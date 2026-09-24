@@ -241,17 +241,23 @@ pub struct BlockCapabilities {
     /// Allowed storage folders — or individual object paths:
     /// `None`/`Any`/`Only([...])` (see [`Allowlist`]).
     ///
-    /// The storage service authorizes each op on `"{folder}/{key}"` (folder
-    /// ops on the bare folder name), and an `Only` entry admits a resource
-    /// when it is equal to the entry or lies beneath it as a `/`-separated
-    /// path — see [`BlockCapabilities::allows_storage_folder`]. So
-    /// `"uploads"` grants every key in `uploads/`, while `"uploads/logo.png"`
-    /// grants exactly that object.
+    /// Entries are RESOLVED backend paths, `{org}/{block}/…`, not the folder
+    /// a block writes in a request. The storage handler first resolves the
+    /// request's folder (a plain `uploads` from `acme/app` is
+    /// `acme/app/uploads`; `@wafer-run/web/site` is `wafer-run/web/site`),
+    /// then authorizes each op on `"{resolved folder}/{key}"` (folder ops on
+    /// the resolved folder), and an `Only` entry admits a resource when it is
+    /// equal to the entry or lies beneath it as a `/`-separated path — see
+    /// [`BlockCapabilities::allows_storage_folder`]. So for `acme/app`,
+    /// `"acme/app/uploads"` grants every key its `uploads` folder holds,
+    /// `"acme/app/uploads/logo.png"` grants exactly that object, and a bare
+    /// `"uploads"` grants nothing it could name.
     ///
     /// Two rules keep prefix matching from over-admitting:
     ///
-    /// - A resource with any EMPTY, `.` or `..` segment is refused outright,
-    ///   whatever the allowlist says. Nothing normalizes the path, so
+    /// - A resource with any EMPTY, `.` or `..` segment, or any `\`, is
+    ///   refused outright, whatever the allowlist says (see
+    ///   `wrap::is_traversal_safe_path`). Nothing normalizes the path, so
     ///   `site/jhg/../other` textually sits under a `site/jhg` grant while
     ///   naming a sibling folder.
     /// - An `Only` entry that is empty or ends in `/` matches NOTHING. Both
@@ -330,13 +336,13 @@ impl BlockCapabilities {
     }
 
     /// Whether this capability set permits operations on the storage
-    /// `resource` — `"{folder}/{key}"` for object ops, the bare folder name
-    /// for folder ops.
+    /// `resource` — the resolved `"{org}/{block}/{folder}/{key}"` for object
+    /// ops, the resolved folder for folder ops (see [`Self::storage_folders`]).
     ///
-    /// - A `resource` with any EMPTY, `.` or `..` segment → denied, whatever
-    ///   the allowlist holds (including [`Allowlist::Any`]). Prefix matching
-    ///   is textual and nothing normalizes the path, so `site/jhg/../other`
-    ///   would otherwise pass a `site/jhg` grant while naming a sibling
+    /// - A `resource` with any EMPTY, `.` or `..` segment, or any `\` →
+    ///   denied, whatever the allowlist holds (including [`Allowlist::Any`]).
+    ///   Prefix matching is textual and nothing normalizes the path, so
+    ///   `site/jhg/../other` would otherwise pass a `site/jhg` grant while naming a sibling
     ///   folder. See [`crate::wrap::is_traversal_safe_path`]; the storage
     ///   handler refuses the same shape one layer earlier with
     ///   `InvalidArgument`.

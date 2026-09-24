@@ -77,7 +77,8 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
 ///   caller is the admin block, or when a Storage grant covers it.
 ///
 /// The resolved path is then refused if any `/`-separated segment is empty,
-/// `.` or `..` ([`wafer_block::wrap::is_traversal_safe_path`]). Storage
+/// `.` or `..`, or carries a `\` (a separator to a Windows filesystem
+/// backend) — [`wafer_block::wrap::is_traversal_safe_path`]. Storage
 /// authorization is textual and prefix-based and nothing normalizes the
 /// string, so `uploads/../../other-org/x` would sit under the caller's own
 /// namespace as text while naming another block's folder. Such a request is
@@ -129,7 +130,7 @@ fn check_path(op: &str, what: &str, sent: &str, path: &str) -> Result<(), WaferE
         ErrorCode::InvalidArgument,
         format!(
             "invalid {op} request: `{what}` must be a plain `/`-separated path \
-             with no empty, `.` or `..` segment (got {sent:?})"
+             with no empty, `.` or `..` segment and no `\\` (got {sent:?})"
         ),
     ))
 }

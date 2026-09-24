@@ -116,7 +116,13 @@ pub fn storage_resource_owner(path: &str) -> Option<String> {
 
 /// Whether every `/`-separated segment of `path` is a plain name — i.e. the
 /// path has no EMPTY segment (a leading or trailing `/`, a `//` run, or the
-/// empty string itself) and no RELATIVE segment (`.` or `..`).
+/// empty string itself), no RELATIVE segment (`.` or `..`), and no `\`.
+///
+/// `/` is the only separator in a storage path. A backend that maps the path
+/// onto a filesystem (`wafer-block-local-storage` joins it with `Path::join`)
+/// reads `\` as a separator too on Windows, so `a\..\..\b` — one plain
+/// segment here — would climb there. Refusing `\` keeps the path WRAP
+/// authorizes the path every backend touches.
 ///
 /// Storage authorization is textual and prefix-based: the handler authorizes
 /// on `"{folder}/{key}"` and
@@ -130,9 +136,9 @@ pub fn storage_resource_owner(path: &str) -> Option<String> {
 /// rejects such a `folder`/`key` with `InvalidArgument` before authorizing,
 /// and the capability check refuses it as a second, independent layer.
 pub fn is_traversal_safe_path(path: &str) -> bool {
-    !path
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    !path.split('/').any(|segment| {
+        segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\')
+    })
 }
 
 /// Dispatch to the right resource-owner parser for the given resource type.
@@ -340,7 +346,7 @@ pub fn check_access(
         return Err(WaferError::new(
             ErrorCode::PermissionDenied,
             format!(
-                "WRAP: storage path '{resource}' has an empty, `.` or `..` segment \
+                "WRAP: storage path '{resource}' has an empty, `.` or `..` segment or a `\\` \
                  (caller: {caller_id:?})"
             ),
         ));
@@ -908,6 +914,10 @@ mod tests {
         assert!(!is_traversal_safe_path("/site"));
         assert!(!is_traversal_safe_path("site/"));
         assert!(!is_traversal_safe_path("site//jhg"));
+        // `\` is a separator to a Windows filesystem backend, so a segment
+        // carrying it is not a plain name.
+        assert!(!is_traversal_safe_path("site/jhg/..\\..\\other"));
+        assert!(!is_traversal_safe_path("a\\b"));
     }
 
     #[test]

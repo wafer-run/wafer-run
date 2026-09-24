@@ -211,7 +211,7 @@ where
 /// Storage is the case that needs it. A caller names a folder relative to
 /// its own namespace (or `@`-explicit), so the backend path exists only once
 /// the handler has resolved it against the caller, and a path with an empty,
-/// `.` or `..` segment has to be refused as malformed (`InvalidArgument`)
+/// `.` or `..` segment (or a `\`) has to be refused as malformed (`InvalidArgument`)
 /// rather than authorized: resources are matched by prefix and never
 /// normalized. Rejecting before the WRAP check also keeps the error honest:
 /// the request is malformed whether or not the caller holds a grant.

@@ -9,7 +9,7 @@
 //! what the caller was answered and which backend paths were touched.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -25,7 +25,7 @@ use wafer_block::{
     },
     types::{ResourceGrant, ResourceType},
     wire::storage as wire,
-    Block, BlockInfo, ErrorCode,
+    Allowlist, Block, BlockCapabilities, BlockInfo, ErrorCode,
 };
 use wafer_core::interfaces::storage::service::{
     FolderInfo, ListOptions, ObjectInfo, ObjectList, StorageError, StorageService,
@@ -157,6 +157,9 @@ impl StorageService for MemStorage {
 struct Caller {
     name: &'static str,
     grants: Vec<ResourceGrant>,
+    /// Runtime-enforced capabilities, when the block declares any (a
+    /// sandboxed guest's shape).
+    caps: Option<BlockCapabilities>,
 }
 
 #[async_trait]
@@ -164,6 +167,9 @@ impl Block for Caller {
     fn info(&self) -> BlockInfo {
         BlockInfo::new(self.name, "0.1.0", "test/iface@v1", "calls storage")
             .grants(self.grants.clone())
+    }
+    fn block_capabilities(&self) -> Option<BlockCapabilities> {
+        self.caps.clone()
     }
     async fn lifecycle(&self, _ctx: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
         Ok(())
@@ -192,6 +198,7 @@ async fn build() -> (Arc<Wafer>, Arc<MemStorage>) {
                 name: VICTIM,
                 grants: vec![ResourceGrant::read(ATTACKER, "acme/victim/shared/*")
                     .typed(ResourceType::Storage)],
+                caps: None,
             }),
         )
         .expect("register victim");
@@ -201,6 +208,7 @@ async fn build() -> (Arc<Wafer>, Arc<MemStorage>) {
             Arc::new(Caller {
                 name: ATTACKER,
                 grants: Vec::new(),
+                caps: None,
             }),
         )
         .expect("register attacker");
@@ -486,6 +494,11 @@ async fn a_path_that_climbs_out_of_the_namespace_is_refused() {
         (format!("@{ATTACKER}/../victim/secret"), SECRET_KEY),
         ("a//b".to_string(), SECRET_KEY),
         ("@".to_string(), SECRET_KEY),
+        // `\` is a separator to a Windows filesystem backend: one plain
+        // segment here, a climb out of the namespace there.
+        ("x".to_string(), "..\\..\\victim\\secret\\doc.txt"),
+        ("uploads\\..\\..".to_string(), SECRET_KEY),
+        (format!("@{ATTACKER}\\..\\victim"), SECRET_KEY),
     ];
     for (folder, key) in requests {
         assert_eq!(
@@ -497,4 +510,85 @@ async fn a_path_that_climbs_out_of_the_namespace_is_refused() {
         );
     }
     assert_eq!(storage.calls(), Vec::new());
+}
+
+/// A block that may write only the storage its capabilities list: the caps
+/// allowlist `storage_folders` over `{only}`, plus the call into storage.
+fn capped(name: &'static str, only: &str) -> Caller {
+    Caller {
+        name,
+        grants: Vec::new(),
+        caps: Some(BlockCapabilities {
+            storage_folders: Allowlist::Only(BTreeSet::from([only.to_string()])),
+            callable_blocks: Allowlist::Only(BTreeSet::from(["wafer-run/storage".to_string()])),
+            ..BlockCapabilities::default()
+        }),
+    }
+}
+
+/// `storage_folders` entries are resolved backend paths, checked against the
+/// same resolved path the handler authorizes and touches: a block writing
+/// its plain folder `uploads` needs the entry `{org}/{block}/uploads`, and a
+/// bare `uploads` entry — which names no block's namespace — admits nothing.
+#[tokio::test]
+async fn storage_capabilities_name_resolved_paths() {
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    let storage = Arc::new(MemStorage::default());
+    wafer_core::service_blocks::storage::register_with(&mut wafer, storage.clone())
+        .expect("register wafer-run/storage");
+    wafer
+        .register_block(
+            "acme/scoped",
+            Arc::new(capped("acme/scoped", "acme/scoped/uploads")),
+        )
+        .expect("register acme/scoped");
+    wafer
+        .register_block("acme/bare", Arc::new(capped("acme/bare", "uploads")))
+        .expect("register acme/bare");
+    wafer.seal().await.expect("seal");
+
+    call(
+        &wafer,
+        "acme/scoped",
+        ServiceOp::STORAGE_PUT,
+        &put("uploads", "a.txt", b"a"),
+    )
+    .await
+    .expect("`acme/scoped/uploads` admits the block's own `uploads` folder");
+    assert_eq!(
+        storage.object("acme/scoped/uploads", "a.txt").as_deref(),
+        Some(&b"a"[..])
+    );
+    assert_eq!(
+        call(
+            &wafer,
+            "acme/scoped",
+            ServiceOp::STORAGE_PUT,
+            &put("other", "a.txt", b"a")
+        )
+        .await
+        .map(|_| ()),
+        Err(ErrorCode::PermissionDenied),
+        "a folder of its own namespace the capabilities do not list"
+    );
+    assert_eq!(
+        call(
+            &wafer,
+            "acme/bare",
+            ServiceOp::STORAGE_PUT,
+            &put("uploads", "a.txt", b"a")
+        )
+        .await
+        .map(|_| ()),
+        Err(ErrorCode::PermissionDenied),
+        "a bare `uploads` entry does not cover `acme/bare/uploads`"
+    );
+    assert_eq!(
+        storage.calls(),
+        vec![("put", "acme/scoped/uploads".to_string())]
+    );
 }
