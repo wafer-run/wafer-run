@@ -269,7 +269,10 @@ impl Block for GateBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         self.barrier.wait().await;
         OutputStream::respond(body)
     }

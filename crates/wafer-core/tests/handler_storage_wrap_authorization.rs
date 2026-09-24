@@ -599,7 +599,10 @@ async fn put_streaming_with_traversal_key_is_invalid_argument() {
         content_type: "text/plain".into(),
     })
     .unwrap();
-    let input = InputStream::from_stream(futures::stream::iter(vec![header, b"body".to_vec()]));
+    let input = InputStream::from_stream(futures::stream::iter(vec![
+        Ok(header),
+        Ok(b"body".to_vec()),
+    ]));
 
     let out = wafer_core::interfaces::storage::handler::handle_put_streaming(
         &svc,

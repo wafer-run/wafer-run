@@ -474,7 +474,10 @@ mod tests {
         ) -> OutputStream {
             // Decode the storage GetRequest payload (lives on the InputStream,
             // per `call_service_streaming`) to capture the key asked for.
-            let body = input.collect_to_bytes().await;
+            let body = match input.collect_to_bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => return OutputStream::error(e),
+            };
             if let Ok(req) = codec::decode::<GetRequest>(&body) {
                 self.calls.lock().unwrap().push(req.key);
             }

@@ -73,8 +73,8 @@ fn put_streaming_input(
         content_type: content_type.to_string(),
     })
     .expect("encode PutStreamingHeader");
-    let mut frames = vec![header];
-    frames.extend(body_chunks.iter().cloned());
+    let mut frames = vec![Ok(header)];
+    frames.extend(body_chunks.iter().cloned().map(Ok));
     InputStream::from_stream(futures::stream::iter(frames))
 }
 
@@ -259,6 +259,7 @@ impl StorageService for RecordingStreamingStorage {
         // Drain the body stream frame-by-frame — each chunk is stored
         // separately so the test can assert frame boundaries were preserved.
         while let Some(chunk) = data.next().await {
+            let chunk = chunk.map_err(StorageError::Body)?;
             self.state.lock().unwrap().body_chunks.push(chunk);
         }
         Ok(())
@@ -558,7 +559,9 @@ async fn client_put_stream_round_trips_header_and_body_into_put_streaming() {
     };
 
     let body_chunks = vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
-    let body = InputStream::from_stream(futures::stream::iter(body_chunks.clone()));
+    let body = InputStream::from_stream(futures::stream::iter(
+        body_chunks.clone().into_iter().map(Ok),
+    ));
 
     wafer_core::clients::storage::put_stream(&ctx, "uploads", "media.bin", "video/mp4", body)
         .await
@@ -615,4 +618,186 @@ async fn put_streaming_missing_header_frame_is_invalid_argument() {
         state.lock().unwrap().calls.is_empty(),
         "a headerless streaming put must never reach the service"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4. A body that fails is never stored.
+// ---------------------------------------------------------------------------
+
+/// The error a transport puts on a body that did not arrive whole.
+fn body_timed_out() -> WaferError {
+    WaferError::new(ErrorCode::DeadlineExceeded, "request body timed out")
+}
+
+/// A backend that keeps `StorageService::put_streaming`'s trait default
+/// (collect, then `put`) and records every `put` it receives.
+#[derive(Default)]
+struct BufferedOnlyStorage {
+    puts: Mutex<Vec<Vec<u8>>>,
+}
+
+#[async_trait]
+impl StorageService for BufferedOnlyStorage {
+    async fn put(
+        &self,
+        _folder: &str,
+        _key: &str,
+        data: &[u8],
+        _content_type: &str,
+    ) -> Result<(), StorageError> {
+        self.puts.lock().unwrap().push(data.to_vec());
+        Ok(())
+    }
+    async fn get(&self, _folder: &str, _key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
+        Err(StorageError::NotFound)
+    }
+    async fn delete(&self, _folder: &str, _key: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn list(&self, _folder: &str, _opts: &ListOptions) -> Result<ObjectList, StorageError> {
+        Ok(ObjectList::default())
+    }
+    async fn create_folder(&self, _name: &str, _public: bool) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn delete_folder(&self, _name: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
+        Ok(vec![])
+    }
+}
+
+/// `input` with its last frame replaced by a failure.
+fn failing_after(mut frames: Vec<Vec<u8>>) -> InputStream {
+    frames.pop();
+    let mut items: Vec<Result<Vec<u8>, WaferError>> = frames.into_iter().map(Ok).collect();
+    items.push(Err(body_timed_out()));
+    InputStream::from_stream(futures::stream::iter(items))
+}
+
+fn header_frame(folder: &str, key: &str) -> Vec<u8> {
+    codec::encode(&wire::storage::PutStreamingHeader {
+        folder: folder.to_string(),
+        key: key.to_string(),
+        content_type: "text/plain".to_string(),
+    })
+    .expect("encode PutStreamingHeader")
+}
+
+async fn expect_body_error(out: OutputStream) {
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(e, body_timed_out()),
+        other => panic!("expected the body's own error, got {other:?}"),
+    }
+}
+
+/// Through the real block dispatch into a backend on the trait default: a
+/// body that fails after its first chunk returns the body's error and the
+/// backend's `put` is never called with the prefix.
+#[tokio::test]
+async fn put_streaming_with_a_failing_body_stores_nothing_on_the_trait_default() {
+    let svc = Arc::new(BufferedOnlyStorage::default());
+    let block = StorageBlock::new(svc.clone());
+
+    let input = failing_after(vec![
+        header_frame("uploads", "k"),
+        b"first half".to_vec(),
+        b"never arrives".to_vec(),
+    ]);
+    let out = block
+        .handle(
+            &RecordingCtx::allow(),
+            msg(ServiceOp::STORAGE_PUT_STREAMING),
+            input,
+        )
+        .await;
+
+    expect_body_error(out).await;
+    assert!(
+        svc.puts.lock().unwrap().is_empty(),
+        "a truncated body must not be stored"
+    );
+}
+
+/// A backend that streams (`put_streaming` overridden) gets the failure and
+/// its error is what the caller sees.
+#[tokio::test]
+async fn put_streaming_with_a_failing_body_is_an_error_on_a_streaming_backend() {
+    let (svc, state) = RecordingStreamingStorage::new();
+    let block = StorageBlock::new(Arc::new(svc));
+
+    let input = failing_after(vec![
+        header_frame("uploads", "k"),
+        b"first half".to_vec(),
+        b"never arrives".to_vec(),
+    ]);
+    let out = block
+        .handle(
+            &RecordingCtx::allow(),
+            msg(ServiceOp::STORAGE_PUT_STREAMING),
+            input,
+        )
+        .await;
+
+    expect_body_error(out).await;
+    assert_eq!(snapshot(&state).body_chunks, vec![b"first half".to_vec()]);
+}
+
+/// A stream that fails before its header frame never reaches the service.
+#[tokio::test]
+async fn put_streaming_failing_before_the_header_never_reaches_the_service() {
+    let (svc, state) = RecordingStreamingStorage::new();
+    let out = wafer_core::interfaces::storage::handler::handle_put_streaming(
+        &svc,
+        &RecordingCtx::allow(),
+        &msg(ServiceOp::STORAGE_PUT_STREAMING),
+        failing_after(vec![header_frame("uploads", "k")]),
+    )
+    .await;
+
+    expect_body_error(out).await;
+    assert!(state.lock().unwrap().calls.is_empty());
+}
+
+/// `clients::storage::put_stream` with a failing body returns the body's
+/// error, and nothing is stored.
+#[tokio::test]
+async fn client_put_stream_with_a_failing_body_returns_its_error() {
+    let svc = Arc::new(BufferedOnlyStorage::default());
+    let ctx = BlockRoutingCtx {
+        block: Arc::new(StorageBlock::new(svc.clone())),
+        seen: Mutex::new(Vec::new()),
+    };
+
+    let body = failing_after(vec![b"first half".to_vec(), b"never arrives".to_vec()]);
+    let err = wafer_core::clients::storage::put_stream(&ctx, "uploads", "k", "text/plain", body)
+        .await
+        .expect_err("a failed body is not a successful upload");
+    assert_eq!(err, body_timed_out());
+    assert!(svc.puts.lock().unwrap().is_empty());
+}
+
+/// The buffered ops collect the request body in the `service_block!` macro:
+/// a body that fails there is refused with its own error before the handler
+/// decodes a prefix of it.
+#[tokio::test]
+async fn buffered_put_with_a_failing_body_is_refused_before_the_handler() {
+    let svc = Arc::new(BufferedOnlyStorage::default());
+    let block = StorageBlock::new(svc.clone());
+
+    let request = codec::encode(&wire::storage::PutRequest {
+        folder: "uploads".into(),
+        key: "k".into(),
+        data: b"whole".to_vec(),
+        content_type: "text/plain".into(),
+    })
+    .expect("encode PutRequest");
+    let input = failing_after(vec![request, Vec::new()]);
+    let out = block
+        .handle(&RecordingCtx::allow(), msg(ServiceOp::STORAGE_PUT), input)
+        .await;
+
+    expect_body_error(out).await;
+    assert!(svc.puts.lock().unwrap().is_empty());
 }

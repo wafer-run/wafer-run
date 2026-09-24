@@ -53,10 +53,10 @@ impl JsLikeBody {
 }
 
 impl Stream for JsLikeBody {
-    type Item = Vec<u8>;
+    type Item = Result<Vec<u8>, WaferError>;
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.chunks.borrow_mut().pop_front())
+        Poll::Ready(self.chunks.borrow_mut().pop_front().map(Ok))
     }
 }
 
@@ -110,7 +110,7 @@ pub fn wrap_request_body(chunks: Vec<Vec<u8>>) -> InputStream {
 /// here, because the future type is unnameable and the `SendProbe` below needs
 /// a name. What it does pin is that `collect_to_bytes` is reachable from a
 /// local body at all.
-pub async fn collect_request_body(chunks: Vec<Vec<u8>>) -> Vec<u8> {
+pub async fn collect_request_body(chunks: Vec<Vec<u8>>) -> Result<Vec<u8>, WaferError> {
     wrap_request_body(chunks).collect_to_bytes().await
 }
 

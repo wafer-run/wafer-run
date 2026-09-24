@@ -95,7 +95,11 @@ impl Block for FakeCrypto {
             ));
         }
 
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+
+            Err(e) => return OutputStream::error(e),
+        };
         let req: serde_json::Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(e) => {

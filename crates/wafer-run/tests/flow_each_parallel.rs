@@ -85,7 +85,10 @@ impl Block for RecordingEchoBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let bytes = input.collect_to_bytes().await;
+        let bytes = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let val: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         self.calls.lock().unwrap().push(val);
         OutputStream::respond(bytes)
@@ -111,7 +114,10 @@ impl Block for FailOnBoomBlock {
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let bytes = input.collect_to_bytes().await;
+        let bytes = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let val: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         if val.get("item") == Some(&json!("boom")) {
             return OutputStream::error(WaferError::new(ErrorCode::Internal, "item went boom"));
@@ -145,7 +151,10 @@ impl Block for ProbeEchoBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let bytes = input.collect_to_bytes().await;
+        let bytes = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let now = self.probe.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.probe.max_seen.fetch_max(now, Ordering::SeqCst);
         for _ in 0..8 {

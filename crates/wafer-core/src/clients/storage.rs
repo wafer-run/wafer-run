@@ -228,7 +228,8 @@ pub async fn get_stream(
 /// buffered [`put`] — a WRITE of `{folder}/{key}` — so a caller that may PUT
 /// may stream-PUT, and no other. `body`'s cancellation token is preserved on
 /// the combined request stream, so a dropped/aborted upload cancels the
-/// upstream body producer.
+/// upstream body producer. A `body` that ends in an error (see
+/// [`InputStream`]) stores nothing and returns that error.
 ///
 /// Use this when the object body is large (e.g. a media upload on the
 /// Cloudflare request path) and the caller wants to forward chunks as they
@@ -254,7 +255,7 @@ pub async fn put_stream(
     // Frame the request: the header chunk first, then the body chunks
     // verbatim. Preserve the body's cancellation token on the combined stream.
     let cancel = body.cancel_token().clone();
-    let combined = futures::stream::once(async move { header_bytes }).chain(body);
+    let combined = futures::stream::once(async move { Ok(header_bytes) }).chain(body);
     let input = InputStream::from_stream_with_cancel(combined, cancel);
 
     // Streaming upload: the dedicated `storage.put_streaming` op — a WRITE of

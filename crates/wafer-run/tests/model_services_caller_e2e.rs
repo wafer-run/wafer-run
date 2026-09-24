@@ -116,7 +116,10 @@ impl Block for EmbeddingBlock {
         Ok(())
     }
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         wafer_core::interfaces::vector::handler::handle_embedding_message(
             self.0.as_ref(),
             ctx,

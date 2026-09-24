@@ -55,7 +55,18 @@ fn normalize_lexical(path: &Path) -> Option<PathBuf> {
     Some(out.iter().map(|c| c.as_os_str()).collect())
 }
 
+/// Name of the directory, directly under the storage root, where writes are
+/// staged before they are renamed onto their key. It is not an object folder:
+/// `list` and `list_folders` never show it, no request may address a path in
+/// it, and [`LocalStorageService::new`] empties it.
+const STAGING_DIR: &str = ".wafer-staging";
+
 /// Local filesystem implementation of StorageService.
+///
+/// One process owns a storage root: [`new`](Self::new) deletes every staged
+/// write it finds, which would fail the in-flight writes of a second process
+/// sharing the root. Every object folder must be on the root's filesystem,
+/// because a write is renamed there from the root's staging directory.
 pub struct LocalStorageService {
     root: PathBuf,
 }
@@ -64,6 +75,9 @@ impl LocalStorageService {
     /// Construct a service rooted at `root`, creating the directory tree if it
     /// does not yet exist. All subsequent reads/writes are confined to this
     /// root via [`Self::validate_path`].
+    ///
+    /// Staged writes left behind by a process that stopped mid-write are
+    /// deleted here (see [`STAGING_DIR`]).
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
         let root = root.into();
         fs::create_dir_all(&root)
@@ -80,7 +94,24 @@ impl LocalStorageService {
         let root = root.canonicalize().map_err(|e| {
             StorageError::Internal(format!("canonicalize storage root {root:?}: {e}"))
         })?;
+        let staging = root.join(STAGING_DIR);
+        match fs::remove_dir_all(&staging) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(StorageError::Internal(format!(
+                    "clear staging directory {staging:?}: {e}"
+                )))
+            }
+        }
+        fs::create_dir_all(&staging).map_err(|e| {
+            StorageError::Internal(format!("create staging directory {staging:?}: {e}"))
+        })?;
         Ok(Self { root })
+    }
+
+    fn staging_path(&self) -> PathBuf {
+        self.root.join(STAGING_DIR)
     }
 
     fn folder_path(&self, folder: &str) -> PathBuf {
@@ -117,13 +148,20 @@ impl LocalStorageService {
         };
 
         let normalized = normalize_lexical(&absolute).ok_or_else(|| {
-            StorageError::Internal("path traversal: resolved path escapes storage root".to_string())
+            StorageError::InvalidArgument(
+                "path traversal: resolved path escapes storage root".to_string(),
+            )
         })?;
 
         if !normalized.starts_with(&canon_root) {
-            return Err(StorageError::Internal(
+            return Err(StorageError::InvalidArgument(
                 "path traversal: resolved path escapes storage root".to_string(),
             ));
+        }
+        if normalized.starts_with(canon_root.join(STAGING_DIR)) {
+            return Err(StorageError::InvalidArgument(format!(
+                "{STAGING_DIR} is reserved for staged writes"
+            )));
         }
         Ok(normalized)
     }
@@ -132,11 +170,12 @@ impl LocalStorageService {
         wafer_core::mime::mime_for_ext(Path::new(key)).to_string()
     }
 
-    /// Atomically write an object at `path`: `fill` a hidden sibling temp file
-    /// on the same filesystem, then `rename` it onto `path` on success. A
-    /// reader therefore never observes a half-written object at the live key —
-    /// a mid-write failure leaves the previous object (or nothing) in place and
-    /// the temp file is removed. POSIX `rename` within a directory is atomic.
+    /// Atomically write an object at `path`: `fill` a temp file in the root's
+    /// [`STAGING_DIR`], then `rename` it onto `path` on success. A reader
+    /// therefore never observes a half-written object at the live key, and
+    /// `list` never shows the temp file — a failure (including a `fill` that
+    /// returns `Err`) leaves the previous object (or nothing) in place and the
+    /// temp file is removed. POSIX `rename` within one filesystem is atomic.
     ///
     /// Shared by both `put` (buffered) and `put_streaming` so the atomicity
     /// guarantee cannot drift between them.
@@ -153,7 +192,13 @@ impl LocalStorageService {
                 .map_err(|e| StorageError::Internal(format!("create dirs for {path:?}: {e}")))?;
         }
 
-        let tmp = temp_sibling(path);
+        // Re-created on every write, so a write still works after something
+        // outside this service removed the directory.
+        let staging = self.staging_path();
+        tokio::fs::create_dir_all(&staging).await.map_err(|e| {
+            StorageError::Internal(format!("create staging directory {staging:?}: {e}"))
+        })?;
+        let tmp = staged_temp_path(&staging);
 
         // Fill + flush the temp file; on any error remove it and propagate.
         let filled = async {
@@ -201,13 +246,13 @@ fn encode_cursor(key: &str) -> String {
 
 /// Decode an opaque list cursor back to the object key it was minted from.
 /// A cursor that isn't valid base64 / UTF-8 is a client error, surfaced as
-/// [`StorageError::Internal`].
+/// [`StorageError::InvalidArgument`].
 fn decode_cursor(cursor: &str) -> Result<String, StorageError> {
     use base64ct::{Base64UrlUnpadded, Encoding};
     let bytes = Base64UrlUnpadded::decode_vec(cursor)
-        .map_err(|e| StorageError::Internal(format!("invalid storage list cursor: {e}")))?;
+        .map_err(|e| StorageError::InvalidArgument(format!("invalid storage list cursor: {e}")))?;
     String::from_utf8(bytes).map_err(|e| {
-        StorageError::Internal(format!("invalid storage list cursor (not utf-8): {e}"))
+        StorageError::InvalidArgument(format!("invalid storage list cursor (not utf-8): {e}"))
     })
 }
 
@@ -243,25 +288,16 @@ fn metadata_or_not_found(
 }
 
 /// Monotonic per-process counter making temp-file names unique even when two
-/// writes to the same key begin within the same nanosecond.
+/// writes begin within the same nanosecond.
 static TEMP_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Build a unique temp path alongside `path` (same parent directory, hence
-/// same filesystem, so a later `rename` onto `path` is atomic). The name is
-/// hidden (leading `.`) and carries the pid plus a monotonic sequence number
-/// so concurrent writers to the same key never collide on the temp file.
-fn temp_sibling(path: &Path) -> PathBuf {
+/// Build a unique temp path in `staging` (the root's [`STAGING_DIR`]). The
+/// name carries the pid plus a monotonic sequence number so concurrent
+/// writers never collide on the temp file.
+fn staged_temp_path(staging: &Path) -> PathBuf {
     let seq = TEMP_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pid = std::process::id();
-    let base = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp_name = format!(".{base}.tmp.{pid}.{seq}");
-    match path.parent() {
-        Some(parent) => parent.join(tmp_name),
-        None => PathBuf::from(tmp_name),
-    }
+    staging.join(format!("{pid}.{seq}.tmp"))
 }
 
 #[wafer_async_trait]
@@ -290,17 +326,12 @@ impl StorageService for LocalStorageService {
     }
 
     /// Streaming write: chunks are written to a temp file as they arrive and
-    /// the temp file is renamed onto `key` only after the stream ends, so a
-    /// reader never observes a partial object — same atomicity as
+    /// the temp file is renamed onto `key` only after the stream ends cleanly,
+    /// so a reader never observes a partial object — same atomicity as
     /// [`put`](Self::put) via [`Self::atomic_write`], without holding the whole
-    /// object in memory.
-    ///
-    /// Caveat: [`InputStream`] has no failure terminal — an upstream producer
-    /// that aborts mid-body is indistinguishable from a clean end (the stream
-    /// simply stops yielding chunks). Temp-file + rename still prevents a *torn*
-    /// object at the live key, but a truncated-then-"ended" stream is committed
-    /// as if complete. Distinguishing the two needs an error terminal on
-    /// `InputStream`; tracked as a wafer-block follow-up.
+    /// object in memory. A stream that ends in an error returns
+    /// [`StorageError::Body`] and the temp file is removed: the key keeps its
+    /// previous object, or stays absent.
     async fn put_streaming(
         &self,
         folder: &str,
@@ -313,6 +344,7 @@ impl StorageService for LocalStorageService {
         self.atomic_write(&path, move |mut file| async move {
             use tokio::io::AsyncWriteExt;
             while let Some(chunk) = data.next().await {
+                let chunk = chunk.map_err(StorageError::Body)?;
                 file.write_all(&chunk)
                     .await
                     .map_err(|e| StorageError::Internal(format!("write {err_path:?}: {e}")))?;
@@ -451,6 +483,7 @@ impl StorageService for LocalStorageService {
     /// count (the walk sees every object regardless of paging mode).
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
         let dir = self.validate_path(&self.folder_path(folder))?;
+        let staging = self.staging_path();
         let prefix = opts.prefix.clone();
         let offset = opts.offset as usize;
         let limit = opts.limit;
@@ -462,7 +495,7 @@ impl StorageService for LocalStorageService {
             }
 
             let mut objects = Vec::new();
-            Self::list_recursive(&dir, &dir, &prefix, &mut objects)?;
+            Self::list_recursive(&dir, &dir, &staging, &prefix, &mut objects)?;
 
             // Sort by key so offset and cursor pagination are both stable and
             // deterministic across runs and filesystems.
@@ -535,7 +568,7 @@ impl StorageService for LocalStorageService {
                 let metadata = entry
                     .metadata()
                     .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
-                if metadata.is_dir() {
+                if metadata.is_dir() && entry.file_name() != STAGING_DIR {
                     let created_at = metadata
                         .created()
                         .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
@@ -555,9 +588,12 @@ impl StorageService for LocalStorageService {
 }
 
 impl LocalStorageService {
+    /// Collect every object under `dir`, keyed relative to `base`, skipping
+    /// the `staging` directory (only reachable when `dir` is the root).
     fn list_recursive(
         base: &Path,
         dir: &Path,
+        staging: &Path,
         prefix: &str,
         objects: &mut Vec<ObjectInfo>,
     ) -> Result<(), StorageError> {
@@ -572,7 +608,10 @@ impl LocalStorageService {
                 .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
 
             if metadata.is_dir() {
-                Self::list_recursive(base, &path, prefix, objects)?;
+                if path == staging {
+                    continue;
+                }
+                Self::list_recursive(base, &path, staging, prefix, objects)?;
             } else {
                 let key = path
                     .strip_prefix(base)
@@ -647,7 +686,7 @@ mod tests {
             .join("passwd");
         let err = svc.validate_path(&evil).expect_err("must reject traversal");
         match err {
-            StorageError::Internal(msg) => assert!(
+            StorageError::InvalidArgument(msg) => assert!(
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
@@ -687,7 +726,7 @@ mod tests {
             .await
             .expect_err("traversal key must be rejected");
         match err {
-            StorageError::Internal(msg) => assert!(
+            StorageError::InvalidArgument(msg) => assert!(
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
@@ -717,7 +756,7 @@ mod tests {
             .await
             .expect_err("traversal name must be rejected");
         match err {
-            StorageError::Internal(msg) => assert!(
+            StorageError::InvalidArgument(msg) => assert!(
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
@@ -751,7 +790,7 @@ mod tests {
             .await
             .expect_err("traversal name must be rejected");
         match err {
-            StorageError::Internal(msg) => assert!(
+            StorageError::InvalidArgument(msg) => assert!(
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
@@ -788,7 +827,7 @@ mod tests {
             .await
             .expect_err("traversal folder must be rejected");
         match err {
-            StorageError::Internal(msg) => assert!(
+            StorageError::InvalidArgument(msg) => assert!(
                 msg.contains("path traversal"),
                 "expected traversal error, got: {msg}"
             ),
@@ -810,9 +849,9 @@ mod tests {
 
         // Multi-chunk input — exercises the incremental write path.
         let input = InputStream::from_stream(futures::stream::iter(vec![
-            b"hello ".to_vec(),
-            b"streamed ".to_vec(),
-            b"world".to_vec(),
+            Ok(b"hello ".to_vec()),
+            Ok(b"streamed ".to_vec()),
+            Ok(b"world".to_vec()),
         ]));
         svc.put_streaming("f", "greeting.txt", input, "text/plain")
             .await
@@ -992,7 +1031,7 @@ mod tests {
             .await
             .expect_err("malformed cursor must be rejected");
         match err {
-            StorageError::Internal(msg) => {
+            StorageError::InvalidArgument(msg) => {
                 assert!(
                     msg.contains("cursor"),
                     "expected a cursor error, got: {msg}"
@@ -1031,6 +1070,157 @@ mod tests {
             ),
         }
         fs::remove_dir_all(&tmp).ok();
+    }
+
+    fn body_failure() -> WaferError {
+        WaferError::new(ErrorCode::DeadlineExceeded, "request body timed out")
+    }
+
+    /// A body that fails after its first chunk is not a shorter object: the
+    /// write returns the body's error and nothing appears at the key.
+    #[tokio::test]
+    async fn put_streaming_that_fails_midway_stores_nothing() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        let input = InputStream::from_stream(futures::stream::iter(vec![
+            Ok(b"first half".to_vec()),
+            Err(body_failure()),
+        ]));
+        match svc.put_streaming("f", "k", input, "text/plain").await {
+            Err(StorageError::Body(e)) => assert_eq!(e, body_failure()),
+            other => panic!("expected the body's failure, got {other:?}"),
+        }
+
+        assert!(
+            matches!(svc.get("f", "k").await, Err(StorageError::NotFound)),
+            "a failed body must not be committed at the key"
+        );
+        let staged: Vec<_> = fs::read_dir(svc.staging_path())
+            .expect("read staging")
+            .collect();
+        assert!(staged.is_empty(), "the staged temp file is removed");
+    }
+
+    /// A failed overwrite leaves the previous object in place, whole.
+    #[tokio::test]
+    async fn put_streaming_that_fails_keeps_the_previous_object() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        svc.put("f", "k", b"previous", "text/plain")
+            .await
+            .expect("put");
+
+        let input = InputStream::from_stream(futures::stream::iter(vec![
+            Ok(b"replacement, truncated".to_vec()),
+            Err(body_failure()),
+        ]));
+        svc.put_streaming("f", "k", input, "text/plain")
+            .await
+            .expect_err("a failed body is an error");
+
+        let (data, _) = svc.get("f", "k").await.expect("get");
+        assert_eq!(data, b"previous");
+    }
+
+    /// While a write is in flight its temp file is outside every folder:
+    /// neither a folder listing, a root listing nor `list_folders` shows it.
+    #[tokio::test]
+    async fn list_during_an_in_flight_put_streaming_shows_no_temp_file() {
+        use futures::channel::oneshot;
+
+        let tmp = tempdir();
+        let svc = std::sync::Arc::new(LocalStorageService::new(&tmp).expect("create svc"));
+
+        // Yields one chunk; the next poll (which the service makes only after
+        // writing that chunk) reports in and then waits for `release`.
+        let (written_tx, written_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let body = futures::stream::unfold(
+            (Some(written_tx), Some(release_rx), true),
+            |(written, release, first)| async move {
+                if first {
+                    return Some((Ok(b"chunk".to_vec()), (written, release, false)));
+                }
+                if let Some(tx) = written {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = release {
+                    let _ = rx.await;
+                }
+                None
+            },
+        );
+        let writer = {
+            let svc = svc.clone();
+            tokio::spawn(async move {
+                svc.put_streaming("f", "k", InputStream::from_stream(body), "text/plain")
+                    .await
+            })
+        };
+        written_rx.await.expect("the first chunk was written");
+
+        let in_folder = svc.list("f", &ListOptions::default()).await.expect("list");
+        assert!(
+            in_folder.objects.is_empty(),
+            "folder listing shows an in-flight write: {:?}",
+            in_folder.objects
+        );
+        let at_root = svc.list("", &ListOptions::default()).await.expect("list");
+        assert!(
+            at_root.objects.is_empty(),
+            "root listing shows an in-flight write: {:?}",
+            at_root.objects
+        );
+        let folders = svc.list_folders().await.expect("list_folders");
+        assert!(
+            folders.iter().all(|f| f.name != STAGING_DIR),
+            "list_folders shows the staging directory"
+        );
+
+        release_tx.send(()).expect("release the body");
+        writer.await.expect("join").expect("put_streaming");
+        let done = svc.list("f", &ListOptions::default()).await.expect("list");
+        let keys: Vec<&str> = done.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, vec!["k"]);
+    }
+
+    /// A process that stopped mid-write leaves its temp file behind; the next
+    /// service over the same root deletes it.
+    #[tokio::test]
+    async fn new_sweeps_staged_writes_left_by_a_stopped_process() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        let leftover = svc.staging_path().join("4242.0.tmp");
+        fs::write(&leftover, b"half an upload").expect("write leftover");
+        drop(svc);
+
+        let svc = LocalStorageService::new(&tmp).expect("reopen svc");
+        assert!(!leftover.exists(), "startup must delete staged leftovers");
+        assert!(svc.staging_path().is_dir());
+    }
+
+    /// No request may address the staging directory: it is not a folder.
+    #[tokio::test]
+    async fn staging_directory_is_not_addressable() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        let put = svc.put(STAGING_DIR, "x", b"x", "text/plain").await;
+        assert!(
+            matches!(put, Err(StorageError::InvalidArgument(_))),
+            "put into staging: {put:?}"
+        );
+        let list = svc.list(STAGING_DIR, &ListOptions::default()).await;
+        assert!(
+            matches!(list, Err(StorageError::InvalidArgument(_))),
+            "list of staging: {list:?}"
+        );
+        let delete = svc.delete_folder(STAGING_DIR).await;
+        assert!(
+            matches!(delete, Err(StorageError::InvalidArgument(_))),
+            "delete of staging: {delete:?}"
+        );
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.

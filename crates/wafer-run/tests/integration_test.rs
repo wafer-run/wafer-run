@@ -194,7 +194,10 @@ impl Block for EchoBlock {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         OutputStream::respond(body) // pass body through
     }
 }
@@ -220,7 +223,10 @@ impl Block for UpperBlock {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let bytes = input.collect_to_bytes().await;
+        let bytes = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let text = String::from_utf8_lossy(&bytes).to_uppercase();
         OutputStream::respond(text.into_bytes())
     }
@@ -288,7 +294,10 @@ impl Block for AppendBlock {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let bytes = input.collect_to_bytes().await;
+        let bytes = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let mut text = String::from_utf8_lossy(&bytes).to_string();
         text.push_str(self.suffix);
         OutputStream::respond(text.into_bytes())
@@ -617,7 +626,10 @@ impl Block for NoopBlock {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         OutputStream::respond(body)
     }
 }
@@ -665,7 +677,10 @@ impl Block for Step1Block {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        OutputStream::respond(input.collect_to_bytes().await)
+        match input.collect_to_bytes().await {
+            Ok(bytes) => OutputStream::respond(bytes),
+            Err(e) => OutputStream::error(e),
+        }
     }
 }
 
@@ -676,7 +691,10 @@ impl Block for Step2Block {
             .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        OutputStream::respond(input.collect_to_bytes().await)
+        match input.collect_to_bytes().await {
+            Ok(bytes) => OutputStream::respond(bytes),
+            Err(e) => OutputStream::error(e),
+        }
     }
 }
 
@@ -1149,7 +1167,10 @@ impl Block for ConfigurableBlock {
     }
     async fn handle(&self, ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
         let prefix = ctx.config_get("prefix").unwrap_or("default").to_string();
-        let bytes = input.collect_to_bytes().await;
+        let bytes = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let text = format!("{}-{}", prefix, String::from_utf8_lossy(&bytes));
         OutputStream::respond(text.into_bytes())
     }
@@ -1338,7 +1359,10 @@ impl Block for LifecycleBlock {
         .instance_mode(InstanceMode::Singleton)
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        OutputStream::respond(input.collect_to_bytes().await)
+        match input.collect_to_bytes().await {
+            Ok(bytes) => OutputStream::respond(bytes),
+            Err(e) => OutputStream::error(e),
+        }
     }
 }
 
@@ -1572,7 +1596,10 @@ async fn test_waferflow_simple_pipeline() {
             _msg: Message,
             input: InputStream,
         ) -> OutputStream {
-            let bytes = input.collect_to_bytes().await;
+            let bytes = match input.collect_to_bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => return OutputStream::error(e),
+            };
             let input_val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
             let text = input_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let output =
@@ -1595,7 +1622,10 @@ async fn test_waferflow_simple_pipeline() {
             _msg: Message,
             input: InputStream,
         ) -> OutputStream {
-            let bytes = input.collect_to_bytes().await;
+            let bytes = match input.collect_to_bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => return OutputStream::error(e),
+            };
             let input_val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
             let text = input_val.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let output =
@@ -1657,7 +1687,10 @@ async fn test_waferflow_conditional_routing() {
             _msg: Message,
             input: InputStream,
         ) -> OutputStream {
-            let bytes = input.collect_to_bytes().await;
+            let bytes = match input.collect_to_bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => return OutputStream::error(e),
+            };
             let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
             let n = val.get("n").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let output = serde_json::to_vec(&serde_json::json!({ "positive": n > 0.0 })).unwrap();

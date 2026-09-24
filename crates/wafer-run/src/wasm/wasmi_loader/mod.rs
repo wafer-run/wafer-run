@@ -378,7 +378,12 @@ impl WasmiBlock {
         input: InputStream,
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
     ) -> OutputStream {
-        let body = input.collect_to_bytes().await;
+        // The guest ABI hands the guest the whole body, so a body that did
+        // not arrive whole never reaches it.
+        let body = match input.collect_to_bytes().await {
+            Ok(body) => body,
+            Err(e) => return OutputStream::error(e),
+        };
 
         // Withhold the sensitive headers the guest may not read, and capture
         // what the host owns for this frame: the identity (`auth.*`, SEC-01)

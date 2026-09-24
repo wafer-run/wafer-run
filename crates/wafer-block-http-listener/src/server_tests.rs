@@ -27,19 +27,56 @@ use crate::{
 /// that does not read it leaves the server's write blocked.
 const BIG_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-/// Runtime behind the test listener. By path: `/big` answers with
+/// What `/collect` read from its request body: the length of a whole body,
+/// or the code of the stream's failure.
+type Collected = Result<usize, wafer_block::ErrorCode>;
+
+/// Runtime behind the test listener. By path: `/collect` records what it
+/// read from the body (see [`Collected`]) and answers with the stream's error
+/// if it failed, `/first-chunk` answers with the body's first chunk without
+/// reading further, `/big` answers with
 /// [`BIG_RESPONSE_BYTES`], `/slow` answers after 500 ms, `/hang` after a
 /// minute, `/bad-headers` with a `Content-Security-Policy` no transport can
 /// send beside a valid header, `/owned-headers` with transport-owned headers
 /// and a lower-case `content-type`, `/xff` with the request's
 /// `X-Forwarded-For` header as the message carries it; anything else answers
-/// with the client IP the listener put on the message.
-struct TestRuntime;
+/// with the client IP the listener put on the message. Every path except
+/// `/collect` and `/first-chunk` reads the whole body first and ignores how
+/// it ended.
+#[derive(Default)]
+struct TestRuntime {
+    collected: parking_lot::Mutex<Vec<Collected>>,
+}
 
 #[wafer_async_trait]
 impl wafer_block::Runtime for TestRuntime {
-    async fn run(&self, _flow_id: &str, msg: Message, input: InputStream) -> OutputStream {
-        input.collect_to_bytes().await;
+    async fn run(&self, _flow_id: &str, msg: Message, mut input: InputStream) -> OutputStream {
+        use futures::StreamExt;
+
+        match msg.get_meta(META_HTTP_PATH) {
+            "/collect" => {
+                let body = input.collect_to_bytes().await;
+                self.collected
+                    .lock()
+                    .push(body.as_ref().map(Vec::len).map_err(|e| e.code));
+                return match body {
+                    Ok(bytes) => OutputStream::respond(format!("{} bytes", bytes.len()).into()),
+                    Err(e) => OutputStream::error(e),
+                };
+            }
+            "/first-chunk" => {
+                return match input.next().await {
+                    Some(Ok(chunk)) => OutputStream::respond(chunk),
+                    other => OutputStream::respond(format!("{other:?}").into()),
+                };
+            }
+            _ => {
+                let _ = match input.collect_to_bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(e) => return OutputStream::error(e),
+                };
+            }
+        }
         match msg.get_meta(META_HTTP_PATH) {
             "/big" => OutputStream::respond(vec![b'x'; BIG_RESPONSE_BYTES]),
             "/slow" => {
@@ -95,6 +132,7 @@ impl wafer_block::Runtime for TestRuntime {
 struct Server {
     block: HttpListenerBlock,
     addr: SocketAddr,
+    runtime: Arc<TestRuntime>,
 }
 
 impl Server {
@@ -115,8 +153,9 @@ impl Server {
             .lifecycle(&NoopCtx, init_event(&config))
             .await
             .expect("test config passes Init");
-        let runtime: Arc<dyn wafer_block::Runtime> = Arc::new(TestRuntime);
-        block.bind(Box::new(runtime));
+        let runtime = Arc::new(TestRuntime::default());
+        let dyn_runtime: Arc<dyn wafer_block::Runtime> = runtime.clone();
+        block.bind(Box::new(dyn_runtime));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -133,7 +172,28 @@ impl Server {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        Self { block, addr }
+        Self {
+            block,
+            addr,
+            runtime,
+        }
+    }
+
+    /// Wait until `/collect` has recorded `n` bodies, then return them.
+    async fn collected(&self, n: usize) -> Vec<Collected> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let seen = self.runtime.collected.lock().clone();
+            if seen.len() >= n {
+                return seen;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {} of {n} bodies reached the block: {seen:?}",
+                seen.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Stop the listener through its lifecycle, as the runtime does.
@@ -341,6 +401,134 @@ async fn stalled_request_body_gets_408_after_body_read_timeout() {
         "answered before the timeout ran out: {:?}",
         started.elapsed()
     );
+}
+
+/// The block reads a stalled body as a timeout failure, and the client gets
+/// 408 even though the block answered with its own error.
+#[tokio::test]
+async fn stalled_request_body_reaches_the_block_as_a_timeout() {
+    let server = Server::start(serde_json::json!({ "body_read_timeout_secs": 1 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"POST /collect HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\nabc")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("the server answers a stalled body");
+    assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+    assert_eq!(
+        server.collected(1).await,
+        vec![Err(wafer_block::ErrorCode::DeadlineExceeded)]
+    );
+}
+
+/// The body streams: the block reads the first chunk while the client is
+/// still sending the rest, and can answer before the body is complete.
+#[tokio::test]
+async fn request_body_reaches_the_block_before_it_is_complete() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"POST /first-chunk HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\nfirst")
+        .await
+        .unwrap();
+    let mut buf = vec![0u8; 4096];
+    let mut got = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !got.ends_with(b"first") {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let n = tokio::time::timeout(left, stream.read(&mut buf))
+            .await
+            .expect("the block answers from the first chunk, before the body is complete")
+            .expect("read");
+        assert!(n > 0, "closed early: {}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(
+        got.starts_with(b"HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&got)
+    );
+}
+
+/// A chunked body that grows past `max_body_bytes` reaches the block as a
+/// failure, not as its first `max_body_bytes`, and the client gets 413.
+#[tokio::test]
+async fn chunked_body_over_the_cap_reaches_the_block_as_a_failure() {
+    let server = Server::start(serde_json::json!({ "max_body_bytes": 8 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(
+            b"POST /collect HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n\
+              5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    assert_eq!(
+        server.collected(1).await,
+        vec![Err(wafer_block::ErrorCode::ResourceExhausted)]
+    );
+}
+
+/// A `Content-Length` over the cap is refused before dispatch.
+#[tokio::test]
+async fn announced_body_over_the_cap_is_refused_before_dispatch() {
+    let server = Server::start(serde_json::json!({ "max_body_bytes": 8 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"POST /collect HTTP/1.1\r\nHost: t\r\nContent-Length: 9\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    assert!(server.runtime.collected.lock().is_empty());
+}
+
+/// A client that disconnects mid-body: the block reads a failure, never the
+/// bytes that arrived as if they were the whole body.
+#[tokio::test]
+async fn dropped_connection_mid_body_reaches_the_block_as_a_failure() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"POST /collect HTTP/1.1\r\nHost: t\r\nContent-Length: 1000\r\n\r\nabc")
+        .await
+        .unwrap();
+    // Let the block start reading, then go away.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(stream);
+    assert_eq!(
+        server.collected(1).await,
+        vec![Err(wafer_block::ErrorCode::InvalidArgument)]
+    );
+}
+
+/// A whole body arrives whole, however it is framed.
+#[tokio::test]
+async fn whole_bodies_reach_the_block_whole() {
+    let server = Server::start(serde_json::json!({})).await;
+    for request in [
+        &b"POST /collect HTTP/1.1\r\nHost: t\r\nContent-Length: 10\r\nConnection: close\r\n\r\n\
+           helloworld"[..],
+        &b"POST /collect HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\
+           Connection: close\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n"[..],
+    ] {
+        let mut stream = server.connect().await;
+        stream.write_all(request).await.unwrap();
+        let response = read_until_closed(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("response arrives");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("10 bytes"), "{response}");
+    }
+    assert_eq!(server.collected(2).await, vec![Ok(10), Ok(10)]);
 }
 
 /// At `max_connections` open connections the listener serves nobody else
