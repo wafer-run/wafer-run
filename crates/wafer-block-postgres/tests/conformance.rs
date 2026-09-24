@@ -35,7 +35,9 @@
 //! [`DatabaseService`]: wafer_core::interfaces::database::service::DatabaseService
 
 use wafer_block_postgres::service::PostgresDatabaseService;
-use wafer_core::interfaces::database::conformance::run_conformance;
+use wafer_core::interfaces::database::conformance::{
+    run_conformance, run_two_instance_conformance,
+};
 
 const URL_ENV: &str = "WAFER_CONFORMANCE_POSTGRES_URL";
 
@@ -53,6 +55,25 @@ async fn postgres_database_service_is_conformant() {
         .await
         .expect("connect to the conformance PostgreSQL server");
     run_conformance(&svc).await;
+}
+
+/// Two pools on one database — two replicas' worth of connections and schema
+/// caches — must not hide each other's schema changes: a table one saw
+/// missing and the other created is visible to the first. Skipped unless
+/// `WAFER_CONFORMANCE_POSTGRES_URL` points at a live server.
+#[tokio::test]
+async fn two_postgres_services_on_one_database_see_each_others_tables() {
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres two-instance conformance: set {URL_ENV} to run");
+        return;
+    };
+    let a = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect the first service");
+    let b = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect the second service");
+    run_two_instance_conformance(&a, &b).await;
 }
 
 /// A role granted only `SELECT` still gets the primary-key tiebreak.

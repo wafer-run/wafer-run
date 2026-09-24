@@ -618,10 +618,12 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Delete removes a record by ID.
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError>;
 
-    /// Count returns the number of records matching the filters.
+    /// Count returns the number of records matching the filters; `0` for a
+    /// table that does not exist.
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError>;
 
-    /// Sum returns the sum of a numeric field for matching records.
+    /// Sum returns the sum of a numeric field for matching records; `0` for a
+    /// table that does not exist.
     async fn sum(
         &self,
         collection: &str,
@@ -800,8 +802,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// return an explicit error. No default — every backend states its choice.
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError>;
 
-    /// Grouped aggregate query. SQL backends implement this via
-    /// `DbExec::aggregate`. No default — every backend states its choice.
+    /// Grouped aggregate query; no groups for a table that does not exist.
+    /// SQL backends implement this via `DbExec::aggregate`. No default —
+    /// every backend states its choice.
     async fn aggregate(
         &self,
         collection: &str,

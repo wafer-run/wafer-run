@@ -612,19 +612,23 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// should proceed against `table`.
     ///
     /// In STRICT_SCHEMA mode always `true` — migrations are authoritative, so
-    /// the table is assumed present and no probe is issued. Otherwise returns
-    /// the memoized [`schema_cache`](Self::schema_cache) fact on a hit, else
-    /// probes once via [`dbx_table_exists`](Self::dbx_table_exists) and stores
-    /// the result. The explicit [`schema_table_exists`](Self::schema_table_exists)
-    /// API deliberately bypasses this and stays a live probe for callers that
+    /// the table is assumed present and no probe is issued. Otherwise `true`
+    /// without a probe when the [`schema_cache`](Self::schema_cache) knows the
+    /// table exists, else one [`dbx_table_exists`](Self::dbx_table_exists)
+    /// probe, whose answer is memoized only when the table is there. A
+    /// missing table is probed again on every operation: another process can
+    /// create it at any moment, and a memoized "missing" would answer every
+    /// read of it as empty until this process happened to invalidate it. The
+    /// explicit [`schema_table_exists`](Self::schema_table_exists) API
+    /// deliberately bypasses this and stays a live probe for callers that
     /// want ground truth.
     async fn table_present_for_op(&self, table: &str) -> Result<bool, DatabaseError> {
         if self.strict_schema() {
             return Ok(true);
         }
         let cache = self.schema_cache();
-        if let Some(exists) = cache.and_then(|c| c.table_exists(table)) {
-            return Ok(exists);
+        if cache.is_some_and(|c| c.table_known_present(table)) {
+            return Ok(true);
         }
         // Snapshot the generation *before* the probe yields; the gen-guarded
         // write-back below is dropped if a mutation raced the probe (see
@@ -632,8 +636,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // is fine — it is a plain reference, never a lock guard.
         let gen0 = cache.map(SchemaCache::generation);
         let exists = self.dbx_table_exists(table).await?;
-        if let (Some(cache), Some(gen0)) = (cache, gen0) {
-            cache.set_table_exists_if_gen(table, exists, gen0);
+        if let (true, Some(cache), Some(gen0)) = (exists, cache, gen0) {
+            cache.mark_table_present_if_gen(table, gen0);
         }
         Ok(exists)
     }
@@ -749,10 +753,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             // a table that does not exist yet stays unprobed, so the next
             // lookup asks again.
             if key.is_empty()
-                && cache.table_exists(table).is_none()
+                && !cache.table_known_present(table)
                 && self.dbx_table_exists(table).await?
             {
-                cache.set_table_exists_if_gen(table, true, gen0);
+                cache.mark_table_present_if_gen(table, gen0);
             }
             cache.set_primary_key_if_gen(table, key.clone(), gen0);
         }
@@ -1082,9 +1086,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `sum`: [`require_columns`](Self::require_columns) on `field` and
-    /// the filters → SUM(field). No table-exists guard: a missing table fails
-    /// in the backend.
+    /// Shared `sum`: table-exists guard → [`require_columns`](Self::require_columns)
+    /// on `field` and the filters → SUM(field). A missing table sums to `0`,
+    /// as [`count`](Self::count) counts `0` rows in it.
     async fn sum(
         &self,
         collection: &str,
@@ -1092,6 +1096,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
         let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
+            return Ok(0.0);
+        }
         let mut columns = query_columns(filters, &[], None, None);
         columns.push(field);
         self.require_columns(table, &columns).await?;
@@ -1476,7 +1483,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Every name in the spec must pass [`sql_name`] (the handler's
     /// `to_aggregate_spec` checks the wire the same way), and every column it
     /// reads must exist ([`require_columns`](Self::require_columns); a sort
-    /// key may also name an output alias).
+    /// key may also name an output alias). A missing table has no groups, as
+    /// [`count`](Self::count) counts `0` rows in it.
     async fn aggregate(
         &self,
         collection: &str,
@@ -1486,6 +1494,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let aliases = spec.aliases();
         for alias in &aliases {
             sql_name(alias)?;
+        }
+        if !self.table_present_for_op(table).await? {
+            return Ok(Vec::new());
         }
         let columns: Vec<&str> = spec
             .read_columns()
@@ -2168,18 +2179,17 @@ mod tests {
         }
     }
 
-    /// Exec-level proof of the linearizability fix: when an invalidation lands
-    /// while `table_present_for_op` is parked in its probe, the stale
-    /// `exists=false` read (taken just before a concurrent CREATE) is NOT
-    /// written back — the next op re-probes instead of trusting a resurrected
-    /// negative cache (Repro A).
+    /// Exec-level proof of the linearizability guard: when an invalidation
+    /// lands while `table_present_for_op` is parked in its probe, the stale
+    /// "present" read (taken just before a concurrent DROP) is NOT written
+    /// back — the next op re-probes instead of trusting a resurrected entry.
     #[tokio::test]
     async fn probe_write_back_dropped_when_invalidated_mid_flight() {
         let backend = BarrierExec {
             cache: SchemaCache::new(),
             entered_probe: Arc::new(Notify::new()),
             release_probe: Arc::new(Notify::new()),
-            exists: false,
+            exists: true,
         };
         let entered = backend.entered_probe.clone();
         let release = backend.release_probe.clone();
@@ -2188,7 +2198,7 @@ mod tests {
         let racer = async {
             // Wait until the probe has snapshotted gen0 and parked in the DB call.
             entered.notified().await;
-            // A concurrent migration CREATEs the table and invalidates the cache
+            // A concurrent migration DROPs the table and invalidates the cache
             // (bumping the generation past the probe's snapshot).
             backend.cache.invalidate("orders");
             // Release the probe to attempt its now-stale write-back.
@@ -2198,13 +2208,12 @@ mod tests {
         let (present, ()) = tokio::join!(probe, racer);
         // The probe still returns what the DB told it at read time...
         assert!(
-            !present.expect("probe succeeds"),
+            present.expect("probe succeeds"),
             "probe returns its read-time value"
         );
         // ...but that stale value must NOT have been cached.
-        assert_eq!(
-            backend.cache.table_exists("orders"),
-            None,
+        assert!(
+            !backend.cache.table_known_present("orders"),
             "a probe write-back racing an invalidation must be discarded"
         );
     }
@@ -3264,13 +3273,19 @@ mod tests {
     #[tokio::test]
     async fn ensure_schema_table_invalidates_the_schema_cache_even_when_it_fails() {
         let mock = DdlMock::new(&["id"], AddColumn::Fails);
-        mock.cache
-            .set_table_exists_if_gen("widgets", false, mock.cache.generation());
+        mock.cache.set_columns_if_gen(
+            "widgets",
+            TableColumns {
+                names: vec!["id".into()],
+                json: JsonColumns::NONE.clone(),
+            },
+            mock.cache.generation(),
+        );
         let _ = DbExec::ensure_schema_table(&mock, &ddl_table()).await;
         assert_eq!(
-            mock.cache.table_exists("widgets"),
+            mock.cache.columns("widgets"),
             None,
-            "the stale not-exists fact must be gone"
+            "the stale column list must be gone"
         );
     }
 

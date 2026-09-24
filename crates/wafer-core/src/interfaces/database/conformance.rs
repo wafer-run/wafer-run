@@ -262,6 +262,91 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_names_longer_than_postgres_keeps_are_refused(svc).await;
 }
 
+/// Drive two services over **one** database and assert that neither keeps
+/// an answer the other has made stale. Panics on the first divergence.
+///
+/// `a` and `b` must be two independent service instances (two processes'
+/// worth of state: separate connections, separate schema caches) that reach
+/// the same database — two services opened on one SQLite file, two pools on
+/// one Postgres database, two D1 bindings to one database. The suite covers
+/// what a multi-replica deployment, or a migration run by another process,
+/// relies on: a table `a` saw missing that `b` then creates is visible to
+/// `a`'s next read, without `a` having done anything to its own cache.
+///
+/// Both services are pinned to non-strict mode, the mode in which a read
+/// probes the table before running.
+pub async fn run_two_instance_conformance(a: &dyn DatabaseService, b: &dyn DatabaseService) {
+    a.set_strict_schema(false);
+    b.set_strict_schema(false);
+    check_table_created_by_another_instance_is_seen(a, b).await;
+}
+
+/// `a` reads a table while it is missing, `b` creates it and inserts a row,
+/// and every guarded read on `a` then sees the row. A backend that memoized
+/// "missing" would answer each of them empty (or zero) until something in
+/// `a`'s own process invalidated its cache.
+async fn check_table_created_by_another_instance_is_seen(
+    a: &dyn DatabaseService,
+    b: &dyn DatabaseService,
+) {
+    let table = crud_table("conf_shared_late");
+    b.schema_drop_table(&table.name)
+        .await
+        .expect("schema_drop_table (idempotent) must succeed");
+
+    let before = a
+        .list(&table.name, &ListOptions::default())
+        .await
+        .expect("list a missing table");
+    assert!(
+        before.records.is_empty(),
+        "the table is missing: {before:?}"
+    );
+    assert_eq!(a.count(&table.name, &[]).await.expect("count"), 0);
+
+    b.ensure_schema_table(&table)
+        .await
+        .expect("the other instance creates the table");
+    let created = b
+        .create(
+            &table.name,
+            row([
+                ("id", serde_json::json!("late-1")),
+                ("name", serde_json::json!("seen")),
+                ("score", serde_json::json!(7)),
+            ]),
+        )
+        .await
+        .expect("the other instance inserts a row");
+
+    let after = a
+        .list(&table.name, &ListOptions::default())
+        .await
+        .expect("list after the other instance created the table");
+    assert_eq!(
+        after
+            .records
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        [created.id.as_str()],
+        "a table another instance created must be visible to list"
+    );
+    assert_eq!(
+        a.count(&table.name, &[]).await.expect("count"),
+        1,
+        "and to count"
+    );
+    assert!(
+        (a.sum(&table.name, "score", &[]).await.expect("sum") - 7.0).abs() < f64::EPSILON,
+        "and to sum"
+    );
+
+    b.schema_drop_table(&table.name)
+        .await
+        .expect("drop the shared table");
+}
+
 // ---------------------------------------------------------------------------
 // JSON round trip
 // ---------------------------------------------------------------------------
@@ -807,13 +892,42 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
         "sum of category=y scores == 10, got {sum_score_y}"
     );
 
-    // count/sum on a missing table must fail-safe to zero, not error.
+    // count, sum and aggregate on a missing table fail safe to zero rows, not
+    // an error.
     assert_eq!(
         svc.count("conf_absent_table", &[])
             .await
             .expect("count missing table"),
         0,
         "count on a non-existent table returns 0"
+    );
+    assert!(
+        svc.sum("conf_absent_table", "score", &[])
+            .await
+            .expect("sum missing table")
+            .abs()
+            < f64::EPSILON,
+        "sum on a non-existent table returns 0"
+    );
+    let groups = svc
+        .aggregate(
+            "conf_absent_table",
+            AggregateSpec {
+                select_columns: vec!["category".into()],
+                aggregates: vec![AggregateColumnSpec::Count {
+                    alias: "cnt".into(),
+                }],
+                filters: vec![],
+                group_by: vec![GroupBySpec::Column("category".into())],
+                sort: vec![],
+                limit: 0,
+            },
+        )
+        .await
+        .expect("aggregate missing table");
+    assert!(
+        groups.is_empty(),
+        "aggregate on a non-existent table has no groups: {groups:?}"
     );
 }
 

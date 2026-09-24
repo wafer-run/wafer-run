@@ -11,7 +11,9 @@
 //! [`DatabaseService`]: wafer_core::interfaces::database::service::DatabaseService
 
 use wafer_block_sqlite::service::SQLiteDatabaseService;
-use wafer_core::interfaces::database::conformance::run_conformance;
+use wafer_core::interfaces::database::conformance::{
+    run_conformance, run_two_instance_conformance,
+};
 
 /// The SQLite `DatabaseService` implementation must satisfy every op in the
 /// shared conformance suite.
@@ -56,5 +58,18 @@ async fn sqlite_database_service_is_conformant_file_backed() {
          the same single-connection configuration as the in-memory suite above"
     );
     run_conformance(&svc).await;
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Two services opened on one file — two processes' worth of connections and
+/// schema caches — must not hide each other's schema changes: a table one
+/// saw missing and the other created is visible to the first.
+#[tokio::test]
+async fn two_sqlite_services_on_one_file_see_each_others_tables() {
+    let path = tempdb_path("two-instance");
+    let a = SQLiteDatabaseService::open(path.to_str().unwrap()).expect("open first service");
+    let b = SQLiteDatabaseService::open(path.to_str().unwrap()).expect("open second service");
+    run_two_instance_conformance(&a, &b).await;
+    drop((a, b));
     let _ = std::fs::remove_file(&path);
 }
