@@ -708,6 +708,36 @@
   value that is empty or holds a space, `=` or `"`; text-rendering
   `LoggerService` implementations can use it too. Every `LoggerService`
   implementation must add the parameter and record the caller.
+- The llm, image and embedding services authorize their caller per
+  operation. Their handlers never checked who was asking, so any block that
+  could reach `wafer-run/llm` could spend a paid provider's quota or unload
+  a model other blocks were using, and any block could embed through an
+  embedding block. `interfaces::llm::handler::handle_message`,
+  `interfaces::image::handler::handle_message` and
+  `interfaces::vector::handler::handle_embedding_message` now take the
+  serving block's `ctx` and registered name (`handle_message(service, ctx,
+  block, msg, body)`) and check every op with `ctx.check_resource_access`
+  against a resource in that block's own namespace, typed by the new
+  `ResourceType::Llm`, `ResourceType::Image` and `ResourceType::Embedding`.
+  A model is `wafer_block::wrap::model_resource(block, backend_id,
+  model_id)` (`wafer_run__llm__{backend_id}/{model_id}` for `wafer-run/llm`):
+  `chat`, `generate` and `status` read it, and `load_model` and
+  `unload_model` write it, since they change what every other caller finds
+  loaded. `list_models`, `embedding.embed` and `embedding.count_tokens` read
+  `wafer_block::wrap::op_resource(block, op)` (`wafer_run__llm__list_models`,
+  `{prefix}embed`, `{prefix}count_tokens`). The serving block and the admin
+  block are admitted; any other caller needs a grant, which only the serving
+  block can declare: return it from the new `LlmService::grants`,
+  `ImageService::grants` or `EmbeddingService::grants` (default empty), or
+  on the routers with `MultiBackendLlmService::grant` /
+  `MultiBackendImageService::grant` (a router also declares each registered
+  backend's grants). For example
+  `ResourceGrant::read("acme/chat", "wafer_run__llm__*").typed(ResourceType::Llm)`
+  lets `acme/chat` use and list every model but not load or unload one. A
+  `backend_id` containing `/` is refused with `InvalidArgument`, because
+  the resource would not name one backend. `ServiceOp::EMBEDDING_OPS`,
+  `LLM_OPS` and `IMAGE_OPS` list the ops, and every `service_block!` block
+  has a `NAME` constant.
 
 ### Added
 
@@ -1146,6 +1176,9 @@
 
 ### Fixed
 
+- `LlmError::Network` and `ImageError::Network` map to `Unavailable`, not
+  `Internal`, so an unreachable model provider surfaces as a 503 rather
+  than a 500, as `network.*` errors already did.
 - The S3 storage block's `delete_folder` returns `Err` when S3 did not
   delete every object. S3 answers `DeleteObjects` with `200 OK` and lists
   the keys it did not delete under `Errors`; that list was ignored, so a
