@@ -36,12 +36,38 @@ pub enum DatabaseError {
     /// for a page it cannot render (a zero limit, an offset with no limit).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// A fault in reaching or using the database that says nothing about the
+    /// request and may clear on its own — a busy or locked SQLite file, a
+    /// refused or broken connection, a pool with no connection free, a
+    /// transaction the server rolled back to break a deadlock. Retrying the
+    /// same request later may succeed. Each backend classifies its driver's
+    /// errors into this variant; see its error mapping for the exact set.
+    #[error("database unavailable: {0}")]
+    Unavailable(String),
     /// Backend-internal failure.
     #[error("database error: {0}")]
     Internal(String),
     /// Wrapped foreign error from a backend driver.
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl DatabaseError {
+    /// The wire [`ErrorCode`](wafer_block::ErrorCode) this error answers with:
+    /// `NotFound`, `AlreadyExists` and `InvalidArgument` for their variants,
+    /// `Unavailable` for a transient fault (so a caller, and the runtime for
+    /// a failed block Init, may retry), `Internal` otherwise.
+    #[must_use]
+    pub const fn code(&self) -> wafer_block::ErrorCode {
+        use wafer_block::ErrorCode;
+        match self {
+            Self::NotFound => ErrorCode::NotFound,
+            Self::AlreadyExists(_) => ErrorCode::AlreadyExists,
+            Self::InvalidArgument(_) => ErrorCode::InvalidArgument,
+            Self::Unavailable(_) => ErrorCode::Unavailable,
+            Self::Internal(_) | Self::Other(_) => ErrorCode::Internal,
+        }
+    }
 }
 
 /// A statement a builder refused to render is the caller's mistake: a name
@@ -604,6 +630,13 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<f64, DatabaseError>;
 
     /// QueryRaw executes a raw SELECT query.
+    ///
+    /// Raw SQL names no single source table, so JSON columns are not decoded
+    /// the way the typed reads decode them, and the result differs by backend:
+    /// on the SQLite family (native, D1, sql.js) a JSON column comes back as
+    /// its stored JSON text — a string value as its quoted text, `"a"` — while
+    /// Postgres returns `json`/`jsonb` columns structured. Read JSON columns
+    /// through `get`/`list` for the same value everywhere, or parse the text.
     async fn query_raw(
         &self,
         query: &str,
@@ -611,6 +644,12 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// ExecRaw executes a raw non-SELECT statement.
+    ///
+    /// Values are bound as given: nothing is encoded for a JSON column the
+    /// way the typed writes encode it (see
+    /// [`codec`](super::codec)). To write a JSON column here, bind its JSON
+    /// text — on Postgres a text parameter for a `json`/`jsonb` column must be
+    /// JSON text.
     async fn exec_raw(&self, query: &str, args: &[serde_json::Value])
         -> Result<i64, DatabaseError>;
 

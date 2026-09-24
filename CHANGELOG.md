@@ -29,6 +29,49 @@
   `clients::database::paginated_list` refuses a `page_size` above `u32::MAX`.
   Migration: `limit: 0` → `limit: None` (or `..Default::default()`),
   `limit: n` → `limit: Some(n)`.
+- A stored value reads back with the structure its column declares, never
+  the structure its text happens to have. The SQL row codec used to parse
+  any text value that started and ended with `{…}`/`[…]` and parsed as JSON,
+  so a user who titled something `[1]` or `{}` got an array or object back
+  (and block code reading it with `as_str()` saw nothing). A text value is
+  now parsed only in a column declared to hold JSON: `JSON` on SQLite / D1 /
+  sql.js, `json`/`jsonb` on Postgres (`wafer_sql_utils::introspect::
+  is_json_decl_type`). `DataType::Json` now creates a SQLite column declared
+  `JSON TEXT` (`ddl::SQLITE_JSON_TYPE`; it was `TEXT`) — TEXT affinity, so
+  numeric-looking JSON text is not turned into a number — and so does a
+  column lazily added for an object or array value; a bare `JSON` column is
+  still read as JSON. Postgres keeps `JSONB`. Every typed write stores a JSON
+  column's value as its JSON text (`codec::encode_json_value`), so any JSON
+  value round-trips: the string `"123"` is stored `"\"123\""` and reads back
+  a string, not a number. A block that wrote pre-serialized JSON strings to a
+  JSON column must write the parsed value instead. On Postgres a text
+  parameter for a `json`/`jsonb` column is JSON text. Raw SQL is not encoded
+  or decoded: `query_raw` returns a JSON column's text on the SQLite family
+  and the structured value on Postgres. `build_list_columns` returns a
+  `decl_type` column next to `name`; the `SchemaCache` column entry is a
+  `TableColumns { names, json }` and no longer caches a missing table's empty
+  column list. Every row-returning `DbExec` primitive (`run_fetch`,
+  `run_fetch_one`, `run_execute_returning`, `BatchOp::Rows`/`FetchOne`,
+  `TxOp::Returning`) takes the result's JSON columns (`codec::JsonColumns`),
+  which the executor looks up from the table a statement reads
+  (`DbExec::json_columns`, one cached introspection per table, in
+  STRICT_SCHEMA mode too); raw SQL and aggregate rows are decoded with
+  `JsonColumns::NONE`. `codec::decode_text_value` is replaced by
+  `codec::decode_text(column, text, json)`, and `codec::record_from_json_row`
+  takes the JSON columns. Embedders: a `DbExec` implementation (the D1 and
+  browser adapters) passes the `json` argument to `record_from_json_row`; a
+  table that stored JSON in a `TEXT` column and relied on the old guess must
+  declare that column `JSON` (a new migration; SQLite cannot retype a column
+  in place, so rebuild the table), or its objects read back as their text.
+- `PostgresDatabaseService::from_pool` returns `Result` and refuses a pool
+  whose connections have no statement cache (`statement-cache-capacity=0`),
+  as `connect` refuses such a URL: every statement is prepared once to learn
+  its parameter types, and without the cache each prepare would leave a
+  named statement open on the connection.
+- `DatabaseError` has a new `Unavailable` variant for a transient backend
+  fault, and `DatabaseError::code()` names each variant's wire code (see
+  Fixed: "A database fault that may clear is `Unavailable`"). A `match` over
+  `DatabaseError` needs the arm.
 
 - The public `wafer_run::runtime::init_stack` module (`InitStack`,
   `InitGuard`) is gone. Init cycles are refused by a runtime-wide wait-for
@@ -1023,6 +1066,31 @@
   rowid lookup as "new entry", and a query no longer drops metadata rows it
   cannot read; each is now an `Internal` error. Stored metadata that is not
   JSON now fails the query with `Internal` instead of reading back as `null`.
+- PostgreSQL binds every parameter by the type the server infers for it (the
+  column an `INSERT`/`UPDATE` writes, the operand a comparison is against),
+  not by the JSON value's type. A `null` bound as `text` could not be written
+  to an `INTEGER`, `BIGINT`, `BOOLEAN` or `JSONB` column at all (`column "n"
+  is of type integer but expression is of type text`); and because sqlx
+  caches a prepared statement per connection by its SQL text, the first
+  execution's value types fixed the parameter types for every later one —
+  once `1.5` had prepared an `INSERT` with a `float8` parameter, a later `2`
+  was sent as `int8` bytes and stored as `1e-323`. A value that does not fit
+  its parameter's type is `InvalidArgument` (a fractional number for an
+  integer column, a string for a boolean). An RFC3339 string now binds into a
+  real `TIMESTAMPTZ` column (the stamped `created_at`/`updated_at` included)
+  and stays text for a TEXT one. `aggregate::build_sum` casts the sum to
+  `DOUBLE PRECISION` in the SQL, and `guard::build_guard_probe` uses inline
+  `1`/`0` literals, since a bound fallback no longer widens the result type.
+- A database fault that may clear is `Unavailable`, not `Internal`. SQLite
+  `SQLITE_BUSY`/`SQLITE_LOCKED`; a Postgres I/O error, pool timeout, or
+  SQLSTATE class `08` (not `08P01`), `40001`, `40P01`, `53300`, `55P03`, `57P01`–`57P03` are
+  `DatabaseError::Unavailable`, which the database handler answers with
+  `ErrorCode::Unavailable` ("database temporarily unavailable"; the driver's
+  message is logged). The Init-time schema migration (`handle_lifecycle`),
+  the schema steps of `ensure_schema_table`, and the Postgres block's
+  connect keep the code, so a block whose Init hit a busy database or a
+  server that was still starting is retried instead of failed for good.
+
 - A failed Init is retried when the failure was transient. Every
   `lifecycle(Init)` error used to be cached as permanent for the life of the
   process, so one bad moment at boot (a backend `Unavailable`, a spent

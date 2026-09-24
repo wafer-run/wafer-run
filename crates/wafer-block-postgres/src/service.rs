@@ -1,17 +1,22 @@
 use std::{
     collections::HashMap,
+    str::FromStr as _,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use base64ct::{Base64, Encoding};
-use sqlx::{postgres::PgRow, PgPool, Row};
+use sqlx::{
+    pool::PoolConnection,
+    postgres::{PgConnectOptions, PgConnection, PgRow},
+    ConnectOptions as _, PgPool, Postgres, Row,
+};
 #[cfg(test)]
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::{
     forward_database_service,
     interfaces::database::{
-        codec,
+        codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
         service::{Column, DatabaseError, Record},
@@ -20,6 +25,8 @@ use wafer_core::{
 #[cfg(test)]
 use wafer_sql_utils::value::sea_values_to_json;
 use wafer_sql_utils::{ddl, introspect, Backend};
+
+use crate::{errors::sqlx_error, params};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -37,20 +44,39 @@ pub struct PostgresDatabaseService {
 
 impl PostgresDatabaseService {
     /// Connect to a PostgreSQL database using a connection URL.
+    ///
+    /// A URL that turns the statement cache off (`statement-cache-capacity=0`)
+    /// is refused before connecting; see [`from_pool`](Self::from_pool).
     pub async fn connect(url: &str) -> Result<Self, DatabaseError> {
-        let pool = PgPool::connect(url)
+        let options = PgConnectOptions::from_str(url).map_err(|e| sqlx_error(&e))?;
+        require_statement_cache(&options)?;
+        let pool = PgPool::connect_with(options)
             .await
-            .map_err(|e| DatabaseError::Internal(format!("connect: {e}")))?;
-        Ok(Self::from_pool(pool))
+            .map_err(|e| sqlx_error(&e))?;
+        Self::from_pool(pool)
     }
 
     /// Create a service from an existing connection pool.
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self {
+    ///
+    /// The pool's connections must keep a statement cache (sqlx's default of
+    /// 100; not `statement-cache-capacity=0`): every statement is prepared
+    /// once to learn its parameter types and then run as that cached
+    /// statement (see [`params::bind`]). Without the cache each prepare leaves
+    /// a named statement on the server connection that nothing closes, so a
+    /// pool configured that way is refused with `InvalidArgument`.
+    pub fn from_pool(pool: PgPool) -> Result<Self, DatabaseError> {
+        require_statement_cache(&pool.connect_options())?;
+        Ok(Self {
             pool,
             schema_cache: SchemaCache::new(),
             strict_schema: AtomicBool::new(false),
-        }
+        })
+    }
+
+    /// A pooled connection; a statement's arguments are encoded for, and it
+    /// is executed on, one connection (see [`params::bind`]).
+    async fn connection(&self) -> Result<PoolConnection<Postgres>, DatabaseError> {
+        self.pool.acquire().await.map_err(|e| sqlx_error(&e))
     }
 
     // -----------------------------------------------------------------
@@ -62,7 +88,7 @@ impl PostgresDatabaseService {
         sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
-            .map_err(|e| DatabaseError::Internal(format!("drop_table: {e}")))?;
+            .map_err(|e| sqlx_error(&e))?;
         Ok(())
     }
 
@@ -75,7 +101,7 @@ impl PostgresDatabaseService {
         sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
-            .map_err(|e| DatabaseError::Internal(format!("add_column: {e}")))?;
+            .map_err(|e| sqlx_error(&e))?;
         Ok(())
     }
 }
@@ -102,35 +128,26 @@ impl DbExec for PostgresDatabaseService {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        _json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
-        let mut q = sqlx::query(sql);
-        for p in params {
-            q = bind_json_value_query(q, p);
-        }
-        let rows = q
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| statement_error(&e))?;
-        let mut records = Vec::with_capacity(rows.len());
-        for row in &rows {
-            records.push(row_to_record(row)?);
-        }
-        Ok(records)
+        let mut conn = self.connection().await?;
+        let rows = fetch_all(&mut conn, sql, params).await?;
+        rows.iter().map(row_to_record).collect()
     }
 
     async fn run_fetch_one(
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        _json: &JsonColumns,
     ) -> Result<Record, DatabaseError> {
-        let mut q = sqlx::query(sql);
-        for p in params {
-            q = bind_json_value_query(q, p);
-        }
-        let row = q.fetch_one(&self.pool).await.map_err(|e| match e {
-            sqlx::Error::RowNotFound => DatabaseError::NotFound,
-            _ => statement_error(&e),
-        })?;
+        let mut conn = self.connection().await?;
+        let args = params::bind(&mut conn, sql, params).await?;
+        let row = sqlx::query_with(sql, args)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| sqlx_error(&e))?
+            .ok_or(DatabaseError::NotFound)?;
         row_to_record(&row)
     }
 
@@ -139,15 +156,8 @@ impl DbExec for PostgresDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let mut q = sqlx::query(sql);
-        for p in params {
-            q = bind_json_value_query(q, p);
-        }
-        let result = q
-            .execute(&self.pool)
-            .await
-            .map_err(|e| statement_error(&e))?;
-        Ok(result.rows_affected() as i64)
+        let mut conn = self.connection().await?;
+        execute(&mut conn, sql, params).await
     }
 
     /// Delegates to [`run_fetch`](Self::run_fetch): Postgres has one pool
@@ -163,8 +173,9 @@ impl DbExec for PostgresDatabaseService {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
-        self.run_fetch(sql, params).await
+        self.run_fetch(sql, params, json).await
     }
 
     async fn run_scalar_i64(
@@ -172,13 +183,8 @@ impl DbExec for PostgresDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let mut q = sqlx::query_scalar::<_, i64>(sql);
-        for p in params {
-            q = bind_json_value(q, p);
-        }
-        q.fetch_one(&self.pool)
-            .await
-            .map_err(|e| statement_error(&e))
+        let mut conn = self.connection().await?;
+        fetch_scalar(&mut conn, sql, params).await
     }
 
     async fn run_scalar_f64(
@@ -186,13 +192,8 @@ impl DbExec for PostgresDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<f64, DatabaseError> {
-        let mut q = sqlx::query_scalar::<_, f64>(sql);
-        for p in params {
-            q = bind_json_value(q, p);
-        }
-        q.fetch_one(&self.pool)
-            .await
-            .map_err(|e| statement_error(&e))
+        let mut conn = self.connection().await?;
+        fetch_scalar(&mut conn, sql, params).await
     }
 
     /// One pooled connection for the whole transaction. Returning early on a
@@ -200,48 +201,27 @@ impl DbExec for PostgresDatabaseService {
     /// rolls it back (sqlx issues the `ROLLBACK` when the connection returns
     /// to the pool).
     async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::Internal(format!("begin transaction: {e}")))?;
+        let mut tx = self.pool.begin().await.map_err(|e| sqlx_error(&e))?;
         let mut results = Vec::with_capacity(ops.len());
         for op in ops {
             let (sql, params) = op.sql_params();
-            let mut q = sqlx::query(sql);
-            for p in params {
-                q = bind_json_value_query(q, p);
-            }
             let result = match op {
-                TxOp::Execute { .. } => {
-                    let done = q.execute(&mut *tx).await.map_err(|e| statement_error(&e))?;
-                    TxResult::Execute(done.rows_affected() as i64)
-                }
+                TxOp::Execute { .. } => TxResult::Execute(execute(&mut tx, sql, params).await?),
                 TxOp::Returning { .. } => {
-                    let rows = q
-                        .fetch_all(&mut *tx)
-                        .await
-                        .map_err(|e| statement_error(&e))?;
+                    let rows = fetch_all(&mut tx, sql, params).await?;
                     TxResult::Returning(rows.iter().map(row_to_record).collect::<Result<_, _>>()?)
                 }
             };
             results.push(result);
         }
-        tx.commit()
-            .await
-            .map_err(|e| DatabaseError::Internal(format!("commit transaction: {e}")))?;
+        tx.commit().await.map_err(|e| sqlx_error(&e))?;
         Ok(results)
     }
 
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
         let (sql, params) = introspect::build_table_exists(table, Backend::Postgres);
-        let mut q = sqlx::query_scalar::<_, bool>(&sql);
-        for p in &params {
-            q = bind_json_value(q, p);
-        }
-        q.fetch_one(&self.pool)
-            .await
-            .map_err(|e| DatabaseError::Internal(format!("table_exists: {e}")))
+        let mut conn = self.connection().await?;
+        fetch_scalar(&mut conn, &sql, &params).await
     }
 }
 
@@ -347,6 +327,10 @@ where
 }
 
 /// Convert a PgRow to a Record, mapping column types to serde_json::Value.
+///
+/// The driver reports every column's type, so this needs no
+/// [`JsonColumns`]: a `JSON`/`JSONB` column decodes structured and a text
+/// column as text, which is what the executor's `json` names would say.
 fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     use sqlx::{Column as SqlxColumn, TypeInfo};
 
@@ -360,15 +344,17 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
         let ordinal = col.ordinal();
 
         let value: serde_json::Value = match type_name {
-            // Text columns go through the shared codec, so a JSON object stored
-            // in a TEXT column decodes to the same `Value::Object` here as it
-            // does on SQLite, D1 and the browser. (A native `JSON`/`JSONB`
-            // column is already structured and takes its own arm below.)
-            "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => {
-                decode_col(row, ordinal, &col_name, type_name, |s: String| {
-                    codec::decode_text_value(&s)
-                })?
-            }
+            // A text column holds text, whatever it looks like. JSON lives in
+            // `JSON`/`JSONB` columns, which the driver returns structured
+            // (their arm below) — the declared type decides, as it does for
+            // the SQLite family (see `codec`).
+            "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "BPCHAR" | "UNKNOWN" => decode_col(
+                row,
+                ordinal,
+                &col_name,
+                type_name,
+                serde_json::Value::String,
+            )?,
             "INT2" | "INT4" => decode_col(row, ordinal, &col_name, type_name, |n: i32| {
                 serde_json::Value::Number(n.into())
             })?,
@@ -437,10 +423,14 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
             "UUID" => decode_col(row, ordinal, &col_name, type_name, |u: uuid::Uuid| {
                 serde_json::Value::String(u.to_string())
             })?,
-            // Fallback: try as string, through the same text codec.
-            _ => decode_col(row, ordinal, &col_name, type_name, |s: String| {
-                codec::decode_text_value(&s)
-            })?,
+            // Fallback: try as string.
+            _ => decode_col(
+                row,
+                ordinal,
+                &col_name,
+                type_name,
+                serde_json::Value::String,
+            )?,
         };
 
         if col_name == "id" {
@@ -453,86 +443,68 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     Ok(Record { id, data })
 }
 
-/// A failed statement as a [`DatabaseError`]: a unique violation (SQLSTATE
-/// `23505`, primary keys included) on a row of a user table is
-/// [`DatabaseError::AlreadyExists`]; anything else is `Internal`.
-///
-/// A `23505` on a `pg_catalog` table is not a duplicate row: two sessions
-/// creating the same table at once collide on a catalog index
-/// (`pg_type_typname_nsp_index`) even under `IF NOT EXISTS`. That is a DDL
-/// race, and reporting it as a taken key would misdirect the caller.
-fn statement_error(e: &sqlx::Error) -> DatabaseError {
-    let duplicate_row = e.as_database_error().is_some_and(|db| {
-        db.is_unique_violation()
-            && db
-                .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
-                .is_some_and(|pg| pg.schema().is_some_and(|schema| schema != "pg_catalog"))
-    });
-    if duplicate_row {
-        DatabaseError::AlreadyExists(e.to_string())
-    } else {
-        DatabaseError::Internal(e.to_string())
+/// Refuse connect options that turn the per-connection statement cache off
+/// (see [`PostgresDatabaseService::from_pool`]). sqlx exposes the capacity
+/// only through the options' URL form, which always carries it.
+fn require_statement_cache(options: &PgConnectOptions) -> Result<(), DatabaseError> {
+    let url = options.to_url_lossy();
+    let disabled = url
+        .query_pairs()
+        .any(|(key, value)| key == "statement-cache-capacity" && value == "0");
+    if disabled {
+        return Err(DatabaseError::InvalidArgument(
+            "wafer-block-postgres needs a statement cache: remove \
+             statement-cache-capacity=0 from the connection options"
+                .to_string(),
+        ));
     }
+    Ok(())
 }
 
-/// `sqlx::query` and `sqlx::query_scalar` builders expose an identical `bind`
-/// method but share no trait, so one definition generates both bind helpers.
-macro_rules! generate_bind {
-    ($(#[$meta:meta])* fn $name:ident<$lt:lifetime $(, $gen:ident)?>($qty:ty)) => {
-        $(#[$meta])*
-        fn $name<$lt $(, $gen)?>(q: $qty, v: &$lt serde_json::Value) -> $qty {
-            match v {
-                serde_json::Value::Null => q.bind(None::<String>),
-                serde_json::Value::Bool(b) => q.bind(*b),
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        q.bind(i)
-                    } else if let Some(f) = n.as_f64() {
-                        q.bind(f)
-                    } else {
-                        q.bind(n.to_string())
-                    }
-                }
-                // Strings are always bound as `text`. This is deliberately NOT
-                // value-driven (e.g. "bind an RFC3339-looking string as
-                // timestamptz"): every block in this workspace stores its
-                // timestamps in TEXT columns holding one canonical RFC3339
-                // string (see impresspress `auth/repo/mod.rs::now_iso`), so
-                // `expires_at < cutoff` / `uploaded_at < cutoff` string
-                // comparisons work. Binding an RFC3339 string as `timestamptz`
-                // would (a) reformat the stored value on write, breaking that
-                // single-format invariant, and (b) make `WHERE text_col <op>
-                // $rfc3339` fail with `operator does not exist: text <op>
-                // timestamp with time zone` — reachable on the file-upload
-                // orphan-sweep and the auth `delete_expired` paths.
-                //
-                // KNOWN FOLLOW-UP (deferred): the shared `create`/`update` path
-                // stamps RFC3339 strings that a *real* `TIMESTAMPTZ` column
-                // (declared via `wafer_schema::timestamps()`) would reject as a
-                // bound text param. No block currently declares such a column, so
-                // this does not manifest. Supporting it correctly needs a
-                // COLUMN-TYPE-AWARE bind (cast/bind per the target column's SQL
-                // type), which requires the schema cache to carry column types —
-                // out of scope here, and a value-driven shortcut is actively
-                // wrong given the TEXT convention above.
-                serde_json::Value::String(s) => q.bind(s.as_str()),
-                serde_json::Value::Array(_) | serde_json::Value::Object(_) => q.bind(v.clone()),
-            }
-        }
-    };
+/// Run `sql` with `params` on `conn`, returning its rows.
+async fn fetch_all(
+    conn: &mut PgConnection,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<Vec<PgRow>, DatabaseError> {
+    let args = params::bind(conn, sql, params).await?;
+    sqlx::query_with(sql, args)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| sqlx_error(&e))
 }
 
-generate_bind!(
-    /// Bind a serde_json::Value to a `sqlx::query_scalar` query.
-    fn bind_json_value<'q, O>(
-        sqlx::query::QueryScalar<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>
-    )
-);
+/// Run `sql` with `params` on `conn`, returning the affected-row count.
+async fn execute(
+    conn: &mut PgConnection,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<i64, DatabaseError> {
+    let args = params::bind(conn, sql, params).await?;
+    let done = sqlx::query_with(sql, args)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| sqlx_error(&e))?;
+    i64::try_from(done.rows_affected())
+        .map_err(|_| DatabaseError::Internal("affected-row count out of range".into()))
+}
 
-generate_bind!(
-    /// Bind a serde_json::Value to a `sqlx::query` (non-scalar).
-    fn bind_json_value_query<'q>(sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>)
-);
+/// Run `sql` with `params` on `conn`, returning the single scalar of its one
+/// row.
+async fn fetch_scalar<T>(
+    conn: &mut PgConnection,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<T, DatabaseError>
+where
+    T: for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres> + Send + Unpin,
+{
+    let args = params::bind(conn, sql, params).await?;
+    sqlx::query_scalar_with(sql, args)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| sqlx_error(&e))
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -541,6 +513,53 @@ generate_bind!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without a statement cache every prepare would leave a named statement
+    /// on the server connection, so a URL or pool that turns it off is refused
+    /// up front — before any connection is attempted.
+    #[tokio::test]
+    async fn a_disabled_statement_cache_is_refused() {
+        let err = PostgresDatabaseService::connect(
+            "postgres://nobody:pw@127.0.0.1:1/nothing?statement-cache-capacity=0",
+        )
+        .await
+        .err()
+        .expect("refused");
+        assert!(matches!(err, DatabaseError::InvalidArgument(_)), "{err:?}");
+
+        let options: PgConnectOptions = "postgres://nobody:pw@127.0.0.1:1/nothing"
+            .parse()
+            .expect("options");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(options.clone().statement_cache_capacity(0));
+        assert!(matches!(
+            PostgresDatabaseService::from_pool(pool),
+            Err(DatabaseError::InvalidArgument(_))
+        ));
+        let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(options);
+        assert!(PostgresDatabaseService::from_pool(pool).is_ok());
+    }
+
+    /// Nothing listens on loopback port 1, so every connection is refused: a
+    /// fault that says nothing about the request and may clear once the
+    /// server is up. It is `Unavailable`, the code a block Init that hit it is
+    /// retried on. (The pool keeps retrying the refused connect until its
+    /// acquire timeout, shortened here; `connect` fails the same way after
+    /// the default 30 s.)
+    #[tokio::test]
+    async fn an_unreachable_server_is_unavailable() {
+        const NOWHERE: &str = "postgres://nobody:pw@127.0.0.1:1/nothing";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy(NOWHERE)
+            .expect("a lazy pool connects on first use");
+        let svc = PostgresDatabaseService::from_pool(pool).expect("a pool with a statement cache");
+        let err = DbExec::get(&svc, "anything", "id")
+            .await
+            .expect_err("nothing to connect to");
+        assert!(matches!(err, DatabaseError::Unavailable(_)), "{err:?}");
+        assert_eq!(err.code(), wafer_block::ErrorCode::Unavailable);
+    }
 
     #[test]
     fn test_sea_query_select_with_filters() {

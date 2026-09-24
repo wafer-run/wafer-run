@@ -1,6 +1,7 @@
-/// One decode policy for SQL result rows (JSON-in-TEXT re-parsing, `Record`
-/// assembly, single-column scalar extraction), shared by every SQL-family
-/// backend so the same row reads the same way on every platform.
+/// One decode policy for SQL result rows (JSON columns decoded by their
+/// declared type, `Record` assembly, single-column scalar extraction), shared
+/// by every SQL-family backend so the same row reads the same way on every
+/// platform.
 pub mod codec;
 /// Backend-agnostic [`DatabaseService`](service::DatabaseService) conformance
 /// suite (`run_conformance`). Gated behind the `conformance` feature so it is

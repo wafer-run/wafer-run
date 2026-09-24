@@ -113,9 +113,12 @@ pub fn build_guard_probe(
 ) -> Result<crate::Statement, SqlBuildError> {
     let mut select = Query::select();
     for (index, guard) in guards.iter().enumerate() {
+        // Inline literals, so the verdict is an integer on every backend: a
+        // `CASE` whose branches are all bound parameters gives Postgres
+        // nothing to infer their type from, and it reads them as text.
         let verdict = sea_query::CaseStatement::new()
-            .case(guard_holds(table, guard)?, Expr::val(1_i64))
-            .finally(Expr::val(0_i64));
+            .case(guard_holds(table, guard)?, Expr::cust("1"))
+            .finally(Expr::cust("0"));
         select.expr_as(verdict, DynCol(guard_probe_column(index)));
     }
     let (sql, values) = crate::render_select(select, backend);

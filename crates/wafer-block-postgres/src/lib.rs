@@ -5,6 +5,8 @@
 
 #![warn(missing_docs)]
 
+mod errors;
+mod params;
 /// PostgreSQL implementation of `wafer_core::interfaces::database::service::DatabaseService`.
 ///
 /// Exposed publicly so native consumers (e.g. a native application build) can construct
@@ -91,9 +93,11 @@ wafer_core::service_block! {
                 )
             })?;
 
-            let svc = PostgresDatabaseService::connect(&url).await.map_err(|e| {
-                WaferError::new(ErrorCode::Internal, format!("wafer-run/postgres: {e}"))
-            })?;
+            // A server that is down or still starting keeps its
+            // `Unavailable` code, so the runtime retries this Init.
+            let svc = PostgresDatabaseService::connect(&url)
+                .await
+                .map_err(|e| WaferError::new(e.code(), format!("wafer-run/postgres: {e}")))?;
             tracing::info!("PostgreSQL database connected");
             this.service.set(Arc::new(svc)).ok();
         }

@@ -22,7 +22,8 @@ use wafer_sql_utils::{
 };
 
 use super::{
-    schema_cache::SchemaCache,
+    codec::{encode_json_value, JsonColumns},
+    schema_cache::{SchemaCache, TableColumns},
     service::{
         AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordList,
         UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
@@ -37,8 +38,11 @@ fn sql_name(name: &str) -> Result<&str, DatabaseError> {
     Ok(validate_ident(name)?)
 }
 
-/// Sort `data` into deterministic `(column, value)` pairs, refusing a key
-/// that is not a plain identifier (see [`sql_name`]).
+/// Sort `data` into deterministic `(column, value)` pairs as they are
+/// written, refusing a key that is not a plain identifier (see [`sql_name`]).
+/// A value for one of `json`'s columns is written as its JSON text
+/// ([`codec::encode_json_value`](super::codec::encode_json_value)), so it
+/// reads back as the value written.
 ///
 /// Sorted-key iteration keeps the generated INSERT/UPDATE shape stable across
 /// process starts: `HashMap` order is randomized by `RandomState`, which would
@@ -46,10 +50,18 @@ fn sql_name(name: &str) -> Result<&str, DatabaseError> {
 /// cached prepared statement on the backend.
 fn sorted_pairs(
     data: &HashMap<String, serde_json::Value>,
+    json: &JsonColumns,
 ) -> Result<Vec<(String, serde_json::Value)>, DatabaseError> {
     let mut pairs: Vec<(String, serde_json::Value)> = data
         .iter()
-        .map(|(k, v)| Ok((sql_name(k)?.to_string(), v.clone())))
+        .map(|(k, v)| {
+            let value = if json.contains(k) {
+                encode_json_value(v)
+            } else {
+                v.clone()
+            };
+            Ok((sql_name(k)?.to_string(), value))
+        })
         .collect::<Result<_, DatabaseError>>()?;
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(pairs)
@@ -219,6 +231,8 @@ pub enum BatchOp<'a> {
         sql: &'a str,
         /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
         params: &'a [serde_json::Value],
+        /// Columns whose text is JSON, as the primitive's `json` argument.
+        json: &'a JsonColumns,
     },
     /// Expected to return exactly one row; no rows → `NotFound` (like
     /// [`DbExec::run_fetch_one`]).
@@ -227,6 +241,8 @@ pub enum BatchOp<'a> {
         sql: &'a str,
         /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
         params: &'a [serde_json::Value],
+        /// Columns whose text is JSON, as the primitive's `json` argument.
+        json: &'a JsonColumns,
     },
     /// Non-row statement; yields the affected-row count (like
     /// [`DbExec::run_execute`]).
@@ -259,8 +275,8 @@ impl<'a> BatchOp<'a> {
     #[must_use]
     pub fn sql_params(&self) -> (&'a str, &'a [serde_json::Value]) {
         match *self {
-            BatchOp::Rows { sql, params }
-            | BatchOp::FetchOne { sql, params }
+            BatchOp::Rows { sql, params, .. }
+            | BatchOp::FetchOne { sql, params, .. }
             | BatchOp::Execute { sql, params }
             | BatchOp::ScalarI64 { sql, params }
             | BatchOp::ScalarF64 { sql, params } => (sql, params),
@@ -292,6 +308,18 @@ fn batch_shape_error(what: &str, got: Option<&BatchResult>) -> DatabaseError {
     DatabaseError::Internal(format!(
         "run_batch returned an unexpected result shape for {what}: {got:?}"
     ))
+}
+
+/// A failed schema step (`CREATE TABLE`, `ADD COLUMN`, `CREATE INDEX`) with
+/// `what` naming it. The failure is the backend's, never the caller's, so it is
+/// `Internal` — unless it is transient: a busy database or a dropped connection
+/// stays [`DatabaseError::Unavailable`], so a block Init migrating its schema
+/// is retried rather than failed for good.
+fn schema_step_error(what: &str, e: DatabaseError) -> DatabaseError {
+    match e {
+        DatabaseError::Unavailable(msg) => DatabaseError::Unavailable(format!("{what}: {msg}")),
+        other => DatabaseError::Internal(format!("{what}: {other}")),
+    }
 }
 
 /// The index of the first guard a [`guard::build_guard_probe`] result says
@@ -349,6 +377,8 @@ pub enum TxOp<'a> {
         sql: &'a str,
         /// Positional parameters, JSON-encoded as `sea_values_to_json` produces.
         params: &'a [serde_json::Value],
+        /// Columns whose text is JSON, as the primitive's `json` argument.
+        json: &'a JsonColumns,
     },
 }
 
@@ -357,7 +387,7 @@ impl<'a> TxOp<'a> {
     #[must_use]
     pub fn sql_params(&self) -> (&'a str, &'a [serde_json::Value]) {
         match *self {
-            TxOp::Execute { sql, params } | TxOp::Returning { sql, params } => (sql, params),
+            TxOp::Execute { sql, params } | TxOp::Returning { sql, params, .. } => (sql, params),
         }
     }
 }
@@ -412,8 +442,15 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     // ---- Primitives: the only backend-specific execution code ----
     // `params` is the JSON form produced by `sea_values_to_json(stmt.values)`;
     // each backend binds it natively. All callers pass single-statement SQL.
+    // `json` names the result columns whose text is JSON: a row-returning
+    // primitive decodes every row with it (`codec::decode_text` /
+    // `codec::record_from_json_row`) and never guesses from content. The
+    // executor derives it from the declared types of the table a statement
+    // reads ([`json_columns`](Self::json_columns)); a statement with no single
+    // source table passes `JsonColumns::NONE`.
 
-    /// Run a row-returning query and convert rows to `Record`s.
+    /// Run a row-returning query and convert rows to `Record`s, decoding the
+    /// text of `json`'s columns as JSON.
     ///
     /// Read path: the statement must have no side effects (a plain `SELECT`).
     /// Implementors that route work along separate read/write paths (e.g.
@@ -428,6 +465,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// Run a query expected to return exactly one row; no rows → `NotFound`.
@@ -438,6 +476,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Record, DatabaseError>;
 
     /// Run a non-row statement; returns the affected-row count.
@@ -462,6 +501,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// Run a query returning a single `i64` scalar (e.g. `COUNT(*)`).
@@ -542,11 +582,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut out = Vec::with_capacity(ops.len());
         for &op in ops {
             let result = match op {
-                BatchOp::Rows { sql, params } => {
-                    BatchResult::Rows(self.run_fetch(sql, params).await?)
+                BatchOp::Rows { sql, params, json } => {
+                    BatchResult::Rows(self.run_fetch(sql, params, json).await?)
                 }
-                BatchOp::FetchOne { sql, params } => {
-                    BatchResult::FetchOne(self.run_fetch_one(sql, params).await?)
+                BatchOp::FetchOne { sql, params, json } => {
+                    BatchResult::FetchOne(self.run_fetch_one(sql, params, json).await?)
                 }
                 BatchOp::Execute { sql, params } => {
                     BatchResult::Execute(self.run_execute(sql, params).await?)
@@ -601,11 +641,30 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Column names (lowercased) of `table`; empty if the table is missing.
     ///
     /// Consults [`schema_cache`](Self::schema_cache) first and populates it on
-    /// a miss, so a warm backend answers without a round-trip. Shared across
-    /// backends via the parameter-bound [`introspect::build_list_columns`]
-    /// builder, whose result shape (`name` per column) is identical in both
-    /// dialects.
+    /// a miss (see [`table_columns`](Self::table_columns)).
     async fn get_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
+        Ok(self.table_columns(table).await?.names)
+    }
+
+    /// The columns of `table` declared to hold JSON, which every row read from
+    /// it is decoded with (see [`codec`](super::codec)); none if the table is
+    /// missing.
+    ///
+    /// Runs in STRICT_SCHEMA mode too: nothing else can tell a backend whose
+    /// driver reports no column types which text is JSON. A backend with a
+    /// [`schema_cache`](Self::schema_cache) issues the introspection once per
+    /// table.
+    async fn json_columns(&self, table: &str) -> Result<JsonColumns, DatabaseError> {
+        Ok(self.table_columns(table).await?.json)
+    }
+
+    /// Columns of `table` — names and the JSON-declared subset — from
+    /// [`schema_cache`](Self::schema_cache), populated on a miss, so a warm
+    /// backend answers without a round-trip. Shared across backends via the
+    /// parameter-bound [`introspect::build_list_columns`] builder, whose result
+    /// shape (`name` and `decl_type` per column) is identical in both
+    /// dialects.
+    async fn table_columns(&self, table: &str) -> Result<TableColumns, DatabaseError> {
         let cache = self.schema_cache();
         if let Some(columns) = cache.and_then(|c| c.columns(table)) {
             return Ok(columns);
@@ -621,21 +680,33 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(columns)
     }
 
-    /// Column names (lowercased) of `table` as the database reports them now,
-    /// bypassing and not touching [`schema_cache`](Self::schema_cache); empty
-    /// if the table is missing.
-    async fn introspect_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
+    /// Columns of `table` as the database reports them now, bypassing and not
+    /// touching [`schema_cache`](Self::schema_cache); empty if the table is
+    /// missing.
+    async fn introspect_columns(&self, table: &str) -> Result<TableColumns, DatabaseError> {
         let (sql, params) = introspect::build_list_columns(table, Self::BACKEND);
-        let rows = self.run_fetch(&sql, &params).await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|r| {
-                r.data
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_lowercase)
-            })
-            .collect())
+        let rows = self.run_fetch(&sql, &params, JsonColumns::NONE).await?;
+        let mut names = Vec::with_capacity(rows.len());
+        let mut json = Vec::new();
+        for row in rows {
+            let Some(name) = row.data.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let name = name.to_lowercase();
+            let decl_type = row
+                .data
+                .get("decl_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if introspect::is_json_decl_type(decl_type) {
+                json.push(name.clone());
+            }
+            names.push(name);
+        }
+        Ok(TableColumns {
+            names,
+            json: JsonColumns::new(json),
+        })
     }
 
     /// Primary-key columns of `table`, in key order; empty when the table has
@@ -662,7 +733,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // Generation snapshot before the probe yields, as in `get_columns`.
         let gen0 = cache.map(SchemaCache::generation);
         let (sql, params) = introspect::build_list_primary_key(table, Self::BACKEND);
-        let rows = self.run_fetch(&sql, &params).await?;
+        let rows = self.run_fetch(&sql, &params, JsonColumns::NONE).await?;
         let key: Vec<String> = rows
             .into_iter()
             .filter_map(|r| {
@@ -716,7 +787,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 .await?
                 .contains(&column.to_lowercase())
             {
-                return Err(DatabaseError::Internal(format!("add column {column}: {e}")));
+                return Err(schema_step_error(&format!("add column {column}"), e));
             }
         }
         Ok(())
@@ -726,7 +797,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Column types are derived from the value being written
     /// ([`ddl::build_add_column_for_value`]): Postgres picks a native type
-    /// (BOOLEAN/BIGINT/DOUBLE PRECISION/JSONB/TEXT), SQLite always TEXT. The
+    /// (BOOLEAN/BIGINT/DOUBLE PRECISION/JSONB/TEXT), SQLite `JSON` for an
+    /// object or array and TEXT for anything else. The
     /// table itself must already exist via the block's migration files — only
     /// columns are added on demand, per the documented lazy column-add design.
     ///
@@ -801,7 +873,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let cache = self.schema_cache();
         let current = match cache {
             Some(cache) => {
-                let current = self.introspect_columns(table).await?;
+                let current = self.introspect_columns(table).await?.names;
                 if current != known {
                     cache.invalidate(table);
                 }
@@ -821,11 +893,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         }
     }
 
-    /// Shared `get`: select-by-id → single row.
+    /// Shared `get`: the table's JSON columns → select-by-id → single row.
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let stmt =
-            wafer_sql_utils::query::build_select_by_id(sql_name(collection)?, id, Self::BACKEND);
-        self.run_fetch_one(&stmt.sql, &sea_values_to_json(stmt.values))
+        let table = sql_name(collection)?;
+        let json = self.json_columns(table).await?;
+        let stmt = wafer_sql_utils::query::build_select_by_id(table, id, Self::BACKEND);
+        self.run_fetch_one(&stmt.sql, &sea_values_to_json(stmt.values), &json)
             .await
     }
 
@@ -882,6 +955,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         } else {
             Vec::new()
         };
+        let json = self.json_columns(table).await?;
 
         // Render both statements to `Statement` (plain `String` + `Vec<Value>`,
         // both `Send`) before any `.await` below, inside a nested block so
@@ -955,6 +1029,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                         BatchOp::Rows {
                             sql: &select_stmt.sql,
                             params: &select_params,
+                            json: &json,
                         },
                     ])
                     .await?;
@@ -971,7 +1046,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             }
             None => {
                 let records = self
-                    .run_fetch(&select_stmt.sql, &sea_values_to_json(select_stmt.values))
+                    .run_fetch(
+                        &select_stmt.sql,
+                        &sea_values_to_json(select_stmt.values),
+                        &json,
+                    )
                     .await?;
                 (None, records)
             }
@@ -1046,7 +1125,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // "no such column".
         self.ensure_data_columns(table, &data).await?;
 
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         let stmt = wafer_sql_utils::query::build_insert(table, &pairs, Self::BACKEND);
         let generated = self
             .run_insert(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1077,7 +1157,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
 
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         // Batch the UPDATE with the by-id re-fetch so a batching backend (D1)
         // collapses the two round-trips into one. The re-fetch mirrors
         // [`get`](Self::get) exactly — `build_select_by_id` on the same
@@ -1102,6 +1183,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 BatchOp::Rows {
                     sql: &select_stmt.sql,
                     params: &select_params,
+                    json: &json,
                 },
             ])
             .await?;
@@ -1183,9 +1265,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         }
         self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
+        let json = self.json_columns(table).await?;
         let stmt =
             wafer_sql_utils::query::build_delete_where_returning(table, filters, Self::BACKEND);
-        self.run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values))
+        self.run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values), &json)
             .await
     }
 
@@ -1207,7 +1290,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         let stmt =
             wafer_sql_utils::query::build_update_where(table, &pairs, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1234,7 +1318,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         let stmt =
             wafer_sql_utils::query::build_update_where(table, &pairs, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1292,19 +1377,28 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// `extract_windowed_id_key` handling below is a defensive fallback, not
     /// the primary validation.
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
-        let stmt = Self::upsert_statement(collection, spec)?;
+        let json = self.json_columns(sql_name(collection)?).await?;
+        let stmt = Self::upsert_statement(collection, spec, &json)?;
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
     /// Render the single `INSERT … ON CONFLICT …` statement behind
     /// [`upsert`](Self::upsert) — shared with [`batch`](Self::batch)'s
-    /// `Upsert` op, so the two cannot drift.
+    /// `Upsert` op, so the two cannot drift. A value for one of `json`'s
+    /// columns is written as its JSON text, as [`create`](Self::create) writes
+    /// it.
     fn upsert_statement(
         collection: &str,
-        spec: UpsertSpec,
+        mut spec: UpsertSpec,
+        json: &JsonColumns,
     ) -> Result<wafer_sql_utils::Statement, DatabaseError> {
         let table = sql_name(collection)?;
+        for (column, value) in &mut spec.data {
+            if json.contains(column) {
+                *value = encode_json_value(value);
+            }
+        }
         let stmt = match spec.on_conflict {
             UpsertConflict::SetColumns(update_cols) => {
                 let named = spec
@@ -1408,11 +1502,21 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             let cfg = spec.into_grouped_config(table.to_string());
             wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)
         };
-        self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        // An aggregate row holds computed values and group keys, not stored
+        // rows, so its text decodes as text.
+        self.run_fetch(
+            &stmt.sql,
+            &sea_values_to_json(stmt.values),
+            JsonColumns::NONE,
+        )
+        .await
     }
 
     /// Shared `query_raw`: pass-through to `run_fetch`.
+    ///
+    /// Raw SQL names no single source table, so it is decoded with
+    /// [`JsonColumns::NONE`]: a JSON column's text comes back as text on the
+    /// SQLite family (Postgres still returns `json`/`jsonb` structured).
     ///
     /// Read path (see [`run_fetch`](Self::run_fetch)'s contract): `query_raw`
     /// is the admin SQL-explorer's read entry point, so a caller must use
@@ -1425,7 +1529,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
-        self.run_fetch(query, args).await
+        self.run_fetch(query, args, JsonColumns::NONE).await
     }
 
     /// Shared `exec_raw`: pass-through to `run_execute`.
@@ -1504,7 +1608,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let create = ddl::build_create_table(table, Self::BACKEND)?;
         self.run_execute(&create.sql, &[])
             .await
-            .map_err(|e| DatabaseError::Internal(format!("create table {}: {e}", table.name)))?;
+            .map_err(|e| schema_step_error(&format!("create table {}", table.name), e))?;
 
         // The table may predate this schema revision, so add whatever declared
         // column it is missing. `get_columns` is re-read rather than cached
@@ -1526,14 +1630,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)?;
             self.run_execute(&stmt.sql, &[])
                 .await
-                .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
+                .map_err(|e| schema_step_error("create index", e))?;
         }
 
         let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)?;
         for stmt in fk_indexes {
             self.run_execute(&stmt.sql, &[])
                 .await
-                .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
+                .map_err(|e| schema_step_error("create FK index", e))?;
         }
         Ok(())
     }
@@ -1563,10 +1667,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // One representative value per column across every row, for the lazy
         // column-add's type choice.
         let mut columns: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(rows.len());
-        for mut data in rows {
-            prepare_created_row(&mut data, autogenerates_id);
-            for (key, value) in &data {
+        let mut rows = rows;
+        for data in &mut rows {
+            prepare_created_row(data, autogenerates_id);
+            for (key, value) in data.iter() {
                 match columns.get(key) {
                     Some(seen) if !seen.is_null() || value.is_null() => {}
                     _ => {
@@ -1574,11 +1678,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     }
                 }
             }
-            let stmt =
-                wafer_sql_utils::query::build_insert(table, &sorted_pairs(&data)?, Self::BACKEND);
-            statements.push((stmt.sql, sea_values_to_json(stmt.values)));
         }
         self.ensure_data_columns(table, &columns).await?;
+        let json = self.json_columns(table).await?;
+        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(rows.len());
+        for data in &rows {
+            let stmt = wafer_sql_utils::query::build_insert(
+                table,
+                &sorted_pairs(data, &json)?,
+                Self::BACKEND,
+            );
+            statements.push((stmt.sql, sea_values_to_json(stmt.values)));
+        }
 
         let ops: Vec<TxOp<'_>> = statements
             .iter()
@@ -1617,8 +1728,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         /// How the statement planned for an op decodes back into its outcome,
         /// or the outcome of an op that needs no statement.
         enum Planned {
-            Created,
-            Updated,
+            Created(JsonColumns),
+            Updated(JsonColumns),
             Deleted,
             UpdatedWhere,
             Upserted,
@@ -1637,12 +1748,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     let autogenerates_id = self.table_autogenerates_id(table).await;
                     prepare_created_row(&mut data, autogenerates_id);
                     self.ensure_data_columns(table, &data).await?;
+                    let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_insert_returning(
                         table,
-                        &sorted_pairs(&data)?,
+                        &sorted_pairs(&data, &json)?,
                         Self::BACKEND,
                     );
-                    (Planned::Created, stmt)
+                    (Planned::Created(json), stmt)
                 }
                 WriteOp::Update {
                     collection,
@@ -1652,13 +1764,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     let table = sql_name(&collection)?;
                     stamp_timestamps(&mut data, false);
                     self.ensure_data_columns(table, &data).await?;
+                    let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_update_by_id_returning(
                         table,
                         &id,
-                        &sorted_pairs(&data)?,
+                        &sorted_pairs(&data, &json)?,
                         Self::BACKEND,
                     );
-                    (Planned::Updated, stmt)
+                    (Planned::Updated(json), stmt)
                 }
                 WriteOp::Delete { collection, id } => {
                     let stmt = wafer_sql_utils::query::build_delete_by_id(
@@ -1684,18 +1797,22 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                         .await?;
                     stamp_timestamps(&mut data, false);
                     self.ensure_data_columns(table, &data).await?;
+                    let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_update_where(
                         table,
-                        &sorted_pairs(&data)?,
+                        &sorted_pairs(&data, &json)?,
                         &filters,
                         Self::BACKEND,
                     );
                     (Planned::UpdatedWhere, stmt)
                 }
-                WriteOp::Upsert { collection, spec } => (
-                    Planned::Upserted,
-                    Self::upsert_statement(&collection, spec)?,
-                ),
+                WriteOp::Upsert { collection, spec } => {
+                    let json = self.json_columns(sql_name(&collection)?).await?;
+                    (
+                        Planned::Upserted,
+                        Self::upsert_statement(&collection, spec, &json)?,
+                    )
+                }
             };
             planned.push(kind);
             statements.push((stmt.sql, sea_values_to_json(stmt.values)));
@@ -1714,7 +1831,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .iter()
             .zip(planned.iter().filter(|k| !matches!(k, Planned::Settled(_))))
             .map(|((sql, params), kind)| match kind {
-                Planned::Created | Planned::Updated => TxOp::Returning { sql, params },
+                Planned::Created(json) | Planned::Updated(json) => {
+                    TxOp::Returning { sql, params, json }
+                }
                 _ => TxOp::Execute { sql, params },
             })
             .collect();
@@ -1738,14 +1857,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     DatabaseError::Internal("run_transaction returned too few results".into())
                 })?;
                 match (kind, result) {
-                    (Planned::Created, TxResult::Returning(rows)) => rows
+                    (Planned::Created(_), TxResult::Returning(rows)) => rows
                         .into_iter()
                         .next()
                         .map(WriteOutcome::Created)
                         .ok_or_else(|| {
                             DatabaseError::Internal("INSERT … RETURNING returned no row".into())
                         }),
-                    (Planned::Updated, TxResult::Returning(rows)) => {
+                    (Planned::Updated(_), TxResult::Returning(rows)) => {
                         Ok(WriteOutcome::Updated(rows.into_iter().next()))
                     }
                     (Planned::Deleted, TxResult::Execute(rows_affected)) => {
@@ -1774,8 +1893,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`guard::build_guard_probe`] of every guard's verdict, the write, and
     /// the same probe again.
     ///
-    /// Returns the write's own result — rows when `returning`, else its
-    /// affected count — and, for a write that did nothing, the index of the
+    /// Returns the write's own result — its rows, decoded with `returning`'s
+    /// JSON columns, when `returning` is `Some`; else its affected count — and, for a write that did nothing, the index of the
     /// guard that refused it. That is the first refusing guard of the probe
     /// before the write or, when that probe passed, of the probe after it:
     /// every guarded write waits on the lock, so between the probes only an
@@ -1787,7 +1906,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         table: &str,
         guards: &[CapGuard],
         write: wafer_sql_utils::Statement,
-        returning: bool,
+        returning: Option<&JsonColumns>,
     ) -> Result<(TxResult, Option<usize>), DatabaseError> {
         let mut statements: Vec<(String, Vec<serde_json::Value>)> =
             guard::build_guard_preamble(table, Self::BACKEND)
@@ -1810,12 +1929,16 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let ops: Vec<TxOp<'_>> = statements
             .iter()
             .enumerate()
-            .map(|(i, (sql, params))| {
-                if i < preamble || (i == write_at && !returning) {
-                    TxOp::Execute { sql, params }
-                } else {
-                    TxOp::Returning { sql, params }
-                }
+            .map(|(i, (sql, params))| match (i, returning) {
+                (i, _) if i < preamble => TxOp::Execute { sql, params },
+                (i, Some(json)) if i == write_at => TxOp::Returning { sql, params, json },
+                (i, None) if i == write_at => TxOp::Execute { sql, params },
+                // A guard probe: one row of computed verdicts.
+                _ => TxOp::Returning {
+                    sql,
+                    params,
+                    json: JsonColumns::NONE,
+                },
             })
             .collect();
         let results = self.run_transaction(&ops).await?;
@@ -1869,9 +1992,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let autogenerates_id = !data.contains_key("id") && self.table_autogenerates_id(table).await;
         prepare_created_row(&mut data, autogenerates_id);
         self.ensure_data_columns(table, &data).await?;
-        let stmt = guard::build_insert_guarded(table, &sorted_pairs(&data)?, guards, Self::BACKEND)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        match self.run_guarded(table, guards, stmt, true).await? {
+        let json = self.json_columns(table).await?;
+        let stmt =
+            guard::build_insert_guarded(table, &sorted_pairs(&data, &json)?, guards, Self::BACKEND)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        match self.run_guarded(table, guards, stmt, Some(&json)).await? {
             (TxResult::Returning(rows), refused) => match (rows.into_iter().next(), refused) {
                 (Some(row), _) => Ok(GuardedInsert::Inserted(row)),
                 (None, Some(guard)) => Ok(GuardedInsert::Refused { guard }),
@@ -1908,15 +2033,16 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
+        let json = self.json_columns(table).await?;
         let stmt = guard::build_update_guarded(
             table,
-            &sorted_pairs(&data)?,
+            &sorted_pairs(&data, &json)?,
             filters,
             guards,
             Self::BACKEND,
         )
         .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        match self.run_guarded(table, guards, stmt, false).await? {
+        match self.run_guarded(table, guards, stmt, None).await? {
             (TxResult::Execute(rows_affected), _) if rows_affected > 0 => {
                 Ok(GuardedUpdate::Updated { rows_affected })
             }
@@ -1980,6 +2106,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(Vec::new())
         }
@@ -1988,6 +2115,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
             Err(DatabaseError::NotFound)
         }
@@ -2004,6 +2132,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(Vec::new())
         }
@@ -2123,6 +2252,7 @@ mod tests {
             &self,
             sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             self.record(format!("fetch:{sql}"));
             Ok(vec![Self::record_row(sql)])
@@ -2132,6 +2262,7 @@ mod tests {
             &self,
             sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
             self.record(format!("fetch_one:{sql}"));
             Ok(Self::record_row(sql))
@@ -2153,6 +2284,7 @@ mod tests {
             &self,
             sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             self.record(format!("execute_returning:{sql}"));
             Ok(vec![Self::record_row(sql)])
@@ -2199,6 +2331,7 @@ mod tests {
                 BatchOp::Rows {
                     sql: "SELECT",
                     params: &[],
+                    json: JsonColumns::NONE,
                 },
                 BatchOp::Execute {
                     sql: "UPDATE",
@@ -2211,6 +2344,7 @@ mod tests {
                 BatchOp::FetchOne {
                     sql: "ONE",
                     params: &[],
+                    json: JsonColumns::NONE,
                 },
             ])
             .await
@@ -2257,6 +2391,7 @@ mod tests {
                 BatchOp::Rows {
                     sql: "A",
                     params: &[],
+                    json: JsonColumns::NONE,
                 },
                 BatchOp::Execute {
                     sql: "FAIL",
@@ -2265,6 +2400,7 @@ mod tests {
                 BatchOp::Rows {
                     sql: "C",
                     params: &[],
+                    json: JsonColumns::NONE,
                 },
             ])
             .await
@@ -2322,10 +2458,12 @@ mod tests {
             BatchOp::Rows {
                 sql: "s",
                 params: &params,
+                json: JsonColumns::NONE,
             },
             BatchOp::FetchOne {
                 sql: "s",
                 params: &params,
+                json: JsonColumns::NONE,
             },
             BatchOp::Execute {
                 sql: "s",
@@ -2357,6 +2495,9 @@ mod tests {
         batch_calls: Mutex<Vec<Vec<(String, String)>>>,
         tx_calls: Mutex<Vec<Vec<(String, String)>>>,
         fetch_calls: Mutex<Vec<String>>,
+        /// `(sql, json)` of every row-returning statement except the column
+        /// introspection, whichever primitive carried it.
+        row_json: Mutex<Vec<(String, JsonColumns)>>,
     }
 
     impl BatchMock {
@@ -2366,7 +2507,31 @@ mod tests {
                 batch_calls: Mutex::new(Vec::new()),
                 tx_calls: Mutex::new(Vec::new()),
                 fetch_calls: Mutex::new(Vec::new()),
+                row_json: Mutex::new(Vec::new()),
             }
+        }
+        /// The column introspection's answer: `widgets` has one column
+        /// declared JSON, spelled in mixed case as a schema may spell it.
+        fn declared_columns() -> Vec<Record> {
+            [("id", "TEXT"), ("name", "TEXT"), ("Meta", "JSON")]
+                .into_iter()
+                .map(|(name, decl_type)| Record {
+                    id: String::new(),
+                    data: HashMap::from([
+                        ("name".to_string(), serde_json::json!(name)),
+                        ("decl_type".to_string(), serde_json::json!(decl_type)),
+                    ]),
+                })
+                .collect()
+        }
+        fn json_of(&self, verb: &str) -> Vec<JsonColumns> {
+            self.row_json
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(sql, _)| sql.starts_with(verb))
+                .map(|(_, json)| json.clone())
+                .collect()
         }
         fn canned_rows() -> Vec<Record> {
             vec![
@@ -2394,17 +2559,30 @@ mod tests {
             &self,
             sql: &str,
             _params: &[serde_json::Value],
+            json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
+            if sql.contains("decl_type") {
+                return Ok(Self::declared_columns());
+            }
             self.fetch_calls.lock().unwrap().push(sql.to_string());
+            self.row_json
+                .lock()
+                .unwrap()
+                .push((sql.to_string(), json.clone()));
             Ok(Self::canned_rows())
         }
 
         async fn run_fetch_one(
             &self,
-            _sql: &str,
+            sql: &str,
             _params: &[serde_json::Value],
+            json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
-            Err(DatabaseError::NotFound)
+            self.row_json
+                .lock()
+                .unwrap()
+                .push((sql.to_string(), json.clone()));
+            Ok(Self::canned_rows().swap_remove(0))
         }
 
         async fn run_execute(
@@ -2417,9 +2595,14 @@ mod tests {
 
         async fn run_execute_returning(
             &self,
-            _sql: &str,
+            sql: &str,
             _params: &[serde_json::Value],
+            json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
+            self.row_json
+                .lock()
+                .unwrap()
+                .push((sql.to_string(), json.clone()));
             Ok(Vec::new())
         }
 
@@ -2455,6 +2638,14 @@ mod tests {
                 })
                 .collect();
             self.tx_calls.lock().unwrap().push(recorded);
+            for op in ops {
+                if let TxOp::Returning { sql, json, .. } = op {
+                    self.row_json
+                        .lock()
+                        .unwrap()
+                        .push(((*sql).to_string(), (*json).clone()));
+                }
+            }
             Ok(ops
                 .iter()
                 .map(|op| match op {
@@ -2491,6 +2682,14 @@ mod tests {
                 })
                 .collect();
             self.batch_calls.lock().unwrap().push(recorded);
+            for op in ops {
+                if let BatchOp::Rows { sql, json, .. } | BatchOp::FetchOne { sql, json, .. } = op {
+                    self.row_json
+                        .lock()
+                        .unwrap()
+                        .push(((*sql).to_string(), (*json).clone()));
+                }
+            }
 
             // Return canned results aligned to each op's variant.
             let out = ops
@@ -2535,6 +2734,9 @@ mod tests {
             ops[1].1
         );
 
+        // The select is decoded with the table's declared JSON columns.
+        assert_eq!(mock.json_of("SELECT"), [JsonColumns::new(["meta"])]);
+
         // list decoded the batch's ScalarI64 as total_count and Rows as records.
         assert_eq!(list.total_count, 9);
         assert_eq!(list.records.len(), 2);
@@ -2569,6 +2771,8 @@ mod tests {
             "the single statement is the select: {}",
             fetches[0]
         );
+
+        assert_eq!(mock.json_of("SELECT"), [JsonColumns::new(["meta"])]);
 
         // total_count falls back to records.len() when the count is skipped.
         assert_eq!(list.records.len(), 2);
@@ -2622,8 +2826,23 @@ mod tests {
             &self,
             sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             self.fetches.lock().unwrap().push(sql.to_string());
+            if sql.contains("decl_type") {
+                // The column introspection: a table that exists has a column.
+                let exists = *self.exists.lock().unwrap();
+                return Ok(exists
+                    .then(|| Record {
+                        id: String::new(),
+                        data: HashMap::from([
+                            ("name".to_string(), serde_json::json!("id")),
+                            ("decl_type".to_string(), serde_json::json!("TEXT")),
+                        ]),
+                    })
+                    .into_iter()
+                    .collect());
+            }
             if sql.contains("pk > 0") {
                 return Ok(self
                     .key
@@ -2643,6 +2862,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
             Err(DatabaseError::NotFound)
         }
@@ -2659,6 +2879,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(Vec::new())
         }
@@ -2718,15 +2939,20 @@ mod tests {
         let fetches = mock.fetches();
         assert_eq!(
             fetches.len(),
-            3,
-            "one key probe, then two selects: {fetches:?}"
+            4,
+            "one key probe, one column probe, then two selects: {fetches:?}"
         );
         assert!(
             fetches[0].contains("pk > 0"),
             "key probe first: {}",
             fetches[0]
         );
-        for select in &fetches[1..] {
+        assert!(
+            fetches[1].contains("decl_type"),
+            "then the column probe: {}",
+            fetches[1]
+        );
+        for select in &fetches[2..] {
             assert!(
                 select.contains(r#"ORDER BY "created_at" DESC, "token_hash" DESC LIMIT"#),
                 "{select}"
@@ -2749,7 +2975,15 @@ mod tests {
         )
         .await
         .expect("list");
-        assert_eq!(mock.fetches(), vec![r#"SELECT * FROM "t""#.to_string()]);
+        let fetches = mock.fetches();
+        assert!(
+            !fetches.iter().any(|sql| sql.contains("pk > 0")),
+            "no key probe: {fetches:?}"
+        );
+        assert_eq!(
+            fetches.last().map(String::as_str),
+            Some(r#"SELECT * FROM "t""#)
+        );
 
         let keyless = KeyedMock::new(&[]);
         DbExec::list(&keyless, "t", &newest_first(None, 0))
@@ -2877,6 +3111,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             let columns = self.columns.lock().unwrap().clone();
             Ok(columns
@@ -2892,6 +3127,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
             Err(DatabaseError::NotFound)
         }
@@ -2929,6 +3165,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(Vec::new())
         }
@@ -3159,6 +3396,10 @@ mod tests {
             .map(|(_, sql)| sql.split_whitespace().next().unwrap_or(""))
             .collect();
         assert_eq!(verbs, ["INSERT", "UPDATE", "DELETE", "UPDATE", "INSERT"]);
+        // The rows a create or update returns decode by the table's JSON columns.
+        let meta = JsonColumns::new(["meta"]);
+        assert_eq!(mock.json_of("INSERT"), std::slice::from_ref(&meta));
+        assert_eq!(mock.json_of("UPDATE"), [meta]);
 
         assert!(matches!(&outcomes[0], WriteOutcome::Created(r) if r.id == "r1"));
         assert!(matches!(&outcomes[1], WriteOutcome::Updated(Some(r)) if r.id == "r1"));
@@ -3229,6 +3470,59 @@ mod tests {
             );
         }
         assert!(mock.batch_calls.lock().unwrap().is_empty());
+        // The inserted row decodes by the table's JSON columns; a probe's
+        // computed verdicts are not stored rows.
+        assert_eq!(mock.json_of("INSERT"), [JsonColumns::new(["meta"])]);
+        let probes = mock.json_of("SELECT (CASE WHEN");
+        assert_eq!(probes.len(), 4, "two probes per guarded write");
+        assert!(probes.iter().all(JsonColumns::is_empty), "{probes:?}");
+    }
+
+    /// Every read of stored rows is decoded with the JSON columns the table
+    /// declares; raw SQL and aggregate rows, which have no single source
+    /// table, are decoded with none. A read that dropped the table's JSON
+    /// columns would hand a JSON column back as its text, and one that used
+    /// them for raw SQL would decode by a table the statement may not read.
+    #[tokio::test]
+    async fn stored_row_reads_decode_by_the_tables_json_columns() {
+        let mock = BatchMock::new(0);
+        DbExec::get(&mock, "widgets", "r1").await.expect("get");
+        DbExec::take_where(&mock, "widgets", &[])
+            .await
+            .expect("take_where");
+        DbExec::query_raw(&mock, "SELECT 1", &[])
+            .await
+            .expect("query_raw");
+        DbExec::aggregate(
+            &mock,
+            "widgets",
+            AggregateSpec {
+                select_columns: Vec::new(),
+                aggregates: vec![
+                    crate::interfaces::database::service::AggregateColumnSpec::Count {
+                        alias: "n".into(),
+                    },
+                ],
+                filters: Vec::new(),
+                group_by: Vec::new(),
+                sort: Vec::new(),
+                limit: 0,
+            },
+        )
+        .await
+        .expect("aggregate");
+
+        let meta = JsonColumns::new(["meta"]);
+        let recorded = mock.row_json.lock().unwrap().clone();
+        let json: Vec<(&str, &JsonColumns)> = recorded
+            .iter()
+            .map(|(sql, json)| (sql.split_whitespace().next().unwrap_or(""), json))
+            .collect();
+        assert_eq!(json.len(), 4, "{recorded:?}");
+        assert_eq!(json[0], ("SELECT", &meta), "get");
+        assert_eq!(json[1], ("DELETE", &meta), "take_where");
+        assert_eq!(json[2], ("SELECT", JsonColumns::NONE), "query_raw");
+        assert_eq!(json[3], ("SELECT", JsonColumns::NONE), "aggregate");
     }
 
     /// A backend whose guarded transaction runs a scripted race: the probe
@@ -3251,6 +3545,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(Vec::new())
         }
@@ -3259,6 +3554,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
             Err(DatabaseError::NotFound)
         }
@@ -3275,6 +3571,7 @@ mod tests {
             &self,
             _sql: &str,
             _params: &[serde_json::Value],
+            _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(Vec::new())
         }

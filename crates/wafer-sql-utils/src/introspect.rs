@@ -61,18 +61,21 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
     }
 }
 
-/// Build query to list a table's column names.
+/// Build query to list a table's columns with their declared types.
 ///
 /// Returns `(sql, params)`. The result shape is identical across dialects —
-/// one `name` column per table column, in declaration order — unlike
-/// [`build_table_info`], whose result columns differ per backend. A missing
-/// table yields zero rows (not an error) in both dialects.
+/// one row per table column, in declaration order, with a `name` column and a
+/// `decl_type` column (the type as the schema declares it; decide JSON-ness
+/// with [`is_json_decl_type`]) — unlike [`build_table_info`], whose result
+/// columns differ per backend. A missing table yields zero rows (not an error)
+/// in both dialects.
 ///
-/// SQLite: `SELECT name FROM pragma_table_info(?1) ORDER BY cid` (the
-/// table-valued pragma function, available since SQLite 3.16, which —
+/// SQLite: `SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY
+/// cid` (the table-valued pragma function, available since SQLite 3.16, which —
 /// unlike `PRAGMA table_info(...)` — accepts a bound parameter).
-/// Postgres: `SELECT column_name AS name FROM information_schema.columns
-/// WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`.
+/// Postgres: `SELECT column_name AS name, data_type AS decl_type FROM
+/// information_schema.columns WHERE table_schema='public' AND table_name=$1
+/// ORDER BY ordinal_position`.
 ///
 /// The table name is parameter-bound in both dialects, so this builder is
 /// infallible — no identifier validation needed.
@@ -80,15 +83,34 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
     let params = vec![serde_json::Value::String(table.to_string())];
     match backend {
         Backend::Sqlite => (
-            "SELECT name FROM pragma_table_info(?1) ORDER BY cid".to_string(),
+            "SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY cid".to_string(),
             params,
         ),
         Backend::Postgres => (
-            "SELECT column_name AS name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position"
+            "SELECT column_name AS name, data_type AS decl_type FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position"
                 .to_string(),
             params,
         ),
     }
+}
+
+/// Whether a column declared with `decl_type` (a [`build_list_columns`]
+/// `decl_type` value) holds JSON.
+///
+/// SQLite has no JSON storage class: a JSON column holds JSON text, and is one
+/// declared [`JSON TEXT`](crate::ddl::SQLITE_JSON_TYPE) — what the DDL builders
+/// emit for [`DataType::Json`](wafer_schema::DataType::Json) and for a lazily
+/// added column first written with an object or array — or `JSON`, which
+/// earlier builds emitted (NUMERIC affinity, so still read as JSON but best
+/// migrated). Postgres reports its native `json` and `jsonb` types. Any other
+/// declaration, `TEXT` included, holds plain values: a string stored there is
+/// never read back as JSON, however it looks.
+#[must_use]
+pub fn is_json_decl_type(decl_type: &str) -> bool {
+    let decl = decl_type.trim();
+    ["json", "jsonb", crate::ddl::SQLITE_JSON_TYPE]
+        .iter()
+        .any(|json| decl.eq_ignore_ascii_case(json))
 }
 
 /// Build query to list the columns of a table's primary key.
@@ -258,8 +280,35 @@ mod tests {
     fn test_list_columns_sqlite() {
         let (sql, params) = build_list_columns("users", Backend::Sqlite);
         assert!(sql.contains("pragma_table_info(?1)"), "{sql}");
+        assert!(sql.contains("AS decl_type"), "{sql}");
         assert!(sql.contains("ORDER BY cid"), "{sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
+    }
+
+    #[test]
+    fn only_the_json_type_names_declare_a_json_column() {
+        for decl in [
+            "JSON TEXT",
+            "json text",
+            "JSON",
+            "json",
+            " Json ",
+            "jsonb",
+            "JSONB",
+        ] {
+            assert!(is_json_decl_type(decl), "{decl:?} declares JSON");
+        }
+        for decl in [
+            "TEXT",
+            "text",
+            "",
+            "VARCHAR",
+            "TEXT JSON",
+            "JSONTEXT",
+            "character varying",
+        ] {
+            assert!(!is_json_decl_type(decl), "{decl:?} does not declare JSON");
+        }
     }
 
     #[test]
@@ -267,6 +316,7 @@ mod tests {
         let (sql, params) = build_list_columns("users", Backend::Postgres);
         assert!(sql.contains("information_schema.columns"), "{sql}");
         assert!(sql.contains("AS name"), "{sql}");
+        assert!(sql.contains("data_type AS decl_type"), "{sql}");
         assert!(sql.contains("ORDER BY ordinal_position"), "{sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
     }
@@ -279,7 +329,7 @@ mod tests {
     fn test_table_exists_and_list_columns_execute_in_sqlite() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute(
-            "CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT, created_at TEXT)",
+            "CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, meta JSON TEXT, legacy JSON)",
             [],
         )
         .unwrap();
@@ -297,12 +347,25 @@ mod tests {
 
         let (sql, params) = build_list_columns("widgets", Backend::Sqlite);
         let mut stmt = conn.prepare(&sql).unwrap();
-        let cols: Vec<String> = stmt
-            .query_map([params[0].as_str().unwrap()], |r| r.get(0))
+        let cols: Vec<(String, String)> = stmt
+            .query_map([params[0].as_str().unwrap()], |r| {
+                Ok((r.get("name")?, r.get("decl_type")?))
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(cols, vec!["id", "name", "created_at"]);
+        let names: Vec<&str> = cols.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["id", "name", "created_at", "meta", "legacy"]);
+        let json: Vec<&str> = cols
+            .iter()
+            .filter(|(_, t)| is_json_decl_type(t))
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(
+            json,
+            vec!["meta", "legacy"],
+            "only the JSON-declared columns hold JSON"
+        );
 
         // Missing table: zero rows, not an error.
         let (sql, params) = build_list_columns("no_such_table", Backend::Sqlite);

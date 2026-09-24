@@ -2,51 +2,71 @@
 //! ([`wafer_core::interfaces::database::codec`]) — the one decode policy every
 //! SQL-family backend applies to a result row.
 //!
-//! Before this module existed each backend carried its own copy and they had
-//! drifted: native SQLite re-parsed a JSON-looking TEXT column back into a
-//! structured value, the browser (sql.js) adapter did the same, and the
-//! Cloudflare D1 adapter did not — so the *same* row read through the *same*
-//! block code came back as `Value::Object` on two platforms and
-//! `Value::String` on the third. These tests pin the single policy; the
-//! backend-agnostic half (that a live service actually applies it) is pinned by
+//! A text value is JSON to parse only in a column the schema declares JSON,
+//! never because of what the text looks like: a user's title `[1]` or `{}`
+//! is a string. These tests pin the policy; the backend-agnostic half (that a
+//! live service decodes by the table's declared types) is pinned by
 //! `conformance::run_conformance`.
 
-use wafer_core::interfaces::database::codec;
+use wafer_core::interfaces::database::codec::{self, JsonColumns};
+
+fn json_columns(names: &[&str]) -> JsonColumns {
+    JsonColumns::new(names.iter().copied())
+}
 
 // ---------------------------------------------------------------------------
-// decode_text_value
+// decode_text
 // ---------------------------------------------------------------------------
 
 #[test]
-fn decode_text_value_parses_json_objects_and_arrays() {
-    assert_eq!(
-        codec::decode_text_value(r#"{"a":1}"#),
-        serde_json::json!({"a": 1})
-    );
-    assert_eq!(codec::decode_text_value("[1,2]"), serde_json::json!([1, 2]));
-    assert_eq!(codec::decode_text_value("{}"), serde_json::json!({}));
-    assert_eq!(codec::decode_text_value("[]"), serde_json::json!([]));
+fn decode_text_parses_a_json_columns_text() {
+    let json = json_columns(&["meta"]);
+    for (text, want) in [
+        (r#"{"a":1}"#, serde_json::json!({"a": 1})),
+        ("[1,2]", serde_json::json!([1, 2])),
+        ("{}", serde_json::json!({})),
+        ("[]", serde_json::json!([])),
+        ("42", serde_json::json!(42)),
+        (r#""quoted""#, serde_json::json!("quoted")),
+    ] {
+        assert_eq!(codec::decode_text("meta", text, &json), want, "{text:?}");
+    }
 }
 
 #[test]
-fn decode_text_value_keeps_plain_text_as_a_string() {
-    for text in ["", "hello", "2026-01-15T00:00:00Z", "42", "true", "null"] {
+fn decode_text_keeps_every_other_columns_text_as_a_string() {
+    let json = json_columns(&["meta"]);
+    for text in [
+        r#"{"a":1}"#,
+        "[1]",
+        "{}",
+        "[]",
+        "42",
+        "true",
+        "null",
+        "plain",
+    ] {
         assert_eq!(
-            codec::decode_text_value(text),
+            codec::decode_text("title", text, &json),
             serde_json::Value::String(text.to_string()),
-            "{text:?} must decode as a string, not a JSON scalar"
+            "{text:?} in a text column must stay a string"
+        );
+        assert_eq!(
+            codec::decode_text("meta", text, JsonColumns::NONE),
+            serde_json::Value::String(text.to_string()),
+            "with no JSON columns, {text:?} must stay a string"
         );
     }
 }
 
 #[test]
-fn decode_text_value_keeps_malformed_json_as_a_string() {
-    // Braced/bracketed but not valid JSON: the value is returned verbatim
-    // rather than lost, so a column holding hand-written text that happens to
-    // start with `{` survives the round trip.
-    for text in [r#"{"a":}"#, "{not json}", "[1,", "[1,2", "{a:1}"] {
+fn decode_text_keeps_a_json_columns_unparsable_text_as_a_string() {
+    // A value written before the column was declared JSON is returned
+    // verbatim rather than lost.
+    let json = json_columns(&["meta"]);
+    for text in [r#"{"a":}"#, "{not json}", "[1,", "hello", ""] {
         assert_eq!(
-            codec::decode_text_value(text),
+            codec::decode_text("meta", text, &json),
             serde_json::Value::String(text.to_string()),
             "{text:?} is not valid JSON and must stay a string"
         );
@@ -54,17 +74,12 @@ fn decode_text_value_keeps_malformed_json_as_a_string() {
 }
 
 #[test]
-fn decode_text_value_requires_the_braces_to_bound_the_whole_value() {
-    // The predicate is deliberately "starts with `{` and ends with `}`" on the
-    // raw text, with no trimming: leading/trailing whitespace means the column
-    // is not a serialized JSON value this codec produced.
-    for text in [" {\"a\":1}", "{\"a\":1} ", "x{\"a\":1}", "{\"a\":1}x"] {
-        assert_eq!(
-            codec::decode_text_value(text),
-            serde_json::Value::String(text.to_string()),
-            "{text:?} must stay a string"
-        );
-    }
+fn json_column_names_match_case_insensitively() {
+    let json = json_columns(&["meta"]);
+    assert!(json.contains("META"));
+    assert!(json.contains("Meta"));
+    assert!(!json.contains("metadata"));
+    assert!(JsonColumns::NONE.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -73,10 +88,13 @@ fn decode_text_value_requires_the_braces_to_bound_the_whole_value() {
 
 #[test]
 fn record_from_json_row_splits_out_the_id_and_keeps_it_in_data() {
-    let rec = codec::record_from_json_row(serde_json::json!({
-        "id": "r1",
-        "name": "alpha",
-    }));
+    let rec = codec::record_from_json_row(
+        serde_json::json!({
+            "id": "r1",
+            "name": "alpha",
+        }),
+        JsonColumns::NONE,
+    );
     assert_eq!(rec.id, "r1");
     assert_eq!(rec.data.get("id"), Some(&serde_json::json!("r1")));
     assert_eq!(rec.data.get("name"), Some(&serde_json::json!("alpha")));
@@ -84,56 +102,54 @@ fn record_from_json_row_splits_out_the_id_and_keeps_it_in_data() {
 
 #[test]
 fn record_from_json_row_stringifies_a_numeric_id() {
-    let rec = codec::record_from_json_row(serde_json::json!({ "id": 7 }));
+    let rec = codec::record_from_json_row(serde_json::json!({ "id": 7 }), JsonColumns::NONE);
     assert_eq!(rec.id, "7");
     assert_eq!(rec.data.get("id"), Some(&serde_json::json!(7)));
 }
 
 #[test]
-fn record_from_json_row_reparses_json_looking_text_columns() {
-    // This is the B25 divergence: the D1 adapter produced `Value::String` here
-    // while SQLite and the browser produced `Value::Object`.
-    let rec = codec::record_from_json_row(serde_json::json!({
-        "id": "r1",
-        "payload": r#"{"k":[1,2]}"#,
-        "tags": "[\"a\"]",
-        "note": "plain",
-    }));
+fn record_from_json_row_parses_only_the_json_columns() {
+    // A row as D1 and sql.js hand it over: every text column is a string.
+    let rec = codec::record_from_json_row(
+        serde_json::json!({
+            "id": "[1]",
+            "payload": r#"{"k":[1,2]}"#,
+            "tags": "[\"a\"]",
+            "title": "[1]",
+            "note": "{}",
+        }),
+        &json_columns(&["payload", "tags"]),
+    );
     assert_eq!(
         rec.data.get("payload"),
         Some(&serde_json::json!({"k":[1,2]}))
     );
     assert_eq!(rec.data.get("tags"), Some(&serde_json::json!(["a"])));
-    assert_eq!(rec.data.get("note"), Some(&serde_json::json!("plain")));
-}
-
-#[test]
-fn record_from_json_row_reparses_an_id_column_that_holds_json() {
-    // A re-parsed `id` is no longer a string or a number, so there is no
-    // sensible `Record::id` — it is empty rather than the raw text, matching
-    // every backend's existing "id is a string or a number" rule.
-    let rec = codec::record_from_json_row(serde_json::json!({ "id": "{}" }));
-    assert_eq!(rec.id, "");
-    assert_eq!(rec.data.get("id"), Some(&serde_json::json!({})));
+    assert_eq!(rec.data.get("title"), Some(&serde_json::json!("[1]")));
+    assert_eq!(rec.data.get("note"), Some(&serde_json::json!("{}")));
+    assert_eq!(rec.id, "[1]", "a JSON-looking id is still the id");
 }
 
 #[test]
 fn record_from_json_row_on_a_non_object_is_an_empty_record() {
-    let rec = codec::record_from_json_row(serde_json::json!(5));
+    let rec = codec::record_from_json_row(serde_json::json!(5), JsonColumns::NONE);
     assert_eq!(rec.id, "");
     assert!(rec.data.is_empty());
 }
 
 #[test]
 fn record_from_json_row_leaves_non_string_columns_alone() {
-    let rec = codec::record_from_json_row(serde_json::json!({
-        "id": "r1",
-        "n": 3,
-        "f": 1.5,
-        "b": true,
-        "nil": serde_json::Value::Null,
-        "obj": {"already": "structured"},
-    }));
+    let rec = codec::record_from_json_row(
+        serde_json::json!({
+            "id": "r1",
+            "n": 3,
+            "f": 1.5,
+            "b": true,
+            "nil": serde_json::Value::Null,
+            "obj": {"already": "structured"},
+        }),
+        &json_columns(&["n", "f", "b", "nil", "obj"]),
+    );
     assert_eq!(rec.data.get("n"), Some(&serde_json::json!(3)));
     assert_eq!(rec.data.get("f"), Some(&serde_json::json!(1.5)));
     assert_eq!(rec.data.get("b"), Some(&serde_json::json!(true)));

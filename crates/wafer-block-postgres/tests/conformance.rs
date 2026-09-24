@@ -22,13 +22,13 @@
 //! at any scratch database.
 //!
 //! This passes against a live server. The first live-DB run of the Postgres
-//! backend surfaced four real, pre-existing backend bugs; three are now fixed at
-//! the shared renderer / decoder layer and the suite exercises each (`sum` over
-//! an `INT` column; windowed-counter upsert emitting an ambiguous column
-//! reference; aggregate `CaseWhenSum` silently decoding to NULL). The fourth
-//! (stamped RFC3339 string vs a real `TIMESTAMPTZ` column) is deferred — it
-//! does not manifest for any real code, since every block stores timestamps in
-//! TEXT columns. See the `conformance` module's "Backend divergences" section.
+//! backend surfaced four real, pre-existing backend bugs, all now fixed: the
+//! suite exercises three (`sum` over an `INT` column; windowed-counter upsert
+//! emitting an ambiguous column reference; aggregate `CaseWhenSum` silently
+//! decoding to NULL), and
+//! [`a_stamped_timestamp_binds_into_a_timestamptz_column`] the fourth (stamped
+//! RFC3339 string vs a real `TIMESTAMPTZ` column). See the `conformance`
+//! module's "Backend divergences" section.
 //! The test is gated off by default (no `WAFER_CONFORMANCE_POSTGRES_URL` →
 //! skip), so `cargo test --workspace` stays green without a database.
 //!
@@ -99,7 +99,7 @@ async fn a_select_only_role_still_breaks_ties_on_the_primary_key() {
     let reader_pool = PgPool::connect_with(reader_opts)
         .await
         .expect("connect as the read-only role");
-    let reader = PostgresDatabaseService::from_pool(reader_pool.clone());
+    let reader = PostgresDatabaseService::from_pool(reader_pool.clone()).expect("service");
 
     let mut ids = Vec::new();
     for offset in [0, 2, 4] {
@@ -246,7 +246,7 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
             .expect("read the session isolation");
         assert_eq!(current, level, "the session default took effect");
     }
-    let svc = PostgresDatabaseService::from_pool(pool);
+    let svc = PostgresDatabaseService::from_pool(pool).expect("service");
 
     svc.schema_drop_table(table).await.expect("drop");
     svc.ensure_schema_table(&Table {
@@ -446,4 +446,89 @@ async fn a_catalog_collision_is_not_already_exists() {
         ),
         other => panic!("a catalog collision must be Internal, got {other:?}"),
     }
+}
+
+/// The RFC3339 string `create` stamps into `created_at`/`updated_at`, and one
+/// a caller writes or filters by, binds into a real `TIMESTAMPTZ` column.
+///
+/// Parameters bind by the type Postgres infers for them, so the same string
+/// is a timestamp for a `TIMESTAMPTZ` column and text for a TEXT one. Bound
+/// as text it was refused (`column … is of type timestamp with time zone but
+/// expression is of type text`). The stored form reads back in Postgres's own
+/// RFC3339 spelling, which is why this is not a shared conformance check.
+/// Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_stamped_timestamp_binds_into_a_timestamptz_column() {
+    use std::collections::HashMap;
+
+    use wafer_block::db::{Filter, FilterOp, ListOptions};
+    use wafer_core::interfaces::database::service::{
+        pk, timestamps, Column, DataType, DatabaseService, Table,
+    };
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres TIMESTAMPTZ check: set {URL_ENV} to run");
+        return;
+    };
+    let svc = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect to the conformance PostgreSQL server");
+    let mut columns = vec![pk("id"), Column::new("due", DataType::DateTime).null()];
+    columns.extend(timestamps());
+    let table = Table {
+        name: "conf_timestamptz".to_string(),
+        columns,
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    svc.schema_drop_table(&table.name).await.expect("drop");
+    svc.ensure_schema_table(&table).await.expect("create");
+
+    let row: HashMap<String, serde_json::Value> = [
+        ("id".to_string(), serde_json::json!("t1")),
+        ("due".to_string(), serde_json::json!("2026-01-15T10:00:00Z")),
+    ]
+    .into_iter()
+    .collect();
+    svc.create(&table.name, row)
+        .await
+        .expect("create stamps created_at/updated_at into TIMESTAMPTZ columns");
+
+    let got = svc.get(&table.name, "t1").await.expect("get");
+    let due = got.data["due"]
+        .as_str()
+        .expect("due reads back as a string");
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(due).expect("RFC3339"),
+        chrono::DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z").expect("RFC3339"),
+    );
+    for stamped in ["created_at", "updated_at"] {
+        let at = got.data[stamped].as_str().expect("stamped timestamp");
+        chrono::DateTime::parse_from_rfc3339(at).expect("the stamp reads back as RFC3339");
+    }
+
+    let before = |at: &str| ListOptions {
+        filters: vec![Filter {
+            field: "due".to_string(),
+            operator: FilterOp::LessThan,
+            value: serde_json::json!(at),
+        }],
+        ..Default::default()
+    };
+    let listed = |at: &'static str| {
+        let svc = &svc;
+        let table = &table.name;
+        async move {
+            svc.list(table, &before(at))
+                .await
+                .expect("filter a TIMESTAMPTZ column by an RFC3339 string")
+                .records
+                .len()
+        }
+    };
+    assert_eq!(listed("2026-02-01T00:00:00Z").await, 1);
+    assert_eq!(listed("2026-01-01T00:00:00+01:00").await, 0);
+
+    svc.schema_drop_table(&table.name).await.expect("drop");
 }
