@@ -28,9 +28,10 @@ wafer_core::service_block! {
     /// Initialized during `lifecycle(Init)`. Two config namespaces:
     /// - Per-flow JSON (declared in `BlockInfo::flow_config`): `bucket`, `prefix`.
     ///   Each S3 block instance can serve a different bucket / prefix per flow.
-    /// - Process env (declared in `BlockInfo::config_keys`):
+    /// - Declared config vars (`BlockInfo::config_keys`):
     ///   `WAFER_RUN__S3__ENDPOINT`, `WAFER_RUN__S3__REGION`,
-    ///   `WAFER_RUN__S3__MAX_OBJECT_BYTES`.
+    ///   `WAFER_RUN__S3__MAX_OBJECT_BYTES`, which the runtime resolves through
+    ///   the embedder's `ConfigSource` and hands over in the Init payload.
     ///   These are typically uniform across flows in a single wafer-run process.
     lazy block: pub(crate) S3StorageBlock,
     name: "wafer-run/s3",
@@ -60,7 +61,8 @@ wafer_core::service_block! {
                 "S3-compatible endpoint URL (e.g., MinIO). Empty for AWS.",
                 "",
             )
-            .name("Endpoint"),
+            .name("Endpoint")
+            .optional(),
             ConfigVar::new(
                 REGION_ENV,
                 "AWS region used when talking to a non-AWS S3 endpoint.",
@@ -103,15 +105,18 @@ wafer_core::service_block! {
             };
             let prefix = config.str("prefix").to_string();
 
-            // Process env (SCREAMING_SNAKE).
-            let endpoint = std::env::var(ENDPOINT_ENV).unwrap_or_default();
-            let region = std::env::var(REGION_ENV).unwrap_or_else(|_| DEFAULT_REGION.to_string());
-            let max_object_bytes = max_object_bytes_from_env()?;
+            // Declared config vars (SCREAMING_SNAKE), resolved by the runtime.
+            let endpoint = config.str(ENDPOINT_ENV);
+            let region = match config.str(REGION_ENV) {
+                "" => DEFAULT_REGION,
+                region => region,
+            };
+            let max_object_bytes = max_object_bytes(config.get(MAX_OBJECT_BYTES_ENV))?;
 
             let svc = if endpoint.is_empty() {
                 S3StorageService::new(&bucket, &prefix).await
             } else {
-                S3StorageService::with_endpoint(&bucket, &prefix, &endpoint, &region).await
+                S3StorageService::with_endpoint(&bucket, &prefix, endpoint, region).await
             }
             .map_err(|e| WaferError::new(ErrorCode::Internal, format!("wafer-run/s3 init: {e}")))?
             .with_max_object_bytes(max_object_bytes);
@@ -125,20 +130,14 @@ wafer_core::service_block! {
 
 wafer_block::register_static_block!("wafer-run/s3", S3StorageBlock);
 
-/// The read cap from [`MAX_OBJECT_BYTES_ENV`]: unset is
+/// The read cap from the Init payload's [`MAX_OBJECT_BYTES_ENV`]: unset is
 /// [`DEFAULT_MAX_OBJECT_BYTES`]; anything but a positive integer fails Init
 /// rather than silently falling back to the default.
-fn max_object_bytes_from_env() -> Result<u64, WaferError> {
-    match std::env::var(MAX_OBJECT_BYTES_ENV) {
-        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_MAX_OBJECT_BYTES),
-        Err(std::env::VarError::NotUnicode(_)) => Err(WaferError::new(
-            ErrorCode::InvalidArgument,
-            format!(
-                "wafer-run/s3 init: {MAX_OBJECT_BYTES_ENV} is not valid UTF-8: expected a \
-                 positive integer byte count"
-            ),
-        )),
-        Ok(raw) => parse_max_object_bytes(&raw),
+fn max_object_bytes(value: Option<&serde_json::Value>) -> Result<u64, WaferError> {
+    match value {
+        None => Ok(DEFAULT_MAX_OBJECT_BYTES),
+        Some(serde_json::Value::String(raw)) => parse_max_object_bytes(raw),
+        Some(other) => parse_max_object_bytes(&other.to_string()),
     }
 }
 
@@ -207,6 +206,28 @@ mod tests {
         assert_eq!(super::parse_max_object_bytes("5").expect("valid"), 5);
         for bad in ["0", "-1", "abc", "", "1.5"] {
             let err = super::parse_max_object_bytes(bad).expect_err(bad);
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
+        }
+    }
+
+    /// The runtime hands resolved config over as strings; a number from
+    /// registered block JSON reads the same, and anything else is refused.
+    #[test]
+    fn max_object_bytes_reads_the_init_payload_value() {
+        assert_eq!(
+            super::max_object_bytes(None).expect("unset"),
+            super::DEFAULT_MAX_OBJECT_BYTES
+        );
+        assert_eq!(
+            super::max_object_bytes(Some(&serde_json::json!("7"))).expect("string"),
+            7
+        );
+        assert_eq!(
+            super::max_object_bytes(Some(&serde_json::json!(7))).expect("number"),
+            7
+        );
+        for bad in [serde_json::json!(true), serde_json::json!(["7"])] {
+            let err = super::max_object_bytes(Some(&bad)).expect_err("not a count");
             assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
         }
     }

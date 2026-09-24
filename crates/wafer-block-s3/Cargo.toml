@@ -15,6 +15,8 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 chrono = { workspace = true }
+# The Init payload's config values.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

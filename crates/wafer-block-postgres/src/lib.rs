@@ -35,8 +35,9 @@ wafer_core::service_block! {
     /// Initialized during `lifecycle(Init)`. Reads its connection URL from its
     /// declared `WAFER_RUN__POSTGRES__DATABASE_URL` config var, which the
     /// runtime resolves through the embedder's `ConfigSource` (a process
-    /// environment, a settings table) — a wafer-run process typically points
-    /// at one database, so this lives in `config_keys`.
+    /// environment, a settings table) and hands over in the Init payload — a
+    /// wafer-run process typically points at one database, so this lives in
+    /// `config_keys`.
     lazy block: pub(crate) PostgresDatabaseBlock,
     name: "wafer-run/postgres",
     version: "0.0.1",
@@ -91,15 +92,15 @@ wafer_core::service_block! {
             };
             this.tables.set(tables).ok();
 
-            let url = ctx
-                .config_get(DATABASE_URL_ENV)
-                .filter(|url| !url.is_empty())
-                .ok_or_else(|| {
-                    WaferError::new(
+            let url = match config.str(DATABASE_URL_ENV) {
+                "" => {
+                    return Err(WaferError::new(
                         ErrorCode::FailedPrecondition,
                         format!("wafer-run/postgres: {DATABASE_URL_ENV} must be set"),
-                    )
-                })?;
+                    ));
+                }
+                url => url,
+            };
 
             // A server that is down or still starting keeps its
             // `Unavailable` code, so the runtime retries this Init.
@@ -134,11 +135,9 @@ mod tests {
     use super::{PostgresDatabaseBlock, DATABASE_URL_ENV};
 
     /// Minimal `Context` that panics if the block reaches back into the
-    /// runtime. Its config holds `url` under the block's URL key, if given.
+    /// runtime, and serves no config.
     #[derive(Clone, Default)]
-    struct NoopContext {
-        url: Option<String>,
-    }
+    struct NoopContext;
 
     #[async_trait::async_trait]
     impl Context for NoopContext {
@@ -155,10 +154,8 @@ mod tests {
             false
         }
 
-        fn config_get(&self, key: &str) -> Option<&str> {
-            (key == DATABASE_URL_ENV)
-                .then_some(self.url.as_deref())
-                .flatten()
+        fn config_get(&self, _key: &str) -> Option<&str> {
+            None
         }
 
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
@@ -179,11 +176,7 @@ mod tests {
     async fn handle_before_init_yields_typed_error_not_panic() {
         let block = PostgresDatabaseBlock::new();
         let out = block
-            .handle(
-                &NoopContext::default(),
-                Message::new("db.get"),
-                InputStream::empty(),
-            )
+            .handle(&NoopContext, Message::new("db.get"), InputStream::empty())
             .await;
         match out.collect_buffered().await {
             Err(TerminalNotResponse::Error(e)) => {
@@ -216,7 +209,7 @@ mod tests {
         };
 
         let err = block
-            .lifecycle(&NoopContext::default(), event)
+            .lifecycle(&NoopContext, event)
             .await
             .expect_err("malformed collections config must fail Init");
 
@@ -228,25 +221,33 @@ mod tests {
         );
     }
 
-    fn init_event() -> LifecycleEvent {
+    /// An Init event whose payload holds `url` under the block's URL key, if
+    /// given — where the runtime puts the value its `ConfigSource` resolved.
+    fn init_event(url: Option<&str>) -> LifecycleEvent {
+        let payload = match url {
+            Some(url) => serde_json::json!({ DATABASE_URL_ENV: url }),
+            None => serde_json::json!({}),
+        };
         LifecycleEvent {
             event_type: LifecycleType::Init,
-            data: b"{}".to_vec(),
+            data: serde_json::to_vec(&payload).expect("serialize test config"),
         }
     }
 
-    /// The URL comes from the block's declared config var, which the runtime
-    /// resolves through the embedder's `ConfigSource` — not from the process
-    /// environment, which a settings-table source never touches. The URL
-    /// given here is refused by the connect step itself (it turns the
-    /// statement cache off), so reaching that refusal proves Init read it.
+    /// The URL comes from the Init payload, where the runtime puts the
+    /// block's declared config var resolved through the embedder's
+    /// `ConfigSource`. The context serves no config at all. The URL given
+    /// here is refused by the connect step itself (it turns the statement
+    /// cache off), so reaching that refusal proves Init read it.
     #[tokio::test]
-    async fn init_reads_the_url_from_the_blocks_config() {
-        let ctx = NoopContext {
-            url: Some("postgres://u:p@127.0.0.1:1/db?statement-cache-capacity=0".into()),
-        };
+    async fn init_reads_the_url_from_the_init_payload() {
         let err = PostgresDatabaseBlock::new()
-            .lifecycle(&ctx, init_event())
+            .lifecycle(
+                &NoopContext,
+                init_event(Some(
+                    "postgres://u:p@127.0.0.1:1/db?statement-cache-capacity=0",
+                )),
+            )
             .await
             .expect_err("the configured URL is refused at connect");
         assert_eq!(err.code, ErrorCode::InvalidArgument, "{}", err.message);
@@ -256,9 +257,9 @@ mod tests {
     /// Without the config var (or with it empty) Init fails naming it.
     #[tokio::test]
     async fn init_without_a_configured_url_fails_naming_the_var() {
-        for url in [None, Some(String::new())] {
+        for url in [None, Some("")] {
             let err = PostgresDatabaseBlock::new()
-                .lifecycle(&NoopContext { url }, init_event())
+                .lifecycle(&NoopContext, init_event(url))
                 .await
                 .expect_err("no URL, no database");
             assert_eq!(err.code, ErrorCode::FailedPrecondition);
