@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::StreamExt;
 use wafer_block::{common::ErrorCode, OutputStream, WaferError};
@@ -7,7 +7,7 @@ use wafer_block_macro::wafer_async_trait;
 pub use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response, ResponseHead,
 };
-use wafer_net_security::{ssrf_redirect_policy, SsrfFilteringResolver};
+use wafer_net_security::SsrfFilteringResolver;
 
 /// Config var key controlling the maximum response body size accepted by
 /// `HttpNetworkService`. Read from the process env **once** at service
@@ -20,9 +20,64 @@ use wafer_net_security::{ssrf_redirect_policy, SsrfFilteringResolver};
 /// the admin UI can surface and edit it (see `service_blocks::network`).
 pub const MAX_RESPONSE_BYTES_KEY: &str = "WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES";
 
+/// Config var key for [`HttpNetworkLimits::connect_timeout`], in whole
+/// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`].
+pub const CONNECT_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__CONNECT_TIMEOUT_SECS";
+
+/// Config var key for [`HttpNetworkLimits::read_timeout`], in whole seconds.
+/// Read like [`MAX_RESPONSE_BYTES_KEY`].
+pub const READ_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__READ_TIMEOUT_SECS";
+
+/// Config var key for [`HttpNetworkLimits::request_timeout`], in whole
+/// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`].
+pub const REQUEST_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__REQUEST_TIMEOUT_SECS";
+
 /// Default response body cap: 50 MiB. SEC-020 — prevents unbounded memory
 /// growth from hostile or runaway upstream servers.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
+
+/// Default [`HttpNetworkLimits::connect_timeout`]: 10 s.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default [`HttpNetworkLimits::read_timeout`]: 30 s.
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default [`HttpNetworkLimits::request_timeout`]: 30 s.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Size and time limits of an [`HttpNetworkService`].
+///
+/// The timeouts are split so a long streaming download is bounded by how long
+/// the server goes quiet, not by how long the whole body takes:
+/// `connect_timeout` and `read_timeout` apply to every request, and only the
+/// buffered `do_request` also has the total `request_timeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpNetworkLimits {
+    /// Response body cap in bytes (SEC-020), on both paths.
+    pub max_response_bytes: usize,
+    /// Longest wait to establish a connection (DNS, TCP and TLS).
+    pub connect_timeout: Duration,
+    /// Longest the connection may go without delivering a byte, while waiting
+    /// for the response head and between body chunks. Resets on every read.
+    pub read_timeout: Duration,
+    /// Total time allowed for a buffered `do_request`, response body included;
+    /// through the network handler, for the whole redirect chain (see
+    /// `NetworkService::buffered_deadline`). Not applied to
+    /// `do_request_streaming`, whose body may legitimately take longer than
+    /// any fixed total while `read_timeout` still bounds a stall.
+    pub request_timeout: Duration,
+}
+
+impl Default for HttpNetworkLimits {
+    fn default() -> Self {
+        Self {
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            read_timeout: DEFAULT_READ_TIMEOUT,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // HTTP client concrete implementation (reqwest async)
@@ -40,48 +95,60 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 #[derive(Debug)]
 pub struct HttpNetworkService {
     client: std::sync::OnceLock<Result<reqwest::Client, String>>,
-    /// Response-body cap in bytes. Parsed once at construction (PERF-04) —
-    /// the old code re-read and re-parsed the env var on every request.
-    max_response_bytes: usize,
+    /// Parsed once at construction (PERF-04), never per request.
+    limits: HttpNetworkLimits,
+}
+
+/// Read `key` from the process env as a positive integer, or `default` when
+/// unset. A present value that is not a positive integer is an error naming
+/// the key and the value, never a silent fallback to the default.
+fn positive_env<T>(key: &str, default: T) -> Result<T, NetworkError>
+where
+    T: std::str::FromStr + PartialOrd + From<u8> + std::fmt::Display,
+{
+    match std::env::var(key) {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(NetworkError::Other(format!(
+            "{key} is not valid UTF-8: expected a positive integer"
+        ))),
+        Ok(raw) => match raw.parse::<T>() {
+            Ok(v) if v > T::from(0) => Ok(v),
+            _ => Err(NetworkError::Other(format!(
+                "{key}={raw:?} is invalid: expected a positive integer (unset it to use the \
+                 default {default})"
+            ))),
+        },
+    }
 }
 
 impl HttpNetworkService {
-    /// Construct the service, reading [`MAX_RESPONSE_BYTES_KEY`] from the
-    /// process env exactly once.
+    /// Construct the service, reading [`MAX_RESPONSE_BYTES_KEY`],
+    /// [`CONNECT_TIMEOUT_SECS_KEY`], [`READ_TIMEOUT_SECS_KEY`] and
+    /// [`REQUEST_TIMEOUT_SECS_KEY`] from the process env exactly once.
     ///
-    /// - Unset → [`DEFAULT_MAX_RESPONSE_BYTES`] (documented default).
+    /// - Unset → the matching [`HttpNetworkLimits::default`] value.
     /// - Present but not a positive integer → explicit error, so a typo'd
-    ///   cap fails the boot loudly instead of silently reverting to the
-    ///   default (the old per-request parse swallowed invalid values).
+    ///   limit fails the boot loudly instead of silently reverting to the
+    ///   default.
     pub fn from_env() -> Result<Self, NetworkError> {
-        let max_response_bytes = match std::env::var(MAX_RESPONSE_BYTES_KEY) {
-            Err(std::env::VarError::NotPresent) => DEFAULT_MAX_RESPONSE_BYTES,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(NetworkError::Other(format!(
-                    "{MAX_RESPONSE_BYTES_KEY} is not valid UTF-8: \
-                     expected a positive integer byte count"
-                )));
-            }
-            Ok(raw) => match raw.parse::<usize>() {
-                Ok(v) if v > 0 => v,
-                _ => {
-                    return Err(NetworkError::Other(format!(
-                        "{MAX_RESPONSE_BYTES_KEY}={raw:?} is invalid: expected a positive \
-                         integer byte count (unset it to use the default \
-                         {DEFAULT_MAX_RESPONSE_BYTES})"
-                    )));
-                }
-            },
+        let defaults = HttpNetworkLimits::default();
+        let secs = |key: &str, default: Duration| {
+            positive_env(key, default.as_secs()).map(Duration::from_secs)
         };
-        Ok(Self::with_max_response_bytes(max_response_bytes))
+        Ok(Self::new(HttpNetworkLimits {
+            max_response_bytes: positive_env(MAX_RESPONSE_BYTES_KEY, defaults.max_response_bytes)?,
+            connect_timeout: secs(CONNECT_TIMEOUT_SECS_KEY, defaults.connect_timeout)?,
+            read_timeout: secs(READ_TIMEOUT_SECS_KEY, defaults.read_timeout)?,
+            request_timeout: secs(REQUEST_TIMEOUT_SECS_KEY, defaults.request_timeout)?,
+        }))
     }
 
-    /// Construct with an explicit response-body cap in bytes (no env read).
-    /// The underlying `reqwest::Client` is built on the first request.
-    pub fn with_max_response_bytes(max_response_bytes: usize) -> Self {
+    /// Construct with explicit limits (no env read). The underlying
+    /// `reqwest::Client` is built on the first request.
+    pub fn new(limits: HttpNetworkLimits) -> Self {
         Self {
             client: std::sync::OnceLock::new(),
-            max_response_bytes,
+            limits,
         }
     }
 
@@ -109,13 +176,16 @@ impl HttpNetworkService {
                     );
                 }
                 reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    // SSRF: every redirect hop is revalidated (URL-level by
-                    // `ssrf_redirect_policy`, resolved-IP-level by the DNS
-                    // resolver below), with a bounded hop count. This follows
-                    // legitimate public redirects while blocking a public first
-                    // hop that bounces to an internal address (SEC-019).
-                    .redirect(ssrf_redirect_policy())
+                    // No total timeout on the client: it would cut off a
+                    // streaming download that is still making progress. The
+                    // buffered path sets `request_timeout` per request.
+                    .connect_timeout(self.limits.connect_timeout)
+                    .read_timeout(self.limits.read_timeout)
+                    // Never follow: a 3xx goes back to the network handler,
+                    // which authorizes the next hop against the caller's grant
+                    // and issues it as a new request through `send_request`,
+                    // so the SSRF gates below run on every hop too.
+                    .redirect(reqwest::redirect::Policy::none())
                     // DNS rebinding: drop resolved IPs pointing at
                     // private/loopback/link-local/multicast addresses. reqwest
                     // dials exactly the addresses returned here, so the checked
@@ -137,7 +207,14 @@ impl HttpNetworkService {
     ///
     /// [`do_request`]: NetworkService::do_request
     /// [`do_request_streaming`]: NetworkService::do_request_streaming
-    async fn send_request(&self, req: &Request) -> Result<reqwest::Response, NetworkError> {
+    ///
+    /// `total_timeout` bounds the whole exchange, body included; `None` leaves
+    /// only the client's connect and idle-read timeouts.
+    async fn send_request(
+        &self,
+        req: &Request,
+        total_timeout: Option<Duration>,
+    ) -> Result<reqwest::Response, NetworkError> {
         // SSRF protection: block requests to private/internal IPs.
         // The runtime escape hatch (`ALLOW_PRIVATE_NETWORK` env var) was
         // replaced with a Cargo feature in SEC-018 so the bypass cannot be
@@ -166,6 +243,10 @@ impl HttpNetworkService {
 
         if let Some(ref body) = req.body {
             builder = builder.body(body.clone());
+        }
+
+        if let Some(total) = total_timeout {
+            builder = builder.timeout(total);
         }
 
         builder
@@ -285,7 +366,9 @@ where
 #[wafer_async_trait]
 impl NetworkService for HttpNetworkService {
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
-        let response = self.send_request(req).await?;
+        let response = self
+            .send_request(req, Some(self.limits.request_timeout))
+            .await?;
         let status_code = response.status().as_u16();
         let headers = collect_headers(&response);
 
@@ -294,7 +377,7 @@ impl NetworkService for HttpNetworkService {
         // stream and bail once the cap is exceeded (handles chunked /
         // unknown-length responses without buffering the whole thing in
         // reqwest's internal Bytes first).
-        let cap = self.max_response_bytes;
+        let cap = self.limits.max_response_bytes;
         check_advertised_len(&response, cap)?;
 
         let mut body: Vec<u8> = Vec::new();
@@ -317,6 +400,13 @@ impl NetworkService for HttpNetworkService {
         })
     }
 
+    /// `request_timeout` from the call. Each hop's own `do_request` carries the
+    /// same total, so a direct caller is bounded too; through the network
+    /// handler this one bounds the whole redirect chain.
+    async fn buffered_deadline(&self) {
+        tokio::time::sleep(self.limits.request_timeout).await;
+    }
+
     /// Streams the response body via reqwest's `bytes_stream` instead of
     /// buffering it whole. The [`ResponseHead`] (status + headers) is returned
     /// eagerly; body chunks are forwarded through an [`OutputStream`] producer
@@ -328,15 +418,19 @@ impl NetworkService for HttpNetworkService {
     /// stream is surfaced as an `Error` terminal (an upstream read failure is
     /// too). Chunked / unknown-length responses have no advertised length, so
     /// the per-chunk check is the only guard for them.
+    ///
+    /// No total timeout applies here (see [`HttpNetworkLimits`]): a body that
+    /// keeps arriving streams for as long as it takes, and a connection that
+    /// goes quiet for `read_timeout` ends the stream with an `Error` terminal.
     async fn do_request_streaming(
         &self,
         req: &Request,
     ) -> Result<(ResponseHead, OutputStream), NetworkError> {
-        let response = self.send_request(req).await?;
+        let response = self.send_request(req, None).await?;
         let status_code = response.status().as_u16();
         let headers = collect_headers(&response);
 
-        let cap = self.max_response_bytes;
+        let cap = self.limits.max_response_bytes;
         check_advertised_len(&response, cap)?;
 
         let head = ResponseHead {
@@ -375,7 +469,7 @@ mod tests {
     #[cfg(not(feature = "allow-private-network"))]
     #[tokio::test]
     async fn http_request_rejected_when_dns_returns_private_ip() {
-        let svc = HttpNetworkService::with_max_response_bytes(DEFAULT_MAX_RESPONSE_BYTES);
+        let svc = HttpNetworkService::new(HttpNetworkLimits::default());
         // Use a URL whose host is NOT obviously private — `is_blocked_url`
         // only catches the `localhost` literal because that's what's in
         // the URL. We want to ensure the resolver kicks in, so we craft a
@@ -406,7 +500,7 @@ mod tests {
     #[cfg(not(feature = "allow-private-network"))]
     #[tokio::test]
     async fn streaming_request_rejected_for_private_address() {
-        let svc = HttpNetworkService::with_max_response_bytes(DEFAULT_MAX_RESPONSE_BYTES);
+        let svc = HttpNetworkService::new(HttpNetworkLimits::default());
         let req = Request {
             method: "GET".into(),
             url: "http://localhost/".into(),
@@ -468,48 +562,73 @@ mod tests {
     /// the hot path branch-free after the first successful init.
     #[test]
     fn client_is_cached_across_calls() {
-        let svc = HttpNetworkService::with_max_response_bytes(DEFAULT_MAX_RESPONSE_BYTES);
+        let svc = HttpNetworkService::new(HttpNetworkLimits::default());
         let first = svc.client().expect("first build succeeds");
         let second = svc.client().expect("second call returns cached client");
         // Same shared instance — the closure ran exactly once.
         assert!(std::ptr::eq(first, second));
     }
 
-    /// PERF-04: the response cap is parsed exactly once, at construction.
+    /// PERF-04: every limit is parsed exactly once, at construction.
     /// Unset → documented default; valid → parsed value; present-but-invalid
-    /// (non-numeric, zero, negative, empty) → explicit Init error, never a
-    /// silent fallback to the default.
+    /// (non-numeric, zero, negative, empty) → explicit construction error,
+    /// never a silent fallback to the default.
     ///
     /// All cases live in one test so the env mutation is serialized — cargo
     /// runs `#[test]`s in parallel threads which would otherwise race on the
     /// shared process env. (The other tests in this module deliberately use
-    /// `with_max_response_bytes`, which never touches the env.)
+    /// `HttpNetworkService::new`, which never touches the env.)
     #[test]
-    fn from_env_parses_cap_once_with_default_and_loud_invalid() {
-        let prev = std::env::var(MAX_RESPONSE_BYTES_KEY).ok();
+    fn from_env_parses_limits_once_with_default_and_loud_invalid() {
+        let keys = [
+            MAX_RESPONSE_BYTES_KEY,
+            CONNECT_TIMEOUT_SECS_KEY,
+            READ_TIMEOUT_SECS_KEY,
+            REQUEST_TIMEOUT_SECS_KEY,
+        ];
+        let prev: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
 
-        std::env::remove_var(MAX_RESPONSE_BYTES_KEY);
-        let svc = HttpNetworkService::from_env().expect("unset env uses the default");
-        assert_eq!(svc.max_response_bytes, DEFAULT_MAX_RESPONSE_BYTES);
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        let svc = HttpNetworkService::from_env().expect("unset env uses the defaults");
+        assert_eq!(svc.limits, HttpNetworkLimits::default());
 
         std::env::set_var(MAX_RESPONSE_BYTES_KEY, "1234");
-        let svc = HttpNetworkService::from_env().expect("valid value parses");
-        assert_eq!(svc.max_response_bytes, 1234);
+        std::env::set_var(CONNECT_TIMEOUT_SECS_KEY, "3");
+        std::env::set_var(READ_TIMEOUT_SECS_KEY, "4");
+        std::env::set_var(REQUEST_TIMEOUT_SECS_KEY, "5");
+        let svc = HttpNetworkService::from_env().expect("valid values parse");
+        assert_eq!(
+            svc.limits,
+            HttpNetworkLimits {
+                max_response_bytes: 1234,
+                connect_timeout: Duration::from_secs(3),
+                read_timeout: Duration::from_secs(4),
+                request_timeout: Duration::from_secs(5),
+            }
+        );
 
-        for invalid in ["not-a-number", "0", "-5", "12.5", ""] {
-            std::env::set_var(MAX_RESPONSE_BYTES_KEY, invalid);
-            let err = HttpNetworkService::from_env()
-                .expect_err("present-but-invalid value must fail construction");
-            let msg = err.to_string();
-            assert!(
-                msg.contains(MAX_RESPONSE_BYTES_KEY) && msg.contains(invalid),
-                "error must name the key and the offending value, got: {msg}"
-            );
+        for key in keys {
+            let valid = std::env::var(key).expect("set above");
+            for invalid in ["not-a-number", "0", "-5", "12.5", ""] {
+                std::env::set_var(key, invalid);
+                let err = HttpNetworkService::from_env()
+                    .expect_err("present-but-invalid value must fail construction");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains(key) && msg.contains(&format!("{invalid:?}")),
+                    "error must name the key and the offending value, got: {msg}"
+                );
+            }
+            std::env::set_var(key, valid);
         }
 
-        match prev {
-            Some(v) => std::env::set_var(MAX_RESPONSE_BYTES_KEY, v),
-            None => std::env::remove_var(MAX_RESPONSE_BYTES_KEY),
+        for (key, prev) in keys.iter().zip(prev) {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
         }
     }
 }

@@ -54,10 +54,28 @@ pub struct ResponseHead {
 }
 
 /// Service provides outbound network connectivity.
+///
+/// **Implementations MUST NOT follow redirects.** A 3xx response is returned
+/// to the caller as is, `Location` header included. The network block's
+/// handler follows redirects itself and authorizes every hop against the
+/// caller's grant before issuing it as a new request; a service that follows a
+/// redirect internally takes the caller to a URL that check never saw. A
+/// backend that cannot surface the 3xx (a browser `fetch` in `manual` mode
+/// returns an opaque response with no readable `Location`) must fail the
+/// request instead.
 #[wafer_async_trait]
 pub trait NetworkService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Issue `req` and return the upstream response, or a transport error.
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError>;
+
+    /// Resolves once the total time allowed for one buffered request has
+    /// elapsed, counted from this call. The network handler races a buffered
+    /// request's whole redirect chain against it, so the total bounds the
+    /// chain rather than each hop. Streaming requests are not raced against
+    /// it. The default never resolves: a backend with no timer sets no total.
+    async fn buffered_deadline(&self) {
+        futures::future::pending::<()>().await
+    }
 
     /// Streaming variant of [`do_request`](Self::do_request): issue `req` and
     /// return the [`ResponseHead`] plus the response body as an

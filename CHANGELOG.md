@@ -36,6 +36,48 @@
   and protocol detection read the connection preface with no deadline.
   The body is still buffered whole (streaming it into the `InputStream`
   waits for a stream failure terminal), but no longer copied once more.
+- The network grant covers every redirect hop. `HttpNetworkService`
+  followed redirects inside reqwest, after the network handler had
+  authorized only the first URL, so an allowed API that redirected (an open
+  redirect is enough) handed the caller a body from any public URL. Now the
+  handler (`wafer_core::interfaces::network::handler`) follows redirects
+  itself: each hop's URL passes the same `(url, Network, Read)` check before
+  it is issued as a new service call, so the service's SSRF gates run on it
+  too; a hop outside the grant fails the call with the check's
+  `PermissionDenied` and is never contacted; more than
+  `handler::MAX_REDIRECT_HOPS` (10) hops is `Unavailable`. 301/302/303 turn
+  any method but `GET`/`HEAD` into a body-less `GET`, 307/308 replay method
+  and body, and a hop to another origin (scheme, host or port) drops
+  `Authorization`, `Proxy-Authorization`, `Cookie`, `Cookie2` and
+  `WWW-Authenticate`. The `NetworkService` contract is now that an
+  implementation MUST NOT follow redirects: return the 3xx with its
+  `Location`, or fail the request if the platform cannot expose it (a
+  browser `fetch` in `manual` mode). New `NetworkService::buffered_deadline`
+  (default: never) resolves when a buffered request's total has elapsed; the
+  handler races the whole redirect chain against it, so the total bounds the
+  chain, not each hop (`HttpNetworkService`: `request_timeout`).
+  `wafer_net_security::ssrf_redirect_policy` and
+  `wafer_net_security::MAX_REDIRECT_HOPS` are removed.
+- A network capability entry matches paths on segment boundaries.
+  `BlockCapabilities::allows_network_url` compared paths with a plain
+  prefix, so `https://a.com/v1/public` also admitted `/v1/public-admin` and
+  `/v1/publicity`. An entry now admits its own path and paths below it
+  (`/v1/public/x`); an entry ending in `/` still admits everything under it.
+  A path whose part below the entry holds an encoded `/` or `\` (`%2F`,
+  `%5C`) is refused, since an upstream that decodes it could resolve `..`
+  out of the granted path.
+- `HttpNetworkService` timeouts no longer cut off streams.
+  `do_request_streaming` shared the client's 30 s total timeout, so a
+  download still making progress failed at 30 s. The client now has a
+  connect timeout and an idle read timeout (reset on every read); only the
+  buffered `do_request` has a total. All three are `HttpNetworkLimits`
+  fields, read once by `HttpNetworkService::from_env` from the new declared
+  keys `WAFER_RUN__NETWORK__CONNECT_TIMEOUT_SECS` (default 10),
+  `WAFER_RUN__NETWORK__READ_TIMEOUT_SECS` (30) and
+  `WAFER_RUN__NETWORK__REQUEST_TIMEOUT_SECS` (30), rejected at construction
+  when not a positive integer. `HttpNetworkService::with_max_response_bytes`
+  is replaced by `HttpNetworkService::new(HttpNetworkLimits)`; migration:
+  `new(HttpNetworkLimits { max_response_bytes: n, ..Default::default() })`.
 
 - `VectorService` has a required `rename_index(from, to)` method (see
   Added). Every implementation must provide it; there is no default,

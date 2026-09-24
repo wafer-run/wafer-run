@@ -6,7 +6,7 @@
 //! the runtime's registry/manifest downloads (`wafer-run`, SEC-09).
 //! `wafer_core::security` re-exports the predicates for existing consumers.
 //!
-//! Three layers, applied together by callers:
+//! Two layers, applied together by callers:
 //! - [`is_blocked_url`] — URL-level pre-check: scheme, `localhost`, and
 //!   IP-literal hosts. Cheap, synchronous, catches by-name hits.
 //! - [`SsrfFilteringResolver`] — DNS-resolution filter: drops resolved IPs
@@ -15,14 +15,15 @@
 //!   Because reqwest connects to exactly the addresses this resolver returns
 //!   (no second lookup), the IP that is validated is the IP that is dialed —
 //!   there is no resolve-then-reconnect TOCTOU window.
-//! - [`ssrf_redirect_policy`] — redirect filter: revalidates every 3xx hop's
-//!   target URL (and, via the resolver above, its resolved IP) so a public
-//!   first hop cannot bounce the request to an internal address. Bounded hop
-//!   count. Unlike a blanket `redirect::Policy::none()`, legitimate public
-//!   redirects are still followed.
 //!
-//! The `allow-private-network` Cargo feature disables the enforcement in all
-//! three layers for local development and integration tests; it is a
+//! Both check one request. A fetcher that follows a redirect reaches a URL
+//! neither saw, so the clients built on this crate follow none
+//! (`reqwest::redirect::Policy::none()`): the registry download refuses them,
+//! and the `wafer-run/network` block's handler issues each hop as a new
+//! request that passes both layers — and the caller's grant — again.
+//!
+//! The `allow-private-network` Cargo feature disables the enforcement in
+//! both layers for local development and integration tests; it is a
 //! compile-time escape hatch by design (SEC-018) so the bypass cannot be
 //! flipped on a live deploy.
 
@@ -223,12 +224,6 @@ pub fn is_blocked_ipv6(ip: std::net::Ipv6Addr) -> bool {
     false
 }
 
-/// Maximum number of redirect hops [`ssrf_redirect_policy`] follows before it
-/// aborts the chain. Bounds redirect-loop / amplification; matches reqwest's
-/// historical default of 10.
-#[cfg(not(target_arch = "wasm32"))]
-pub const MAX_REDIRECT_HOPS: usize = 10;
-
 #[cfg(not(target_arch = "wasm32"))]
 mod resolver {
     use std::net::SocketAddr;
@@ -308,97 +303,14 @@ mod resolver {
         }
     }
 
-    /// Per-hop decision for the redirect policy, factored out of the reqwest
-    /// `redirect::Policy` closure so the SSRF revalidation is unit testable
-    /// without constructing reqwest's non-`pub` `Attempt`.
-    ///
-    /// Only compiled into the enforcing (default) build; under
-    /// `allow-private-network` the policy is a plain bounded follow with no
-    /// per-hop URL block, so this decision type is not needed there.
-    #[cfg(not(feature = "allow-private-network"))]
-    #[derive(Debug, PartialEq, Eq)]
-    enum RedirectDecision {
-        /// Safe to follow this hop.
-        Follow,
-        /// Abort: the redirect chain exceeded [`MAX_REDIRECT_HOPS`].
-        TooManyHops,
-        /// Abort: the hop target is a private/internal/non-http URL.
-        Blocked,
-    }
-
-    /// Decide whether a single redirect hop to `next_url` (with `prior_hops`
-    /// URLs already visited) may be followed. The URL-layer block mirrors
-    /// [`is_blocked_url`](super::is_blocked_url); the hop's *resolved* IP is
-    /// validated separately by [`SsrfFilteringResolver`] on connect, so a
-    /// public-looking redirect target that rebinds to a private IP is still
-    /// caught.
-    #[cfg(not(feature = "allow-private-network"))]
-    fn redirect_decision(next_url: &str, prior_hops: usize) -> RedirectDecision {
-        if prior_hops >= super::MAX_REDIRECT_HOPS {
-            return RedirectDecision::TooManyHops;
-        }
-        if super::is_blocked_url(next_url) {
-            return RedirectDecision::Blocked;
-        }
-        RedirectDecision::Follow
-    }
-
-    /// Error surfaced to reqwest when a redirect hop is rejected, so the caller
-    /// sees a descriptive SSRF message rather than a generic redirect failure.
-    #[cfg(not(feature = "allow-private-network"))]
-    #[derive(Debug)]
-    struct RedirectBlocked(String);
-
-    #[cfg(not(feature = "allow-private-network"))]
-    impl std::fmt::Display for RedirectBlocked {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str(&self.0)
-        }
-    }
-
-    #[cfg(not(feature = "allow-private-network"))]
-    impl std::error::Error for RedirectBlocked {}
-
-    /// reqwest redirect policy that revalidates every hop against the SSRF URL
-    /// predicate ([`is_blocked_url`](super::is_blocked_url)) and bounds the hop
-    /// count at [`MAX_REDIRECT_HOPS`]. Combined with [`SsrfFilteringResolver`]
-    /// on the same client — which validates each hop's *resolved* IP — this
-    /// closes the redirect-to-private vector (a public first hop cannot bounce
-    /// the request to an internal address) while still following legitimate
-    /// public redirects, unlike a blanket `redirect::Policy::none()`.
-    #[cfg(not(feature = "allow-private-network"))]
-    pub fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
-        reqwest::redirect::Policy::custom(|attempt| {
-            let url = attempt.url().as_str().to_string();
-            match redirect_decision(&url, attempt.previous().len()) {
-                RedirectDecision::Follow => attempt.follow(),
-                RedirectDecision::TooManyHops => attempt.error(RedirectBlocked(format!(
-                    "too many redirects (limit {})",
-                    super::MAX_REDIRECT_HOPS
-                ))),
-                RedirectDecision::Blocked => attempt.error(RedirectBlocked(format!(
-                    "redirect to private/internal address blocked: {url}"
-                ))),
-            }
-        })
-    }
-
-    /// `allow-private-network` escape hatch: a plain bounded redirect follow
-    /// (no per-hop URL block), mirroring the resolver passthrough. Intended
-    /// only for local development / integration tests.
-    #[cfg(feature = "allow-private-network")]
-    pub fn ssrf_redirect_policy() -> reqwest::redirect::Policy {
-        reqwest::redirect::Policy::limited(super::MAX_REDIRECT_HOPS)
-    }
-
-    // All items under test (`filter_resolved`, `redirect_decision`,
-    // `RedirectDecision`) are compiled only in the enforcing build, so the
-    // whole module is gated off under `allow-private-network`.
+    // The item under test (`filter_resolved`) is compiled only in the
+    // enforcing build, so the whole module is gated off under
+    // `allow-private-network`.
     #[cfg(all(test, not(feature = "allow-private-network")))]
     mod tests {
         use std::net::SocketAddr;
 
-        use super::{filter_resolved, redirect_decision, RedirectDecision};
+        use super::filter_resolved;
 
         /// The DNS-rebinding filter: a "public" host that resolves to a
         /// loopback socket is rejected (no public IP survives), while a public
@@ -422,45 +334,11 @@ mod resolver {
                 .expect("at least one public");
             assert_eq!(mixed, vec![public]);
         }
-
-        #[test]
-        fn redirect_decision_bounds_hop_count() {
-            assert_eq!(
-                redirect_decision("https://example.com/", super::super::MAX_REDIRECT_HOPS),
-                RedirectDecision::TooManyHops
-            );
-        }
-
-        /// A redirect hop to a private/internal or non-http target is blocked;
-        /// a public target is followed.
-        #[test]
-        fn redirect_decision_blocks_private_follows_public() {
-            assert_eq!(
-                redirect_decision("http://10.0.0.1/", 0),
-                RedirectDecision::Blocked
-            );
-            assert_eq!(
-                redirect_decision("http://169.254.169.254/latest/meta-data/", 1),
-                RedirectDecision::Blocked
-            );
-            assert_eq!(
-                redirect_decision("http://localhost/admin", 0),
-                RedirectDecision::Blocked
-            );
-            assert_eq!(
-                redirect_decision("file:///etc/passwd", 0),
-                RedirectDecision::Blocked
-            );
-            assert_eq!(
-                redirect_decision("https://example.com/next", 3),
-                RedirectDecision::Follow
-            );
-        }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use resolver::{ssrf_redirect_policy, SsrfFilteringResolver};
+pub use resolver::SsrfFilteringResolver;
 
 #[cfg(test)]
 mod tests {
