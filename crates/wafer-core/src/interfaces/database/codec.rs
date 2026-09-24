@@ -1,36 +1,45 @@
-//! One decode policy for SQL result rows, shared by every SQL-family backend.
+//! One value policy for SQL columns, shared by every SQL-family backend.
 //!
 //! A SQL backend that reads a row has to answer the same three questions each
 //! time: how a column's raw value becomes a [`serde_json::Value`], how a row
 //! map becomes a [`Record`], and how a single-column aggregate row becomes a
 //! scalar. This module answers them once, so the same row reads the same way
-//! on native SQLite, PostgreSQL, Cloudflare D1 and the browser's sql.js.
+//! on native SQLite, PostgreSQL, Cloudflare D1 and the browser's sql.js — and
+//! says how a value is written to a JSON column, so it reads back as written.
 //!
-//! # Structure comes from the column's declared type
+//! # JSON columns: declared, and holding JSON text
 //!
-//! SQLite (and therefore D1 and sql.js) has no array/object storage class, so
-//! the write path stores an object or array as its JSON text. Whether a text
-//! value is JSON to parse back or a string to return as written is decided by
-//! the column's declared type, never by what the text looks like: a column
-//! declared `JSON` (SQLite) or `json`/`jsonb` (Postgres) holds JSON, and every
-//! other column holds plain values. Guessing from content would turn a user's
-//! title `[1]` or `{}` back into an array or object.
+//! A column holds JSON when its declared type says so: `JSON TEXT` (or the
+//! older `JSON`) on SQLite, `json`/`jsonb` on Postgres
+//! ([`is_json_decl_type`](wafer_sql_utils::introspect::is_json_decl_type)).
+//! Every other column holds plain values, and its text is never parsed:
+//! guessing from content would turn a user's title `[1]` or `{}` back into an
+//! array or object.
 //!
-//! The declared types come from the table's schema
-//! ([`build_list_columns`](wafer_sql_utils::introspect::build_list_columns),
-//! decided by [`is_json_decl_type`](wafer_sql_utils::introspect::is_json_decl_type)).
-//! The shared executor looks them up (through the
+//! **Writing.** A JSON column is written with the JSON text of the value
+//! ([`encode_json_value`]): an object as `{"a":1}`, the number `123` as `123`,
+//! the string `123` as `"123"` (quoted). SQL `NULL` stays `NULL`. The
+//! shared executor applies this to every data value it writes to a JSON
+//! column, on every backend: SQLite stores the text, Postgres parses it into
+//! its `json`/`jsonb` parameter. So any JSON value — a string that looks like
+//! a number, a boolean, `null` or JSON included — reads back as the value
+//! written. A caller that holds already-serialized JSON parses it and writes
+//! the value; there is no "raw JSON text" form.
+//!
+//! **Reading.** The text of a JSON column is parsed ([`decode_text`]).
+//! Postgres returns `json`/`jsonb` columns structured from the driver. SQLite
+//! (and therefore D1 and sql.js) returns text, and a backend whose driver
+//! reports no column types (D1, sql.js) cannot tell which text is JSON, so the
+//! shared executor looks the declared types up (through the
 //! [`SchemaCache`](super::schema_cache::SchemaCache)) for the table a
 //! statement reads and hands them to the backend's row-returning primitive as
-//! [`JsonColumns`]; a backend whose driver reports no column types (D1,
-//! sql.js) decodes with them, and so does native SQLite, so all three agree by
-//! construction. Postgres returns `json`/`jsonb` columns structured from the
-//! driver, so a Postgres text column is always a string. A statement with no
-//! single source table — raw SQL, aggregates, introspection — is decoded with
-//! [`JsonColumns::NONE`]: its text comes back as text.
+//! [`JsonColumns`]. Native SQLite decodes with them too, so all three agree by
+//! construction. A statement with no single source table — raw SQL,
+//! aggregates, introspection — is decoded with [`JsonColumns::NONE`]: its text
+//! comes back as text (see `DatabaseService::query_raw`).
 //!
 //! A JSON column whose text does not parse (a value written before the column
-//! was declared `JSON`, say) is returned verbatim as a string rather than lost.
+//! was declared JSON, say) is returned verbatim as a string rather than lost.
 
 use std::collections::HashMap;
 
@@ -67,6 +76,16 @@ impl JsonColumns {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+/// The value a JSON column is written with: the JSON text of `value`, or SQL
+/// `NULL` for `null`. See the module docs.
+#[must_use]
+pub fn encode_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Null => serde_json::Value::Null,
+        other => serde_json::Value::String(other.to_string()),
     }
 }
 

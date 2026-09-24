@@ -30,6 +30,12 @@ fn validate_fk_action(action: &str) -> Result<&'static str, SqlBuildError> {
     }
 }
 
+/// The type SQLite JSON columns are declared with: a name
+/// [`introspect::is_json_decl_type`](crate::introspect::is_json_decl_type)
+/// recognises, with TEXT affinity (SQLite gives any declared type containing
+/// `TEXT` that affinity), so a JSON column stores its JSON text verbatim.
+pub const SQLITE_JSON_TYPE: &str = "JSON TEXT";
+
 fn data_type_to_sql(dt: DataType, backend: Backend) -> &'static str {
     match backend {
         Backend::Sqlite => match dt {
@@ -38,9 +44,13 @@ fn data_type_to_sql(dt: DataType, backend: Backend) -> &'static str {
             DataType::Float => "REAL",
             DataType::Bool => "INTEGER",
             DataType::DateTime => "DATETIME",
-            // Stored as JSON text; the declared type is what tells a reader
-            // the column holds JSON (see `introspect::is_json_decl_type`).
-            DataType::Json => "JSON",
+            // Stored as JSON text. `JSON TEXT` is a type name SQLite gives
+            // TEXT affinity (it contains "TEXT"), so the text is kept exactly
+            // as written; a bare `JSON` would get NUMERIC affinity and turn
+            // numeric-looking text into an integer or a real. The declared
+            // type is what tells a reader the column holds JSON (see
+            // `introspect::is_json_decl_type`).
+            DataType::Json => SQLITE_JSON_TYPE,
             DataType::Blob => "BLOB",
         },
         Backend::Postgres => match dt {
@@ -321,11 +331,12 @@ pub fn build_add_column_with_type(
 /// Postgres maps the JSON value onto a native type (`BOOLEAN`, `BIGINT`,
 /// `DOUBLE PRECISION`, `JSONB`, `TEXT`). SQLite is dynamically typed, so only
 /// the one distinction a reader needs is declared: an object or array gets a
-/// `JSON` column, so it reads back structured, and everything else `TEXT`.
+/// [`SQLITE_JSON_TYPE`] column, so it reads back structured, and everything
+/// else `TEXT`.
 pub fn column_type_for_value(value: &serde_json::Value, backend: Backend) -> &'static str {
     match backend {
         Backend::Sqlite => match value {
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => "JSON",
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => SQLITE_JSON_TYPE,
             _ => "TEXT",
         },
         Backend::Postgres => match value {
@@ -563,10 +574,44 @@ mod tests {
             (json!("[1]"), "TEXT"),
             (json!(true), "TEXT"),
             (json!(42), "TEXT"),
-            (json!([1, 2, 3]), "JSON"),
-            (json!({"key": "val"}), "JSON"),
+            (json!([1, 2, 3]), "JSON TEXT"),
+            (json!({"key": "val"}), "JSON TEXT"),
         ] {
             assert_eq!(column_type_for_value(&value, Backend::Sqlite), expected);
+        }
+    }
+
+    /// A SQLite JSON column keeps its text exactly as written. A bare `JSON`
+    /// declaration has NUMERIC affinity, which stores numeric-looking text as
+    /// an integer or a real and rounds a number above 2^63.
+    #[test]
+    fn a_sqlite_json_column_stores_its_text_verbatim() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let table = wafer_schema::Table {
+            name: "docs".to_string(),
+            columns: vec![
+                wafer_schema::pk("id"),
+                Column::new("doc", DataType::Json).null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        conn.execute_batch(&build_create_table(&table, Backend::Sqlite).unwrap().sql)
+            .unwrap();
+        for text in ["18446744073709551615", "1.50", "007"] {
+            conn.execute(
+                "INSERT OR REPLACE INTO docs (id, doc) VALUES ('d', ?1)",
+                [text],
+            )
+            .unwrap();
+            let (kind, stored): (String, String) = conn
+                .query_row("SELECT typeof(doc), CAST(doc AS TEXT) FROM docs", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(kind, "text", "{text:?} is kept as text");
+            assert_eq!(stored, text);
         }
     }
 
@@ -590,7 +635,10 @@ mod tests {
             Backend::Sqlite,
         )
         .expect("plain identifiers");
-        assert_eq!(stmt.sql, "ALTER TABLE \"orders\" ADD COLUMN \"meta\" JSON");
+        assert_eq!(
+            stmt.sql,
+            "ALTER TABLE \"orders\" ADD COLUMN \"meta\" JSON TEXT"
+        );
     }
 
     #[test]

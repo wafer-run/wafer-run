@@ -1,13 +1,14 @@
 use std::{
     collections::HashMap,
+    str::FromStr as _,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 use base64ct::{Base64, Encoding};
 use sqlx::{
     pool::PoolConnection,
-    postgres::{PgConnection, PgRow},
-    PgPool, Postgres, Row,
+    postgres::{PgConnectOptions, PgConnection, PgRow},
+    ConnectOptions as _, PgPool, Postgres, Row,
 };
 #[cfg(test)]
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
@@ -43,18 +44,33 @@ pub struct PostgresDatabaseService {
 
 impl PostgresDatabaseService {
     /// Connect to a PostgreSQL database using a connection URL.
+    ///
+    /// A URL that turns the statement cache off (`statement-cache-capacity=0`)
+    /// is refused before connecting; see [`from_pool`](Self::from_pool).
     pub async fn connect(url: &str) -> Result<Self, DatabaseError> {
-        let pool = PgPool::connect(url).await.map_err(|e| sqlx_error(&e))?;
-        Ok(Self::from_pool(pool))
+        let options = PgConnectOptions::from_str(url).map_err(|e| sqlx_error(&e))?;
+        require_statement_cache(&options)?;
+        let pool = PgPool::connect_with(options)
+            .await
+            .map_err(|e| sqlx_error(&e))?;
+        Self::from_pool(pool)
     }
 
     /// Create a service from an existing connection pool.
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self {
+    ///
+    /// The pool's connections must keep a statement cache (sqlx's default of
+    /// 100; not `statement-cache-capacity=0`): every statement is prepared
+    /// once to learn its parameter types and then run as that cached
+    /// statement (see [`params::bind`]). Without the cache each prepare leaves
+    /// a named statement on the server connection that nothing closes, so a
+    /// pool configured that way is refused with `InvalidArgument`.
+    pub fn from_pool(pool: PgPool) -> Result<Self, DatabaseError> {
+        require_statement_cache(&pool.connect_options())?;
+        Ok(Self {
             pool,
             schema_cache: SchemaCache::new(),
             strict_schema: AtomicBool::new(false),
-        }
+        })
     }
 
     /// A pooled connection; a statement's arguments are encoded for, and it
@@ -427,6 +443,24 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     Ok(Record { id, data })
 }
 
+/// Refuse connect options that turn the per-connection statement cache off
+/// (see [`PostgresDatabaseService::from_pool`]). sqlx exposes the capacity
+/// only through the options' URL form, which always carries it.
+fn require_statement_cache(options: &PgConnectOptions) -> Result<(), DatabaseError> {
+    let url = options.to_url_lossy();
+    let disabled = url
+        .query_pairs()
+        .any(|(key, value)| key == "statement-cache-capacity" && value == "0");
+    if disabled {
+        return Err(DatabaseError::InvalidArgument(
+            "wafer-block-postgres needs a statement cache: remove \
+             statement-cache-capacity=0 from the connection options"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Run `sql` with `params` on `conn`, returning its rows.
 async fn fetch_all(
     conn: &mut PgConnection,
@@ -480,6 +514,32 @@ where
 mod tests {
     use super::*;
 
+    /// Without a statement cache every prepare would leave a named statement
+    /// on the server connection, so a URL or pool that turns it off is refused
+    /// up front — before any connection is attempted.
+    #[tokio::test]
+    async fn a_disabled_statement_cache_is_refused() {
+        let err = PostgresDatabaseService::connect(
+            "postgres://nobody:pw@127.0.0.1:1/nothing?statement-cache-capacity=0",
+        )
+        .await
+        .err()
+        .expect("refused");
+        assert!(matches!(err, DatabaseError::InvalidArgument(_)), "{err:?}");
+
+        let options: PgConnectOptions = "postgres://nobody:pw@127.0.0.1:1/nothing"
+            .parse()
+            .expect("options");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(options.clone().statement_cache_capacity(0));
+        assert!(matches!(
+            PostgresDatabaseService::from_pool(pool),
+            Err(DatabaseError::InvalidArgument(_))
+        ));
+        let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(options);
+        assert!(PostgresDatabaseService::from_pool(pool).is_ok());
+    }
+
     /// Nothing listens on loopback port 1, so every connection is refused: a
     /// fault that says nothing about the request and may clear once the
     /// server is up. It is `Unavailable`, the code a block Init that hit it is
@@ -493,7 +553,7 @@ mod tests {
             .acquire_timeout(std::time::Duration::from_millis(500))
             .connect_lazy(NOWHERE)
             .expect("a lazy pool connects on first use");
-        let svc = PostgresDatabaseService::from_pool(pool);
+        let svc = PostgresDatabaseService::from_pool(pool).expect("a pool with a statement cache");
         let err = DbExec::get(&svc, "anything", "id")
             .await
             .expect_err("nothing to connect to");

@@ -1757,6 +1757,36 @@ mod tests {
         assert_eq!(DatabaseService::count(&svc, "codes", &[]).await.unwrap(), 1);
     }
 
+    /// A column an earlier build declared bare `JSON` (NUMERIC affinity) is
+    /// still a JSON column: objects and strings written to it read back as
+    /// written.
+    #[tokio::test]
+    async fn a_legacy_json_declared_column_still_reads_as_json() {
+        let svc = make_test_svc();
+        DatabaseService::exec_raw(
+            &svc,
+            "CREATE TABLE legacy (id TEXT PRIMARY KEY, meta JSON)",
+            &[],
+        )
+        .await
+        .unwrap();
+        for (id, meta) in [
+            ("obj", serde_json::json!({"a": [1, 2]})),
+            ("str", serde_json::json!("123")),
+            ("num", serde_json::json!(7)),
+        ] {
+            let data = [
+                ("id".to_string(), serde_json::json!(id)),
+                ("meta".to_string(), meta.clone()),
+            ]
+            .into_iter()
+            .collect();
+            DatabaseService::create(&svc, "legacy", data).await.unwrap();
+            let got = DatabaseService::get(&svc, "legacy", id).await.unwrap();
+            assert_eq!(got.data["meta"], meta, "{id}");
+        }
+    }
+
     #[tokio::test]
     async fn create_stores_objects_as_json_and_roundtrips() {
         // Objects flow through the shared create default →

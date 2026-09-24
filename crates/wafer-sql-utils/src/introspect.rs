@@ -97,16 +97,20 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
 /// Whether a column declared with `decl_type` (a [`build_list_columns`]
 /// `decl_type` value) holds JSON.
 ///
-/// SQLite has no JSON storage class: a JSON column is one declared `JSON` (what
-/// the DDL builders emit for [`DataType::Json`](wafer_schema::DataType::Json)
-/// and for a lazily added column first written with an object or array), and
-/// its values are JSON text. Postgres reports its native `json` and `jsonb`
-/// types. Any other declaration, `TEXT` included, holds plain values: a string
-/// stored there is never read back as JSON, however it looks.
+/// SQLite has no JSON storage class: a JSON column holds JSON text, and is one
+/// declared [`JSON TEXT`](crate::ddl::SQLITE_JSON_TYPE) — what the DDL builders
+/// emit for [`DataType::Json`](wafer_schema::DataType::Json) and for a lazily
+/// added column first written with an object or array — or `JSON`, which
+/// earlier builds emitted (NUMERIC affinity, so still read as JSON but best
+/// migrated). Postgres reports its native `json` and `jsonb` types. Any other
+/// declaration, `TEXT` included, holds plain values: a string stored there is
+/// never read back as JSON, however it looks.
 #[must_use]
 pub fn is_json_decl_type(decl_type: &str) -> bool {
     let decl = decl_type.trim();
-    decl.eq_ignore_ascii_case("json") || decl.eq_ignore_ascii_case("jsonb")
+    ["json", "jsonb", crate::ddl::SQLITE_JSON_TYPE]
+        .iter()
+        .any(|json| decl.eq_ignore_ascii_case(json))
 }
 
 /// Build query to list the columns of a table's primary key.
@@ -282,8 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn only_json_and_jsonb_declare_a_json_column() {
-        for decl in ["JSON", "json", " Json ", "jsonb", "JSONB"] {
+    fn only_the_json_type_names_declare_a_json_column() {
+        for decl in [
+            "JSON TEXT",
+            "json text",
+            "JSON",
+            "json",
+            " Json ",
+            "jsonb",
+            "JSONB",
+        ] {
             assert!(is_json_decl_type(decl), "{decl:?} declares JSON");
         }
         for decl in [
@@ -291,7 +303,8 @@ mod tests {
             "text",
             "",
             "VARCHAR",
-            "JSON TEXT",
+            "TEXT JSON",
+            "JSONTEXT",
             "character varying",
         ] {
             assert!(!is_json_decl_type(decl), "{decl:?} does not declare JSON");
@@ -316,7 +329,7 @@ mod tests {
     fn test_table_exists_and_list_columns_execute_in_sqlite() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute(
-            "CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, meta JSON)",
+            "CREATE TABLE widgets (id TEXT PRIMARY KEY, name TEXT, created_at TEXT, meta JSON TEXT, legacy JSON)",
             [],
         )
         .unwrap();
@@ -342,7 +355,7 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         let names: Vec<&str> = cols.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, vec!["id", "name", "created_at", "meta"]);
+        assert_eq!(names, vec!["id", "name", "created_at", "meta", "legacy"]);
         let json: Vec<&str> = cols
             .iter()
             .filter(|(_, t)| is_json_decl_type(t))
@@ -350,8 +363,8 @@ mod tests {
             .collect();
         assert_eq!(
             json,
-            vec!["meta"],
-            "only the JSON-declared column holds JSON"
+            vec!["meta", "legacy"],
+            "only the JSON-declared columns hold JSON"
         );
 
         // Missing table: zero rows, not an error.

@@ -22,7 +22,7 @@ use wafer_sql_utils::{
 };
 
 use super::{
-    codec::JsonColumns,
+    codec::{encode_json_value, JsonColumns},
     schema_cache::{SchemaCache, TableColumns},
     service::{
         AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordList,
@@ -38,8 +38,11 @@ fn sql_name(name: &str) -> Result<&str, DatabaseError> {
     Ok(validate_ident(name)?)
 }
 
-/// Sort `data` into deterministic `(column, value)` pairs, refusing a key
-/// that is not a plain identifier (see [`sql_name`]).
+/// Sort `data` into deterministic `(column, value)` pairs as they are
+/// written, refusing a key that is not a plain identifier (see [`sql_name`]).
+/// A value for one of `json`'s columns is written as its JSON text
+/// ([`codec::encode_json_value`](super::codec::encode_json_value)), so it
+/// reads back as the value written.
 ///
 /// Sorted-key iteration keeps the generated INSERT/UPDATE shape stable across
 /// process starts: `HashMap` order is randomized by `RandomState`, which would
@@ -47,10 +50,18 @@ fn sql_name(name: &str) -> Result<&str, DatabaseError> {
 /// cached prepared statement on the backend.
 fn sorted_pairs(
     data: &HashMap<String, serde_json::Value>,
+    json: &JsonColumns,
 ) -> Result<Vec<(String, serde_json::Value)>, DatabaseError> {
     let mut pairs: Vec<(String, serde_json::Value)> = data
         .iter()
-        .map(|(k, v)| Ok((sql_name(k)?.to_string(), v.clone())))
+        .map(|(k, v)| {
+            let value = if json.contains(k) {
+                encode_json_value(v)
+            } else {
+                v.clone()
+            };
+            Ok((sql_name(k)?.to_string(), value))
+        })
         .collect::<Result<_, DatabaseError>>()?;
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(pairs)
@@ -1114,7 +1125,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // "no such column".
         self.ensure_data_columns(table, &data).await?;
 
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         let stmt = wafer_sql_utils::query::build_insert(table, &pairs, Self::BACKEND);
         let generated = self
             .run_insert(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1146,7 +1158,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.ensure_data_columns(table, &data).await?;
 
         let json = self.json_columns(table).await?;
-        let pairs = sorted_pairs(&data)?;
+        let pairs = sorted_pairs(&data, &json)?;
         // Batch the UPDATE with the by-id re-fetch so a batching backend (D1)
         // collapses the two round-trips into one. The re-fetch mirrors
         // [`get`](Self::get) exactly — `build_select_by_id` on the same
@@ -1278,7 +1290,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         let stmt =
             wafer_sql_utils::query::build_update_where(table, &pairs, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1305,7 +1318,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
-        let pairs = sorted_pairs(&data)?;
+        let json = self.json_columns(table).await?;
+        let pairs = sorted_pairs(&data, &json)?;
         let stmt =
             wafer_sql_utils::query::build_update_where(table, &pairs, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1363,19 +1377,28 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// `extract_windowed_id_key` handling below is a defensive fallback, not
     /// the primary validation.
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
-        let stmt = Self::upsert_statement(collection, spec)?;
+        let json = self.json_columns(sql_name(collection)?).await?;
+        let stmt = Self::upsert_statement(collection, spec, &json)?;
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
     /// Render the single `INSERT … ON CONFLICT …` statement behind
     /// [`upsert`](Self::upsert) — shared with [`batch`](Self::batch)'s
-    /// `Upsert` op, so the two cannot drift.
+    /// `Upsert` op, so the two cannot drift. A value for one of `json`'s
+    /// columns is written as its JSON text, as [`create`](Self::create) writes
+    /// it.
     fn upsert_statement(
         collection: &str,
-        spec: UpsertSpec,
+        mut spec: UpsertSpec,
+        json: &JsonColumns,
     ) -> Result<wafer_sql_utils::Statement, DatabaseError> {
         let table = sql_name(collection)?;
+        for (column, value) in &mut spec.data {
+            if json.contains(column) {
+                *value = encode_json_value(value);
+            }
+        }
         let stmt = match spec.on_conflict {
             UpsertConflict::SetColumns(update_cols) => {
                 let named = spec
@@ -1644,10 +1667,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // One representative value per column across every row, for the lazy
         // column-add's type choice.
         let mut columns: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(rows.len());
-        for mut data in rows {
-            prepare_created_row(&mut data, autogenerates_id);
-            for (key, value) in &data {
+        let mut rows = rows;
+        for data in &mut rows {
+            prepare_created_row(data, autogenerates_id);
+            for (key, value) in data.iter() {
                 match columns.get(key) {
                     Some(seen) if !seen.is_null() || value.is_null() => {}
                     _ => {
@@ -1655,11 +1678,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     }
                 }
             }
-            let stmt =
-                wafer_sql_utils::query::build_insert(table, &sorted_pairs(&data)?, Self::BACKEND);
-            statements.push((stmt.sql, sea_values_to_json(stmt.values)));
         }
         self.ensure_data_columns(table, &columns).await?;
+        let json = self.json_columns(table).await?;
+        let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(rows.len());
+        for data in &rows {
+            let stmt = wafer_sql_utils::query::build_insert(
+                table,
+                &sorted_pairs(data, &json)?,
+                Self::BACKEND,
+            );
+            statements.push((stmt.sql, sea_values_to_json(stmt.values)));
+        }
 
         let ops: Vec<TxOp<'_>> = statements
             .iter()
@@ -1721,7 +1751,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_insert_returning(
                         table,
-                        &sorted_pairs(&data)?,
+                        &sorted_pairs(&data, &json)?,
                         Self::BACKEND,
                     );
                     (Planned::Created(json), stmt)
@@ -1738,7 +1768,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     let stmt = wafer_sql_utils::query::build_update_by_id_returning(
                         table,
                         &id,
-                        &sorted_pairs(&data)?,
+                        &sorted_pairs(&data, &json)?,
                         Self::BACKEND,
                     );
                     (Planned::Updated(json), stmt)
@@ -1767,18 +1797,22 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                         .await?;
                     stamp_timestamps(&mut data, false);
                     self.ensure_data_columns(table, &data).await?;
+                    let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_update_where(
                         table,
-                        &sorted_pairs(&data)?,
+                        &sorted_pairs(&data, &json)?,
                         &filters,
                         Self::BACKEND,
                     );
                     (Planned::UpdatedWhere, stmt)
                 }
-                WriteOp::Upsert { collection, spec } => (
-                    Planned::Upserted,
-                    Self::upsert_statement(&collection, spec)?,
-                ),
+                WriteOp::Upsert { collection, spec } => {
+                    let json = self.json_columns(sql_name(&collection)?).await?;
+                    (
+                        Planned::Upserted,
+                        Self::upsert_statement(&collection, spec, &json)?,
+                    )
+                }
             };
             planned.push(kind);
             statements.push((stmt.sql, sea_values_to_json(stmt.values)));
@@ -1959,8 +1993,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         prepare_created_row(&mut data, autogenerates_id);
         self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
-        let stmt = guard::build_insert_guarded(table, &sorted_pairs(&data)?, guards, Self::BACKEND)
-            .map_err(|e| DatabaseError::Internal(e.to_string()))?;
+        let stmt =
+            guard::build_insert_guarded(table, &sorted_pairs(&data, &json)?, guards, Self::BACKEND)
+                .map_err(|e| DatabaseError::Internal(e.to_string()))?;
         match self.run_guarded(table, guards, stmt, Some(&json)).await? {
             (TxResult::Returning(rows), refused) => match (rows.into_iter().next(), refused) {
                 (Some(row), _) => Ok(GuardedInsert::Inserted(row)),
@@ -1998,9 +2033,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         stamp_timestamps(&mut data, false);
         self.ensure_data_columns(table, &data).await?;
+        let json = self.json_columns(table).await?;
         let stmt = guard::build_update_guarded(
             table,
-            &sorted_pairs(&data)?,
+            &sorted_pairs(&data, &json)?,
             filters,
             guards,
             Self::BACKEND,

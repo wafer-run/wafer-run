@@ -630,6 +630,13 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<f64, DatabaseError>;
 
     /// QueryRaw executes a raw SELECT query.
+    ///
+    /// Raw SQL names no single source table, so JSON columns are not decoded
+    /// the way the typed reads decode them, and the result differs by backend:
+    /// on the SQLite family (native, D1, sql.js) a JSON column comes back as
+    /// its stored JSON text — a string value as its quoted text, `"a"` — while
+    /// Postgres returns `json`/`jsonb` columns structured. Read JSON columns
+    /// through `get`/`list` for the same value everywhere, or parse the text.
     async fn query_raw(
         &self,
         query: &str,
@@ -637,6 +644,12 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<Vec<Record>, DatabaseError>;
 
     /// ExecRaw executes a raw non-SELECT statement.
+    ///
+    /// Values are bound as given: nothing is encoded for a JSON column the
+    /// way the typed writes encode it (see
+    /// [`codec`](super::codec)). To write a JSON column here, bind its JSON
+    /// text — on Postgres a text parameter for a `json`/`jsonb` column must be
+    /// JSON text.
     async fn exec_raw(&self, query: &str, args: &[serde_json::Value])
         -> Result<i64, DatabaseError>;
 

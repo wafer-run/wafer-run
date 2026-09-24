@@ -99,7 +99,7 @@ async fn a_select_only_role_still_breaks_ties_on_the_primary_key() {
     let reader_pool = PgPool::connect_with(reader_opts)
         .await
         .expect("connect as the read-only role");
-    let reader = PostgresDatabaseService::from_pool(reader_pool.clone());
+    let reader = PostgresDatabaseService::from_pool(reader_pool.clone()).expect("service");
 
     let mut ids = Vec::new();
     for offset in [0, 2, 4] {
@@ -246,7 +246,7 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
             .expect("read the session isolation");
         assert_eq!(current, level, "the session default took effect");
     }
-    let svc = PostgresDatabaseService::from_pool(pool);
+    let svc = PostgresDatabaseService::from_pool(pool).expect("service");
 
     svc.schema_drop_table(table).await.expect("drop");
     svc.ensure_schema_table(&Table {

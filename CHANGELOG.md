@@ -37,10 +37,17 @@
   now parsed only in a column declared to hold JSON: `JSON` on SQLite / D1 /
   sql.js, `json`/`jsonb` on Postgres (`wafer_sql_utils::introspect::
   is_json_decl_type`). `DataType::Json` now creates a SQLite column declared
-  `JSON` (it was `TEXT`), and a column lazily added for an object or array
-  value is `JSON` on SQLite (it was `TEXT`); Postgres keeps `JSONB`. A string
-  written to a JSON column is JSON text when it parses as JSON and a JSON
-  string otherwise, on every backend. `build_list_columns` returns a
+  `JSON TEXT` (`ddl::SQLITE_JSON_TYPE`; it was `TEXT`) — TEXT affinity, so
+  numeric-looking JSON text is not turned into a number — and so does a
+  column lazily added for an object or array value; a bare `JSON` column is
+  still read as JSON. Postgres keeps `JSONB`. Every typed write stores a JSON
+  column's value as its JSON text (`codec::encode_json_value`), so any JSON
+  value round-trips: the string `"123"` is stored `"\"123\""` and reads back
+  a string, not a number. A block that wrote pre-serialized JSON strings to a
+  JSON column must write the parsed value instead. On Postgres a text
+  parameter for a `json`/`jsonb` column is JSON text. Raw SQL is not encoded
+  or decoded: `query_raw` returns a JSON column's text on the SQLite family
+  and the structured value on Postgres. `build_list_columns` returns a
   `decl_type` column next to `name`; the `SchemaCache` column entry is a
   `TableColumns { names, json }` and no longer caches a missing table's empty
   column list. Every row-returning `DbExec` primitive (`run_fetch`,
@@ -56,6 +63,11 @@
   table that stored JSON in a `TEXT` column and relied on the old guess must
   declare that column `JSON` (a new migration; SQLite cannot retype a column
   in place, so rebuild the table), or its objects read back as their text.
+- `PostgresDatabaseService::from_pool` returns `Result` and refuses a pool
+  whose connections have no statement cache (`statement-cache-capacity=0`),
+  as `connect` refuses such a URL: every statement is prepared once to learn
+  its parameter types, and without the cache each prepare would leave a
+  named statement open on the connection.
 - `DatabaseError` has a new `Unavailable` variant for a transient backend
   fault, and `DatabaseError::code()` names each variant's wire code (see
   Fixed: "A database fault that may clear is `Unavailable`"). A `match` over
@@ -1071,7 +1083,7 @@
   `1`/`0` literals, since a bound fallback no longer widens the result type.
 - A database fault that may clear is `Unavailable`, not `Internal`. SQLite
   `SQLITE_BUSY`/`SQLITE_LOCKED`; a Postgres I/O error, pool timeout, or
-  SQLSTATE class `08`, `40001`, `40P01`, `53300`, `55P03`, `57P01`–`57P03` are
+  SQLSTATE class `08` (not `08P01`), `40001`, `40P01`, `53300`, `55P03`, `57P01`–`57P03` are
   `DatabaseError::Unavailable`, which the database handler answers with
   `ErrorCode::Unavailable` ("database temporarily unavailable"; the driver's
   message is logged). The Init-time schema migration (`handle_lifecycle`),

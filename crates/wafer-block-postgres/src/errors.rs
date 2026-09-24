@@ -12,7 +12,8 @@ use wafer_core::interfaces::database::service::DatabaseError;
 ///   taken key would misdirect the caller.
 /// - A fault that says nothing about the request and may clear on its own is
 ///   [`DatabaseError::Unavailable`]: the server could not be reached or the
-///   connection broke (an I/O error, SQLSTATE class `08`), no pooled
+///   connection broke (an I/O error, SQLSTATE class `08` except `08P01`,
+///   protocol_violation), no pooled
 ///   connection came free in time, the server is shutting down or starting up
 ///   (`57P01`–`57P03`), has no connection slot left (`53300`), or rolled the
 ///   transaction back to break a deadlock or a serialization conflict
@@ -41,7 +42,9 @@ pub(crate) fn sqlx_error(e: &sqlx::Error) -> DatabaseError {
 }
 
 fn is_transient_sqlstate(code: &str) -> bool {
-    code.starts_with("08")
+    // `08P01` (protocol_violation) is in the connection class but is a bug on
+    // one side of the wire, not a fault that clears.
+    (code.starts_with("08") && code != "08P01")
         || matches!(
             code,
             "40001" | "40P01" | "53300" | "55P03" | "57P01" | "57P02" | "57P03"
@@ -60,7 +63,9 @@ mod tests {
         ] {
             assert!(is_transient_sqlstate(code), "{code} is transient");
         }
-        for code in ["23505", "42P01", "42703", "22P02", "53100", "57014", ""] {
+        for code in [
+            "08P01", "23505", "42P01", "42703", "22P02", "53100", "57014", "",
+        ] {
             assert!(!is_transient_sqlstate(code), "{code} is not transient");
         }
     }

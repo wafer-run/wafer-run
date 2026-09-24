@@ -266,15 +266,17 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 // JSON round trip
 // ---------------------------------------------------------------------------
 
-/// A value comes back with the structure its column declares: a JSON column's
-/// text is JSON, and any other column's text is text, however it looks.
+/// A value reads back as the value written: a JSON column holds the JSON
+/// value, whatever its kind, and any other column's text is text, however it
+/// looks.
 ///
 /// SQL backends in the SQLite family have no array/object storage class, so
-/// the write path serializes a structured value to JSON text, and the read
-/// path parses it back only in a column declared `JSON`; Postgres stores it in
-/// a native `JSONB` column. Every backend must present the same value to block
-/// code. Deciding by content instead would hand a user who titled something
-/// `[1]` or `{}` an array or an object where they wrote a string.
+/// a JSON column (declared `JSON TEXT`) holds the JSON text of its value and
+/// the read path parses it; Postgres stores it in a native `JSONB` column.
+/// Every backend must present the same value to block code. Deciding by
+/// content instead would hand a user who titled something `[1]` or `{}` an
+/// array or an object where they wrote a string, and storing a string in a
+/// JSON column unquoted would read `"123"` back as a number.
 ///
 /// Shapes checked:
 ///
@@ -282,28 +284,47 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 ///   empty object, an already-serialized object — reads back as that text;
 /// - a **lazily added** column first written with a string that looks like
 ///   JSON (it gets a text type) reads back as the string;
-/// - a column **declared JSON** and a **lazily added** one first written with
-///   an object or array (it gets `JSON` on SQLite, `JSONB` on Postgres) read
-///   back structured;
-/// - a string written to a JSON column is JSON text when it parses (a block
-///   that serializes its own payloads keeps working once the column is
-///   declared JSON) and a string otherwise;
+/// - a column **declared JSON** holding a *string* — `"123"`, `"true"`,
+///   `"null"`, `"[1]"`, `"{}"`, a serialized object, a word — reads back as
+///   that string;
+/// - a column declared JSON holding an object, a number (up to `u64::MAX`,
+///   which SQLite's NUMERIC affinity would round), a boolean or `null`, and
+///   a **lazily added** one first written with an object or array (`JSON
+///   TEXT` on SQLite, `JSONB` on Postgres), read back structured;
 /// - an id that looks like JSON is still the record's id;
-/// - `get`, `list` and `update`'s re-read decode alike.
+/// - `get`, `list` and `update`'s re-read decode alike, and `update` writes a
+///   JSON column the way `create` does.
 async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
+    let json_columns = [
+        "declared_json",
+        "serialized_json",
+        "word_json",
+        "str_123",
+        "str_true",
+        "str_null",
+        "str_array",
+        "str_object",
+        "num_json",
+        "big_json",
+        "bool_json",
+        "null_json",
+    ];
+    let mut columns = vec![
+        pk("id"),
+        Column::new("declared_text", DataType::Text).null(),
+        Column::new("empty_object_text", DataType::Text).null(),
+        Column::new("serialized_text", DataType::Text).null(),
+    ];
+    columns.extend(
+        json_columns
+            .iter()
+            .map(|name| Column::new(*name, DataType::Json).null()),
+    );
+    // `lazy_*` and `plain` are absent so the lazy column-add picks their
+    // types from the first value written.
     let table = Table {
         name: "conf_json".to_string(),
-        // `lazy_*` and `plain` are absent so the lazy column-add picks their
-        // types from the first value written.
-        columns: vec![
-            pk("id"),
-            Column::new("declared_text", DataType::Text).null(),
-            Column::new("empty_object_text", DataType::Text).null(),
-            Column::new("serialized_text", DataType::Text).null(),
-            Column::new("declared_json", DataType::Json).null(),
-            Column::new("serialized_json", DataType::Json).null(),
-            Column::new("word_json", DataType::Json).null(),
-        ],
+        columns,
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -312,45 +333,42 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
 
     let object = serde_json::json!({ "k": [1, 2], "nested": { "b": true } });
     let array = serde_json::json!(["a", "b"]);
+    let text = |s: &str| serde_json::Value::String(s.to_string());
+    let values = vec![
+        ("declared_text", text("[1]")),
+        ("empty_object_text", text("{}")),
+        ("serialized_text", text(&object.to_string())),
+        ("lazy_text", text("{\"a\":1}")),
+        ("declared_json", object.clone()),
+        ("serialized_json", text(&object.to_string())),
+        ("word_json", text("not json")),
+        ("str_123", text("123")),
+        ("str_true", text("true")),
+        ("str_null", text("null")),
+        ("str_array", text("[1]")),
+        ("str_object", text("{}")),
+        ("num_json", serde_json::json!(123)),
+        ("big_json", serde_json::json!(u64::MAX)),
+        ("bool_json", serde_json::json!(true)),
+        ("null_json", serde_json::Value::Null),
+        ("lazy_json", object.clone()),
+        ("lazy_array", array.clone()),
+        ("plain", text("not json")),
+    ];
     let id = "[1]";
-    svc.create(
-        "conf_json",
-        row([
-            ("id", serde_json::json!(id)),
-            ("declared_text", serde_json::json!("[1]")),
-            ("empty_object_text", serde_json::json!("{}")),
-            ("serialized_text", serde_json::json!(object.to_string())),
-            ("lazy_text", serde_json::json!("{\"a\":1}")),
-            ("declared_json", object.clone()),
-            ("serialized_json", serde_json::json!(object.to_string())),
-            ("word_json", serde_json::json!("not json")),
-            ("lazy_json", object.clone()),
-            ("lazy_array", array.clone()),
-            ("plain", serde_json::json!("not json")),
-        ]),
-    )
-    .await
-    .expect("create with JSON-looking payloads must succeed");
+    let mut created = row([("id", serde_json::json!(id))]);
+    created.extend(values.iter().map(|(k, v)| ((*k).to_string(), v.clone())));
+    svc.create("conf_json", created)
+        .await
+        .expect("create with JSON-looking payloads must succeed");
 
     let expect = |rec: &Record, how: &str| {
-        let text = |s: &str| serde_json::Value::String(s.to_string());
-        for (column, want) in [
-            ("declared_text", text("[1]")),
-            ("empty_object_text", text("{}")),
-            ("serialized_text", text(&object.to_string())),
-            ("lazy_text", text("{\"a\":1}")),
-            ("declared_json", object.clone()),
-            ("serialized_json", object.clone()),
-            ("word_json", text("not json")),
-            ("lazy_json", object.clone()),
-            ("lazy_array", array.clone()),
-            ("plain", text("not json")),
-        ] {
+        for (column, want) in &values {
             assert_eq!(
-                rec.data.get(column),
-                Some(&want),
+                rec.data.get(*column),
+                Some(want),
                 "{how}: column {column:?} must read back as {want:?} (got {:?})",
-                rec.data.get(column)
+                rec.data.get(*column)
             );
         }
         assert_eq!(rec.id, id, "{how}: a JSON-looking id is still the id");
@@ -374,13 +392,15 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
     assert_eq!(listed.records.len(), 1);
     expect(&listed.records[0], "list");
 
-    // `update` returns the row re-read after the write.
+    // `update` writes JSON columns as `create` does and returns the row
+    // re-read after the write.
+    let rewritten: HashMap<String, serde_json::Value> = values
+        .iter()
+        .filter(|(column, _)| json_columns.contains(column))
+        .map(|(k, v)| ((*k).to_string(), v.clone()))
+        .collect();
     let updated = svc
-        .update(
-            "conf_json",
-            id,
-            row([("declared_text", serde_json::json!("[1]"))]),
-        )
+        .update("conf_json", id, rewritten)
         .await
         .expect("update must succeed");
     expect(&updated, "update");

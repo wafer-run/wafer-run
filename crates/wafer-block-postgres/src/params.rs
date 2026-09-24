@@ -113,9 +113,9 @@ fn mismatch(value: &serde_json::Value, expected: &str) -> BindError {
 /// one) for an integer type, a number for a floating-point or `NUMERIC` type,
 /// a boolean for `BOOLEAN`, and for a text type anything, as the text it
 /// spells (a number or boolean as its JSON text, an object or array as its
-/// JSON). A `json`/`jsonb` parameter takes any value; a string there is taken
-/// as JSON text when it parses as JSON, as the SQLite family reads the text of
-/// a JSON column, and as a JSON string otherwise. `TIMESTAMPTZ`, `TIMESTAMP`,
+/// JSON). A `json`/`jsonb` parameter takes a string as JSON text — the form
+/// the executor writes every JSON column in, so a JSON string value arrives
+/// quoted — and any other value as that JSON value. `TIMESTAMPTZ`, `TIMESTAMP`,
 /// `DATE` and `UUID` take a string in their standard text form (RFC 3339 for
 /// the timestamps), and `BYTEA` takes base64, the form it reads back in. A
 /// parameter of any other type cannot be bound from JSON.
@@ -164,10 +164,13 @@ fn add(
             Value::String(s) => push(args, s.clone()),
             other => push(args, other.to_string()),
         },
+        // The executor writes a JSON column with the JSON text of the value
+        // (`codec::encode_json_value`), so a string here is that text.
         "JSON" | "JSONB" => match value {
-            Value::String(s) => push(
+            Value::String(text) => push(
                 args,
-                serde_json::from_str::<Value>(s).unwrap_or_else(|_| value.clone()),
+                serde_json::from_str::<Value>(text)
+                    .map_err(|e| BindError::Mismatch(format!("not JSON text: {e}")))?,
             ),
             other => push(args, other.clone()),
         },
@@ -248,9 +251,11 @@ fn string(value: &serde_json::Value) -> Result<&str, BindError> {
     value.as_str().ok_or_else(|| mismatch(value, "a string"))
 }
 
-/// SQL `NULL` bound as the parameter's own type, so a statement prepared
-/// without this cache (a connection configured with no statement cache
-/// re-prepares with the argument types) still gets the inferred type.
+/// SQL `NULL`, naming the parameter's inferred type as its own. The service
+/// requires a statement cache (see `PostgresDatabaseService::from_pool`), so
+/// the statement these arguments run against is the one [`bind`] just
+/// prepared and the type is never sent to the server; naming it keeps the
+/// argument list's types equal to the statement's parameter types.
 struct TypedNull(PgTypeInfo);
 
 impl sqlx::Type<Postgres> for TypedNull {
