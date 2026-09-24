@@ -86,6 +86,22 @@
   anything but a positive integer fails construction). Without it an
   upstream that sends a byte within every idle `read_timeout` holds a
   stream open indefinitely.
+- The database schema cache never records that a table is missing.
+  `SchemaCache::table_exists` / `set_table_exists_if_gen` are replaced by
+  `table_known_present` / `mark_table_present_if_gen`, which can only say
+  a table exists; `SchemaCache` gains `generates_id` /
+  `set_generates_id_if_gen`. `DbExec::run_insert` is removed and
+  `DbExec::table_autogenerates_id` is a shared default returning
+  `Result<bool, DatabaseError>`: a backend that overrode either drops the
+  override. See Fixed for the behaviour.
+- `VectorError` has a new `Unavailable(String)` variant (a busy or locked
+  store); an exhaustive `match` on it needs an arm. The vector handler
+  answers it with `ErrorCode::Unavailable`.
+- The `wafer-run/postgres` block reads `WAFER_RUN__POSTGRES__DATABASE_URL`
+  through its declared config (`ctx.config_get`), resolved by the
+  embedder's `ConfigSource`, instead of from the process environment. An
+  embedder whose `ConfigSource` is not the environment and who set only
+  the env var must supply the value through the source.
 
 - `wafer_block_security_headers::merge_csp` returns a `CspMerge`
   (`policy` plus the `refused` directives and sources) instead of a
@@ -1329,6 +1345,35 @@
   read-only.
 
 ### Fixed
+
+- A table another process creates is visible to a database service that
+  saw it missing. The schema cache memoized "missing" for its lifetime, so
+  on a non-strict backend shared by several processes (replicas, an
+  out-of-band migration) `list` stayed empty and `count` zero until the
+  process restarted. A missing table now costs one existence probe per
+  operation. `sum` and `aggregate` on a missing table answer `0` and no
+  groups, as `count` does, instead of failing in the backend.
+- Postgres introspection resolves a table name through the session's
+  `search_path`, as the (unqualified) statements do, instead of looking
+  only in `public`: with another schema first, every existence, column and
+  key check missed the table the statements wrote to. `introspect::
+  build_list_tables[_like]` list the tables an unqualified name reaches,
+  and `build_table_info`'s Postgres arm no longer matches the name in
+  every schema.
+- A table that numbers its own rows gets its id from the database on every
+  create path (`create`, `create_many`, `batch`, `insert_guarded`). On
+  Postgres a `pk_int` (`SERIAL`) or identity key was never detected, so
+  `create` bound a minted UUID string into it and every insert without an
+  id failed. On SQLite any `id` key whose type contained `INT` (`INT`,
+  `BIGINT`, a composite key) was taken for the rowid alias, so the row was
+  stored with a `NULL` id and `create` returned SQLite's rowid as its id.
+  The new `introspect::build_id_is_generated` answers for both dialects
+  (SQLite: the rowid alias only; Postgres: identity or `nextval` default),
+  cached per table; such a `create` runs `INSERT … RETURNING *`. The
+  Postgres binder accepts a string spelling a decimal integer for an
+  integer parameter, so `get`/`update`/`delete` by such a table's id work.
+- A SQLite vector op that meets another connection's lock past the busy
+  timeout fails as `Unavailable` (retryable), not `Internal`.
 
 - `LlmError::Network` and `ImageError::Network` map to `Unavailable`, not
   `Internal`, so an unreachable model provider surfaces as a 503 rather
