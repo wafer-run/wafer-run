@@ -76,6 +76,12 @@ pub const FLOW_JSON: &str = r#"{
     "config_map": {
         "listen": { "target": "wafer-run/http-listener", "key": "listen" },
         "trusted_proxies": { "target": "wafer-run/http-listener", "key": "trusted_proxies" },
+        "max_body_bytes": { "target": "wafer-run/http-listener", "key": "max_body_bytes" },
+        "header_read_timeout_secs": { "target": "wafer-run/http-listener", "key": "header_read_timeout_secs" },
+        "body_read_timeout_secs": { "target": "wafer-run/http-listener", "key": "body_read_timeout_secs" },
+        "max_connections": { "target": "wafer-run/http-listener", "key": "max_connections" },
+        "write_timeout_secs": { "target": "wafer-run/http-listener", "key": "write_timeout_secs" },
+        "shutdown_grace_secs": { "target": "wafer-run/http-listener", "key": "shutdown_grace_secs" },
         "routes": { "target": "wafer-run/router", "key": "routes" }
     },
     "config_defaults": {
