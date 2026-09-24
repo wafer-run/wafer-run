@@ -95,16 +95,36 @@ pub struct VersionDetail {
 // ---- Registry base URL ----------------------------------------------------
 
 /// A registry base URL, normalized exactly once at construction (trailing
-/// slashes trimmed). Every endpoint URL is built via [`Registry::join`] and
+/// slashes trimmed, scheme and host lowercased). Every endpoint URL is built via [`Registry::join`] and
 /// the `Display` impl renders the normalized base, so no consumer ever
 /// needs to re-normalize.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registry(String);
 
 impl Registry {
-    /// Wrap and normalize a raw base URL.
+    /// Wrap and normalize a raw base URL. Scheme and host are
+    /// case-insensitive, so they are lowercased; userinfo and path keep
+    /// their case.
     pub fn new(raw: impl AsRef<str>) -> Self {
-        Self(raw.as_ref().trim_end_matches('/').to_string())
+        let trimmed = raw.as_ref().trim_end_matches('/');
+        let Some((scheme, rest)) = trimmed.split_once("://") else {
+            return Self(trimmed.to_string());
+        };
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        let (userinfo, host) = match authority.rsplit_once('@') {
+            Some((userinfo, host)) => (Some(userinfo), host),
+            None => (None, authority),
+        };
+        let mut normalized = scheme.to_ascii_lowercase();
+        normalized.push_str("://");
+        if let Some(userinfo) = userinfo {
+            normalized.push_str(userinfo);
+            normalized.push('@');
+        }
+        normalized.push_str(&host.to_ascii_lowercase());
+        normalized.push_str(tail);
+        Self(normalized)
     }
 
     /// The normalized base URL (no trailing slash).
@@ -323,6 +343,19 @@ pub(crate) async fn ensure_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_lowercases_scheme_and_host_only() {
+        assert_eq!(
+            Registry::new("HTTPS://Wafer.RUN/").as_str(),
+            "https://wafer.run"
+        );
+        assert_eq!(
+            Registry::new("http://User:PW@Staging.Example:8080/Base/").as_str(),
+            "http://User:PW@staging.example:8080/Base"
+        );
+        assert_eq!(Registry::new("not-a-url/").as_str(), "not-a-url");
+    }
 
     #[test]
     fn package_summary_deserialises_from_wire() {

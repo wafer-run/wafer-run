@@ -17,7 +17,7 @@ pub async fn run(
     let version = version.ok_or_else(|| anyhow::anyhow!("target must be org/block@version"))?;
 
     let url = registry_client::resolve_registry(registry);
-    let entry = credentials::require(&url)?;
+    let token = credentials::require(&url)?;
 
     let action = match op {
         YankOp::Yank => "yank",
@@ -29,7 +29,7 @@ pub async fn run(
 
     let mut req = crate::registry_client::client()
         .post(&endpoint)
-        .bearer_auth(&entry.token);
+        .bearer_auth(&token);
     if let (YankOp::Yank, Some(r)) = (&op, &reason) {
         req = req.json(&serde_json::json!({ "reason": r }));
     }

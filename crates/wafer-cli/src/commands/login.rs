@@ -1,9 +1,6 @@
 use anyhow::{Context, Result};
 
-use crate::{
-    credentials::{self, Entry},
-    registry_client,
-};
+use crate::{credentials, registry_client};
 
 fn read_code() -> Result<String> {
     // rpassword falls back to stdin on non-TTY. If that fails (some builds),
@@ -39,14 +36,7 @@ pub async fn run(registry: Option<String>) -> Result<()> {
     let resp = registry_client::exchange_code(&url, &code).await?;
 
     let mut cf = credentials::load()?;
-    credentials::upsert(
-        &mut cf,
-        None,
-        Entry {
-            registry: url.as_str().to_string(),
-            token: resp.token,
-        },
-    );
+    cf.set_token(&url, resp.token);
     credentials::save(&cf)?;
 
     println!("\u{2714} Logged in as {}", resp.user.email);
