@@ -1,7 +1,10 @@
 //! SQLite-backed VectorService using sqlite-vec for similarity search
 //! and FTS5 for optional keyword search.
 
-use rusqlite::{params, Connection};
+use rusqlite::{
+    functions::{Context, FunctionFlags},
+    params, Connection, OptionalExtension, TransactionBehavior,
+};
 use wafer_core::interfaces::vector::{
     rrf,
     service::{
@@ -9,7 +12,7 @@ use wafer_core::interfaces::vector::{
         VectorError, VectorIndexConfig, VectorMatch, VectorService,
     },
 };
-use wafer_sql_utils::vector::{build_list_meta_tables, VectorIndexSchema};
+use wafer_sql_utils::vector::{build_list_meta_tables, VectorIndexSchema, METADATA_FILTER_FN};
 
 use crate::{
     ensure_vec_loaded,
@@ -30,10 +33,24 @@ impl SqliteVecService {
     /// Wrap an existing `rusqlite::Connection` that already has the
     /// `sqlite-vec` extension loaded. Used by the consuming application to bind a
     /// shared on-disk DB to the vector service.
-    pub fn new(db: Connection) -> Self {
-        Self {
+    ///
+    /// When the file is shared with other writers (such as the database
+    /// service), `db` must carry a busy timeout: `upsert` and `delete` wait
+    /// for another writer's lock through the busy handler, and without one
+    /// they fail with `SQLITE_BUSY` at once. `Connection::open` sets a 5 s
+    /// timeout; a caller that changes it chooses how long vector writes wait.
+    ///
+    /// Registers [`METADATA_FILTER_FN`] on `db`, which filtered searches call.
+    pub fn new(db: Connection) -> rusqlite::Result<Self> {
+        db.create_scalar_function(
+            METADATA_FILTER_FN,
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            metadata_filter_fn,
+        )?;
+        Ok(Self {
             worker: ConnWorker::spawn(db, "sqlite-vec"),
-        }
+        })
     }
 
     /// Open an in-memory SQLite connection with `sqlite-vec` registered
@@ -47,7 +64,7 @@ impl SqliteVecService {
         let probe = Connection::open_in_memory()?;
         ensure_vec_loaded(&probe)?;
         drop(probe);
-        Ok(Self::new(Connection::open_in_memory()?))
+        Self::new(Connection::open_in_memory()?)
     }
 
     /// Run a job on the connection worker, mapping a dead worker to
@@ -120,8 +137,14 @@ impl SqliteVecService {
         let delete_fts_sql = schema.build_delete_fts_by_id().sql;
         let insert_fts_sql = schema.build_insert_fts().sql;
 
+        // IMMEDIATE takes the write lock up front, waiting through the busy
+        // handler (the connection's busy timeout, see `new`) if another
+        // connection to the same file is writing. A
+        // DEFERRED transaction would read first and then fail to upgrade to
+        // a writer with SQLITE_BUSY, without waiting, whenever another
+        // connection holds or has just committed a write.
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|e| VectorError::Internal(e.to_string()))?;
 
         for e in entries {
@@ -133,7 +156,8 @@ impl SqliteVecService {
             // Find existing rowid (re-upsert path) or create a new one.
             let rowid: Option<i64> = tx
                 .query_row(&select_rowid_sql, params![&e.id], |r| r.get(0))
-                .ok();
+                .optional()
+                .map_err(|err| VectorError::Internal(err.to_string()))?;
             let rowid = match rowid {
                 Some(rid) => {
                     tx.execute(&delete_vec_sql, params![rid])
@@ -268,8 +292,9 @@ impl VectorService for SqliteVecService {
             }
             let has_kw = Self::has_keyword_search(conn, &schema)?;
 
+            // IMMEDIATE for the same reason as in `upsert_on_conn`.
             let tx = conn
-                .transaction()
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
 
             // Gather rowids first so we can delete from _vec by rowid.
@@ -281,8 +306,8 @@ impl VectorService for SqliteVecService {
                     r.get::<_, i64>(0)
                 })
                 .map_err(|e| VectorError::Internal(e.to_string()))?
-                .filter_map(|r| r.ok())
-                .collect();
+                .collect::<rusqlite::Result<Vec<i64>>>()
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
             drop(stmt);
 
             let delete_vec_sql = schema.build_delete_vec_by_rowid().sql;
@@ -440,8 +465,8 @@ impl VectorService for SqliteVecService {
 }
 
 impl SqliteVecService {
-    /// Worker-side body of [`VectorService::query`]: candidate ranking,
-    /// fusion, metadata lookup and filtering, all on the worker thread.
+    /// Worker-side body of [`VectorService::query`]: filtered candidate
+    /// ranking, fusion and metadata lookup, all on the worker thread.
     #[expect(
         clippy::too_many_arguments,
         reason = "1:1 with the trait method's parameters plus the connection and parsed schema"
@@ -476,22 +501,34 @@ impl SqliteVecService {
             _ => top_k.max(50),
         };
 
+        // A non-empty filter restricts the candidates inside each ranking
+        // query, before its LIMIT, so every ranking holds only matching
+        // entries and a query returns the top `top_k` of the filtered set.
+        // Filtering after the LIMIT would drop matches that rank below
+        // non-matching entries and return fewer than `top_k`, or none.
+        let filter_json = filter
+            .filter(|f| !f.equals.is_empty())
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+
         // --- Vector rankings ---
         let vec_ranking: Vec<(String, f32)> =
             if matches!(mode, SearchMode::Vector | SearchMode::Hybrid) {
                 let vec_bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
                 // vec0 knn requires LIMIT (or `k = ?`) in the same SELECT that has the MATCH
                 // clause, so run the knn as a subquery and join against meta outside.
-                let mut stmt = conn
-                    .prepare(&schema.build_vec_knn_select().sql)
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
-                let rows = stmt
-                    .query_map(params![vec_bytes, candidate_limit as i64], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
-                    })
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(|e| VectorError::Internal(e.to_string()))?
+                let sql = match filter_json {
+                    Some(_) => schema.build_vec_knn_select_filtered().sql,
+                    None => schema.build_vec_knn_select().sql,
+                };
+                Self::ranking(
+                    conn,
+                    &sql,
+                    &vec_bytes,
+                    candidate_limit,
+                    filter_json.as_deref(),
+                )?
             } else {
                 Vec::new()
             };
@@ -500,16 +537,11 @@ impl SqliteVecService {
         let kw_ranking: Vec<(String, f32)> =
             if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
                 let q = keyword_query.unwrap();
-                let mut stmt = conn
-                    .prepare(&schema.build_fts_bm25_select().sql)
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
-                let rows = stmt
-                    .query_map(params![q, candidate_limit as i64], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32))
-                    })
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(|e| VectorError::Internal(e.to_string()))?
+                let sql = match filter_json {
+                    Some(_) => schema.build_fts_bm25_select_filtered().sql,
+                    None => schema.build_fts_bm25_select().sql,
+                };
+                Self::ranking(conn, &sql, &q, candidate_limit, filter_json.as_deref())?
             } else {
                 Vec::new()
             };
@@ -526,63 +558,108 @@ impl SqliteVecService {
             }
             _ => Vec::new(),
         };
-        let ids_top: Vec<String> = match mode {
-            SearchMode::Vector => vec_ranking.iter().map(|(id, _)| id.clone()).collect(),
-            SearchMode::Keyword => kw_ranking.iter().map(|(id, _)| id.clone()).collect(),
-            SearchMode::Hybrid => hybrid_fused.iter().map(|(id, _)| id.clone()).collect(),
+        let ranked: Vec<(String, f32)> = match mode {
+            SearchMode::Vector => vec_ranking,
+            SearchMode::Keyword => kw_ranking,
+            SearchMode::Hybrid => hybrid_fused,
         };
+        // The Keyword arm's candidate LIMIT is at least 50, so cut to `top_k`.
+        let ranked: Vec<(String, f32)> = ranked.into_iter().take(top_k).collect();
 
-        if ids_top.is_empty() {
+        if ranked.is_empty() {
             return Ok(Vec::new());
         }
 
         // Metadata lookup
         let mut stmt = conn
-            .prepare(&schema.build_select_metadata_in(ids_top.len()).sql)
+            .prepare(&schema.build_select_metadata_in(ranked.len()).sql)
             .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(ids_top.iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-
-        let meta_map: std::collections::HashMap<String, serde_json::Value> = rows
-            .filter_map(|r| r.ok())
-            .map(|(id, meta)| {
-                let v = meta
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .unwrap_or(serde_json::Value::Null);
-                (id, v)
-            })
-            .collect();
-
-        let scores: std::collections::HashMap<String, f32> = match mode {
-            SearchMode::Vector => vec_ranking.into_iter().collect(),
-            SearchMode::Keyword => kw_ranking.into_iter().collect(),
-            SearchMode::Hybrid => hybrid_fused.into_iter().collect(),
-        };
-
-        let out: Vec<VectorMatch> = ids_top
-            .into_iter()
-            .filter_map(|id| {
-                let metadata = meta_map.get(&id).cloned();
-                if let Some(flt) = filter {
-                    if !flt.matches(metadata.as_ref()) {
-                        return None;
+        let mut meta_map: std::collections::HashMap<String, serde_json::Value> = stmt
+            .query_map(
+                rusqlite::params_from_iter(ranked.iter().map(|(id, _)| id)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .map(|row| {
+                let (id, meta) = row.map_err(|e| VectorError::Internal(e.to_string()))?;
+                let value = match meta {
+                    Some(text) => {
+                        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+                            VectorError::Internal(format!(
+                                "metadata of entry {id:?} is not JSON: {e}"
+                            ))
+                        })?
                     }
-                }
-                Some(VectorMatch {
-                    id: id.clone(),
-                    score: scores.get(&id).copied().unwrap_or(0.0),
-                    metadata,
-                })
+                    None => serde_json::Value::Null,
+                };
+                Ok((id, value))
             })
-            .take(top_k)
-            .collect();
+            .collect::<Result<_, VectorError>>()?;
 
-        Ok(out)
+        Ok(ranked
+            .into_iter()
+            .map(|(id, score)| VectorMatch {
+                metadata: meta_map.remove(&id),
+                id,
+                score,
+            })
+            .collect())
+    }
+
+    /// Run one ranking statement: `?1` is the query (embedding bytes or FTS5
+    /// query text), `?2` the candidate limit, and `?3` the serialized
+    /// metadata filter when the statement is a `*_filtered` one. Rows are
+    /// `(id, score)` in rank order.
+    fn ranking(
+        conn: &Connection,
+        sql: &str,
+        query: &dyn rusqlite::ToSql,
+        limit: usize,
+        filter_json: Option<&str>,
+    ) -> Result<Vec<(String, f32)>, VectorError> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| VectorError::Internal(format!("candidate limit {limit} overflows i64")))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let map_row =
+            |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32));
+        let rows = match filter_json {
+            Some(f) => stmt.query_map(params![query, limit, f], map_row),
+            None => stmt.query_map(params![query, limit], map_row),
+        }
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| VectorError::Internal(e.to_string()))
     }
 }
+
+/// Body of the [`METADATA_FILTER_FN`] SQL function: `(metadata, filter_json)`
+/// → whether `metadata` satisfies the filter, per [`MetadataFilter::matches`].
+/// Evaluating the filter's own predicate keeps a filtered search in
+/// agreement with the filter's defined meaning by construction.
+/// The filter argument is the same for every row of a statement, so it is
+/// parsed once and cached as SQLite auxiliary data. A `NULL` metadata column
+/// is absent metadata; text that is not JSON is an error, not a mismatch.
+fn metadata_filter_fn(ctx: &Context<'_>) -> rusqlite::Result<bool> {
+    let filter = ctx.get_or_create_aux(1, |value| -> Result<MetadataFilter, BoxError> {
+        Ok(serde_json::from_str(value.as_str()?)?)
+    })?;
+    let metadata = match ctx.get_raw(0) {
+        rusqlite::types::ValueRef::Null => None,
+        value => Some(
+            serde_json::from_str::<serde_json::Value>(
+                value
+                    .as_str()
+                    .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?,
+            )
+            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?,
+        ),
+    };
+    Ok(filter.matches(metadata.as_ref()))
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 #[cfg(test)]
 mod tests {
@@ -1028,5 +1105,302 @@ mod tests {
         filter.equals.insert("k".into(), serde_json::json!("v"));
         let err = svc.list_ids("nope", filter).await.unwrap_err();
         assert!(matches!(err, VectorError::IndexNotFound(_)));
+    }
+
+    fn dims3(name: &str, keyword_search: bool) -> VectorIndexConfig {
+        VectorIndexConfig {
+            name: name.into(),
+            model: "m".into(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search,
+        }
+    }
+
+    fn owned(id: String, owner: &str, v: Vec<f32>, text: Option<&str>) -> VectorEntry {
+        VectorEntry {
+            id,
+            vector: v,
+            metadata: Some(serde_json::json!({ "owner": owner })),
+            text: text.map(String::from),
+        }
+    }
+
+    fn owner_filter(owner: &str) -> MetadataFilter {
+        let mut filter = MetadataFilter::default();
+        filter
+            .equals
+            .insert("owner".into(), serde_json::json!(owner));
+        filter
+    }
+
+    /// 100 entries: the 50 nearest to the query belong to `u2`, `u1`'s 50 lie
+    /// further out. A `u1`-filtered top-5 must be `u1`'s five nearest, not
+    /// the (empty) `u1` subset of the unfiltered top-5.
+    #[tokio::test]
+    async fn vector_query_filter_returns_top_k_of_the_filtered_set() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(dims3("docs", false)).await.unwrap();
+        let mut entries = Vec::new();
+        for i in 0..50 {
+            let near = vec![1.0, 0.001 * i as f32, 0.0];
+            let far = vec![0.0, 1.0, 0.01 * i as f32];
+            entries.push(owned(format!("u2-{i:02}"), "u2", near, None));
+            entries.push(owned(format!("u1-{i:02}"), "u1", far, None));
+        }
+        svc.upsert("docs", entries).await.unwrap();
+
+        let hits = svc
+            .query(
+                "docs",
+                vec![1.0, 0.0, 0.0],
+                5,
+                Some(owner_filter("u1")),
+                SearchMode::Vector,
+                None,
+            )
+            .await
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["u1-00", "u1-01", "u1-02", "u1-03", "u1-04"]);
+        assert!(hits
+            .iter()
+            .all(|h| h.metadata == Some(serde_json::json!({ "owner": "u1" }))));
+    }
+
+    /// Keyword and hybrid rankings take at least 50 candidates; 60 `u2`
+    /// entries outrank every `u1` entry on bm25 (and on distance), so a
+    /// filter applied after that cut would leave nothing for `u1`.
+    #[tokio::test]
+    async fn keyword_and_hybrid_query_filter_returns_top_k_of_the_filtered_set() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(dims3("docs", true)).await.unwrap();
+        let mut entries = Vec::new();
+        for i in 0..60 {
+            entries.push(owned(
+                format!("u2-{i:02}"),
+                "u2",
+                vec![1.0, 0.001 * i as f32, 0.0],
+                Some("cats cats cats"),
+            ));
+        }
+        for i in 0..10 {
+            entries.push(owned(
+                format!("u1-{i:02}"),
+                "u1",
+                vec![0.0, 1.0, 0.01 * i as f32],
+                Some("cats sit next to many dogs and birds in the long grass all day"),
+            ));
+        }
+        svc.upsert("docs", entries).await.unwrap();
+
+        for mode in [SearchMode::Keyword, SearchMode::Hybrid] {
+            let hits = svc
+                .query(
+                    "docs",
+                    vec![1.0, 0.0, 0.0],
+                    5,
+                    Some(owner_filter("u1")),
+                    mode,
+                    Some("cats".into()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(hits.len(), 5, "{mode:?}: {hits:?}");
+            assert!(
+                hits.iter().all(|h| h.id.starts_with("u1-")),
+                "{mode:?}: {hits:?}"
+            );
+        }
+    }
+
+    /// The in-SQL filter is `MetadataFilter::matches` itself, so it keeps
+    /// the filter's typed, dot-path, subtree and absent-metadata rules.
+    /// Guard test: these entries all fit in the unfiltered top-k, so it
+    /// passes whether the filter runs before or after the cut.
+    #[tokio::test]
+    async fn query_filter_follows_metadata_filter_semantics() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(dims3("docs", false)).await.unwrap();
+        let e = |id: &str, metadata: Option<serde_json::Value>| VectorEntry {
+            id: id.into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata,
+            text: None,
+        };
+        svc.upsert(
+            "docs",
+            vec![
+                e(
+                    "int",
+                    Some(serde_json::json!({ "n": 1, "doc": { "rev": 2 } })),
+                ),
+                e("str", Some(serde_json::json!({ "n": "1" }))),
+                e("bool", Some(serde_json::json!({ "n": true }))),
+                e("none", None),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let ids_for = |path: &str, value: serde_json::Value| {
+            let mut filter = MetadataFilter::default();
+            filter.equals.insert(path.into(), value);
+            let svc = &svc;
+            async move {
+                let mut ids: Vec<String> = svc
+                    .query(
+                        "docs",
+                        vec![1.0, 0.0, 0.0],
+                        10,
+                        Some(filter),
+                        SearchMode::Vector,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|h| h.id)
+                    .collect();
+                ids.sort();
+                ids
+            }
+        };
+        assert_eq!(ids_for("n", serde_json::json!(1)).await, vec!["int"]);
+        assert_eq!(ids_for("n", serde_json::json!("1")).await, vec!["str"]);
+        assert_eq!(ids_for("n", serde_json::json!(true)).await, vec!["bool"]);
+        assert_eq!(ids_for("doc.rev", serde_json::json!(2)).await, vec!["int"]);
+        assert_eq!(
+            ids_for("doc", serde_json::json!({ "rev": 2 })).await,
+            vec!["int"]
+        );
+        assert!(ids_for("n.x", serde_json::json!(1)).await.is_empty());
+    }
+
+    /// A rowid that cannot be read must fail the delete, not be skipped:
+    /// skipping it deletes the `_meta` row but leaves its `_vec` row behind
+    /// with nothing pointing at it.
+    #[tokio::test]
+    async fn delete_fails_on_an_unreadable_rowid_instead_of_orphaning_the_vector() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        svc.create_index(dims3("docs", false)).await.unwrap();
+        svc.upsert(
+            "docs",
+            vec![
+                entry("a", vec![1.0, 0.0, 0.0], None),
+                entry("b", vec![0.0, 1.0, 0.0], None),
+            ],
+        )
+        .await
+        .unwrap();
+        // SQLite column types are advisory: store a rowid that is not an integer.
+        svc.worker
+            .run(|conn| {
+                conn.execute("UPDATE docs_meta SET rowid = 'x' WHERE id = 'a'", [])
+                    .unwrap();
+            })
+            .await
+            .expect("vector worker alive");
+
+        let err = svc.delete("docs", vec!["a".into()]).await.unwrap_err();
+        assert!(matches!(err, VectorError::Internal(_)), "{err:?}");
+        assert_eq!(
+            query_i64_for_tests(&svc, "SELECT COUNT(*) FROM docs_meta").await,
+            2
+        );
+        assert_eq!(
+            query_i64_for_tests(&svc, "SELECT COUNT(*) FROM docs_vec").await,
+            2
+        );
+    }
+
+    /// A fresh path for an on-disk database, removed (with its WAL files) on drop.
+    struct TempDb(std::path::PathBuf);
+
+    impl TempDb {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "wafer-vector-{tag}-{}-{nanos}.db",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let mut path = self.0.clone().into_os_string();
+                path.push(suffix);
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Another connection to the same file takes the write lock, signals,
+    /// holds the lock for `hold`, then commits. Stands in for the database
+    /// service writing to the file the vector service shares.
+    fn hold_write_lock(
+        path: &std::path::Path,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let path = path.to_path_buf();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let other = Connection::open(&path).unwrap();
+            other
+                .execute_batch(
+                    "BEGIN IMMEDIATE; \
+                     CREATE TABLE IF NOT EXISTS other(n INTEGER); \
+                     INSERT INTO other(n) VALUES (1);",
+                )
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(hold);
+            other.execute_batch("COMMIT;").unwrap();
+        });
+        ready_rx.recv().unwrap();
+        writer
+    }
+
+    /// The vector service shares its database file with another writer (the
+    /// database service). While that writer holds the lock, a vector write
+    /// must wait for it through the busy handler and then succeed, not fail
+    /// at once with SQLITE_BUSY.
+    #[tokio::test]
+    async fn writes_wait_for_another_connection_holding_the_write_lock() {
+        let db = TempDb::new("busy");
+        let probe = Connection::open_in_memory().unwrap();
+        ensure_vec_loaded(&probe).unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let svc = SqliteVecService::new(conn).unwrap();
+        svc.create_index(dims3("docs", false)).await.unwrap();
+        svc.upsert("docs", vec![entry("a", vec![1.0, 0.0, 0.0], None)])
+            .await
+            .unwrap();
+
+        let hold = std::time::Duration::from_millis(300);
+
+        let writer = hold_write_lock(&db.0, hold);
+        let upsert = svc
+            .upsert("docs", vec![entry("b", vec![0.0, 1.0, 0.0], None)])
+            .await;
+        writer.join().unwrap();
+        upsert.expect("upsert waits for the other writer, then commits");
+        assert_eq!(svc.count("docs").await.unwrap(), 2);
+
+        let writer = hold_write_lock(&db.0, hold);
+        let delete = svc.delete("docs", vec!["a".into()]).await;
+        writer.join().unwrap();
+        delete.expect("delete waits for the other writer, then commits");
+        assert_eq!(svc.count("docs").await.unwrap(), 1);
+        drop(svc);
     }
 }

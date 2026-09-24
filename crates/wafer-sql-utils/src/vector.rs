@@ -281,7 +281,63 @@ impl VectorIndexSchema {
         );
         self.ddl_stmt(sql)
     }
+
+    /// [`Self::build_vec_knn_select`] restricted to entries whose metadata
+    /// satisfies a filter, so the `LIMIT` counts only matching entries.
+    ///
+    /// The restriction is a `rowid IN (…)` constraint that vec0 applies
+    /// inside the KNN scan; it calls [`METADATA_FILTER_FN`], which the
+    /// connection must have registered. Bind `?1` to the LE-bytes query
+    /// embedding, `?2` to the `LIMIT`, and `?3` to the filter as JSON.
+    /// Result columns: `(id TEXT, distance REAL)`.
+    pub fn build_vec_knn_select_filtered(&self) -> crate::Statement {
+        let Self {
+            vec_table,
+            meta_table,
+            ..
+        } = self;
+        let sql = format!(
+            "SELECT m.id, v.distance FROM (\
+                 SELECT rowid, distance FROM {vec_table} \
+                 WHERE embedding MATCH ?1 \
+                 AND rowid IN (SELECT rowid FROM {meta_table} \
+                     WHERE {METADATA_FILTER_FN}(metadata, ?3)) \
+                 ORDER BY distance LIMIT ?2\
+             ) v JOIN {meta_table} m ON m.rowid = v.rowid \
+             ORDER BY v.distance"
+        );
+        self.ddl_stmt(sql)
+    }
+
+    /// [`Self::build_fts_bm25_select`] restricted to entries whose metadata
+    /// satisfies a filter, so the `LIMIT` counts only matching entries.
+    /// Calls [`METADATA_FILTER_FN`], which the connection must have
+    /// registered. Bind `?1` to the FTS5 query string, `?2` to the `LIMIT`,
+    /// and `?3` to the filter as JSON. Result columns: `(id TEXT, score
+    /// REAL)`.
+    pub fn build_fts_bm25_select_filtered(&self) -> crate::Statement {
+        let Self {
+            meta_table,
+            fts_table,
+            ..
+        } = self;
+        let sql = format!(
+            "SELECT id, bm25({fts_table}) AS score \
+             FROM {fts_table} WHERE {fts_table} MATCH ?1 \
+             AND id IN (SELECT id FROM {meta_table} \
+                 WHERE {METADATA_FILTER_FN}(metadata, ?3)) \
+             ORDER BY score LIMIT ?2"
+        );
+        self.ddl_stmt(sql)
+    }
 }
+
+/// Name of the SQL scalar function the `*_filtered` search builders call
+/// as `METADATA_FILTER_FN(metadata, filter_json)`: true when the entry's
+/// `metadata` column satisfies the metadata filter serialized in
+/// `filter_json`. The builders only reference it; the connection that runs
+/// the statement registers it.
+pub const METADATA_FILTER_FN: &str = "wafer_vector_metadata_matches";
 
 /// Escape LIKE-pattern metacharacters (`\`, `%`, `_`) with a backslash so
 /// the input matches literally under `LIKE … ESCAPE '\'`.
@@ -410,6 +466,21 @@ mod tests {
         assert!(sql.contains("bm25(docs_fts)"));
         assert!(sql.contains("FROM docs_fts WHERE docs_fts MATCH ?1"));
         assert_eq!(stmt.collection, "docs_meta");
+    }
+
+    #[test]
+    fn filtered_search_selects_restrict_inside_the_limited_query() {
+        let s = VectorIndexSchema::new("docs").expect("plain identifier");
+        let knn = s.build_vec_knn_select_filtered().sql;
+        assert!(knn.contains(
+            "WHERE embedding MATCH ?1 AND rowid IN (SELECT rowid FROM docs_meta \
+             WHERE wafer_vector_metadata_matches(metadata, ?3)) ORDER BY distance LIMIT ?2"
+        ));
+        let fts = s.build_fts_bm25_select_filtered().sql;
+        assert!(fts.contains(
+            "WHERE docs_fts MATCH ?1 AND id IN (SELECT id FROM docs_meta \
+             WHERE wafer_vector_metadata_matches(metadata, ?3)) ORDER BY score LIMIT ?2"
+        ));
     }
 
     #[test]
