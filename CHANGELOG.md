@@ -4,6 +4,16 @@
 
 ### Breaking changes
 
+- `DEFAULT_SENSITIVE_HEADERS` adds `x-content-type-options`,
+  `referrer-policy`, `permissions-policy`, `cross-origin-opener-policy` and
+  `cross-origin-embedder-policy` — with HSTS, `x-frame-options` and CSP,
+  every header the security-headers block sets. A WASM guest no longer
+  reads or writes any of them unless its `HeaderPolicy` names it
+  (`readable` / `writable`), so a guest step can no longer replace the
+  middleware's value (e.g. `Referrer-Policy: unsafe-url`) without a grant
+  the operator can narrow. A guest that sets one of these headers declares
+  it in `headers.writable`, or its value is dropped (logged once).
+
 - The `wafer-run/network` block's declared limits
   (`WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`, `…__CONNECT_TIMEOUT_SECS`,
   `…__READ_TIMEOUT_SECS`, `…__REQUEST_TIMEOUT_SECS`,

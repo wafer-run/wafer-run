@@ -184,7 +184,8 @@ fn has_encoded_separator(path: &str) -> bool {
 /// unless its [`HeaderPolicy`] names them: credentials, and the response
 /// headers that steer the browser's security model — including the ones that
 /// navigate (`location`, `refresh`) or wipe the origin's state
-/// (`clear-site-data`).
+/// (`clear-site-data`), and every header the security-headers middleware
+/// sets, so a guest cannot replace one of those without a `writable` grant.
 pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -203,6 +204,11 @@ pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
     "x-frame-options",
     "content-security-policy",
     "content-security-policy-report-only",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+    "cross-origin-opener-policy",
+    "cross-origin-embedder-policy",
 ];
 
 /// Policy for which headers a block may read, write, or which should be masked.

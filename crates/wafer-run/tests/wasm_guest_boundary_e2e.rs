@@ -10,6 +10,8 @@
 //!   the same `HeaderPolicy.writable` allowlist as a `Respond` result, and a
 //!   `Continue` cannot drop or forge the request headers the guest may not
 //!   write.
+//! - A guest step after the security-headers middleware cannot replace any
+//!   header the middleware set: it holds no `writable` grant for them.
 //! - `stream_init` is charged against the per-call host-byte budget.
 
 #![cfg(feature = "wasm")]
@@ -82,6 +84,16 @@ fn assert_no_hostile_response_headers(meta: &[MetaEntry]) {
         "resp.set_cookie.s",
         "resp.header.location",
         "resp.header.access-control-allow-origin",
+        // The security-headers middleware's headers (the guest writes
+        // `Referrer-Policy` mixed-case: the policy matches any case).
+        "resp.header.strict-transport-security",
+        "resp.header.x-frame-options",
+        "resp.header.content-security-policy",
+        "resp.header.x-content-type-options",
+        "resp.header.Referrer-Policy",
+        "resp.header.permissions-policy",
+        "resp.header.cross-origin-opener-policy",
+        "resp.header.cross-origin-embedder-policy",
     ] {
         assert_eq!(get(meta, key), None, "{key} crossed the boundary: {meta:?}");
     }
@@ -235,5 +247,94 @@ async fn stream_init_is_charged_against_the_host_byte_budget() {
     assert!(
         opened < 16,
         "16 MiB budget admitted {opened} one-MiB stream messages"
+    );
+}
+
+/// In a flow, a guest step after the security-headers middleware cannot
+/// replace the headers the middleware set: it holds no `writable` grant for
+/// them, so its forged values are dropped and the middleware's stand.
+#[tokio::test]
+async fn a_guest_step_cannot_replace_the_security_headers() {
+    let mut wafer = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    let block = WasmiBlock::load_approving_declaration(&guest_wasm(), ResourceLimits::default())
+        .expect("load hostile-boundary-guest wasm");
+    wafer
+        .register_block(GUEST, Arc::new(block))
+        .expect("register hostile-boundary-guest");
+    wafer
+        .register_block(
+            "wafer-run/security-headers",
+            Arc::new(wafer_block_security_headers::SecurityHeadersBlock::new()),
+        )
+        .expect("register security-headers");
+    wafer
+        .add_flow_json(
+            &serde_json::json!({
+                "id": "page",
+                "name": "page",
+                "version": "0.1.0",
+                "steps": [
+                    { "id": "security-headers", "block": "wafer-run/security-headers" },
+                    { "id": "guest", "block": GUEST },
+                ],
+            })
+            .to_string(),
+        )
+        .expect("add flow");
+    let wafer = wafer.start().await.expect("start runtime");
+
+    let mut msg = request_with_credentials("/page");
+    msg.kind = "test.continue_with_headers".to_string();
+    let out = wafer
+        .run("page", msg, InputStream::empty())
+        .await
+        .collect_buffered()
+        .await;
+    // A flow whose last step continues ends in a response carrying the
+    // message's response meta.
+    let next = out.expect("the flow must respond");
+    for (key, expected) in [
+        (
+            "resp.header.Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains; preload",
+        ),
+        ("resp.header.X-Frame-Options", "DENY"),
+        ("resp.header.X-Content-Type-Options", "nosniff"),
+        (
+            "resp.header.Referrer-Policy",
+            "strict-origin-when-cross-origin",
+        ),
+        (
+            "resp.header.Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()",
+        ),
+    ] {
+        let values: Vec<&str> = next
+            .meta
+            .iter()
+            .filter(|e| e.key.eq_ignore_ascii_case(key))
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(values, vec![expected], "{key}: {:?}", next.meta);
+    }
+    assert!(
+        next.meta
+            .iter()
+            .any(|e| e.key == "resp.header.Content-Security-Policy"
+                && e.value.contains("default-src")),
+        "the middleware's CSP must stand: {:?}",
+        next.meta
+    );
+    assert!(
+        !next.meta.iter().any(|e| e
+            .key
+            .to_ascii_lowercase()
+            .starts_with("resp.header.cross-origin-")),
+        "the guest's COOP/COEP must not cross: {:?}",
+        next.meta
     );
 }
