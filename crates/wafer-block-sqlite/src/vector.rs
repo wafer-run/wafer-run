@@ -33,10 +33,24 @@ impl SqliteVecService {
     /// Wrap an existing `rusqlite::Connection` that already has the
     /// `sqlite-vec` extension loaded. Used by the consuming application to bind a
     /// shared on-disk DB to the vector service.
-    pub fn new(db: Connection) -> Self {
-        Self {
+    ///
+    /// When the file is shared with other writers (such as the database
+    /// service), `db` must carry a busy timeout: `upsert` and `delete` wait
+    /// for another writer's lock through the busy handler, and without one
+    /// they fail with `SQLITE_BUSY` at once. `Connection::open` sets a 5 s
+    /// timeout; a caller that changes it chooses how long vector writes wait.
+    ///
+    /// Registers [`METADATA_FILTER_FN`] on `db`, which filtered searches call.
+    pub fn new(db: Connection) -> rusqlite::Result<Self> {
+        db.create_scalar_function(
+            METADATA_FILTER_FN,
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            metadata_filter_fn,
+        )?;
+        Ok(Self {
             worker: ConnWorker::spawn(db, "sqlite-vec"),
-        }
+        })
     }
 
     /// Open an in-memory SQLite connection with `sqlite-vec` registered
@@ -50,7 +64,7 @@ impl SqliteVecService {
         let probe = Connection::open_in_memory()?;
         ensure_vec_loaded(&probe)?;
         drop(probe);
-        Ok(Self::new(Connection::open_in_memory()?))
+        Self::new(Connection::open_in_memory()?)
     }
 
     /// Run a job on the connection worker, mapping a dead worker to
@@ -96,22 +110,6 @@ impl SqliteVecService {
         Self::table_exists(conn, &schema.fts_table)
     }
 
-    /// Register [`METADATA_FILTER_FN`] on `conn` so the `*_filtered` search
-    /// statements can restrict their candidates inside SQL. The function
-    /// evaluates [`MetadataFilter::matches`] itself, so a filtered search
-    /// agrees with the filter's defined meaning by construction.
-    /// Re-registering replaces the previous definition, so calling this
-    /// before every filtered search is idempotent.
-    fn register_metadata_filter_fn(conn: &Connection) -> Result<(), VectorError> {
-        conn.create_scalar_function(
-            METADATA_FILTER_FN,
-            2,
-            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            metadata_filter_fn,
-        )
-        .map_err(|e| VectorError::Internal(e.to_string()))
-    }
-
     /// Worker-side body of [`VectorService::upsert`]: validation that needs
     /// the connection, then one transaction spanning every entry.
     fn upsert_on_conn(
@@ -140,7 +138,8 @@ impl SqliteVecService {
         let insert_fts_sql = schema.build_insert_fts().sql;
 
         // IMMEDIATE takes the write lock up front, waiting through the busy
-        // handler if another connection to the same file is writing. A
+        // handler (the connection's busy timeout, see `new`) if another
+        // connection to the same file is writing. A
         // DEFERRED transaction would read first and then fail to upgrade to
         // a writer with SQLITE_BUSY, without waiting, whenever another
         // connection holds or has just committed a write.
@@ -507,13 +506,11 @@ impl SqliteVecService {
         // entries and a query returns the top `top_k` of the filtered set.
         // Filtering after the LIMIT would drop matches that rank below
         // non-matching entries and return fewer than `top_k`, or none.
-        let filter_json = match filter.filter(|f| !f.equals.is_empty()) {
-            Some(f) => {
-                Self::register_metadata_filter_fn(conn)?;
-                Some(serde_json::to_string(f).map_err(|e| VectorError::Internal(e.to_string()))?)
-            }
-            None => None,
-        };
+        let filter_json = filter
+            .filter(|f| !f.equals.is_empty())
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
 
         // --- Vector rankings ---
         let vec_ranking: Vec<(String, f32)> =
@@ -639,6 +636,8 @@ impl SqliteVecService {
 
 /// Body of the [`METADATA_FILTER_FN`] SQL function: `(metadata, filter_json)`
 /// → whether `metadata` satisfies the filter, per [`MetadataFilter::matches`].
+/// Evaluating the filter's own predicate keeps a filtered search in
+/// agreement with the filter's defined meaning by construction.
 /// The filter argument is the same for every row of a statement, so it is
 /// parsed once and cached as SQLite auxiliary data. A `NULL` metadata column
 /// is absent metadata; text that is not JSON is an error, not a mismatch.
@@ -1381,7 +1380,7 @@ mod tests {
             .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode, "wal");
-        let svc = SqliteVecService::new(conn);
+        let svc = SqliteVecService::new(conn).unwrap();
         svc.create_index(dims3("docs", false)).await.unwrap();
         svc.upsert("docs", vec![entry("a", vec![1.0, 0.0, 0.0], None)])
             .await

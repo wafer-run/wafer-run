@@ -4,6 +4,13 @@
 
 ### Breaking changes
 
+- `wafer_block_sqlite::vector::SqliteVecService::new` returns
+  `rusqlite::Result<Self>`: it registers the SQL function filtered searches
+  call (`wafer_sql_utils::vector::METADATA_FILTER_FN`) on the connection,
+  which can fail. Its docs now state the connection's busy timeout is what
+  `upsert` and `delete` wait on when another writer shares the file
+  (`Connection::open` sets 5 s).
+
 - A list page is never unbounded by accident. `ListOptions::limit` and the
   wire `ListRequest::limit` are `Option<u32>`: `None` (absent on the wire)
   returns every matching row, as `0` silently did while the docs called it
@@ -22,6 +29,7 @@
   `clients::database::paginated_list` refuses a `page_size` above `u32::MAX`.
   Migration: `limit: 0` → `limit: None` (or `..Default::default()`),
   `limit: n` → `limit: Some(n)`.
+
 - The public `wafer_run::runtime::init_stack` module (`InitStack`,
   `InitGuard`) is gone. Init cycles are refused by a runtime-wide wait-for
   graph of in-flight inits instead (see Fixed: "A failed Init is retried when
@@ -1000,7 +1008,8 @@
   non-matching entries were dropped: a tenant-filtered query on a shared
   index came back short or empty as the index grew. The filter now runs
   inside each ranking query, before its `LIMIT`, through a SQL function
-  (`wafer_sql_utils::vector::METADATA_FILTER_FN`, used by the new
+  (`wafer_sql_utils::vector::METADATA_FILTER_FN`, registered by
+  `SqliteVecService::new` and used by the new
   `VectorIndexSchema::build_vec_knn_select_filtered` and
   `build_fts_bm25_select_filtered`) that evaluates `MetadataFilter::matches`
   itself, so filtered results keep the filter's typed, dot-path semantics.
@@ -1012,7 +1021,8 @@
   no longer skips a rowid it cannot read (which deleted the entry's
   metadata and left its vector orphaned), `upsert` no longer treats a failed
   rowid lookup as "new entry", and a query no longer drops metadata rows it
-  cannot read; each is now an `Internal` error.
+  cannot read; each is now an `Internal` error. Stored metadata that is not
+  JSON now fails the query with `Internal` instead of reading back as `null`.
 - A failed Init is retried when the failure was transient. Every
   `lifecycle(Init)` error used to be cached as permanent for the life of the
   process, so one bad moment at boot (a backend `Unavailable`, a spent
