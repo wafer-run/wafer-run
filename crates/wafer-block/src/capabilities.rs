@@ -400,7 +400,7 @@ impl BlockCapabilities {
     /// - [`Allowlist::Any`] → allowed.
     /// - [`Allowlist::Only`] → allowed iff `url` matches an allow entry by
     ///   exact scheme + host + port, and the entry's path covers the target's
-    ///   path on a `/` segment boundary (see [`url_path_covers`]):
+    ///   path on a `/` segment boundary:
     ///   `https://a.com/v1/public` admits `/v1/public` and `/v1/public/x`,
     ///   never `/v1/public-admin` or `/v1/publicity`.
     pub fn allows_network_url(&self, url: &str) -> bool {
