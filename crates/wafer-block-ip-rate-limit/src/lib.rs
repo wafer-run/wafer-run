@@ -195,24 +195,30 @@ fn client_network(remote_addr: &str, ipv6_prefix: u8) -> Option<String> {
     })
 }
 
+/// What one bucket counts: a client network under one (budget, window)
+/// pair. Two flow steps through the same block instance with different
+/// limits (a tight login step, a looser page step) count separately, so a
+/// request through one never resets or inflates the other's window.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BucketKey {
+    client: String,
+    max_requests: u32,
+    window: Duration,
+}
+
+impl BucketKey {
+    fn expired(&self, bucket: &RateBucket, now: Instant) -> bool {
+        now.duration_since(bucket.window_start) > self.window
+    }
+
+    fn throttled(&self, bucket: &RateBucket) -> bool {
+        bucket.count >= self.max_requests
+    }
+}
+
 struct RateBucket {
     count: u32,
     window_start: Instant,
-    /// The window and budget this bucket was last charged under. Two flow
-    /// steps may configure different limits, so expiry and "throttled" are
-    /// judged per bucket, never by whichever request triggers eviction.
-    window: Duration,
-    max_requests: u32,
-}
-
-impl RateBucket {
-    fn expired(&self, now: Instant) -> bool {
-        now.duration_since(self.window_start) > self.window
-    }
-
-    fn throttled(&self) -> bool {
-        self.count >= self.max_requests
-    }
 }
 
 /// Number of independent bucket shards. Power of two, sized so that at
@@ -234,7 +240,7 @@ const HARD_CAP: usize = 100_000;
 /// shard by [`evict_for_new_key`].
 pub(crate) struct ShardedBuckets {
     hasher: RandomState,
-    shards: Vec<Mutex<HashMap<String, RateBucket>>>,
+    shards: Vec<Mutex<HashMap<BucketKey, RateBucket>>>,
     /// Most buckets one shard holds.
     shard_capacity: usize,
 }
@@ -254,35 +260,38 @@ impl ShardedBuckets {
         }
     }
 
-    fn shard_index(&self, key: &str) -> usize {
-        (self.hasher.hash_one(key) as usize) % SHARD_COUNT
+    /// The shard a client's buckets live in: chosen by the client alone, so
+    /// all of one client's buckets share a shard.
+    fn shard_index(&self, client: &str) -> usize {
+        (self.hasher.hash_one(client) as usize) % SHARD_COUNT
     }
 
-    /// Record one request for `key` at `now` under `limits`, returning the
-    /// post-increment count and the bucket's window start.
+    /// Record one request from `client` at `now` in its bucket for
+    /// `limits`, returning the post-increment count and the bucket's window
+    /// start.
     ///
-    /// Locks only `key`'s shard: eviction, window reset, and the increment
-    /// all happen under that one shard lock, and the lock is released before
-    /// the caller builds its response. Only a key the shard does not hold yet
-    /// can trigger eviction.
-    fn record(&self, key: String, now: Instant, limits: Limits) -> (u32, Instant) {
-        let mut buckets = self.shards[self.shard_index(&key)].lock();
+    /// Locks only the client's shard: eviction, window reset, and the
+    /// increment all happen under that one shard lock, and the lock is
+    /// released before the caller builds its response. Only a bucket the
+    /// shard does not hold yet can trigger eviction.
+    fn record(&self, client: String, now: Instant, limits: Limits) -> (u32, Instant) {
+        let mut buckets = self.shards[self.shard_index(&client)].lock();
+        let key = BucketKey {
+            client,
+            max_requests: limits.max_requests,
+            window: limits.window,
+        };
 
         if buckets.len() >= self.shard_capacity && !buckets.contains_key(&key) {
             evict_for_new_key(&mut buckets, self.shard_capacity, now);
         }
 
+        let expired = buckets.get(&key).is_some_and(|b| key.expired(b, now));
         let bucket = buckets.entry(key).or_insert(RateBucket {
             count: 0,
             window_start: now,
-            window: limits.window,
-            max_requests: limits.max_requests,
         });
-
-        // Charged under this request's limits from here on.
-        bucket.window = limits.window;
-        bucket.max_requests = limits.max_requests;
-        if bucket.expired(now) {
+        if expired {
             bucket.count = 0;
             bucket.window_start = now;
         }
@@ -300,23 +309,25 @@ impl ShardedBuckets {
 
 /// Make room for one new key in a shard holding `capacity` buckets.
 ///
-/// Expired buckets go first: they hold nothing. If that frees nothing, the
-/// shard drops live buckets down to 90% of `capacity`, cheapest first:
+/// Expired buckets go first: they hold nothing. If the shard is still above
+/// 90% of `capacity`, it drops live buckets down to that, cheapest first:
 /// buckets still under their budget before throttled ones, lower counts
 /// before higher, older windows before newer. So a flood of fresh keys (one
 /// request from each /64 of a /48) evicts its own one-request buckets, and a
 /// client that is being throttled keeps its counter; dropping the oldest
 /// windows instead would reset exactly the clients closest to their limit.
-fn evict_for_new_key(buckets: &mut HashMap<String, RateBucket>, capacity: usize, now: Instant) {
-    buckets.retain(|_, b| !b.expired(now));
-    if buckets.len() < capacity {
+/// Either way the shard ends with room for about a tenth of `capacity` new
+/// keys, so a steady stream of them rescans the shard once per that many.
+fn evict_for_new_key(buckets: &mut HashMap<BucketKey, RateBucket>, capacity: usize, now: Instant) {
+    buckets.retain(|key, b| !key.expired(b, now));
+    let target = capacity - capacity / 10;
+    if buckets.len() < target {
         return;
     }
-    let target = capacity - capacity / 10;
     let excess = buckets.len() + 1 - target;
-    let mut victims: Vec<(bool, u32, Instant, String)> = buckets
+    let mut victims: Vec<(bool, u32, Instant, BucketKey)> = buckets
         .iter()
-        .map(|(key, b)| (b.throttled(), b.count, b.window_start, key.clone()))
+        .map(|(key, b)| (key.throttled(b), b.count, b.window_start, key.clone()))
         .collect();
     victims.sort_unstable();
     for (_, _, _, key) in victims.into_iter().take(excess) {
@@ -570,6 +581,31 @@ mod bucket_tests {
 
         let (count, _) = sb.record(victim, later, hourly);
         assert_eq!(count, 3, "the live hourly bucket survived");
+    }
+
+    /// Eviction always leaves room below 90% of capacity, even when expiry
+    /// alone freed a slot: otherwise every new key in a nearly full shard
+    /// would rescan the whole shard.
+    #[test]
+    fn eviction_trims_to_ninety_percent_after_expiry() {
+        let capacity = 10;
+        let sb = ShardedBuckets::with_shard_capacity(capacity);
+        let base = Instant::now();
+        let keys = keys_on_shard(&sb, sb.shard_index("10.0.0.0"), capacity + 1);
+        sb.record(keys[0].clone(), base, limits(5, 1));
+        let later = base + Duration::from_secs(5);
+        for key in &keys[1..capacity] {
+            sb.record(key.clone(), later, limits(5, 60));
+        }
+        let shard = sb.shard_index(&keys[capacity]);
+        assert_eq!(sb.shards[shard].lock().len(), capacity);
+
+        sb.record(keys[capacity].clone(), later, limits(5, 60));
+        assert_eq!(
+            sb.shards[shard].lock().len(),
+            capacity - capacity / 10,
+            "one expired bucket freed, and live ones trimmed to 90%"
+        );
     }
 
     /// Only a key the shard does not hold triggers eviction: a full shard of
@@ -1034,6 +1070,54 @@ mod rate_limit_tests {
         ) -> bool {
             false
         }
+    }
+
+    fn step(max_requests: &str, window_seconds: &str) -> StepConfig {
+        StepConfig(HashMap::from([
+            ("max_requests".to_string(), max_requests.to_string()),
+            ("window_seconds".to_string(), window_seconds.to_string()),
+        ]))
+    }
+
+    async fn send_via(block: &RateLimitBlock, step: &StepConfig, ip: &str) -> bool {
+        match block
+            .handle(step, request_from(ip), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Continue(_)) => true,
+            Err(TerminalNotResponse::Error(e)) if e.code == ErrorCode::ResourceExhausted => false,
+            other => panic!("expected Continue or ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    /// One block instance serves every flow step that names it, each with
+    /// its own limits. A request through a short-window step must not reset
+    /// (or spend) the client's count on a long-window step: throttled on
+    /// login, a hit on a 60-second route is not a fresh login budget.
+    #[tokio::test]
+    async fn steps_with_different_limits_count_separately() {
+        let clock = ControllableClock::new();
+        let block = RateLimitBlock::with_clock(clock.clone());
+        let login = step("3", "3600");
+        let pages = step("5", "60");
+        let ip = "198.51.100.20";
+
+        for _ in 0..3 {
+            assert!(send_via(&block, &login, ip).await, "under the login budget");
+        }
+        assert!(!send_via(&block, &login, ip).await, "login budget spent");
+
+        clock.advance(90_000);
+        assert!(
+            send_via(&block, &pages, ip).await,
+            "the page step has its own budget"
+        );
+        assert!(
+            !send_via(&block, &login, ip).await,
+            "a page request did not reset the hour-long login window"
+        );
     }
 
     /// A step limit the block cannot read denies the request rather than
