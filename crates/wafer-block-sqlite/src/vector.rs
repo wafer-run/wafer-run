@@ -466,8 +466,8 @@ impl VectorService for SqliteVecService {
 }
 
 impl SqliteVecService {
-    /// Worker-side body of [`VectorService::query`]: candidate ranking,
-    /// fusion, metadata lookup and filtering, all on the worker thread.
+    /// Worker-side body of [`VectorService::query`]: filtered candidate
+    /// ranking, fusion and metadata lookup, all on the worker thread.
     #[expect(
         clippy::too_many_arguments,
         reason = "1:1 with the trait method's parameters plus the connection and parsed schema"
@@ -510,10 +510,7 @@ impl SqliteVecService {
         let filter_json = match filter.filter(|f| !f.equals.is_empty()) {
             Some(f) => {
                 Self::register_metadata_filter_fn(conn)?;
-                Some(
-                    serde_json::to_string(f)
-                        .map_err(|e| VectorError::InvalidMetadataFilter(e.to_string()))?,
-                )
+                Some(serde_json::to_string(f).map_err(|e| VectorError::Internal(e.to_string()))?)
             }
             None => None,
         };
@@ -531,7 +528,7 @@ impl SqliteVecService {
                 Self::ranking(
                     conn,
                     &sql,
-                    rusqlite::types::Value::Blob(vec_bytes),
+                    &vec_bytes,
                     candidate_limit,
                     filter_json.as_deref(),
                 )?
@@ -547,13 +544,7 @@ impl SqliteVecService {
                     Some(_) => schema.build_fts_bm25_select_filtered().sql,
                     None => schema.build_fts_bm25_select().sql,
                 };
-                Self::ranking(
-                    conn,
-                    &sql,
-                    rusqlite::types::Value::Text(q.to_string()),
-                    candidate_limit,
-                    filter_json.as_deref(),
-                )?
+                Self::ranking(conn, &sql, &q, candidate_limit, filter_json.as_deref())?
             } else {
                 Vec::new()
             };
@@ -625,7 +616,7 @@ impl SqliteVecService {
     fn ranking(
         conn: &Connection,
         sql: &str,
-        query: rusqlite::types::Value,
+        query: &dyn rusqlite::ToSql,
         limit: usize,
         filter_json: Option<&str>,
     ) -> Result<Vec<(String, f32)>, VectorError> {
