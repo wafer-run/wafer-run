@@ -12,9 +12,11 @@ if [ -n "$RS_FILES" ]; then
   # ignores with a warning, so a stable format does not pass CI's check.
   echo "Running cargo +nightly fmt..."
   cargo +nightly fmt --all
-  for fixture in wasm_static_blocks wasm_local_input_stream; do
-    cargo +nightly fmt --all \
-      --manifest-path "crates/wafer-block/tests/$fixture/Cargo.toml"
+  for fixture in \
+    crates/wafer-block/tests/wasm_static_blocks \
+    crates/wafer-block/tests/wasm_local_input_stream \
+    crates/wafer-block-crypto/tests/wasm32_consumer; do
+    cargo +nightly fmt --all --manifest-path "$fixture/Cargo.toml"
   done
   # shellcheck disable=SC2086  # RS_FILES is newline-separated; word-splitting is intentional
   git add $RS_FILES
