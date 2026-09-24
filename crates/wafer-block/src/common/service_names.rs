@@ -200,7 +200,7 @@ impl ServiceOp {
     pub const AUTH_REQUIRE_TOKEN: &str = "auth.require_token";
     /// Require the caller to have the specified role.
     pub const AUTH_REQUIRE_ROLE: &str = "auth.require_role";
-    /// Fetch the authenticated user's profile.
+    /// Fetch the profile of the user named in the request body.
     pub const AUTH_USER_PROFILE: &str = "auth.user_profile";
 
     // -----------------------------------------------------------------------
@@ -212,8 +212,9 @@ impl ServiceOp {
     // families requires adding it to the family slice AND declaring an
     // `ActionSpec` for it in the matching `*_action_spec` fn in
     // `crate::interfaces`; the drift tests there enforce slice ↔ catalog
-    // agreement. Families without a well-known interface catalog (embedding,
-    // llm, image, auth) intentionally have no slice yet.
+    // agreement. `AUTH_OPS` is the one slice without an interface catalog:
+    // it drives only the handler authorization completeness test. Embedding,
+    // llm and image have no slice yet.
     // -----------------------------------------------------------------------
 
     /// Every `database.*` op — drives the `database@v1` action catalog in
@@ -297,6 +298,15 @@ impl ServiceOp {
         Self::LOGGER_INFO,
         Self::LOGGER_WARN,
         Self::LOGGER_ERROR,
+    ];
+
+    /// Every `auth.*` op. No interface catalog is derived from it; the auth
+    /// handler's authorization completeness test iterates it.
+    pub const AUTH_OPS: &[&str] = &[
+        Self::AUTH_REQUIRE_USER,
+        Self::AUTH_REQUIRE_TOKEN,
+        Self::AUTH_REQUIRE_ROLE,
+        Self::AUTH_USER_PROFILE,
     ];
 
     /// Every `config.*` op — drives the `config@v1` action catalog in

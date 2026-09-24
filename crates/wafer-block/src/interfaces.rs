@@ -1236,6 +1236,7 @@ mod tests {
             ("network.", ServiceOp::NETWORK_OPS),
             ("logger.", ServiceOp::LOGGER_OPS),
             ("config.", ServiceOp::CONFIG_OPS),
+            ("auth.", ServiceOp::AUTH_OPS),
         ] {
             for op in ops {
                 assert!(

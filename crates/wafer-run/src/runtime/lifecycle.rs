@@ -53,7 +53,7 @@ pub(crate) struct GrantValidationOutcome {
 ///   point. This accommodates the common pattern of constructing a
 ///   `Wafer` (which auto-registers linkme-collected blocks during
 ///   `WaferBuilder::build`) and only then calling `set_admin_block`.
-/// - Storage grants and Db / untyped grants are namespace-based: every
+/// - Storage, Auth and Db / untyped grants are namespace-based: every
 ///   resource a grant can match must be owned by the declaring block, per
 ///   [`grant_resource_owner`]. Unnamespaced or owned-by-other grants are
 ///   pushed into `rejected` so `seal()` surfaces them via
