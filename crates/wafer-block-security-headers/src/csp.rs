@@ -30,6 +30,18 @@ const NARROW_ONLY_DIRECTIVES: &[&str] = &["base-uri", "form-action"];
 /// `X-Frame-Options`; the operator CSP cannot set it.
 const FRAME_ANCESTORS: &str = "frame-ancestors";
 
+/// Where violation reports are POSTed. A report carries the blocked URL, the
+/// document URL (with its query string) and, under `'report-sample'`, the
+/// first characters of the offending script — so the operator may only name
+/// a path on this site's own origin.
+const REPORT_URI: &str = "report-uri";
+
+/// Names a reporting endpoint group. The group's URL is declared by the
+/// site's own `Reporting-Endpoints` response header, not by the policy, so
+/// the directive can only reach an endpoint the site chose; it takes exactly
+/// one group name.
+const REPORT_TO: &str = "report-to";
+
 /// A directive or source the merge refused, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
@@ -78,14 +90,22 @@ type Directives = BTreeMap<String, Vec<String>>;
 /// * `frame-ancestors` — refused; the `frame_ancestors` config key owns it.
 /// * `base-uri`, `form-action` — narrow only: a source already in the
 ///   baseline's list is kept, `'none'` replaces the list, anything else is
-///   refused.
+///   refused. When the baseline lacks the directive it places no limit at
+///   all (neither falls back to `default-src`), so any well-formed operator
+///   list narrows it and is added; a malformed source is refused.
 /// * `default-src`, `script-src`, `script-src-elem`, `script-src-attr`,
 ///   `worker-src`, `child-src` — sources are added to the baseline's, except
-///   any that would let script run from an arbitrary origin or from a string:
+///   any that would let script run from an arbitrary origin, from a host
+///   someone else controls, over a replaceable transport, or from a string:
 ///   `*`, a scheme-only source (`https:`, `data:`, `blob:`, …), a host-source
-///   whose host is `*` at any scheme, port or path (`https://*/`, `*:443`), a
-///   wildcard over a single label (`*.com`), `'unsafe-eval'`, and any
-///   unrecognised keyword or malformed source.
+///   whose host is `*` at any scheme, port or path (`https://*/`, `*:443`),
+///   any host wildcard (`*.example.com`, and so `*.github.io` or `*.co.uk`,
+///   where anyone can register the subdomain), a host-source with an
+///   explicit scheme other than `https` (`http://cdn.example.com`),
+///   `'unsafe-eval'`, and any unrecognised keyword or malformed source.
+/// * `report-uri` — only a path on this origin (`/csp-reports`); a report
+///   leaks page URLs and script samples to wherever it is sent.
+/// * `report-to` — exactly one group name (see [`REPORT_TO`]).
 /// * any other directive — sources are added to the baseline's.
 ///
 /// A directive the baseline lacks is added only when at least one of its
@@ -113,23 +133,36 @@ pub fn merge_csp(baseline: &str, custom: &str) -> CspMerge {
             }
         }
 
-        let script = SCRIPT_DIRECTIVES.contains(&name.as_str());
+        let rule: fn(&str) -> Option<&'static str> = match name.as_str() {
+            n if SCRIPT_DIRECTIVES.contains(&n) => script_source_refusal,
+            // Reached only when the baseline lacks the directive: see
+            // `merge_csp`'s doc for why any well-formed list then narrows.
+            n if NARROW_ONLY_DIRECTIVES.contains(&n) => navigation_source_refusal,
+            REPORT_URI => report_uri_refusal,
+            _ => |_| None,
+        };
+        if name == REPORT_TO && sources.len() > 1 {
+            refused.push(Refusal {
+                directive: name,
+                source: None,
+                reason: "takes exactly one reporting group name",
+            });
+            continue;
+        }
         let offered = sources.len();
         let accepted: Vec<String> = sources
             .into_iter()
-            .filter(
-                |source| match script.then(|| script_source_refusal(source)).flatten() {
-                    Some(reason) => {
-                        refused.push(Refusal {
-                            directive: name.clone(),
-                            source: Some(source.clone()),
-                            reason,
-                        });
-                        false
-                    }
-                    None => true,
-                },
-            )
+            .filter(|source| match rule(source) {
+                Some(reason) => {
+                    refused.push(Refusal {
+                        directive: name.clone(),
+                        source: Some(source.clone()),
+                        reason,
+                    });
+                    false
+                }
+                None => true,
+            })
             .collect();
 
         if accepted.is_empty() && offered > 0 && !merged.contains_key(&name) {
@@ -277,13 +310,46 @@ pub(crate) fn script_source_refusal(source: &str) -> Option<&'static str> {
             "a scheme-only source admits script from every host on that scheme, or \
              (data:, blob:, filesystem:) from strings the page builds",
         ),
-        Source::Host(Host::Any) => Some("a `*` host admits script from any origin"),
-        Source::Host(Host::Subdomains { suffix }) if !suffix.contains('.') => {
-            Some("a wildcard over a single label admits script from any registrable domain")
+        Source::Host {
+            host: Host::Any, ..
+        } => Some("a `*` host admits script from any origin"),
+        Source::Host {
+            host: Host::Subdomains,
+            ..
+        } => Some(
+            "a host wildcard admits script from every subdomain, and under a public suffix \
+             (`*.github.io`, `*.co.uk`) anyone can register one; list the hosts",
+        ),
+        Source::Host {
+            scheme: Some(scheme),
+            ..
+        } if scheme != "https" => {
+            Some("script fetched over a scheme other than https can be replaced in transit")
         }
-        Source::Host(_) => None,
+        Source::Host { .. } => None,
         Source::Invalid => Some("not a valid CSP source expression"),
     }
+}
+
+/// Why a source may not be added as a `base-uri` / `form-action` the
+/// baseline lacks, or `None` when it may: any keyword or source the CSP
+/// grammar accepts narrows a directive that was absent.
+fn navigation_source_refusal(source: &str) -> Option<&'static str> {
+    let s = source.to_ascii_lowercase();
+    let well_formed = match s.as_str() {
+        "'self'" | "'none'" => true,
+        _ if s.starts_with('\'') => false,
+        _ => parse_source(&s) != Source::Invalid,
+    };
+    (!well_formed).then_some("not a valid source for this directive")
+}
+
+/// Why a `report-uri` value is refused, or `None` for a path on this
+/// origin: path-absolute (`/…`), not network-path (`//host/…`).
+fn report_uri_refusal(uri: &str) -> Option<&'static str> {
+    (!(uri.starts_with('/') && !uri.starts_with("//"))).then_some(
+        "reports carry page URLs and script samples; only a path on this origin is allowed",
+    )
 }
 
 /// Quoted sources allowed in a script directive: keywords that do not let a
@@ -326,17 +392,22 @@ enum Source<'a> {
     /// `scheme:`.
     Scheme,
     /// `[scheme://]host[:port][/path]`.
-    Host(Host<'a>),
+    Host {
+        /// The explicit scheme, when the source names one.
+        scheme: Option<&'a str>,
+        /// What the host part matches.
+        host: Host,
+    },
     /// Anything the CSP grammar does not accept.
     Invalid,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Host<'a> {
+enum Host {
     /// `*`: every host.
     Any,
     /// `*.suffix`: every subdomain of `suffix`.
-    Subdomains { suffix: &'a str },
+    Subdomains,
     /// One named host.
     Exact,
 }
@@ -354,10 +425,10 @@ fn parse_source(s: &str) -> Source<'_> {
             Source::Invalid
         };
     }
-    let rest = match s.split_once("://") {
-        Some((scheme, rest)) if is_scheme(scheme) => rest,
+    let (scheme, rest) = match s.split_once("://") {
+        Some((scheme, rest)) if is_scheme(scheme) => (Some(scheme), rest),
         Some(_) => return Source::Invalid,
-        None => s,
+        None => (None, s),
     };
     let host_end = rest.find([':', '/']).unwrap_or(rest.len());
     let (host, after_host) = rest.split_at(host_end);
@@ -375,15 +446,16 @@ fn parse_source(s: &str) -> Source<'_> {
     if !(path.is_empty() || path.starts_with('/')) {
         return Source::Invalid;
     }
-    if host == "*" {
-        return Source::Host(Host::Any);
-    }
-    match host.strip_prefix("*.") {
-        Some(suffix) if is_host_labels(suffix) => Source::Host(Host::Subdomains { suffix }),
-        Some(_) => Source::Invalid,
-        None if is_host_labels(host) => Source::Host(Host::Exact),
-        None => Source::Invalid,
-    }
+    let host = if host == "*" {
+        Host::Any
+    } else {
+        match host.strip_prefix("*.") {
+            Some(suffix) if is_host_labels(suffix) => Host::Subdomains,
+            None if is_host_labels(host) => Host::Exact,
+            _ => return Source::Invalid,
+        }
+    };
+    Source::Host { scheme, host }
 }
 
 /// CSP `scheme`: `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
@@ -438,6 +510,15 @@ mod tests {
             "*/path",
             "*.com",
             "https://*.com",
+            "*.example.com",
+            "https://*.example.com",
+            "https://*.github.io",
+            "*.pages.dev",
+            "https://*.workers.dev",
+            "*.co.uk",
+            "http://cdn.example.com",
+            "HTTP://cdn.example.com/js/",
+            "ws://cdn.example.com",
             "'unsafe-eval'",
             "'UNSAFE-EVAL'",
             "'unknown-keyword'",
@@ -464,8 +545,6 @@ mod tests {
             "https://cdn.example.com:*",
             "https://cdn.example.com:8443/js/",
             "cdn.example.com",
-            "*.example.com",
-            "https://*.example.com",
         ] {
             assert_eq!(
                 script_source_refusal(source),
@@ -589,5 +668,51 @@ mod tests {
             directive(&merged.policy, "img-src"),
             Some(vec!["https://a.example"])
         );
+    }
+
+    #[test]
+    fn report_uri_is_limited_to_this_origin() {
+        let merged = merge_csp(
+            BASE,
+            "report-uri /csp-reports https://collector.example //evil.example/r",
+        );
+        assert_eq!(
+            directive(&merged.policy, "report-uri"),
+            Some(vec!["/csp-reports"]),
+            "{}",
+            merged.policy
+        );
+        assert_eq!(merged.refused.len(), 2, "{:?}", merged.refused);
+
+        let merged = merge_csp(BASE, "report-uri https://collector.example");
+        assert_eq!(directive(&merged.policy, "report-uri"), None);
+    }
+
+    #[test]
+    fn report_to_takes_one_group_name() {
+        let merged = merge_csp(BASE, "report-to csp-endpoint");
+        assert_eq!(
+            directive(&merged.policy, "report-to"),
+            Some(vec!["csp-endpoint"])
+        );
+        let merged = merge_csp(BASE, "report-to a b");
+        assert_eq!(directive(&merged.policy, "report-to"), None);
+        assert_eq!(merged.refused.len(), 1, "{:?}", merged.refused);
+    }
+
+    /// An absent `base-uri` / `form-action` admits everything, so an operator
+    /// list narrows it — but only a well-formed one is added.
+    #[test]
+    fn a_narrow_only_directive_the_baseline_lacks_is_added_when_well_formed() {
+        let merged = merge_csp(
+            "default-src 'self'",
+            "base-uri 'self' 'unsafe-inline'; form-action https://pay.example https://exa_mple",
+        );
+        assert_eq!(directive(&merged.policy, "base-uri"), Some(vec!["'self'"]));
+        assert_eq!(
+            directive(&merged.policy, "form-action"),
+            Some(vec!["https://pay.example"])
+        );
+        assert_eq!(merged.refused.len(), 2, "{:?}", merged.refused);
     }
 }

@@ -57,6 +57,35 @@ enum OriginMatch {
 /// Match a request's `origin` against `allowed` (`*` or a comma-separated
 /// list). `None` when the request has no `Origin` or the origin is not
 /// allowed; the caller then emits no `Access-Control-Allow-Origin`.
+/// Add `Origin` to the response's `Vary`, keeping whatever an earlier block
+/// already varies on. `Vary` is a list, and adapters send one value per
+/// header name, so every `resp.header.{vary}` entry in any case is folded
+/// into a single `resp.header.Vary`. A `*` already varies on everything and
+/// is left alone.
+fn vary_on_origin(msg: &mut Message) {
+    let is_vary = |key: &str| {
+        key.strip_prefix(META_RESP_HEADER_PREFIX)
+            .is_some_and(|name| name.eq_ignore_ascii_case("vary"))
+    };
+    let mut fields: Vec<String> = msg
+        .meta
+        .iter()
+        .filter(|m| is_vary(&m.key))
+        .flat_map(|m| m.value.split(','))
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(String::from)
+        .collect();
+    if !fields
+        .iter()
+        .any(|f| f == "*" || f.eq_ignore_ascii_case("origin"))
+    {
+        fields.push("Origin".to_string());
+    }
+    msg.meta.retain(|m| !is_vary(&m.key));
+    msg.set_meta(format!("{META_RESP_HEADER_PREFIX}Vary"), fields.join(", "));
+}
+
 fn match_origin(allowed: &str, origin: &str) -> Option<OriginMatch> {
     if origin.is_empty() {
         None
@@ -94,7 +123,8 @@ fn match_origin(allowed: &str, origin: &str) -> Option<OriginMatch> {
 /// request's `Origin` — including a request without one, or from an origin
 /// that is refused — so the block sets `Vary: Origin` on every such
 /// response. Without it, an intermediary cache can serve a response keyed
-/// for one origin to a request from another — see SEC-088.
+/// for one origin to a request from another — see SEC-088. `Origin` is
+/// added to any `Vary` an earlier block set, never in place of it.
 pub struct CorsBlock {
     /// Allow-list resolved at `Init` lifecycle, used as fallback when the
     /// per-request context does not supply `allowed_origins`. Unset until
@@ -216,7 +246,7 @@ impl Block for CorsBlock {
                 // SEC-088: with an allow-list the response depends on the
                 // request's `Origin` — present, absent or refused — so a
                 // cache must key on it.
-                out_msg.set_meta("resp.header.Vary", "Origin");
+                vary_on_origin(&mut out_msg);
                 match match_origin(allowed, &origin) {
                     Some(OriginMatch::Listed) => {
                         // Origin explicitly in allowlist: safe to enable credentials.
@@ -746,5 +776,53 @@ mod tests {
     #[test]
     fn unconfigured_denial_warns_for_real_cross_origin_requests() {
         assert!(unconfigured_denial_is_loggable("https://cross.example"));
+    }
+
+    /// An earlier block's `Vary` (here `Accept-Encoding`, in lower case) is
+    /// extended, not replaced — replacing it lets a cache serve a
+    /// compressed body to a client that cannot decode it.
+    #[tokio::test]
+    async fn vary_extends_an_earlier_value() {
+        let block = CorsBlock::new();
+        block
+            .lifecycle(
+                &TestContext::new(),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: serde_json::to_vec(
+                        &serde_json::json!({ "allowed_origins": TWO_ORIGINS }),
+                    )
+                    .expect("json"),
+                },
+            )
+            .await
+            .expect("init ok");
+        for (earlier, expected) in [
+            ("Accept-Encoding", "Accept-Encoding, Origin"),
+            ("accept-encoding, origin", "accept-encoding, origin"),
+            ("*", "*"),
+        ] {
+            let mut msg = Message::new("http.request");
+            msg.set_meta("http.method", "GET");
+            msg.set_meta("http.header.origin", "https://a.example");
+            msg.set_meta("resp.header.vary", earlier);
+            let meta: Vec<(String, String)> = match block
+                .handle(&TestContext::new(), msg, InputStream::empty())
+                .await
+                .collect_buffered()
+                .await
+            {
+                Err(TerminalNotResponse::Continue(msg)) => {
+                    msg.meta.into_iter().map(|m| (m.key, m.value)).collect()
+                }
+                other => panic!("expected Continue, got {other:?}"),
+            };
+            let varies: Vec<&str> = meta
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case("resp.header.vary"))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(varies, vec![expected], "{earlier}: {meta:?}");
+        }
     }
 }
