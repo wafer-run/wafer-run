@@ -7,7 +7,12 @@ use wafer_block::{
 };
 
 use super::Wafer;
-use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::Instant};
+use crate::{
+    context::RuntimeContext,
+    observability::ObservabilityBus,
+    platform::Instant,
+    waferflow::{plan::CompiledFlow, ResponderRecord},
+};
 
 /// Identity fields for the observability bracket around one block dispatch.
 pub(crate) struct DispatchObs<'a> {
@@ -51,8 +56,8 @@ pub(crate) struct DispatchInit<'a> {
 ///
 /// 1. Lazy init — fast path on `slot`'s cached outcome; on the first
 ///    dispatch (or while init is in flight) build the init inputs via
-///    `make_init` and run the init pipeline, converting failures into a
-///    terminal error stream (`Err`).
+///    `make_init` and run the init pipeline, returning a failure as the
+///    typed error (`Err`) the caller turns into its terminal.
 /// 2. Observability — bracket the dispatch in the opt-in
 ///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
 ///
@@ -68,7 +73,7 @@ pub(crate) async fn run_resolved<'a, T, Fut>(
     msg: Message,
     input: InputStream,
     invoke: impl FnOnce(Message, InputStream) -> Fut,
-) -> Result<T, OutputStream>
+) -> Result<T, WaferError>
 where
     Fut: std::future::Future<Output = T>,
 {
@@ -81,10 +86,7 @@ where
     match target.slot.try_cached() {
         Some(Ok(_)) => {}
         Some(Err(e)) => {
-            return Err(OutputStream::error(super::init_error_to_wafer_error(
-                target.resolved,
-                e,
-            )));
+            return Err(super::init_error_to_wafer_error(target.resolved, e));
         }
         None => {
             let init = make_init();
@@ -98,10 +100,7 @@ where
             )
             .await
             {
-                return Err(OutputStream::error(super::init_error_to_wafer_error(
-                    target.resolved,
-                    e,
-                )));
+                return Err(super::init_error_to_wafer_error(target.resolved, e));
             }
         }
     }
@@ -112,6 +111,31 @@ where
         span.end();
     }
     Ok(out)
+}
+
+/// The error for a flow id that names no flow.
+pub(crate) fn flow_not_found(flow_id: &str) -> WaferError {
+    WaferError::new(ErrorCode::NotFound, format!("flow not found: {flow_id}"))
+}
+
+/// A flow's execution plan: the seal-compiled one, or one compiled for this
+/// invocation. See [`Wafer::flow_plan`].
+pub(crate) enum FlowPlan<'a> {
+    /// Compiled at `seal()`.
+    Sealed(&'a CompiledFlow),
+    /// Compiled for this invocation.
+    AdHoc(Box<CompiledFlow>),
+}
+
+impl std::ops::Deref for FlowPlan<'_> {
+    type Target = CompiledFlow;
+
+    fn deref(&self) -> &CompiledFlow {
+        match self {
+            Self::Sealed(plan) => plan,
+            Self::AdHoc(plan) => plan,
+        }
+    }
 }
 
 impl Wafer {
@@ -143,38 +167,60 @@ impl Wafer {
         if let Some(refused) = self.refuse_unless_sealed() {
             return refused;
         }
-        // Seal-compiled plan (PERF-03). Flows added after `seal()` are not in
-        // the plan and are compiled ad hoc for this invocation, which is no
-        // more work than the per-step reparsing the executor previously did
-        // every run.
-        let ad_hoc;
-        let compiled: &crate::waferflow::plan::CompiledFlow =
-            if let Some(compiled) = self.plan.flows.get(flow_id) {
-                compiled
-            } else if let Some(flow) = self.flows.get(flow_id) {
-                ad_hoc = crate::waferflow::plan::compile_flow(self, flow);
-                &ad_hoc
-            } else {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::NotFound,
-                    format!("flow not found: {flow_id}"),
-                ));
-            };
+        match self.flow_plan(flow_id) {
+            Some(plan) => {
+                self.run_plan(&plan, msg, input, ResponderRecord::new())
+                    .await
+            }
+            None => OutputStream::error(flow_not_found(flow_id)),
+        }
+    }
 
+    /// The execution plan of flow `flow_id`, if it exists. Seal-compiled
+    /// (PERF-03); a flow added after `seal()` is not in the plan and is
+    /// compiled ad hoc for this invocation, which is no more work than the
+    /// per-step reparsing the executor previously did every run.
+    pub(crate) fn flow_plan(&self, flow_id: &str) -> Option<FlowPlan<'_>> {
+        if let Some(compiled) = self.plan.flows.get(flow_id) {
+            Some(FlowPlan::Sealed(compiled))
+        } else {
+            self.flows.get(flow_id).map(|flow| {
+                FlowPlan::AdHoc(Box::new(crate::waferflow::plan::compile_flow(self, flow)))
+            })
+        }
+    }
+
+    /// Execute `plan` with the observability hooks and its timeout.
+    /// `responder_record` is the executor's record of the `msg` entries a
+    /// responding step wrote (empty unless this is a `next` transfer).
+    pub(crate) async fn run_plan(
+        &self,
+        plan: &CompiledFlow,
+        msg: Message,
+        input: InputStream,
+        responder_record: ResponderRecord,
+    ) -> OutputStream {
         // Observability: flow start
-        self.hooks.fire_flow_start(flow_id, &msg);
+        self.hooks.fire_flow_start(&plan.id, &msg);
         let start = Instant::now();
 
         // Set up flow-level timeout via deadline (parsed once at compile).
         let cancelled = Arc::new(AtomicBool::new(false));
-        let deadline = compiled.timeout.map(|t| Instant::now() + t);
+        let deadline = plan.timeout.map(|t| Instant::now() + t);
 
-        let result =
-            crate::waferflow::execute_waferflow(compiled, msg, input, self, &cancelled, deadline)
-                .await;
+        let result = crate::waferflow::execute_waferflow(
+            plan,
+            msg,
+            input,
+            self,
+            &cancelled,
+            deadline,
+            responder_record,
+        )
+        .await;
 
         // Observability: flow end
-        self.hooks.fire_flow_end(flow_id, start.elapsed());
+        self.hooks.fire_flow_end(&plan.id, start.elapsed());
 
         result
     }
@@ -267,7 +313,7 @@ impl Wafer {
             |msg, input| block.handle(&ctx, msg, input),
         )
         .await
-        .unwrap_or_else(|init_failure| init_failure)
+        .unwrap_or_else(OutputStream::error)
     }
 
     /// The once-success init slot paired with a registered block.

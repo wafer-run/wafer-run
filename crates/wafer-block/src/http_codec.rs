@@ -415,7 +415,9 @@ pub fn error_to_http_response(err: &WaferError) -> HttpResponseParts {
 ///   [`buffered_to_http_response`] (status override or `200`, meta headers,
 ///   default `Content-Type: application/json`).
 /// - `Error(WaferError)` → [`error_to_http_response`].
-/// - `Drop` → `204 No Content`, no headers, empty body.
+/// - `Drop` → `204 No Content`, empty body, the headers and cookies of the
+///   drop's meta (no `Content-Type`: there is no body; a `resp.status` on
+///   the meta is ignored — a drop is a 204).
 /// - `Continue` → empty-body `200` with the message's response meta applied
 ///   and `Content-Type: application/json` (the HTTP boundary has nowhere
 ///   further to forward).
@@ -428,9 +430,9 @@ pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
 
         Err(TerminalNotResponse::Error(err)) => error_to_http_response(&err),
 
-        Err(TerminalNotResponse::Drop) => HttpResponseParts {
+        Err(TerminalNotResponse::Drop { meta }) => HttpResponseParts {
             status: 204,
-            headers: Vec::new(),
+            headers: non_content_type_headers_from_meta(&meta),
             body: Vec::new(),
         },
 
@@ -481,7 +483,7 @@ fn headers_from_meta(meta: &[MetaEntry]) -> Vec<(String, String)> {
 
 /// Like [`headers_from_meta`] but drops `ContentType` parts — for the
 /// Error/Continue arms whose `Content-Type` is fixed to
-/// [`DEFAULT_RESPONSE_CONTENT_TYPE`].
+/// [`DEFAULT_RESPONSE_CONTENT_TYPE`], and the bodiless Drop arm.
 fn non_content_type_headers_from_meta(meta: &[MetaEntry]) -> Vec<(String, String)> {
     let mut headers = headers_from_meta(meta);
     headers.retain(|(name, _)| name != "Content-Type");
@@ -894,6 +896,35 @@ mod tests {
         let parts = collect_http_response(OutputStream::drop_request()).await;
         assert_eq!(parts.status, 204);
         assert!(parts.headers.is_empty());
+        assert!(parts.body.is_empty());
+    }
+
+    /// A drop's meta reaches the 204: its headers and cookies (a
+    /// cross-origin caller needs the CORS headers to read even an empty
+    /// response), never a `Content-Type` or a status other than 204.
+    #[tokio::test]
+    async fn drop_with_meta_maps_to_204_carrying_its_headers() {
+        let parts = collect_http_response(OutputStream::drop_request_with_meta(vec![
+            entry(
+                "resp.header.Access-Control-Allow-Origin",
+                "https://a.example",
+            ),
+            entry("resp.set_cookie.sid", "sid=1; Path=/"),
+            entry(META_RESP_CONTENT_TYPE, "text/plain"),
+            entry(META_RESP_STATUS, "200"),
+        ]))
+        .await;
+        assert_eq!(parts.status, 204);
+        assert_eq!(
+            parts.headers,
+            vec![
+                (
+                    "Access-Control-Allow-Origin".to_string(),
+                    "https://a.example".to_string()
+                ),
+                ("Set-Cookie".to_string(), "sid=1; Path=/".to_string()),
+            ]
+        );
         assert!(parts.body.is_empty());
     }
 

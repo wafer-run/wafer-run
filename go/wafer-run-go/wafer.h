@@ -119,7 +119,7 @@ char* wafer_register(WaferRuntime* w, const char* name, const char* path);
  * Returns immediately. Invokes `cb` with a JSON result string of the form
  *   {"action": "respond|drop|error|continue|halt", ...}
  *
- * Every action but "drop" carries a "meta" object holding ONLY the canonical
+ * Every action carries a "meta" object holding ONLY the canonical
  * response keys — "resp.status", "resp.header.*", "resp.cookie.*",
  * "resp.content_type" — for the host to apply to its response. Request state
  * (headers, cookies, caller identity, client IP, query) never crosses this

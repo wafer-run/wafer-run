@@ -39,6 +39,56 @@
   `{org}/{block}/{folder}`: a block writing its plain folder `uploads` needs
   the entry `acme/app/uploads`, and a bare `uploads` entry (which the field
   doc used to describe as covering `uploads/*`) now admits nothing.
+- A flow that stops early keeps the response headers its middleware set.
+  A step's `Error` (under `on_error = "stop"`), `Halt` or `Drop`, and an error
+  the executor raises itself (step budget, deadline, a failing `next`
+  condition, an unresolvable input, a missing block, a `next` transfer to an
+  unknown flow), used to return only the stopping step's own meta, so every
+  401/403/404/429 behind `security-headers` and `cors` shipped without CSP,
+  `X-Content-Type-Options` or `Access-Control-Allow-Origin` (a browser cannot
+  even read a cross-origin error without the last). The flow boundary now
+  carries the flow message's `resp.header.*` and `resp.set_cookie.*` entries
+  that a middleware (`Continue`) step left there, or that the flow's inbound
+  message carried, after any middleware overwrote or removed one. Cookie
+  semantics: a cookie a middleware set (a refreshed session) is carried onto
+  the error; a cookie a responding step set is NOT — that response was
+  discarded, so a login step's session cookie is never set on a failed
+  request — and neither is any header a responding step set (a static
+  file's `Cache-Control: immutable` must not cache a 500), unless a later
+  middleware rewrote it; where a responding step overwrote a middleware's
+  header or cookie, the middleware's entry is carried in its place (CORS's
+  `Vary: Origin` survives an asset step's `Vary: Accept-Encoding`, and
+  `X-Frame-Options` reverts to the security-headers value). Never carried, whatever set them: body-describing
+  headers (`Content-*`, `ETag`, `Last-Modified`, `Location`,
+  `Accept-Ranges`), `resp.status`, `resp.content_type`, the stopping step's
+  own partial output (streamed `Meta` before an `Error`), and a parallel
+  branch's message (discarded at the join, as on success). The terminal's
+  own entries win: a header by name, case-insensitively; a cookie by name,
+  `Path` (case-sensitive; a missing `Path` is not `Path=/`, since the
+  browser derives it from the request URI) and `Domain` — not by its
+  `resp.set_cookie.*` key, which
+  `ResponseBuilder` assigns by position (`.0`, `.1`, …) so unrelated cookies
+  from two producers collide. `Vary` values are unioned, so the CORS
+  middleware's `Vary: Origin` survives a terminal's own `Vary`. The same
+  header, cookie and `Vary` rules now apply when a responding step's meta is
+  laid over the flow message on the success path (before, a responder's
+  `resp.set_cookie.0` replaced a middleware's unrelated `resp.set_cookie.0`,
+  and a header differing only in case was emitted twice). A `next` flow
+  transfer hands the target flow the message and the record of what
+  responding steps wrote, and returns its terminal unchanged. A WASM guest's
+  `Error` is still sanitized by the guest egress allowlist before the
+  executor sees it; carried entries come from the host's flow message, never
+  from the guest's output. `Drop` now carries response meta so a flow's drop
+  can keep its CORS headers: `StreamEvent::Drop` and
+  `TerminalNotResponse::Drop` are struct variants `Drop { meta }` (match
+  `Drop { .. }`), and `OutputStream::drop_request_with_meta` /
+  `OutputSink::drop_request_with_meta` build one (`drop_request()` is the
+  empty-meta drop). The HTTP codec renders a drop as a `204` with its meta's
+  headers and cookies (no `Content-Type`, `resp.status` ignored), and the
+  embedder wire format's `drop` action now carries `meta` (headers and
+  cookies only) like every other action. Forwarders that re-emit a received
+  `Drop` must pass its meta on. Internal: `runner::run_resolved` returns its
+  init failure as a `WaferError`.
 - A block is the name it is registered under. `register_block` (and every
   path built on it: `load_inventory_blocks`, the lockfile loader,
   `embed::register_path` behind the Node/Go/C bindings) refuses a block whose

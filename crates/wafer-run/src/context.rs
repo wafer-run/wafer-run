@@ -375,7 +375,7 @@ impl RuntimeContext {
             },
         )
         .await
-        .unwrap_or_else(|init_failure| init_failure)
+        .unwrap_or_else(OutputStream::error)
     }
 }
 

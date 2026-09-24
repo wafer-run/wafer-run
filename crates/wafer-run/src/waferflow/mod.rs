@@ -7,5 +7,7 @@ pub(crate) mod executor;
 /// Seal-time flow compilation (PERF-03): expressions parsed, configs
 /// flattened, blocks resolved, jump targets indexed — once per flow.
 pub(crate) mod plan;
+mod response_meta;
 
 pub(crate) use executor::execute as execute_waferflow;
+pub(crate) use response_meta::ResponderRecord;

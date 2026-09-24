@@ -216,7 +216,7 @@ impl StreamState {
                     self.last_error = Some(err.clone());
                     return Err(err);
                 }
-                Some(StreamEvent::Drop) => {
+                Some(StreamEvent::Drop { .. }) => {
                     self.response_stream = None;
                     let err =
                         WaferError::new(ErrorCode::Aborted, "target block dropped the request");

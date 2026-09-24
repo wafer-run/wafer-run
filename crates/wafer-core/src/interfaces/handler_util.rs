@@ -118,7 +118,7 @@ where
                     let _ = sink.error(*e).await;
                     return;
                 }
-                StreamEvent::Drop | StreamEvent::Continue(_) | StreamEvent::Halt { .. } => {
+                StreamEvent::Drop { .. } | StreamEvent::Continue(_) | StreamEvent::Halt { .. } => {
                     let _ = sink
                         .error(WaferError::new(
                             ErrorCode::Internal,

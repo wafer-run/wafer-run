@@ -128,13 +128,24 @@ impl OutputSink {
         self.send_terminal(StreamEvent::Error(Box::new(err)))
     }
 
-    /// Terminal. The block chose to drop the request (HTTP 204-equivalent).
+    /// Terminal. The block chose to drop the request (HTTP 204-equivalent),
+    /// with no response meta.
     ///
     /// Refused if a `Chunk`/`Meta` was already emitted on this sink: a `Drop`
     /// carries no body, so following body events with it is a protocol
     /// violation. In that case no event is sent and
     /// [`SinkSendError::BodyAlreadySent`] is returned.
-    pub async fn drop_request(mut self) -> Result<(), SinkSendError> {
+    pub async fn drop_request(self) -> Result<(), SinkSendError> {
+        self.drop_request_with_meta(Vec::new()).await
+    }
+
+    /// Terminal. Like [`Self::drop_request`], carrying response `meta`
+    /// (headers, cookies) for the bodiless response — what a forwarder uses
+    /// to pass on a `Drop` it received.
+    pub async fn drop_request_with_meta(
+        mut self,
+        meta: Vec<MetaEntry>,
+    ) -> Result<(), SinkSendError> {
         if self
             .any_body_sent
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -142,7 +153,7 @@ impl OutputSink {
             tracing::warn!("Drop terminal cannot follow Chunk or Meta events; refusing");
             return Err(SinkSendError::BodyAlreadySent("Drop"));
         }
-        self.send_terminal(StreamEvent::Drop)
+        self.send_terminal(StreamEvent::Drop { meta })
             .map_err(SinkSendError::from)
     }
 
@@ -287,9 +298,16 @@ impl OutputStream {
         Self::from_events([StreamEvent::Error(Box::new(err))])
     }
 
-    /// Buffered helper: emits a single Drop terminal event.
+    /// Buffered helper: emits a single Drop terminal event with no response
+    /// meta.
     pub fn drop_request() -> Self {
-        Self::from_events([StreamEvent::Drop])
+        Self::drop_request_with_meta(Vec::new())
+    }
+
+    /// Buffered helper: emits a single Drop terminal event carrying response
+    /// `meta` (headers, cookies) for the bodiless response.
+    pub fn drop_request_with_meta(meta: Vec<MetaEntry>) -> Self {
+        Self::from_events([StreamEvent::Drop { meta }])
     }
 
     /// Buffered helper: emits a single Continue terminal event.
@@ -391,8 +409,11 @@ pub struct BufferedResponse {
 pub enum TerminalNotResponse {
     /// Stream ended with [`StreamEvent::Error`].
     Error(WaferError),
-    /// Stream ended with [`StreamEvent::Drop`].
-    Drop,
+    /// Stream ended with [`StreamEvent::Drop`]. Carries its response meta.
+    Drop {
+        /// Response meta (headers, cookies) for the bodiless response.
+        meta: Vec<MetaEntry>,
+    },
     /// Stream ended with [`StreamEvent::Halt`] — block produced a response
     /// AND requests short-circuit. Carries the buffered response.
     Halt(BufferedResponse),
@@ -406,7 +427,7 @@ impl std::fmt::Display for TerminalNotResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Error(e) => write!(f, "block error: {e}"),
-            Self::Drop => write!(f, "block dropped the request"),
+            Self::Drop { .. } => write!(f, "block dropped the request"),
             Self::Halt(buf) => write!(
                 f,
                 "block halted the flow ({} body bytes, {} meta entries)",
@@ -423,7 +444,7 @@ impl From<TerminalNotResponse> for WaferError {
     fn from(t: TerminalNotResponse) -> Self {
         match t {
             TerminalNotResponse::Error(e) => e,
-            TerminalNotResponse::Drop => WaferError {
+            TerminalNotResponse::Drop { .. } => WaferError {
                 code: crate::core_types::ErrorCode::Unknown,
                 message: "block dropped the request".into(),
                 meta: vec![],
@@ -498,7 +519,9 @@ impl OutputStream {
                     }));
                 }
                 StreamEvent::Error(e) => return Err(TerminalNotResponse::Error(*e)),
-                StreamEvent::Drop => return Err(TerminalNotResponse::Drop),
+                StreamEvent::Drop { meta: drop_meta } => {
+                    return Err(TerminalNotResponse::Drop { meta: drop_meta })
+                }
                 StreamEvent::Continue(msg) => return Err(TerminalNotResponse::Continue(msg)),
             }
         }
@@ -535,7 +558,7 @@ impl OutputStream {
                 StreamEvent::Error(e) => Some(Err(*e)),
                 StreamEvent::Meta(_) => None,
                 StreamEvent::Complete { .. }
-                | StreamEvent::Drop
+                | StreamEvent::Drop { .. }
                 | StreamEvent::Continue(_)
                 | StreamEvent::Halt { .. } => None,
             }
@@ -666,7 +689,7 @@ mod tests {
     async fn sink_drop_terminal() {
         let (mut rx, sink, _cancel) = new_streaming_channel(16);
         sink.drop_request().await.unwrap();
-        assert_eq!(rx.recv().await.unwrap(), StreamEvent::Drop);
+        assert_eq!(rx.recv().await.unwrap(), StreamEvent::Drop { meta: vec![] });
     }
 
     #[tokio::test]
@@ -732,7 +755,32 @@ mod tests {
         let stream = OutputStream::drop_request();
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0], StreamEvent::Drop);
+        assert_eq!(events[0], StreamEvent::Drop { meta: vec![] });
+    }
+
+    /// A forwarder passes a received drop's response meta on, through the
+    /// sink as through the buffered helper.
+    #[tokio::test]
+    async fn drop_request_with_meta_carries_its_meta_to_the_collector() {
+        let acao = MetaEntry {
+            key: "resp.header.Access-Control-Allow-Origin".into(),
+            value: "https://a.example".into(),
+        };
+        let (stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.drop_request_with_meta(vec![acao.clone()])
+            .await
+            .expect("consumer is alive");
+        match stream.collect_buffered().await {
+            Err(TerminalNotResponse::Drop { meta }) => assert_eq!(meta, vec![acao.clone()]),
+            other => panic!("expected a Drop terminal, got {other:?}"),
+        }
+        match OutputStream::drop_request_with_meta(vec![acao.clone()])
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Drop { meta }) => assert_eq!(meta, vec![acao]),
+            other => panic!("expected a Drop terminal, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -825,7 +873,7 @@ mod tests {
     async fn collect_buffered_errors_on_drop_terminal() {
         let stream = OutputStream::drop_request();
         let result = stream.collect_buffered().await;
-        assert!(matches!(result, Err(TerminalNotResponse::Drop)));
+        assert!(matches!(result, Err(TerminalNotResponse::Drop { .. })));
     }
 
     #[tokio::test]

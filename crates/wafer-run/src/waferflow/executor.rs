@@ -48,6 +48,51 @@
 //! the original body for the next step without ever having copied it.
 //! Parallel branches snapshot the body with an `Arc` clone. Mutations
 //! (pipeline outputs, `each` items) replace the `Arc` wholesale.
+//!
+//! # Response meta across steps
+//!
+//! A responding step's meta is laid over the flow message with the rules in
+//! [`super::response_meta`]: a header replaces the message's header of the
+//! same name (case-insensitively), `Vary` values are unioned, and a cookie
+//! replaces the message's cookie of the same name, `Path` and `Domain` —
+//! never an unrelated cookie that happens to share its positional
+//! `resp.set_cookie.N` key.
+//!
+//! # Short-circuit terminals keep the middleware's response headers
+//!
+//! A flow that stops early — a step's `Error` under `on_error = "stop"`, a
+//! step's `Halt` or `Drop`, or an error the executor raises itself (budget,
+//! deadline, a failing `next` condition, an unresolvable input, a missing
+//! block or transfer target) — returns that terminal with the middleware's
+//! response headers and cookies carried onto it. Carried: the
+//! `resp.header.*` and `resp.set_cookie.*` entries on the flow message at the
+//! moment the flow stopped that a middleware step (`Continue`) left there, or
+//! that the flow's inbound message carried — CORS, security headers, a
+//! refreshed session cookie — after any middleware overwrote or removed one.
+//! Not carried:
+//! - what a responding step wrote (its headers and cookies describe a
+//!   response the flow discarded: a static file's year-long `Cache-Control`
+//!   must not cache a 500, a login step's session cookie must not be set on a
+//!   failed request), unless a later middleware rewrote the entry. Where a
+//!   responder overwrote a middleware's header or cookie, the middleware's
+//!   entry is carried in its place: CORS's `Vary: Origin` survives an asset
+//!   step's `Vary: Accept-Encoding`, `X-Frame-Options` reverts to the
+//!   security-headers value;
+//! - body-describing headers (`Content-*`, `ETag`, `Last-Modified`,
+//!   `Location`, `Accept-Ranges`) and `resp.status` / `resp.content_type`,
+//!   whatever set them: the terminal has its own body;
+//! - the stopping step's own partial output — an erroring block's streamed
+//!   `Meta` events are discarded with its partial body, and its `Continue`
+//!   message is never applied;
+//! - a parallel branch's message changes, discarded at the join (see step
+//!   semantics).
+//!
+//! The terminal's own entries are laid over the carried ones with the same
+//! rules as a responding step's, so the terminal wins and `Vary` is unioned.
+//! A flow transfer (`next` to another flow) hands the target the message and
+//! the record of what responding steps wrote, so the target's boundary
+//! applies the same rule; a transfer to an unknown flow errors with the
+//! carried headers.
 
 use std::{
     collections::HashMap,
@@ -61,12 +106,15 @@ use wafer_block::{
     core_types::*,
     streams::{
         input::InputStream,
-        output::{OutputStream, TerminalNotResponse},
+        output::{BufferedResponse, OutputStream, TerminalNotResponse},
     },
 };
 use wafer_flow::Accumulator;
 
-use super::plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget};
+use super::{
+    plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget},
+    response_meta,
+};
 use crate::{
     platform::{BoxFuture, Instant},
     runtime::Wafer,
@@ -89,6 +137,11 @@ struct ExecState {
     acc: Accumulator,
     body: Arc<Vec<u8>>,
     msg: Message,
+    /// The `msg` response headers and cookies a responding step wrote and
+    /// no middleware has rewritten since, each with the middleware entries
+    /// it displaced — what a short-circuit terminal carries in its place
+    /// (see the module docs).
+    responder_record: response_meta::ResponderRecord,
 }
 
 /// How a single block invocation concluded (when it did not short-circuit
@@ -99,6 +152,42 @@ enum InvocationOutcome {
     /// The block was middleware (`Continue`) or errored under a non-`stop`
     /// `on_error` policy; `ExecState::body` holds the restored input.
     NoOutput,
+}
+
+/// A terminal that stops the flow before it runs out of steps. Kept typed
+/// until the flow boundary so [`ShortCircuit::into_output`] can carry the
+/// flow's response headers onto it (see the module docs).
+enum ShortCircuit {
+    /// A step failed under `on_error = "stop"`, or the executor raised an
+    /// error of its own.
+    Error(WaferError),
+    /// A step produced a response and asked the flow to stop.
+    Halt(BufferedResponse),
+    /// A step dropped the request; carries the drop's response meta.
+    Drop(Vec<MetaEntry>),
+}
+
+impl ShortCircuit {
+    /// The flow's terminal: this short-circuit laid over the middleware
+    /// response headers of `state`'s message (see the module docs).
+    fn into_output(self, state: &ExecState) -> OutputStream {
+        let with_carried = |own: Vec<MetaEntry>| {
+            let mut meta = response_meta::carried(&state.msg.meta, &state.responder_record);
+            response_meta::overlay(&mut meta, own);
+            meta
+        };
+        match self {
+            Self::Error(mut err) => {
+                err.meta = with_carried(std::mem::take(&mut err.meta));
+                OutputStream::error(err)
+            }
+            Self::Halt(buf) => OutputStream::from_buffered_response(BufferedResponse {
+                body: buf.body,
+                meta: with_carried(buf.meta),
+            }),
+            Self::Drop(meta) => OutputStream::drop_request_with_meta(with_carried(meta)),
+        }
+    }
 }
 
 /// Take the body buffer out of its `Arc` for a consumer that needs owned
@@ -116,7 +205,11 @@ fn unwrap_body(body: Arc<Vec<u8>>) -> Vec<u8> {
 /// array; steps carrying `parallel` run their branches concurrently first —
 /// see the module docs for the precise semantics.
 ///
-/// Short-circuits on Error or Drop terminals from any step.
+/// Short-circuits on a step's Error (under `on_error = "stop"`), Halt or Drop
+/// terminal, carrying the middleware's response headers onto it (see the
+/// module docs). `responder_record` is the record of the `msg` entries a
+/// responding step already wrote: empty for a fresh run, the transferring
+/// flow's record for a `next` transfer.
 pub(crate) async fn execute(
     flow: &CompiledFlow,
     msg: Message,
@@ -124,6 +217,7 @@ pub(crate) async fn execute(
     wafer: &Wafer,
     cancelled: &Arc<AtomicBool>,
     deadline: Option<Instant>,
+    responder_record: response_meta::ResponderRecord,
 ) -> OutputStream {
     let mut acc = Accumulator::new();
 
@@ -152,6 +246,7 @@ pub(crate) async fn execute(
         acc,
         body: Arc::new(body),
         msg,
+        responder_record,
     };
 
     let steps = &flow.steps;
@@ -162,7 +257,7 @@ pub(crate) async fn execute(
         let step = &steps[current];
 
         if let Err(short_circuit) = run_step(&env, step, &mut state).await {
-            return short_circuit;
+            return short_circuit.into_output(&state);
         }
 
         // --- Advance ---
@@ -183,14 +278,15 @@ pub(crate) async fn execute(
                         // design in the expression layer; only genuine
                         // evaluation errors reach here.)
                         Err(e) => {
-                            return OutputStream::error(WaferError::new(
+                            return ShortCircuit::Error(WaferError::new(
                                 ErrorCode::InvalidArgument,
                                 format!(
                                     "flow '{}' step '{}': condition '{condition}' failed to \
                                      evaluate: {e}",
                                     flow.id, step.id
                                 ),
-                            ));
+                            ))
+                            .into_output(&state);
                         }
                     },
                 };
@@ -202,21 +298,31 @@ pub(crate) async fn execute(
                             routed = true;
                         }
                         NextTarget::MissingStep(target_step) => {
-                            return OutputStream::error(WaferError::new(
+                            return ShortCircuit::Error(WaferError::new(
                                 ErrorCode::NotFound,
                                 format!("next target step '{target_step}' not found"),
-                            ));
+                            ))
+                            .into_output(&state);
                         }
                         NextTarget::Flow(target_flow) => {
                             // Flow transfer: execute the target flow (boxed to
-                            // break recursion)
-                            let flow_result = Box::pin(wafer.run(
-                                target_flow,
+                            // break recursion). Its terminal is returned as-is:
+                            // the target runs with this flow's message and
+                            // responder record, so its own boundary carries
+                            // the middleware's response headers.
+                            let Some(target) = wafer.flow_plan(target_flow) else {
+                                return ShortCircuit::Error(
+                                    crate::runtime::runner::flow_not_found(target_flow),
+                                )
+                                .into_output(&state);
+                            };
+                            return Box::pin(wafer.run_plan(
+                                &target,
                                 state.msg,
                                 InputStream::from_bytes(unwrap_body(state.body)),
+                                state.responder_record,
                             ))
                             .await;
-                            return flow_result;
                         }
                         // Entry with neither `step` nor `flow`: taking it ends
                         // routing without jumping (sequential advance below).
@@ -250,9 +356,9 @@ pub(crate) async fn execute(
 }
 
 /// Charge one unit of the shared step budget; error once it is exhausted.
-fn check_budget(env: &StepEnv<'_>) -> Result<(), OutputStream> {
+fn check_budget(env: &StepEnv<'_>) -> Result<(), ShortCircuit> {
     if env.steps_used.fetch_add(1, Ordering::Relaxed) >= env.flow.max_steps {
-        return Err(OutputStream::error(WaferError::new(
+        return Err(ShortCircuit::Error(WaferError::new(
             ErrorCode::ResourceExhausted,
             format!(
                 "max steps ({}) exceeded in flow '{}'",
@@ -264,9 +370,9 @@ fn check_budget(env: &StepEnv<'_>) -> Result<(), OutputStream> {
 }
 
 /// Fail fast when the flow has been cancelled or its deadline has passed.
-fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), OutputStream> {
+fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), ShortCircuit> {
     if env.cancelled.load(Ordering::Relaxed) {
-        return Err(OutputStream::error(WaferError::new(
+        return Err(ShortCircuit::Error(WaferError::new(
             ErrorCode::Cancelled,
             "flow cancelled",
         )));
@@ -274,7 +380,7 @@ fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), OutputStream> {
     if let Some(dl) = env.deadline {
         if Instant::now() >= dl {
             env.cancelled.store(true, Ordering::Relaxed);
-            return Err(OutputStream::error(WaferError::new(
+            return Err(ShortCircuit::Error(WaferError::new(
                 ErrorCode::DeadlineExceeded,
                 format!("flow '{}' timed out", env.flow.id),
             )));
@@ -285,7 +391,7 @@ fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), OutputStream> {
 
 /// Execute one step: parallel branches first (if any), then the step's own
 /// block — fanned out per item when `each` is present. `Err` carries the
-/// stream that short-circuits the whole flow.
+/// terminal that short-circuits the whole flow.
 ///
 /// Returns a boxed future ([`BoxFuture`]) to break the async-recursion cycle
 /// step → parallel branch → step at the signature level.
@@ -293,7 +399,7 @@ fn run_step<'a>(
     env: &'a StepEnv<'a>,
     step: &'a CompiledStep,
     state: &'a mut ExecState,
-) -> BoxFuture<'a, Result<(), OutputStream>> {
+) -> BoxFuture<'a, Result<(), ShortCircuit>> {
     Box::pin(async move {
         check_budget(env)?;
         check_cancel_deadline(env)?;
@@ -329,11 +435,11 @@ async fn run_each(
     step: &CompiledStep,
     each: &CompiledEach,
     state: &mut ExecState,
-) -> Result<(), OutputStream> {
+) -> Result<(), ShortCircuit> {
     let items = match each.path.resolve(&state.acc) {
         Ok(serde_json::Value::Array(items)) => items,
         Ok(other) => {
-            return Err(OutputStream::error(WaferError::new(
+            return Err(ShortCircuit::Error(WaferError::new(
                 ErrorCode::InvalidArgument,
                 format!(
                     "each expression '{}' in step '{}' must resolve to an array, got {other}",
@@ -342,7 +448,7 @@ async fn run_each(
             )));
         }
         Err(e) => {
-            return Err(OutputStream::error(WaferError::new(
+            return Err(ShortCircuit::Error(WaferError::new(
                 ErrorCode::InvalidArgument,
                 format!(
                     "each expression '{}' in step '{}' failed to resolve: {e}",
@@ -362,7 +468,7 @@ async fn run_each(
             match serde_json::to_vec(&item) {
                 Ok(bytes) => state.body = Arc::new(bytes),
                 Err(e) => {
-                    return Err(OutputStream::error(WaferError::new(
+                    return Err(ShortCircuit::Error(WaferError::new(
                         ErrorCode::Internal,
                         format!(
                             "failed to serialize each item {index} for step '{}': {e}",
@@ -390,7 +496,7 @@ async fn run_each(
     state.body = match serde_json::to_vec(&results) {
         Ok(bytes) => Arc::new(bytes),
         Err(e) => {
-            return Err(OutputStream::error(WaferError::new(
+            return Err(ShortCircuit::Error(WaferError::new(
                 ErrorCode::Internal,
                 format!("failed to serialize results of step '{}': {e}", step.id),
             )));
@@ -416,7 +522,7 @@ async fn run_parallel(
     env: &StepEnv<'_>,
     branches: &[CompiledBranch],
     state: &mut ExecState,
-) -> Result<(), OutputStream> {
+) -> Result<(), ShortCircuit> {
     // Freeze the pre-fork accumulator. `state.acc` is left empty while the
     // branches run; it is restored from `parent` before any return below.
     let parent = Arc::new(std::mem::take(&mut state.acc));
@@ -426,6 +532,7 @@ async fn run_parallel(
             acc: Accumulator::branch_from(parent.clone()),
             body: state.body.clone(),
             msg: state.msg.clone(),
+            responder_record: state.responder_record.clone(),
         };
         async move {
             run_branch_steps(env, &branch.steps, &mut branch_state)
@@ -477,10 +584,10 @@ async fn run_branch_steps(
     env: &StepEnv<'_>,
     steps: &[CompiledStep],
     state: &mut ExecState,
-) -> Result<(), OutputStream> {
+) -> Result<(), ShortCircuit> {
     for step in steps {
         if step.next.is_some() {
-            return Err(OutputStream::error(WaferError::new(
+            return Err(ShortCircuit::Error(WaferError::new(
                 ErrorCode::InvalidArgument,
                 format!(
                     "step '{}': 'next' routing inside parallel branches is not supported — branch steps run strictly in order",
@@ -501,7 +608,7 @@ async fn run_invocation(
     env: &StepEnv<'_>,
     step: &CompiledStep,
     state: &mut ExecState,
-) -> Result<InvocationOutcome, OutputStream> {
+) -> Result<InvocationOutcome, ShortCircuit> {
     check_cancel_deadline(env)?;
 
     // --- Resolve input (data pipeline mode; template compiled at seal) ---
@@ -510,14 +617,14 @@ async fn run_invocation(
             Ok(val) => match serde_json::to_vec(&val) {
                 Ok(data) => state.body = Arc::new(data),
                 Err(e) => {
-                    return Err(OutputStream::error(WaferError::new(
+                    return Err(ShortCircuit::Error(WaferError::new(
                         ErrorCode::Internal,
                         format!("failed to serialize input for step '{}': {}", step.id, e),
                     )));
                 }
             },
             Err(e) => {
-                return Err(OutputStream::error(WaferError::new(
+                return Err(ShortCircuit::Error(WaferError::new(
                     ErrorCode::InvalidArgument,
                     format!("input resolution failed in step '{}': {}", step.id, e),
                 )));
@@ -532,7 +639,7 @@ async fn run_invocation(
     //     attribute all WRAP calls to the (arbitrary) step name and cause
     //     false denials. ---
     let Some(target) = &step.target else {
-        return Err(OutputStream::error(WaferError::new(
+        return Err(ShortCircuit::Error(WaferError::new(
             ErrorCode::NotFound,
             format!(
                 "block '{}' not found in step '{}'",
@@ -560,7 +667,7 @@ async fn run_invocation(
     // --- Execute block (lazy init + observability via the shared
     //     dispatch scaffold, panic recovery via run_block_with_recovery,
     //     stream collection inside the observed window). Init failure
-    //     surfaces as an error event so the flow short-circuits via the
+    //     comes back as a typed error so the flow short-circuits via the
     //     standard error path. ---
     // The block gets a lazily-cloned view of the shared body: the buffer is
     // copied only if the block polls its input, and `state.body` keeps the
@@ -596,7 +703,7 @@ async fn run_invocation(
     .await;
     let buf = match scaffold_result {
         Ok(buf) => buf,
-        Err(init_failure) => return Err(init_failure),
+        Err(init_failure) => return Err(ShortCircuit::Error(init_failure)),
     };
 
     // --- Process result ---
@@ -604,38 +711,47 @@ async fn run_invocation(
         Ok(response) => {
             state.body = Arc::new(response.body);
 
-            // Apply trailing meta to the message
-            for entry in response.meta {
-                state.msg.set_meta(entry.key, entry.value);
-            }
+            // Lay the response's meta over the message (see the module docs)
+            // and record which headers and cookies it wrote over what.
+            response_meta::apply_response(
+                &mut state.responder_record,
+                &mut state.msg.meta,
+                response.meta,
+            );
             Ok(InvocationOutcome::Responded)
         }
         Err(TerminalNotResponse::Error(e)) => {
             if env.flow.on_error_stop {
-                return Err(OutputStream::error(e));
+                return Err(ShortCircuit::Error(e));
             }
             // on_error=continue: clear body, fall through
             state.body = Arc::new(Vec::new());
             Ok(InvocationOutcome::NoOutput)
         }
-        Err(TerminalNotResponse::Drop) => {
+        Err(TerminalNotResponse::Drop { meta }) => {
             // Short-circuit: block requested drop
-            Err(OutputStream::drop_request())
+            Err(ShortCircuit::Drop(meta))
         }
         Err(TerminalNotResponse::Halt(buf)) => {
             // Short-circuit: block produced a response and requests halt.
-            // Forward the buffered response as a Halt terminal so the
-            // HTTP listener can serve it while preserving the signal.
-            Err(OutputStream::from_buffered_response(buf))
+            // The flow boundary forwards the buffered response as a Halt
+            // terminal so the HTTP listener can serve it while preserving
+            // the signal.
+            Err(ShortCircuit::Halt(buf))
         }
         Err(TerminalNotResponse::Continue(next_msg)) => {
             // Middleware block — update the message. The body was never
             // taken out of `state`, so the next step sees the original
             // input with no restore copy.
+            response_meta::after_continue(
+                &mut state.responder_record,
+                &state.msg.meta,
+                &next_msg.meta,
+            );
             state.msg = next_msg;
             Ok(InvocationOutcome::NoOutput)
         }
-        Err(TerminalNotResponse::Malformed) => Err(OutputStream::error(WaferError::new(
+        Err(TerminalNotResponse::Malformed) => Err(ShortCircuit::Error(WaferError::new(
             ErrorCode::Internal,
             format!(
                 "block '{}' in step '{}' produced malformed output stream",
