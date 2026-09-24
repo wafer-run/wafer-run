@@ -905,7 +905,10 @@ mod tests {
     #[tokio::test]
     async fn drop_with_meta_maps_to_204_carrying_its_headers() {
         let parts = collect_http_response(OutputStream::drop_request_with_meta(vec![
-            entry("resp.header.Access-Control-Allow-Origin", "https://a.example"),
+            entry(
+                "resp.header.Access-Control-Allow-Origin",
+                "https://a.example",
+            ),
             entry("resp.set_cookie.sid", "sid=1; Path=/"),
             entry(META_RESP_CONTENT_TYPE, "text/plain"),
             entry(META_RESP_STATUS, "200"),

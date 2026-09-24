@@ -142,7 +142,10 @@ impl OutputSink {
     /// Terminal. Like [`Self::drop_request`], carrying response `meta`
     /// (headers, cookies) for the bodiless response — what a forwarder uses
     /// to pass on a `Drop` it received.
-    pub async fn drop_request_with_meta(mut self, meta: Vec<MetaEntry>) -> Result<(), SinkSendError> {
+    pub async fn drop_request_with_meta(
+        mut self,
+        meta: Vec<MetaEntry>,
+    ) -> Result<(), SinkSendError> {
         if self
             .any_body_sent
             .load(std::sync::atomic::Ordering::Relaxed)

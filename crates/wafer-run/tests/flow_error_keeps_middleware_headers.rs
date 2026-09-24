@@ -52,8 +52,10 @@ impl Block for Unauthenticated {
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
         let mut err = WaferError::new(ErrorCode::Unauthenticated, "sign in first");
-        err.meta.push(meta("resp.header.WWW-Authenticate", "Bearer"));
-        err.meta.push(meta("resp.header.x-frame-options", "SAMEORIGIN"));
+        err.meta
+            .push(meta("resp.header.WWW-Authenticate", "Bearer"));
+        err.meta
+            .push(meta("resp.header.x-frame-options", "SAMEORIGIN"));
         OutputStream::error(err)
     }
 }
@@ -220,7 +222,7 @@ fn flow(id: &str, steps: Vec<serde_json::Value>) -> serde_json::Value {
         "id": id,
         "name": id,
         "version": "0.0.1",
-        "steps": steps,
+        "steps": serde_json::Value::Array(steps),
         "config": { "on_error": "stop" },
     })
 }
@@ -374,7 +376,10 @@ async fn only_what_the_completed_steps_left_on_the_message_is_carried() {
 
     let parts = run_http(&wafer, "api").await;
 
-    assert_eq!(parts.status, 500, "a middleware's resp.status must not mask the error");
+    assert_eq!(
+        parts.status, 500,
+        "a middleware's resp.status must not mask the error"
+    );
     assert_eq!(header(&parts, "Content-Type"), vec!["application/json"]);
     assert_middleware_headers(&parts);
     assert_eq!(
