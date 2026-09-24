@@ -73,6 +73,12 @@ pub enum VectorError {
     /// `json_extract` output is ill-defined for non-scalar JSON values.
     #[error("invalid metadata filter: {0}")]
     InvalidMetadataFilter(String),
+    /// A fault in reaching or using the store that says nothing about the
+    /// request and may clear on its own — a busy or locked SQLite file, a
+    /// refused connection. Retrying the same request later may succeed. Each
+    /// backend classifies its driver's errors into this variant.
+    #[error("vector store unavailable: {0}")]
+    Unavailable(String),
     /// Backend-internal failure.
     #[error("internal vector store error: {0}")]
     Internal(String),

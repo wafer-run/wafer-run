@@ -48,6 +48,15 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
         | VectorError::InvalidMetadataFilter(_) => {
             WaferError::new(ErrorCode::InvalidArgument, e.to_string())
         }
+        // Transient: the code tells a caller it may retry. The driver's
+        // message can name files and hosts, so it is logged, not returned.
+        VectorError::Unavailable(msg) => {
+            tracing::warn!(error = %msg, "vector store temporarily unavailable");
+            WaferError::new(
+                ErrorCode::Unavailable,
+                "vector store temporarily unavailable",
+            )
+        }
         VectorError::Internal(msg) => {
             tracing::error!(error = %msg, "vector internal error");
             WaferError::new(ErrorCode::Internal, "internal vector error")
@@ -294,5 +303,21 @@ pub async fn handle_embedding_message(
             ErrorCode::Unimplemented,
             format!("unknown embedding operation: {other}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wafer_block::ErrorCode;
+
+    use super::{vector_error_to_wafer, VectorError};
+
+    #[test]
+    fn unavailable_is_transient_and_scrubbed() {
+        let w = vector_error_to_wafer(VectorError::Unavailable(
+            "database is locked: /srv/data/app.db".into(),
+        ));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.message, "vector store temporarily unavailable");
     }
 }
