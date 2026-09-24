@@ -640,6 +640,10 @@
   instead of being re-resolved. The first `vectors` lint surfaced three
   clippy errors in `wafer-block-sqlite`'s `vector.rs`, fixed here, and
   `wafer-block-crypto` drops its unused `uuid` dependency.
+  The fixture crates' own Cargo.locks are seeded from the root one
+  (`scripts/fixture-locks.sh sync`), and `check.sh fixtures` fails when a
+  crate a fixture shares with the root lock resolves to a version the root
+  lock does not pin; run `sync` after changing the root lock.
 
 - `database.aggregate`'s `CaseWhenSum` counts `0`, not `NULL`, in an
   ungrouped query over no rows: it renders
