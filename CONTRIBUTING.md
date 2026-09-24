@@ -79,7 +79,7 @@ crates/
   wafer-flow/            Flow composition
   wafer-flow-http-server/HTTP server hosting flows
   wafer-core/            Runtime core
-  wafer-test-support/    Test fakes (FakeDb, FakeCrypto, WaferBuilder)
+  wafer-test-support/    Test runtime helper (WaferBuilder)
   wafer-sql-utils/       Type-safe SQL builders (use these, no raw SQL)
   wafer-ffi/             FFI bindings
   wafer-run-node/        Node-side host integration

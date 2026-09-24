@@ -4,6 +4,15 @@
 
 ### Breaking changes
 
+- `wafer-test-support` no longer ships `FakeDb`, `FakeCrypto`,
+  `WaferBuilder::with_fake_db` or `WaferBuilder::with_fake_crypto`. The
+  fakes parsed JSON request bodies while every production client encodes
+  MessagePack (`wafer_block::codec`), so a test routing
+  `wafer_core::clients::database::*` to them failed with `fake-db: bad
+  request`, and nothing used them. A test that needs a database registers
+  the real handler over an in-memory SQLite service
+  (`wafer_core::service_blocks::database::register_with_tables` with
+  `SQLiteDatabaseService::open_in_memory`); `WaferBuilder` stays.
 - `DEFAULT_SENSITIVE_HEADERS` adds `x-content-type-options`,
   `referrer-policy`, `permissions-policy`, `cross-origin-opener-policy` and
   `cross-origin-embedder-policy` — with HSTS, `x-frame-options` and CSP,
