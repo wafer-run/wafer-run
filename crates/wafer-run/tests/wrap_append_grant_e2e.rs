@@ -461,17 +461,26 @@ async fn append_only_inserts_cannot_add_columns() {
 
 /// An append-only insert may not choose a row's `id`, `created_at` or
 /// `updated_at` — the server stamps them, so an append-only grantee cannot
-/// forge or back-date an entry. The refusal covers every insert path and any
-/// letter case; a read-write grantee still chooses them.
+/// forge or back-date an entry. The refusal covers every insert path; a
+/// read-write grantee still chooses them. Another letter case (`ID`) is not a
+/// column name at all, so it is refused as `InvalidArgument` for every caller.
 #[tokio::test]
 async fn append_only_inserts_cannot_set_server_owned_columns() {
     let (wafer, sqlite) = build().await;
     let mut wrong = Vec::new();
-    for (column, value) in [
-        ("id", json!("forged")),
-        ("ID", json!("forged")),
-        ("created_at", json!("2000-01-01T00:00:00Z")),
-        ("updated_at", json!("2000-01-01T00:00:00Z")),
+    for (column, value, refusal) in [
+        ("id", json!("forged"), ErrorCode::PermissionDenied),
+        ("ID", json!("forged"), ErrorCode::InvalidArgument),
+        (
+            "created_at",
+            json!("2000-01-01T00:00:00Z"),
+            ErrorCode::PermissionDenied,
+        ),
+        (
+            "updated_at",
+            json!("2000-01-01T00:00:00Z"),
+            ErrorCode::PermissionDenied,
+        ),
     ] {
         let data = json!({ "action": "a", column: value });
         for (op, request) in [
@@ -489,9 +498,9 @@ async fn append_only_inserts_cannot_set_server_owned_columns() {
             ),
         ] {
             match call(&wafer, APPENDER, op, &request).await {
-                Err(ErrorCode::PermissionDenied) => {}
+                Err(code) if code == refusal => {}
                 other => wrong.push(format!(
-                    "{op} setting `{column}`: expected PermissionDenied, got {other:?}"
+                    "{op} setting `{column}`: expected {refusal:?}, got {other:?}"
                 )),
             }
         }

@@ -2679,23 +2679,31 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
     reset(svc, &crud_table(t)).await;
     svc.create(
         t,
-        row([("id", serde_json::json!("r1")), ("name", serde_json::json!("a"))]),
+        row([
+            ("id", serde_json::json!("r1")),
+            ("name", serde_json::json!("a")),
+        ]),
     )
     .await
     .expect("seed conf_ab");
     let columns = svc.schema_columns(t).await.expect("schema_columns");
 
     let twin = "conf_a-b";
-    assert_invalid_argument(svc.list(twin, &ListOptions::default()).await, "list conf_a-b");
+    assert_invalid_argument(
+        svc.list(twin, &ListOptions::default()).await,
+        "list conf_a-b",
+    );
     assert_invalid_argument(svc.count(twin, &[]).await, "count conf_a-b");
     assert_invalid_argument(svc.get(twin, "r1").await, "get conf_a-b");
     assert_invalid_argument(
-        svc.create(twin, row([("name", serde_json::json!("b"))])).await,
+        svc.create(twin, row([("name", serde_json::json!("b"))]))
+            .await,
         "create conf_a-b",
     );
     assert_invalid_argument(svc.delete(twin, "r1").await, "delete conf_a-b");
     assert_invalid_argument(
-        svc.create(t, row([("no-te", serde_json::json!("x"))])).await,
+        svc.create(t, row([("no-te", serde_json::json!("x"))]))
+            .await,
         "create with a non-identifier data key",
     );
 

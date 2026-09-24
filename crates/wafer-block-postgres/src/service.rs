@@ -17,9 +17,9 @@ use wafer_core::{
         service::{Column, DatabaseError, Record},
     },
 };
-use wafer_sql_utils::{ddl, introspect, Backend};
 #[cfg(test)]
 use wafer_sql_utils::value::sea_values_to_json;
+use wafer_sql_utils::{ddl, introspect, Backend};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///

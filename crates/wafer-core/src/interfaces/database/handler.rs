@@ -700,6 +700,9 @@ fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
 ///   Columns are never dropped individually, so one present here is present
 ///   when the insert runs.
 ///
+/// A guarded insert's guard columns need no rule here: a guard never adds a
+/// column, the executor refuses one the table lacks.
+///
 /// So a collection lacking any of `id`, `created_at` or `updated_at` refuses
 /// EVERY append-only insert — the server would stamp the missing column and,
 /// outside STRICT_SCHEMA, add it. An owner that grants append declares all
@@ -713,8 +716,7 @@ async fn check_append_only_rows<'a>(
     for row in rows {
         for key in row.keys() {
             check_name(key)?;
-            let column = key.clone();
-            if SERVER_OWNED_COLUMNS.contains(&column.as_str()) {
+            if SERVER_OWNED_COLUMNS.contains(&key.as_str()) {
                 return Err(WaferError::new(
                     ErrorCode::PermissionDenied,
                     format!(
@@ -723,8 +725,8 @@ async fn check_append_only_rows<'a>(
                     ),
                 ));
             }
-            if !named.contains(&column) {
-                named.push(column);
+            if !named.contains(key) {
+                named.push(key.clone());
             }
         }
     }

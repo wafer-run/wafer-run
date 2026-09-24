@@ -313,7 +313,10 @@ async fn append_only_guard_on_a_new_column_is_refused_and_adds_nothing() {
     )
     .await
     .expect("an append-and-read caller inserts under a guard on known columns");
-    assert_eq!(landed["Inserted"]["record"]["data"]["name"], "guarded", "{landed}");
+    assert_eq!(
+        landed["Inserted"]["record"]["data"]["name"], "guarded",
+        "{landed}"
+    );
     let with_insert = snapshot(&sqlite).await;
     assert_eq!(with_insert.0, before.0, "the insert added no column");
 

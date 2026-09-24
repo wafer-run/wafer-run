@@ -1600,13 +1600,21 @@ mod tests {
     async fn delete_where_on_a_missing_filter_column_is_refused() {
         let svc = make_test_svc();
         seed_rows(&svc, "items", vec![serde_json::json!({"name": "alpha"})]).await;
-        let before = DatabaseService::schema_columns(&svc, "items").await.unwrap();
-
-        let err = DatabaseService::delete_where_count(&svc, "items", &unknown_column_filter("archived"))
+        let before = DatabaseService::schema_columns(&svc, "items")
             .await
-            .expect_err("a filter on a missing column must be refused");
+            .unwrap();
+
+        let err =
+            DatabaseService::delete_where_count(&svc, "items", &unknown_column_filter("archived"))
+                .await
+                .expect_err("a filter on a missing column must be refused");
         assert_unknown_column(&err, "archived");
-        assert_eq!(DatabaseService::schema_columns(&svc, "items").await.unwrap(), before);
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "items")
+                .await
+                .unwrap(),
+            before
+        );
         assert_eq!(DatabaseService::count(&svc, "items", &[]).await.unwrap(), 1);
     }
 
@@ -1622,7 +1630,9 @@ mod tests {
             ],
         )
         .await;
-        let before = DatabaseService::schema_columns(&svc, "items").await.unwrap();
+        let before = DatabaseService::schema_columns(&svc, "items")
+            .await
+            .unwrap();
 
         // `category` (WHERE) does not exist: refused before `flag` is added.
         let mut patch = std::collections::HashMap::new();
@@ -1636,7 +1646,12 @@ mod tests {
         .await
         .expect_err("a filter on a missing column must be refused");
         assert_unknown_column(&err, "category");
-        assert_eq!(DatabaseService::schema_columns(&svc, "items").await.unwrap(), before);
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "items")
+                .await
+                .unwrap(),
+            before
+        );
 
         // A filter on a present column: the new SET column `flag` is added.
         let filters = vec![Filter {
@@ -1650,24 +1665,31 @@ mod tests {
         let rows = DatabaseService::list(&svc, "items", &ListOptions::default())
             .await
             .unwrap();
-        let flagged: Vec<_> = rows
+        let flagged = rows
             .records
             .iter()
             .filter(|r| r.data["flag"] == serde_json::json!("on"))
-            .collect();
-        assert_eq!(flagged.len(), 1);
+            .count();
+        assert_eq!(flagged, 1);
     }
 
     #[tokio::test]
     async fn take_where_on_a_missing_filter_column_is_refused() {
         let svc = make_test_svc();
         seed_rows(&svc, "codes", vec![serde_json::json!({"code": "abc"})]).await;
-        let before = DatabaseService::schema_columns(&svc, "codes").await.unwrap();
+        let before = DatabaseService::schema_columns(&svc, "codes")
+            .await
+            .unwrap();
         let err = DatabaseService::take_where(&svc, "codes", &unknown_column_filter("claimed_by"))
             .await
             .expect_err("a filter on a missing column must be refused");
         assert_unknown_column(&err, "claimed_by");
-        assert_eq!(DatabaseService::schema_columns(&svc, "codes").await.unwrap(), before);
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "codes")
+                .await
+                .unwrap(),
+            before
+        );
         assert_eq!(DatabaseService::count(&svc, "codes", &[]).await.unwrap(), 1);
     }
 
@@ -2255,9 +2277,14 @@ mod tests {
             operator: FilterOp::Equal,
             value: serde_json::json!("a"),
         }];
-        let _ = DatabaseService::count(&svc, "widgets", &named_a).await.unwrap();
+        let _ = DatabaseService::count(&svc, "widgets", &named_a)
+            .await
+            .unwrap();
         let cache = DbExec::schema_cache(&svc).expect("the SQLite backend caches");
-        assert!(cache.columns("widgets").is_some(), "the column list is cached");
+        assert!(
+            cache.columns("widgets").is_some(),
+            "the column list is cached"
+        );
 
         // Add a real column out of band; the cached column list must be
         // dropped. Asserted on the cache itself: the column check re-reads a
@@ -2270,7 +2297,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(cache.columns("widgets").is_none(), "add_column drops the entry");
+        assert!(
+            cache.columns("widgets").is_none(),
+            "add_column drops the entry"
+        );
 
         // A filter on the freshly-added column resolves against the true
         // schema.

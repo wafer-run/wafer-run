@@ -123,7 +123,10 @@ async fn a_non_identifier_collection_is_refused_before_any_access_check() {
     for bad in BAD_COLLECTIONS {
         let requests = [
             (ServiceOp::DATABASE_LIST, json!({ "collection": bad })),
-            (ServiceOp::DATABASE_GET, json!({ "collection": bad, "id": "x" })),
+            (
+                ServiceOp::DATABASE_GET,
+                json!({ "collection": bad, "id": "x" }),
+            ),
             (
                 ServiceOp::DATABASE_CREATE,
                 json!({ "collection": bad, "data": { "name": "n" } }),

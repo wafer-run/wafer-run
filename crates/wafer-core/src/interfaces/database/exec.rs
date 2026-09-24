@@ -797,7 +797,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `get`: select-by-id → single row.
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let stmt = wafer_sql_utils::query::build_select_by_id(sql_name(collection)?, id, Self::BACKEND);
+        let stmt =
+            wafer_sql_utils::query::build_select_by_id(sql_name(collection)?, id, Self::BACKEND);
         self.run_fetch_one(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
@@ -1094,7 +1095,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `delete`: delete-by-id; 0 rows → `NotFound`.
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let stmt = wafer_sql_utils::query::build_delete_by_id(sql_name(collection)?, id, Self::BACKEND);
+        let stmt =
+            wafer_sql_utils::query::build_delete_by_id(sql_name(collection)?, id, Self::BACKEND);
         let affected = self
             .run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
@@ -1611,8 +1613,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     (Planned::Updated, stmt)
                 }
                 WriteOp::Delete { collection, id } => {
-                    let stmt =
-                        wafer_sql_utils::query::build_delete_by_id(sql_name(&collection)?, &id, Self::BACKEND);
+                    let stmt = wafer_sql_utils::query::build_delete_by_id(
+                        sql_name(&collection)?,
+                        &id,
+                        Self::BACKEND,
+                    );
                     (Planned::Deleted, stmt)
                 }
                 WriteOp::UpdateWhere {
@@ -1813,8 +1818,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sql_name(collection)?;
         self.require_columns(table, &guard_columns(guards)).await?;
         let mut data = data;
-        let autogenerates_id =
-            !data.contains_key("id") && self.table_autogenerates_id(table).await;
+        let autogenerates_id = !data.contains_key("id") && self.table_autogenerates_id(table).await;
         prepare_created_row(&mut data, autogenerates_id);
         self.ensure_data_columns(table, &data).await?;
         let stmt = guard::build_insert_guarded(table, &sorted_pairs(&data)?, guards, Self::BACKEND)
