@@ -620,12 +620,6 @@ impl Wafer {
         )
         .await
     }
-
-    /// Rebuild the all_blocks map from registered blocks + aliases.
-    /// Call this after resolve() completes.
-    pub fn rebuild_all_blocks(&mut self) {
-        self.registration.rebuild_all_blocks();
-    }
 }
 
 /// Convert a slot-level [`InitError`] into a [`WaferError`] for surfacing on

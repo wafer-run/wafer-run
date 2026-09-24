@@ -115,12 +115,38 @@ where
 }
 
 impl Wafer {
-    /// Run a flow by ID with the given message.
+    /// Refuse top-level dispatch on a runtime [`seal`](Self::seal) has not
+    /// sealed successfully: capabilities, the grant gate, the downloaded
+    /// blocks and the snapshot every context reads are all computed there,
+    /// so an unsealed or failed-seal runtime would dispatch blocks under
+    /// their load-time capabilities and no grant check. `FailedPrecondition`,
+    /// naming the seal failure when there was one.
+    fn refuse_unless_sealed(&self) -> Option<OutputStream> {
+        let reason = match &self.seal_state {
+            super::SealState::Sealed => return None,
+            super::SealState::Unsealed => {
+                "runtime is not sealed: call seal() (or start()) before dispatching".to_string()
+            }
+            super::SealState::Failed(reason) => {
+                format!("runtime failed to seal, so it cannot dispatch: {reason}")
+            }
+        };
+        Some(OutputStream::error(WaferError::new(
+            ErrorCode::FailedPrecondition,
+            reason,
+        )))
+    }
+
+    /// Run a flow by ID with the given message. Refused with
+    /// `FailedPrecondition` unless [`seal`](Self::seal) succeeded.
     pub async fn run(&self, flow_id: &str, msg: Message, input: InputStream) -> OutputStream {
-        // Seal-compiled plan (PERF-03). Flows added after `seal()` — or runs
-        // on a not-yet-sealed runtime — are not in the plan and are compiled
-        // ad hoc for this invocation, which is no more work than the
-        // per-step reparsing the executor previously did every run.
+        if let Some(refused) = self.refuse_unless_sealed() {
+            return refused;
+        }
+        // Seal-compiled plan (PERF-03). Flows added after `seal()` are not in
+        // the plan and are compiled ad hoc for this invocation, which is no
+        // more work than the per-step reparsing the executor previously did
+        // every run.
         let ad_hoc;
         let compiled: &crate::waferflow::plan::CompiledFlow =
             if let Some(compiled) = self.plan.flows.get(flow_id) {
@@ -153,7 +179,8 @@ impl Wafer {
         result
     }
 
-    /// Run a single block by name, bypassing flows.
+    /// Run a single block by name, bypassing flows. Refused with
+    /// `FailedPrecondition` unless [`seal`](Self::seal) succeeded.
     ///
     /// # Security
     ///
@@ -179,6 +206,9 @@ impl Wafer {
         msg: Message,
         input: InputStream,
     ) -> OutputStream {
+        if let Some(refused) = self.refuse_unless_sealed() {
+            return refused;
+        }
         // Resolve alias + look up the target block in one step.
         let Some((resolved, block)) = self.registration.lookup_with_alias(block_name) else {
             return OutputStream::error(WaferError::new(

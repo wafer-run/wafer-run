@@ -418,7 +418,7 @@ impl Wafer {
     /// from the snapshot (PERF-03): parsed block configs, `requires`
     /// allowlists, and compiled flows for the dispatch hot paths.
     fn finalize_snapshot(&mut self) {
-        self.rebuild_all_blocks();
+        self.registration.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
             blocks: super::lifecycle::sorted_snapshot(&self.registration.blocks),
             flow_infos: self.flows_info(),
