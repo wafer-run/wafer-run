@@ -1126,7 +1126,8 @@
 - `wafer-client-js` 3.0.0: `WaferErrorCode` is the server's error vocabulary
   as it is on the wire — the `ErrorCode` variant names (`'NotFound'`,
   `'Unauthenticated'`, `'Unimplemented'`, ...) — plus the client's own
-  `'timeout'` and `'network_error'`. The snake_case members (`'not_found'`,
+  `'timeout'`, `'aborted'` and `'network_error'`. A request the caller's
+  `signal` aborts rejects with `'aborted'` (was `'network_error'`). The snake_case members (`'not_found'`,
   `'internal_error'`, ...) are gone, as is the `(string & {})` widening, so
   `err.is('not_found')` (never true: the server sends `"NotFound"`) no longer
   compiles; write `err.is('NotFound')`. A non-2xx body without an `"error"`
@@ -1589,7 +1590,10 @@
   abort reason, so the old `AbortError` check reported it as
   `'network_error'`. The caller's `signal` also aborts the body read, and
   the listener the client adds to that signal is removed after each request
-  instead of accumulating on a reused signal.
+  instead of accumulating on a reused signal. On timeout or abort the body
+  stream is cancelled and released, including the body of a response that
+  arrives after the client gave up, so a `fetch` that ignores the signal
+  leaves no locked body behind.
 
 - `wafer-run/ip-rate-limit` charges an IPv6 client per /64 (the new
   `ipv6_prefix` flow config, 1 to 128) instead of per address, which a host
