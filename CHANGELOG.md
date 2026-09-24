@@ -82,7 +82,20 @@
   credentials the next flow step sees. A guest that reads a credential
   header, or sets a sensitive header on an error, must declare it. The
   default sensitive set is now public as
-  `wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS`.
+  `wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS`, and gains
+  `refresh` (navigates like `Location`), `clear-site-data` (wipes the
+  origin's cookies and storage) and `proxy-authorization`. Header-policy
+  names are lowercased when deserialized, and declared ∩ config ∩ host
+  narrowing compares them case-insensitively, matching enforcement.
+
+  The `readable`/`writable` opt-in is **declared by the guest itself**, so
+  it is a request, not a grant: an embedder that loads untrusted guests MUST
+  approve or narrow it (the `capabilities` block-config subkey, or refusing
+  the guest — impresspress refuses any sandbox guest that declares one,
+  `CAP_HEADERS`). Note that `Wafer::seal` currently replaces the
+  capabilities passed to `WasmiBlock::load_with_capabilities*` with the
+  guest's declared ones (∩ config), so a loader-supplied cap does not bound
+  the declaration yet; WR-09 fixes that.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`
