@@ -379,7 +379,8 @@ pub fn build_insert(
 /// Build INSERT INTO {table} (cols) VALUES (vals) RETURNING *.
 ///
 /// The row comes back as the database stored it, including a key the table
-/// generated itself (an `INTEGER PRIMARY KEY` on SQLite).
+/// generated itself (a SQLite rowid alias, a Postgres identity or `SERIAL`
+/// column).
 pub fn build_insert_returning(
     table: &str,
     data: &[(String, serde_json::Value)],

@@ -99,7 +99,7 @@ use wafer_block::db::{
 use wafer_sql_utils::aggregate::CastType;
 
 use super::service::{
-    pk, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
+    pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
     DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, Record, Table, UpsertConflict,
     UpsertSpec, WriteOp, WriteOutcome,
 };
@@ -207,7 +207,8 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// Covers, in order: schema management (`ensure_schema_table[s]`,
 /// `schema_table_exists`, `schema_add_column`, `schema_drop_table`,
 /// `set_strict_schema`); `create`/`get` (a taken id refused, the row
-/// untouched) and `schema_columns`; `count`/`sum` across the full
+/// untouched) and `schema_columns`; a table that numbers its own rows
+/// ([`pk_int`]) filling the id of every create path; `count`/`sum` across the full
 /// [`FilterOp`] surface; `list` (filter, sort, limit, offset, projection,
 /// OR-group `filter_tree`, `total_count`, and pages over a tied sort key
 /// ordered by the primary key — single-column, composite, or none);
@@ -241,6 +242,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 
     check_schema_management(svc).await;
     check_create_get(svc).await;
+    check_generated_ids(svc).await;
     check_count_and_sum(svc).await;
     check_list(svc).await;
     check_list_tiebreak(svc).await;
@@ -260,6 +262,211 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_typed_values_round_trip(svc).await;
     check_names_are_verbatim_and_reads_never_reshape(svc).await;
     check_names_longer_than_postgres_keeps_are_refused(svc).await;
+}
+
+/// Drive two services over **one** database and assert that neither keeps
+/// an answer the other has made stale. Panics on the first divergence.
+///
+/// `a` and `b` must be two independent service instances (two processes'
+/// worth of state: separate connections, separate schema caches) that reach
+/// the same database — two services opened on one SQLite file, two pools on
+/// one Postgres database, two D1 bindings to one database. The suite covers
+/// what a multi-replica deployment, or a migration run by another process,
+/// relies on: a table `a` saw missing that `b` then creates is visible to
+/// `a`'s next read, without `a` having done anything to its own cache.
+///
+/// Both services are pinned to non-strict mode, the mode in which a read
+/// probes the table before running.
+pub async fn run_two_instance_conformance(a: &dyn DatabaseService, b: &dyn DatabaseService) {
+    a.set_strict_schema(false);
+    b.set_strict_schema(false);
+    check_table_created_by_another_instance_is_seen(a, b).await;
+}
+
+/// `a` reads a table while it is missing, `b` creates it and inserts a row,
+/// and every guarded read on `a` then sees the row. A backend that memoized
+/// "missing" would answer each of them empty (or zero) until something in
+/// `a`'s own process invalidated its cache.
+async fn check_table_created_by_another_instance_is_seen(
+    a: &dyn DatabaseService,
+    b: &dyn DatabaseService,
+) {
+    let table = crud_table("conf_shared_late");
+    b.schema_drop_table(&table.name)
+        .await
+        .expect("schema_drop_table (idempotent) must succeed");
+
+    let before = a
+        .list(&table.name, &ListOptions::default())
+        .await
+        .expect("list a missing table");
+    assert!(
+        before.records.is_empty(),
+        "the table is missing: {before:?}"
+    );
+    assert_eq!(a.count(&table.name, &[]).await.expect("count"), 0);
+
+    b.ensure_schema_table(&table)
+        .await
+        .expect("the other instance creates the table");
+    let created = b
+        .create(
+            &table.name,
+            row([
+                ("id", serde_json::json!("late-1")),
+                ("name", serde_json::json!("seen")),
+                ("score", serde_json::json!(7)),
+            ]),
+        )
+        .await
+        .expect("the other instance inserts a row");
+
+    let after = a
+        .list(&table.name, &ListOptions::default())
+        .await
+        .expect("list after the other instance created the table");
+    assert_eq!(
+        after
+            .records
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        [created.id.as_str()],
+        "a table another instance created must be visible to list"
+    );
+    assert_eq!(
+        a.count(&table.name, &[]).await.expect("count"),
+        1,
+        "and to count"
+    );
+    assert!(
+        (a.sum(&table.name, "score", &[]).await.expect("sum") - 7.0).abs() < f64::EPSILON,
+        "and to sum"
+    );
+
+    b.schema_drop_table(&table.name)
+        .await
+        .expect("drop the shared table");
+}
+
+// ---------------------------------------------------------------------------
+// Tables that number their own rows
+// ---------------------------------------------------------------------------
+
+/// A table whose `id` the database fills ([`pk_int`]: `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` on SQLite, `SERIAL` on Postgres) gets the id the database
+/// assigned from every create path, and no path mints a string id for it —
+/// Postgres would refuse the string, and a minted id would bypass the
+/// sequence.
+async fn check_generated_ids(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_serial".to_string(),
+        columns: vec![
+            pk_int("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+
+    let first = svc
+        .create("conf_serial", row([("name", serde_json::json!("first"))]))
+        .await
+        .expect("create without an id in a table that numbers its rows");
+    let second = svc
+        .create("conf_serial", row([("name", serde_json::json!("second"))]))
+        .await
+        .expect("second create");
+    for (created, name) in [(&first, "first"), (&second, "second")] {
+        let id = created.data["id"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("the returned id is the integer assigned: {created:?}"));
+        assert_eq!(created.id, id.to_string(), "{created:?}");
+        let got = svc
+            .get("conf_serial", &created.id)
+            .await
+            .expect("get by the returned id");
+        assert_eq!(got.data["name"], serde_json::json!(name));
+        assert_eq!(got.data["id"], serde_json::json!(id));
+    }
+    assert_ne!(first.id, second.id, "each row gets its own id");
+    // The id string reaches the row on every by-id op.
+    let renamed = svc
+        .update(
+            "conf_serial",
+            &first.id,
+            row([("name", serde_json::json!("renamed"))]),
+        )
+        .await
+        .expect("update by the returned id");
+    assert_eq!(renamed.data["name"], serde_json::json!("renamed"));
+    svc.delete("conf_serial", &second.id)
+        .await
+        .expect("delete by the returned id");
+
+    assert_eq!(
+        svc.create_many(
+            "conf_serial",
+            vec![
+                row([("name", serde_json::json!("many-1"))]),
+                row([("name", serde_json::json!("many-2"))]),
+            ],
+        )
+        .await
+        .expect("create_many without ids"),
+        2
+    );
+    let outcomes = svc
+        .batch(vec![WriteOp::Create {
+            collection: "conf_serial".into(),
+            data: row([("name", serde_json::json!("batched"))]),
+        }])
+        .await
+        .expect("batch create without an id");
+    match outcomes.as_slice() {
+        [WriteOutcome::Created(r)] => {
+            assert!(r.data["id"].is_i64(), "the stored row's id: {r:?}");
+        }
+        other => panic!("expected one Created, got {other:?}"),
+    }
+    match svc
+        .insert_guarded(
+            "conf_serial",
+            row([("name", serde_json::json!("guarded"))]),
+            &[],
+        )
+        .await
+        .expect("guarded insert without an id")
+    {
+        GuardedInsert::Inserted(r) => assert!(r.data["id"].is_i64(), "{r:?}"),
+        other => panic!("expected Inserted, got {other:?}"),
+    }
+
+    let all = svc
+        .list("conf_serial", &ListOptions::default())
+        .await
+        .expect("list");
+    let mut ids: Vec<i64> = all
+        .records
+        .iter()
+        .map(|r| {
+            r.data["id"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("an integer id: {r:?}"))
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        5,
+        "five rows, five distinct ids: {:?}",
+        all.records
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -807,13 +1014,42 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
         "sum of category=y scores == 10, got {sum_score_y}"
     );
 
-    // count/sum on a missing table must fail-safe to zero, not error.
+    // count, sum and aggregate on a missing table fail safe to zero rows, not
+    // an error.
     assert_eq!(
         svc.count("conf_absent_table", &[])
             .await
             .expect("count missing table"),
         0,
         "count on a non-existent table returns 0"
+    );
+    assert!(
+        svc.sum("conf_absent_table", "score", &[])
+            .await
+            .expect("sum missing table")
+            .abs()
+            < f64::EPSILON,
+        "sum on a non-existent table returns 0"
+    );
+    let groups = svc
+        .aggregate(
+            "conf_absent_table",
+            AggregateSpec {
+                select_columns: vec!["category".into()],
+                aggregates: vec![AggregateColumnSpec::Count {
+                    alias: "cnt".into(),
+                }],
+                filters: vec![],
+                group_by: vec![GroupBySpec::Column("category".into())],
+                sort: vec![],
+                limit: 0,
+            },
+        )
+        .await
+        .expect("aggregate missing table");
+    assert!(
+        groups.is_empty(),
+        "aggregate on a non-existent table has no groups: {groups:?}"
     );
 }
 

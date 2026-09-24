@@ -22,6 +22,25 @@ use crate::{
     worker::{ConnWorker, WORKER_GONE},
 };
 
+/// A failed SQLite call as a [`VectorError`]: a busy or locked database
+/// (`SQLITE_BUSY` once the busy timeout ran out, `SQLITE_LOCKED` — another
+/// connection on the same file holds the lock) is
+/// [`VectorError::Unavailable`], since the same call can succeed once that
+/// connection lets go; anything else `Internal`.
+fn sqlite_error(e: &rusqlite::Error) -> VectorError {
+    match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(
+                err.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            VectorError::Unavailable(e.to_string())
+        }
+        _ => VectorError::Internal(e.to_string()),
+    }
+}
+
 /// `VectorService` backed by SQLite + `sqlite-vec` (`vec0` virtual
 /// tables) for ANN search and FTS5 for keyword search. A dedicated worker
 /// thread owns the `rusqlite::Connection` (see [`ConnWorker`]) so vector
@@ -98,7 +117,7 @@ impl SqliteVecService {
                 params![table],
                 |row| row.get(0),
             )
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
         Ok(exists)
     }
 
@@ -113,7 +132,7 @@ impl SqliteVecService {
             params![name, except],
             |row| row.get(0),
         )
-        .map_err(|e| VectorError::Internal(e.to_string()))
+        .map_err(|e| sqlite_error(&e))
     }
 
     /// Worker-side body of [`VectorService::rename_index`]: catalog probes,
@@ -124,12 +143,12 @@ impl SqliteVecService {
         from: &str,
         to: &str,
     ) -> Result<(), VectorError> {
-        ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
         // IMMEDIATE for the same reason as in `upsert_on_conn`; it also holds
         // the catalog still between the probes below and the moves.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
 
         // `from` is matched exactly: an index stored under another spelling
         // of the name is not this one.
@@ -140,7 +159,7 @@ impl SqliteVecService {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
         let Some(vec_sql) = vec_sql else {
             return Err(VectorError::IndexNotFound(from.to_string()));
         };
@@ -173,22 +192,20 @@ impl SqliteVecService {
         })?;
         let mut stmt = tx
             .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
         let vec_columns = stmt
             .query_map(params![&rename.from.vec_table], |row| {
                 row.get::<_, String>(0)
             })
-            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .map_err(|e| sqlite_error(&e))?
             .collect::<Result<Vec<String>, _>>()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
         drop(stmt);
 
         for stmt in rename.build_statements(module_args, &vec_columns, keyword_search) {
-            tx.execute(&stmt.sql, [])
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            tx.execute(&stmt.sql, []).map_err(|e| sqlite_error(&e))?;
         }
-        tx.commit()
-            .map_err(|e| VectorError::Internal(e.to_string()))
+        tx.commit().map_err(|e| sqlite_error(&e))
     }
 
     fn index_exists(conn: &Connection, schema: &VectorIndexSchema) -> Result<bool, VectorError> {
@@ -210,7 +227,7 @@ impl SqliteVecService {
         index: &str,
         entries: Vec<VectorEntry>,
     ) -> Result<(), VectorError> {
-        ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
         if !Self::index_exists(conn, schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
@@ -237,7 +254,7 @@ impl SqliteVecService {
         // connection holds or has just committed a write.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
 
         for e in entries {
             let meta_json = e
@@ -249,11 +266,11 @@ impl SqliteVecService {
             let rowid: Option<i64> = tx
                 .query_row(&select_rowid_sql, params![&e.id], |r| r.get(0))
                 .optional()
-                .map_err(|err| VectorError::Internal(err.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             let rowid = match rowid {
                 Some(rid) => {
                     tx.execute(&delete_vec_sql, params![rid])
-                        .map_err(|err| VectorError::Internal(err.to_string()))?;
+                        .map_err(|e| sqlite_error(&e))?;
                     rid
                 }
                 None => {
@@ -261,34 +278,33 @@ impl SqliteVecService {
                         &insert_meta_sql,
                         params![&e.id, meta_json, e.text.clone().unwrap_or_default()],
                     )
-                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                    .map_err(|e| sqlite_error(&e))?;
                     tx.query_row(&select_rowid_sql, params![&e.id], |r| r.get::<_, i64>(0))
-                        .map_err(|err| VectorError::Internal(err.to_string()))?
+                        .map_err(|e| sqlite_error(&e))?
                 }
             };
 
             let vec_bytes: Vec<u8> = e.vector.iter().flat_map(|f| f.to_le_bytes()).collect();
             tx.execute(&insert_vec_sql, params![rowid, vec_bytes])
-                .map_err(|err| VectorError::Internal(err.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
 
             // Update meta (metadata + text may have changed on re-upsert)
             tx.execute(
                 &update_meta_sql,
                 params![meta_json, e.text.clone().unwrap_or_default(), &e.id],
             )
-            .map_err(|err| VectorError::Internal(err.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
 
             if has_kw {
                 let text = e.text.unwrap_or_default();
                 tx.execute(&delete_fts_sql, params![&e.id])
-                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                    .map_err(|e| sqlite_error(&e))?;
                 tx.execute(&insert_fts_sql, params![&e.id, text])
-                    .map_err(|err| VectorError::Internal(err.to_string()))?;
+                    .map_err(|e| sqlite_error(&e))?;
             }
         }
 
-        tx.commit()
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        tx.commit().map_err(|e| sqlite_error(&e))?;
         Ok(())
     }
 }
@@ -303,15 +319,15 @@ impl VectorService for SqliteVecService {
             DistanceMetric::Cosine | DistanceMetric::Euclidean | DistanceMetric::DotProduct => (),
         };
         self.on_conn(move |conn| {
-            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
             if Self::index_exists(conn, &schema)? {
                 return Err(VectorError::IndexAlreadyExists(config.name));
             }
             conn.execute_batch(&schema.build_create_vec_and_meta(config.dimensions).sql)
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             if config.keyword_search {
                 conn.execute_batch(&schema.build_create_fts().sql)
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                    .map_err(|e| sqlite_error(&e))?;
             }
             Ok(())
         })
@@ -322,13 +338,13 @@ impl VectorService for SqliteVecService {
         let schema = Self::schema_for(name)?;
         let name = name.to_string();
         self.on_conn(move |conn| {
-            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
             if !Self::index_exists(conn, &schema)? {
                 return Err(VectorError::IndexNotFound(name));
             }
             for drop_stmt in schema.build_drop_all() {
                 conn.execute(&drop_stmt.sql, [])
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                    .map_err(|e| sqlite_error(&e))?;
             }
             Ok(())
         })
@@ -378,7 +394,7 @@ impl VectorService for SqliteVecService {
         let schema = Self::schema_for(index)?;
         let index = index.to_string();
         self.on_conn(move |conn| {
-            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
             if !Self::index_exists(conn, &schema)? {
                 return Err(VectorError::IndexNotFound(index));
             }
@@ -387,40 +403,39 @@ impl VectorService for SqliteVecService {
             // IMMEDIATE for the same reason as in `upsert_on_conn`.
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
 
             // Gather rowids first so we can delete from _vec by rowid.
             let mut stmt = tx
                 .prepare(&schema.build_select_rowid_in(ids.len()).sql)
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             let rowids: Vec<i64> = stmt
                 .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
                     r.get::<_, i64>(0)
                 })
-                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .map_err(|e| sqlite_error(&e))?
                 .collect::<rusqlite::Result<Vec<i64>>>()
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             drop(stmt);
 
             let delete_vec_sql = schema.build_delete_vec_by_rowid().sql;
             for rid in rowids {
                 tx.execute(&delete_vec_sql, params![rid])
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                    .map_err(|e| sqlite_error(&e))?;
             }
             tx.execute(
                 &schema.build_delete_meta_in(ids.len()).sql,
                 rusqlite::params_from_iter(ids.iter()),
             )
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
             if has_kw {
                 tx.execute(
                     &schema.build_delete_fts_in(ids.len()).sql,
                     rusqlite::params_from_iter(ids.iter()),
                 )
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             }
-            tx.commit()
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            tx.commit().map_err(|e| sqlite_error(&e))?;
             Ok(())
         })
         .await
@@ -430,13 +445,13 @@ impl VectorService for SqliteVecService {
         let schema = Self::schema_for(index)?;
         let index = index.to_string();
         self.on_conn(move |conn| {
-            ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+            ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
             if !Self::index_exists(conn, &schema)? {
                 return Err(VectorError::IndexNotFound(index));
             }
             let n: i64 = conn
                 .query_row(&schema.build_count_meta().sql, [], |r| r.get(0))
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             Ok(n as u64)
         })
         .await
@@ -456,14 +471,12 @@ impl VectorService for SqliteVecService {
     async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>, VectorError> {
         let (sql, pattern) = build_list_meta_tables(prefix);
         self.on_conn(move |conn| {
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| sqlite_error(&e))?;
             let names = stmt
                 .query_map(params![pattern], |row| row.get::<_, String>(0))
-                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .map_err(|e| sqlite_error(&e))?
                 .collect::<Result<Vec<String>, _>>()
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             // The LIKE pattern guarantees the `_meta` suffix; strip it to stems.
             Ok(names
                 .into_iter()
@@ -487,7 +500,7 @@ impl VectorService for SqliteVecService {
             }
             let mut stmt = conn
                 .prepare("SELECT name, type FROM pragma_table_info(?1) ORDER BY cid")
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             let columns = stmt
                 .query_map(params![&schema.meta_table], |row| {
                     Ok(ColumnInfo {
@@ -495,9 +508,9 @@ impl VectorService for SqliteVecService {
                         sql_type: row.get(1)?,
                     })
                 })
-                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .map_err(|e| sqlite_error(&e))?
                 .collect::<Result<Vec<ColumnInfo>, _>>()
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             drop(stmt);
             let keyword_search = Self::has_keyword_search(conn, &schema)?;
             Ok(DescribeIndexResponse {
@@ -551,16 +564,14 @@ impl VectorService for SqliteVecService {
             if !Self::table_exists(conn, &schema.meta_table)? {
                 return Err(VectorError::IndexNotFound(index));
             }
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| sqlite_error(&e))?;
             let ids = stmt
                 .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
                     row.get::<_, String>(0)
                 })
-                .map_err(|e| VectorError::Internal(e.to_string()))?
+                .map_err(|e| sqlite_error(&e))?
                 .collect::<Result<Vec<String>, _>>()
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                .map_err(|e| sqlite_error(&e))?;
             Ok(ids)
         })
         .await
@@ -584,7 +595,7 @@ impl SqliteVecService {
         mode: SearchMode,
         keyword_query: Option<&str>,
     ) -> Result<Vec<VectorMatch>, VectorError> {
-        ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        ensure_vec_loaded(conn).map_err(|e| sqlite_error(&e))?;
         if !Self::index_exists(conn, schema)? {
             return Err(VectorError::IndexNotFound(index.to_string()));
         }
@@ -676,15 +687,15 @@ impl SqliteVecService {
         // Metadata lookup
         let mut stmt = conn
             .prepare(&schema.build_select_metadata_in(ranked.len()).sql)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            .map_err(|e| sqlite_error(&e))?;
         let mut meta_map: std::collections::HashMap<String, serde_json::Value> = stmt
             .query_map(
                 rusqlite::params_from_iter(ranked.iter().map(|(id, _)| id)),
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
-            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .map_err(|e| sqlite_error(&e))?
             .map(|row| {
-                let (id, meta) = row.map_err(|e| VectorError::Internal(e.to_string()))?;
+                let (id, meta) = row.map_err(|e| sqlite_error(&e))?;
                 let value = match meta {
                     Some(text) => {
                         serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
@@ -722,18 +733,16 @@ impl SqliteVecService {
     ) -> Result<Vec<(String, f32)>, VectorError> {
         let limit = i64::try_from(limit)
             .map_err(|_| VectorError::Internal(format!("candidate limit {limit} overflows i64")))?;
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let mut stmt = conn.prepare(sql).map_err(|e| sqlite_error(&e))?;
         let map_row =
             |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)? as f32));
         let rows = match filter_json {
             Some(f) => stmt.query_map(params![query, limit, f], map_row),
             None => stmt.query_map(params![query, limit], map_row),
         }
-        .map_err(|e| VectorError::Internal(e.to_string()))?;
+        .map_err(|e| sqlite_error(&e))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| VectorError::Internal(e.to_string()))
+            .map_err(|e| sqlite_error(&e))
     }
 }
 
@@ -1504,6 +1513,43 @@ mod tests {
         writer.join().unwrap();
         delete.expect("delete waits for the other writer, then commits");
         assert_eq!(svc.count("docs").await.unwrap(), 1);
+        drop(svc);
+    }
+
+    /// When the other writer holds the lock past the busy timeout, the vector
+    /// write fails as `Unavailable` — transient, retryable — not `Internal`:
+    /// the same write succeeds once the lock is released.
+    #[tokio::test]
+    async fn a_lock_held_past_the_busy_timeout_is_unavailable() {
+        let db = TempDb::new("busy-timeout");
+        let probe = Connection::open_in_memory().unwrap();
+        ensure_vec_loaded(&probe).unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(20))
+            .unwrap();
+        let svc = SqliteVecService::new(conn).unwrap();
+        svc.create_index(dims3("docs", false)).await.unwrap();
+
+        let writer = hold_write_lock(&db.0, std::time::Duration::from_millis(400));
+        let upsert = svc
+            .upsert("docs", vec![entry("a", vec![1.0, 0.0, 0.0], None)])
+            .await;
+        let rename = svc
+            .rename_index("my_org__vector__Docs", "my_org__vector__docs")
+            .await;
+        writer.join().unwrap();
+        assert!(
+            matches!(upsert, Err(VectorError::Unavailable(_))),
+            "{upsert:?}"
+        );
+        assert!(
+            matches!(rename, Err(VectorError::Unavailable(_))),
+            "{rename:?}"
+        );
+
+        svc.upsert("docs", vec![entry("a", vec![1.0, 0.0, 0.0], None)])
+            .await
+            .expect("the same write succeeds once the lock is released");
         drop(svc);
     }
 

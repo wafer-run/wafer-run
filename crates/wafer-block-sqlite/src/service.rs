@@ -327,30 +327,6 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseEr
     Ok(cols)
 }
 
-/// Check if the table's `id` column is INTEGER PRIMARY KEY (autoincrement).
-fn has_integer_pk(db: &Connection, table: &str) -> bool {
-    let Ok((sql, _)) = introspect::build_table_info(table, Backend::Sqlite) else {
-        return false;
-    };
-    let Ok(mut stmt) = db.prepare(&sql) else {
-        return false;
-    };
-    let result = stmt.query_map([], |row| {
-        let name: String = row.get(1)?;
-        let col_type: String = row.get(2)?;
-        let pk: i32 = row.get(5)?;
-        Ok((name, col_type, pk))
-    });
-    if let Ok(rows) = result {
-        for r in rows.flatten() {
-            if r.0.to_lowercase() == "id" && r.2 > 0 && r.1.to_uppercase().contains("INT") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Bind owned [`SqlValue`]s as a `ToSql` slice. Runs inside worker jobs —
 /// the conversion from JSON happens on the async side, the borrow for the
 /// rusqlite call happens on the worker.
@@ -473,24 +449,6 @@ impl DbExec for SQLiteDatabaseService {
         Ok(self.run_scalar_i64(&sql, &params).await? > 0)
     }
 
-    /// Job-spanning insert: `last_insert_rowid()` is only meaningful while no
-    /// other insert can run on the connection, so one worker job covers both
-    /// calls (jobs on the write worker are strictly sequential).
-    async fn run_insert(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-    ) -> Result<Option<i64>, DatabaseError> {
-        let sql = sql.to_string();
-        let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        self.on_write(move |db| {
-            db.execute(&sql, as_params(&sql_params).as_slice())
-                .map_err(|e| statement_error(&e))?;
-            Ok(Some(db.last_insert_rowid()))
-        })
-        .await?
-    }
-
     /// One write-worker job: the transaction holds the only writable
     /// connection from `BEGIN IMMEDIATE` to `COMMIT`, so no other write
     /// interleaves with it, and returning early on a failed statement drops
@@ -534,15 +492,6 @@ impl DbExec for SQLiteDatabaseService {
             Ok(results)
         })
         .await?
-    }
-
-    /// Tables with `INTEGER PRIMARY KEY` autoincrement generate their own id;
-    /// `create` must not synthesize a UUID for them.
-    async fn table_autogenerates_id(&self, table: &str) -> bool {
-        let table = table.to_string();
-        self.on_read(move |db| has_integer_pk(db, &table))
-            .await
-            .unwrap_or(false)
     }
 }
 
@@ -1813,8 +1762,8 @@ mod tests {
     #[tokio::test]
     async fn create_on_integer_pk_table_returns_generated_rowid() {
         // INTEGER PRIMARY KEY tables generate their own id: create() must not
-        // synthesize a UUID, and the rowid from the lock-spanning run_insert
-        // is folded into the returned record.
+        // synthesize a UUID, and the id the INSERT … RETURNING reports is
+        // folded into the returned record.
         let svc = make_test_svc();
         exec_batch_for_tests(
             &svc,

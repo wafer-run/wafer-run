@@ -7,8 +7,16 @@
 //! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes both
 //! facts per table — the column list together with which columns are declared
 //! to hold JSON, which every row read decodes by — plus the table's primary
-//! key, which a sorted or paged `list` appends to its `ORDER BY`, so a warm
-//! backend issues zero introspection round-trips in steady state.
+//! key, which a sorted or paged `list` appends to its `ORDER BY`, and where a
+//! created row's `id` comes from, which `create` asks before minting one, so a
+//! warm backend issues zero introspection round-trips in steady state.
+//!
+//! Only facts about a table that exists are kept. That a table is *missing*
+//! is never memoized: another process (a second replica, a migration run out
+//! of band) can create it at any moment, and nothing in this process would
+//! learn of it — a cached "missing" would answer every read of that table as
+//! empty for the life of the cache. A missing table therefore costs one
+//! existence probe per operation against it.
 //!
 //! # Correctness
 //!
@@ -29,16 +37,16 @@
 //! backend probes the database (which yields the task), then writes the result
 //! back after resuming. A concurrent [`invalidate`](SchemaCache::invalidate) /
 //! [`clear`](SchemaCache::clear) landing *inside* that gap must not be undone
-//! by the write-back — otherwise a pre-mutation value (e.g. a negative
-//! `exists=false` read just before a `CREATE TABLE`) is resurrected
-//! permanently, since nothing re-probes a populated entry except the next
-//! mutation on that exact table.
+//! by the write-back — otherwise a pre-mutation value (e.g. a column list read
+//! just before an `ALTER TABLE … ADD COLUMN`, or a table's presence read just
+//! before a `DROP TABLE`) is resurrected permanently, since nothing re-probes
+//! a populated entry except the next mutation on that exact table.
 //!
 //! [`SchemaCache`] closes this with a monotonic **generation** counter bumped
 //! under the write lock on every `invalidate`/`clear`. A populating caller
 //! snapshots [`generation`](SchemaCache::generation) *before* it probes and
 //! writes back through
-//! [`set_table_exists_if_gen`](SchemaCache::set_table_exists_if_gen) /
+//! [`mark_table_present_if_gen`](SchemaCache::mark_table_present_if_gen) /
 //! [`set_columns_if_gen`](SchemaCache::set_columns_if_gen), which — atomically
 //! under the write lock — commit only if the generation is unchanged. A
 //! write-back that raced a mutation is dropped (leaving the entry absent, so
@@ -56,6 +64,7 @@
 use std::collections::HashMap;
 
 use parking_lot::RwLock;
+use wafer_sql_utils::introspect::IdPolicy;
 
 use super::codec::JsonColumns;
 
@@ -71,18 +80,22 @@ pub struct TableColumns {
 }
 
 /// Memoized introspection facts for one table. Each fact is independently
-/// populated (`dbx_table_exists` fills `exists`, the column-list introspection
-/// fills `columns`, the primary-key introspection fills `primary_key`), so
-/// each is an `Option` and `None` means "not yet probed".
+/// populated (`dbx_table_exists` sets `present`, the column-list
+/// introspection fills `columns`, the primary-key introspection fills
+/// `primary_key`, the id-policy introspection fills `id_policy`), so
+/// each optional fact's `None` means "not yet probed".
 #[derive(Debug, Default)]
 struct TableSchema {
-    /// Whether the table exists, once probed.
-    exists: Option<bool>,
+    /// The table is known to exist. `false` means only "not known": absence
+    /// is never recorded (see the module docs).
+    present: bool,
     /// Column names and JSON columns, once listed.
     columns: Option<TableColumns>,
     /// Primary-key column names in key order, as the catalog spells them;
     /// empty for a table with no primary key.
     primary_key: Option<Vec<String>>,
+    /// Where the `id` of a row inserted without one comes from.
+    id_policy: Option<IdPolicy>,
 }
 
 /// Lock-protected cache state: the per-table facts plus the generation counter
@@ -123,22 +136,29 @@ impl SchemaCache {
         self.inner.read().generation
     }
 
-    /// Cached table-exists fact, or `None` on a miss.
+    /// Whether `table` is known to exist. `false` is a miss, never an answer:
+    /// the cache does not record that a table is missing (see the module
+    /// docs), so the caller probes.
     #[must_use]
-    pub fn table_exists(&self, table: &str) -> Option<bool> {
-        self.inner.read().tables.get(table).and_then(|t| t.exists)
+    pub fn table_known_present(&self, table: &str) -> bool {
+        self.inner
+            .read()
+            .tables
+            .get(table)
+            .is_some_and(|t| t.present)
     }
 
-    /// Record whether `table` exists, but only if the cache has not been
-    /// mutated since `expected_gen` was snapshotted (see the module docs). A
+    /// Record that `table` exists, but only if the cache has not been mutated
+    /// since `expected_gen` was snapshotted (see the module docs). A
     /// generation mismatch means an invalidation raced the probe, so the
-    /// write-back is discarded.
-    pub fn set_table_exists_if_gen(&self, table: &str, exists: bool, expected_gen: u64) {
+    /// write-back is discarded. There is no way to record that a table is
+    /// missing.
+    pub fn mark_table_present_if_gen(&self, table: &str, expected_gen: u64) {
         let mut inner = self.inner.write();
         if inner.generation != expected_gen {
             return;
         }
-        inner.tables.entry(table.to_string()).or_default().exists = Some(exists);
+        inner.tables.entry(table.to_string()).or_default().present = true;
     }
 
     /// Cached columns, or `None` on a miss.
@@ -154,16 +174,16 @@ impl SchemaCache {
     /// Record the full column list for `table`, but only if the cache has
     /// not been mutated since `expected_gen` (see the module docs).
     ///
-    /// A non-empty list also proves the table exists, so the exists fact is set
-    /// alongside it. An empty list is a missing table's introspection result
+    /// A non-empty list also proves the table exists, so the table is marked
+    /// present alongside it. An empty list is a missing table's introspection result
     /// and is not recorded: every row read decodes by the cached list's JSON
     /// columns, and pinning "none" for a table a later migration creates
     /// would read its JSON columns back as text for the life of the cache.
-    /// The exists fact stays with the authoritative existence probe.
+    /// Presence stays with the authoritative existence probe.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "the write guard covers the whole critical section — the \
-                  generation check, the exists-set and the columns-set \
+                  generation check, the presence-set and the columns-set \
                   mutate the same entry and are the entire body; there is \
                   nothing to tighten"
     )]
@@ -176,7 +196,7 @@ impl SchemaCache {
             return;
         }
         let entry = inner.tables.entry(table.to_string()).or_default();
-        entry.exists = Some(true);
+        entry.present = true;
         entry.columns = Some(columns);
     }
 
@@ -193,7 +213,7 @@ impl SchemaCache {
     /// Record `table`'s primary-key columns, but only if the cache has not
     /// been mutated since `expected_gen` (see the module docs).
     ///
-    /// A non-empty key proves the table exists, so the exists fact is set
+    /// A non-empty key proves the table exists, so the table is marked present
     /// alongside it. An empty key is ambiguous: the key introspection of a
     /// table with no primary key and of a table that does not exist yet both
     /// come back empty. It is recorded only when the entry already knows the
@@ -203,8 +223,8 @@ impl SchemaCache {
     #[expect(
         clippy::significant_drop_tightening,
         reason = "the write guard covers the whole critical section — the \
-                  generation check, the exists check and the key-set mutate \
-                  the same entry and are the entire body"
+                  generation check, the presence check and the key-set \
+                  mutate the same entry and are the entire body"
     )]
     pub fn set_primary_key_if_gen(&self, table: &str, key: Vec<String>, expected_gen: u64) {
         let mut inner = self.inner.write();
@@ -213,11 +233,49 @@ impl SchemaCache {
         }
         let entry = inner.tables.entry(table.to_string()).or_default();
         if !key.is_empty() {
-            entry.exists = Some(true);
-        } else if entry.exists != Some(true) {
+            entry.present = true;
+        } else if !entry.present {
             return;
         }
         entry.primary_key = Some(key);
+    }
+
+    /// Cached [`IdPolicy`] of `table`, or `None` on a miss.
+    #[must_use]
+    pub fn id_policy(&self, table: &str) -> Option<IdPolicy> {
+        self.inner
+            .read()
+            .tables
+            .get(table)
+            .and_then(|t| t.id_policy)
+    }
+
+    /// Record `table`'s [`IdPolicy`], but only if the cache has not been
+    /// mutated since `expected_gen` (see the module docs).
+    ///
+    /// [`IdPolicy::Database`] and [`IdPolicy::Caller`] describe an `id`
+    /// column, so they prove the table exists and mark it present.
+    /// [`IdPolicy::Mint`] is also the answer for a table that does not exist
+    /// yet, so it is recorded only when the entry already knows the table
+    /// exists; otherwise it is dropped and the next lookup asks again.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the write guard covers the whole critical section — the \
+                  generation check, the presence check and the fact-set \
+                  mutate the same entry and are the entire body"
+    )]
+    pub fn set_id_policy_if_gen(&self, table: &str, policy: IdPolicy, expected_gen: u64) {
+        let mut inner = self.inner.write();
+        if inner.generation != expected_gen {
+            return;
+        }
+        let entry = inner.tables.entry(table.to_string()).or_default();
+        if policy != IdPolicy::Mint {
+            entry.present = true;
+        } else if !entry.present {
+            return;
+        }
+        entry.id_policy = Some(policy);
     }
 
     /// Invalidate every cached fact for `table` and bump the generation.
@@ -254,14 +312,12 @@ mod tests {
     }
 
     #[test]
-    fn exists_miss_then_hit() {
+    fn presence_miss_then_hit() {
         let cache = SchemaCache::new();
         let gen0 = cache.generation();
-        assert_eq!(cache.table_exists("users"), None, "cold miss");
-        cache.set_table_exists_if_gen("users", true, gen0);
-        assert_eq!(cache.table_exists("users"), Some(true));
-        cache.set_table_exists_if_gen("users", false, cache.generation());
-        assert_eq!(cache.table_exists("users"), Some(false));
+        assert!(!cache.table_known_present("users"), "cold miss");
+        cache.mark_table_present_if_gen("users", gen0);
+        assert!(cache.table_known_present("users"));
     }
 
     #[test]
@@ -277,22 +333,19 @@ mod tests {
     fn non_empty_columns_imply_existence() {
         let cache = SchemaCache::new();
         cache.set_columns_if_gen("users", cols(&["id"]), cache.generation());
-        assert_eq!(
-            cache.table_exists("users"),
-            Some(true),
+        assert!(
+            cache.table_known_present("users"),
             "a listed column set proves the table exists"
         );
     }
 
     #[test]
-    fn empty_columns_are_not_cached_and_leave_existence_alone() {
+    fn empty_columns_are_not_cached_and_do_not_mark_presence() {
         let cache = SchemaCache::new();
-        cache.set_table_exists_if_gen("ghost", false, cache.generation());
         cache.set_columns_if_gen("ghost", cols(&[]), cache.generation());
-        assert_eq!(
-            cache.table_exists("ghost"),
-            Some(false),
-            "an empty column list must not overwrite the existence probe"
+        assert!(
+            !cache.table_known_present("ghost"),
+            "an empty column list proves nothing about the table"
         );
         assert_eq!(
             cache.columns("ghost"),
@@ -308,12 +361,9 @@ mod tests {
         assert_eq!(c.primary_key("t"), None);
         c.set_primary_key_if_gen("t", vec!["id".into()], c.generation());
         assert_eq!(c.primary_key("t"), Some(vec!["id".to_string()]));
-        assert_eq!(c.table_exists("t"), Some(true), "a key proves the table");
+        assert!(c.table_known_present("t"), "a key proves the table");
         // An empty key for a table not known to exist may be a table that
         // does not exist yet: it is dropped, so the next lookup re-probes.
-        c.set_primary_key_if_gen("later", Vec::new(), c.generation());
-        assert_eq!(c.primary_key("later"), None);
-        c.set_table_exists_if_gen("later", false, c.generation());
         c.set_primary_key_if_gen("later", Vec::new(), c.generation());
         assert_eq!(
             c.primary_key("later"),
@@ -322,7 +372,7 @@ mod tests {
         );
         // Once the table is known to exist, an empty key is a cached answer
         // ("no primary key"), not a miss.
-        c.set_table_exists_if_gen("keyless", true, c.generation());
+        c.mark_table_present_if_gen("keyless", c.generation());
         c.set_primary_key_if_gen("keyless", Vec::new(), c.generation());
         assert_eq!(c.primary_key("keyless"), Some(Vec::new()));
         let stale = c.generation();
@@ -333,13 +383,38 @@ mod tests {
     }
 
     #[test]
+    fn id_policy_mint_is_cached_only_for_a_table_known_to_exist() {
+        use wafer_sql_utils::introspect::IdPolicy;
+
+        let c = SchemaCache::new();
+        assert_eq!(c.id_policy("t"), None);
+        c.set_id_policy_if_gen("t", IdPolicy::Database, c.generation());
+        assert_eq!(c.id_policy("t"), Some(IdPolicy::Database));
+        assert!(c.table_known_present("t"), "an id column proves the table");
+        c.set_id_policy_if_gen("u", IdPolicy::Caller, c.generation());
+        assert!(c.table_known_present("u"), "an id column proves the table");
+        // "Mint" is also a missing table's answer: dropped until the table
+        // is known to exist.
+        c.set_id_policy_if_gen("later", IdPolicy::Mint, c.generation());
+        assert_eq!(c.id_policy("later"), None);
+        c.mark_table_present_if_gen("later", c.generation());
+        c.set_id_policy_if_gen("later", IdPolicy::Mint, c.generation());
+        assert_eq!(c.id_policy("later"), Some(IdPolicy::Mint));
+        let stale = c.generation();
+        c.invalidate("t");
+        assert_eq!(c.id_policy("t"), None);
+        c.set_id_policy_if_gen("t", IdPolicy::Database, stale);
+        assert_eq!(c.id_policy("t"), None, "a raced write-back is dropped");
+    }
+
+    #[test]
     fn invalidate_drops_only_the_named_table() {
         let cache = SchemaCache::new();
         cache.set_columns_if_gen("a", cols(&["id"]), cache.generation());
         cache.set_columns_if_gen("b", cols(&["id"]), cache.generation());
         cache.invalidate("a");
         assert_eq!(cache.columns("a"), None, "invalidated");
-        assert_eq!(cache.table_exists("a"), None, "invalidated");
+        assert!(!cache.table_known_present("a"), "invalidated");
         assert_eq!(cache.columns("b"), Some(cols(&["id"])), "untouched");
     }
 
@@ -347,10 +422,10 @@ mod tests {
     fn clear_drops_everything() {
         let cache = SchemaCache::new();
         cache.set_columns_if_gen("a", cols(&["id"]), cache.generation());
-        cache.set_table_exists_if_gen("b", true, cache.generation());
+        cache.mark_table_present_if_gen("b", cache.generation());
         cache.clear();
         assert_eq!(cache.columns("a"), None);
-        assert_eq!(cache.table_exists("b"), None);
+        assert!(!cache.table_known_present("b"));
     }
 
     #[test]
@@ -369,18 +444,17 @@ mod tests {
     /// resurrecting the pre-mutation value.
     #[test]
     fn stale_gen_write_back_is_discarded() {
-        // Negative-cache-survives-mutation (Repro A) shape.
         let cache = SchemaCache::new();
         let gen0 = cache.generation(); // snapshotted "before the probe"
 
-        // A concurrent invalidate lands during the probe's await gap.
+        // A concurrent invalidate (a DROP TABLE) lands during the probe's
+        // await gap.
         cache.invalidate("orders");
 
         // The probe resumes and tries to write back its now-stale read.
-        cache.set_table_exists_if_gen("orders", false, gen0);
-        assert_eq!(
-            cache.table_exists("orders"),
-            None,
+        cache.mark_table_present_if_gen("orders", gen0);
+        assert!(
+            !cache.table_known_present("orders"),
             "a write-back racing an invalidate must be discarded, not cached"
         );
 
@@ -393,7 +467,7 @@ mod tests {
         );
 
         // A fresh probe (current generation) commits normally.
-        cache.set_table_exists_if_gen("orders", true, cache.generation());
-        assert_eq!(cache.table_exists("orders"), Some(true));
+        cache.mark_table_present_if_gen("orders", cache.generation());
+        assert!(cache.table_known_present("orders"));
     }
 }

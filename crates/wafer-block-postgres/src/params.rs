@@ -110,7 +110,8 @@ fn mismatch(value: &serde_json::Value, expected: &str) -> BindError {
 ///
 /// SQL `NULL` binds to a parameter of any type. Otherwise the value must fit:
 /// an integral number (or a boolean, as `1`/`0`, how the SQLite family stores
-/// one) for an integer type, a number for a floating-point or `NUMERIC` type,
+/// one, or a string spelling a decimal integer, the form a record id of an
+/// integer-keyed table takes) for an integer type, a number for a floating-point or `NUMERIC` type,
 /// a boolean for `BOOLEAN`, and for a text type anything, as the text it
 /// spells (a number or boolean as its JSON text, an object or array as its
 /// JSON). A `json`/`jsonb` parameter takes a string as JSON text — the form
@@ -213,8 +214,12 @@ fn out_of_range() -> BindError {
     BindError::Mismatch("integer out of range".to_string())
 }
 
-/// The integer a JSON value names: an integral number, or a boolean as
-/// `1`/`0`. A fractional number is refused rather than rounded.
+/// The integer a JSON value names: an integral number, a boolean as `1`/`0`,
+/// or a string spelling a decimal integer. Record ids travel as strings (the
+/// `DatabaseService` id arguments are `&str`), so `get`, `update` and
+/// `delete` on a table keyed by an integer column bind `"42"` here. A
+/// fractional number is refused rather than rounded, and any other string is
+/// refused.
 fn integer(value: &serde_json::Value) -> Result<i64, BindError> {
     match value {
         serde_json::Value::Number(n) => {
@@ -234,6 +239,15 @@ fn integer(value: &serde_json::Value) -> Result<i64, BindError> {
             }
         }
         serde_json::Value::Bool(b) => Ok(i64::from(*b)),
+        serde_json::Value::String(s) => {
+            s.parse()
+                .map_err(|e: std::num::ParseIntError| match e.kind() {
+                    std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+                        out_of_range()
+                    }
+                    _ => BindError::Mismatch(format!("expected an integer, got the string {s:?}")),
+                })
+        }
         other => Err(mismatch(other, "an integer")),
     }
 }
@@ -272,5 +286,36 @@ impl sqlx::Encode<'_, Postgres> for TypedNull {
 
     fn produces(&self) -> Option<PgTypeInfo> {
         Some(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{integer, BindError};
+
+    fn message(value: &serde_json::Value) -> String {
+        match integer(value) {
+            Err(BindError::Mismatch(msg)) => msg,
+            other => panic!("expected a mismatch for {value}, got {:?}", other.ok()),
+        }
+    }
+
+    #[test]
+    fn a_string_binds_to_an_integer_only_when_it_spells_one() {
+        assert_eq!(integer(&serde_json::json!("42")).ok(), Some(42));
+        assert_eq!(integer(&serde_json::json!("-7")).ok(), Some(-7));
+        assert!(message(&serde_json::json!("4.2")).contains("expected an integer"));
+        assert!(message(&serde_json::json!("abc")).contains("expected an integer"));
+    }
+
+    #[test]
+    fn an_integer_string_past_i64_is_out_of_range() {
+        for s in ["9223372036854775808", "-9223372036854775809"] {
+            assert_eq!(
+                message(&serde_json::json!(s)),
+                "integer out of range",
+                "{s}"
+            );
+        }
     }
 }

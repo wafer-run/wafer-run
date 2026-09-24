@@ -1,23 +1,48 @@
+//! Schema introspection queries.
+//!
+//! # Which table a name means on Postgres
+//!
+//! The statement builders spell every table unqualified (`"users"`), so
+//! Postgres resolves it through the session's `search_path`. Introspection
+//! must resolve the name the same way, or it describes a different table
+//! than the statements touch — or none, and the executor then treats a
+//! present table as missing. Every Postgres query here therefore identifies a
+//! table by `to_regclass(quote_ident($1))`, which is exactly that lookup (a
+//! `NULL` for a name that resolves to nothing), and lists tables with
+//! `pg_table_is_visible`, which is true for the tables an unqualified name
+//! reaches. None of them names a schema.
+
 use crate::{ident::validate_ident, Backend, SqlBuildError};
+
+/// The Postgres relation kinds an unqualified table name in a statement can
+/// read from: ordinary, partitioned and foreign tables, and views — the set
+/// `information_schema.tables` lists.
+const PG_TABLE_KINDS: &str = "('r','p','f','v')";
 
 /// Build query to list all user tables (excludes system tables).
 ///
 /// SQLite: `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
-/// Postgres: `SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name`
+/// Postgres: the tables an unqualified name reaches through the session's
+/// `search_path` (see the module docs), outside the system schemas.
 pub fn build_list_tables(backend: Backend) -> String {
     match backend {
         Backend::Sqlite => {
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
         }
-        Backend::Postgres => {
-            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name".to_string()
-        }
+        Backend::Postgres => format!(
+            "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
+             AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY c.relname"
+        ),
     }
 }
 
 /// Build query to list tables matching a name prefix.
 ///
-/// Returns (sql, params) with one parameter for the LIKE pattern.
+/// Returns (sql, params) with one parameter for the LIKE pattern. On
+/// Postgres the candidates are the ones [`build_list_tables`] lists.
 pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
     let pattern = format!("{prefix}%");
     match backend {
@@ -27,8 +52,13 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
             vec![serde_json::Value::String(pattern)],
         ),
         Backend::Postgres => (
-            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE $1 ORDER BY table_name"
-                .to_string(),
+            format!(
+                "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
+                 AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+                 AND c.relname LIKE $1 ORDER BY c.relname"
+            ),
             vec![serde_json::Value::String(pattern)],
         ),
     }
@@ -41,7 +71,8 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
 /// decode it as a scalar in either dialect.
 ///
 /// SQLite: `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present`
-/// Postgres: `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS present`
+/// Postgres: whether the name resolves, through the session's `search_path`,
+/// to a table a statement can read (see the module docs).
 ///
 /// The table name is parameter-bound in both dialects, so this builder is
 /// infallible — no identifier validation needed.
@@ -54,8 +85,11 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
             params,
         ),
         Backend::Postgres => (
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS present"
-                .to_string(),
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                 WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN {PG_TABLE_KINDS}) \
+                 AS present"
+            ),
             params,
         ),
     }
@@ -73,9 +107,9 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
 /// SQLite: `SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY
 /// cid` (the table-valued pragma function, available since SQLite 3.16, which —
 /// unlike `PRAGMA table_info(...)` — accepts a bound parameter).
-/// Postgres: `SELECT column_name AS name, data_type AS decl_type FROM
-/// information_schema.columns WHERE table_schema='public' AND table_name=$1
-/// ORDER BY ordinal_position`.
+/// Postgres: the live columns of the table the name resolves to (see the
+/// module docs) from `pg_catalog.pg_attribute`, in `attnum` order, with the
+/// type name `format_type` gives (`jsonb`, `text`, `integer`, ...).
 ///
 /// The table name is parameter-bound in both dialects, so this builder is
 /// infallible — no identifier validation needed.
@@ -87,7 +121,10 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
             params,
         ),
         Backend::Postgres => (
-            "SELECT column_name AS name, data_type AS decl_type FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position"
+            "SELECT a.attname::text AS name, pg_catalog.format_type(a.atttypid, NULL) AS decl_type \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 \
+             AND NOT a.attisdropped ORDER BY a.attnum"
                 .to_string(),
             params,
         ),
@@ -122,10 +159,10 @@ pub fn is_json_decl_type(decl_type: &str) -> bool {
 /// SQLite: `SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk`
 /// (`pk` is the column's 1-based position in the key, `0` off it).
 /// Postgres: the key columns of the table's `indisprimary` index in
-/// `pg_catalog.pg_index`, in `indkey` order, for the table
-/// `to_regclass('public.<table>')` names — the `public` schema
-/// [`build_list_columns`] reads. `to_regclass` is `NULL` for a missing
-/// table, so that case is zero rows rather than an error. `indkey` also lists
+/// `pg_catalog.pg_index`, in `indkey` order, for the table the name resolves
+/// to (see the module docs), as [`build_list_columns`] reads it.
+/// `to_regclass` is `NULL` for a missing table, so that case is zero rows
+/// rather than an error. `indkey` also lists
 /// a `PRIMARY KEY (...) INCLUDE (...)` index's non-key columns after its
 /// `indnkeyatts` key columns; those are cut off, since they do not identify
 /// a row.
@@ -153,8 +190,101 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
              JOIN pg_catalog.pg_attribute a \
              ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
              WHERE i.indisprimary AND k.ord <= i.indnkeyatts \
-             AND i.indrelid = to_regclass(format('public.%I', $1::text)) \
+             AND i.indrelid = to_regclass(quote_ident($1)) \
              ORDER BY k.ord"
+                .to_string(),
+            params,
+        ),
+    }
+}
+
+/// Where the `id` of a row inserted without one comes from, as
+/// [`build_id_policy`] reports it for a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdPolicy {
+    /// The caller's executor mints one: the table's `id` column holds text
+    /// (or the table has no `id` column yet).
+    Mint,
+    /// The database fills it: a SQLite rowid alias, a Postgres identity or
+    /// sequence-backed column.
+    Database,
+    /// `id` is declared to hold integers and nothing fills it, so the insert
+    /// must carry one. A minted string id does not fit such a column:
+    /// Postgres refuses it, and SQLite would store a string among integers.
+    Caller,
+}
+
+impl IdPolicy {
+    /// The policy a [`build_id_policy`] result code names: `0` [`Mint`],
+    /// `1` [`Database`], `2` [`Caller`]; `None` for any other code.
+    ///
+    /// [`Mint`]: IdPolicy::Mint
+    /// [`Database`]: IdPolicy::Database
+    /// [`Caller`]: IdPolicy::Caller
+    #[must_use]
+    pub const fn from_code(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Mint),
+            1 => Some(Self::Database),
+            2 => Some(Self::Caller),
+            _ => None,
+        }
+    }
+}
+
+/// Build query asking where a table's `id` comes from when an insert leaves
+/// it out (see [`IdPolicy`]).
+///
+/// Returns `(sql, params)`. The result is a single row with one integer
+/// column `id_policy` — `0` mint, `1` database, `2` caller, decoded by
+/// [`IdPolicy::from_code`] — in both dialects, so callers can read it as an
+/// `i64` scalar. A missing table answers `0`.
+///
+/// Database-filled — SQLite: `id` is the table's rowid alias — the sole
+/// primary-key column of a rowid table, declared exactly `INTEGER` — whose
+/// value SQLite assigns. Of the tables whose sole key column is `id`, the
+/// rowid alias is the one for which SQLite builds no primary-key index
+/// (`pragma_index_list` origin `pk`): `INT`, `BIGINT` or `TEXT` keys, a
+/// column-level `INTEGER PRIMARY KEY DESC`, a composite key and a `WITHOUT
+/// ROWID` table all get one. Any other `id` key is an ordinary column, which
+/// a rowid table even lets hold `NULL`. Postgres: the `id` column of the
+/// table the name resolves to (see the module docs) is an identity column,
+/// or its default draws from a sequence (`nextval(...)`, what `SERIAL` and
+/// `BIGSERIAL` declare).
+///
+/// Caller-supplied — otherwise, an `id` column of integer type: on SQLite a
+/// declared type with INTEGER affinity (one containing `INT`), on Postgres
+/// `smallint`, `integer` or `bigint`.
+///
+/// The table name is parameter-bound in both dialects, so this builder is
+/// infallible.
+pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+    let params = vec![serde_json::Value::String(table.to_string())];
+    match backend {
+        Backend::Sqlite => (
+            "SELECT CASE \
+             WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) \
+             WHERE pk = 1 AND name = 'id' COLLATE NOCASE) \
+             AND NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk > 1) \
+             AND NOT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE origin = 'pk') \
+             THEN 1 \
+             WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) \
+             WHERE name = 'id' COLLATE NOCASE AND upper(type) LIKE '%INT%') \
+             THEN 2 ELSE 0 END AS id_policy"
+                .to_string(),
+            params,
+        ),
+        Backend::Postgres => (
+            "SELECT CASE \
+             WHEN a.attidentity <> '' \
+             OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' THEN 1::int8 \
+             WHEN a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype) \
+             THEN 2::int8 ELSE 0::int8 END AS id_policy \
+             FROM (SELECT 1) AS one \
+             LEFT JOIN pg_catalog.pg_attribute a \
+             ON a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' \
+             AND NOT a.attisdropped \
+             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
                 .to_string(),
             params,
         ),
@@ -164,7 +294,9 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
 /// Build query to get column information for a table.
 ///
 /// SQLite: `PRAGMA table_info("{table}")`
-/// Postgres: `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1`
+/// Postgres: `column_name`, `data_type`, `is_nullable` (`YES`/`NO`) and
+/// `column_default` of each live column of the table the name resolves to
+/// (see the module docs), in `attnum` order.
 ///
 /// Note: column names in the result differ between backends. SQLite returns `name`, `type`, `notnull`, `dflt_value`, `pk`.
 /// Postgres returns `column_name`, `data_type`, `is_nullable`, `column_default`.
@@ -181,7 +313,14 @@ pub fn build_table_info(
     Ok(match backend {
         Backend::Sqlite => (format!("PRAGMA table_info(\"{safe}\")"), vec![]),
         Backend::Postgres => (
-            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position"
+            "SELECT a.attname::text AS column_name, \
+             pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, \
+             CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, \
+             pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default \
+             FROM pg_catalog.pg_attribute a \
+             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 \
+             AND NOT a.attisdropped ORDER BY a.attnum"
                 .to_string(),
             vec![serde_json::Value::String(safe.to_string())],
         ),
@@ -210,7 +349,8 @@ mod tests {
     #[test]
     fn test_list_tables_postgres() {
         let sql = build_list_tables(Backend::Postgres);
-        assert!(sql.contains("information_schema"));
+        assert!(sql.contains("pg_table_is_visible"), "{sql}");
+        assert!(!sql.contains("public"), "no schema is named: {sql}");
     }
 
     #[test]
@@ -230,7 +370,7 @@ mod tests {
     #[test]
     fn test_table_info_postgres() {
         let (sql, params) = build_table_info("users", Backend::Postgres).expect("valid identifier");
-        assert!(sql.contains("information_schema.columns"));
+        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
         assert_eq!(params.len(), 1);
     }
 
@@ -270,7 +410,7 @@ mod tests {
     #[test]
     fn test_table_exists_postgres() {
         let (sql, params) = build_table_exists("users", Backend::Postgres);
-        assert!(sql.contains("information_schema.tables"), "{sql}");
+        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
         assert!(sql.contains("AS present"), "{sql}");
         assert!(sql.contains("$1"), "table name must be bound: {sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
@@ -314,10 +454,10 @@ mod tests {
     #[test]
     fn test_list_columns_postgres() {
         let (sql, params) = build_list_columns("users", Backend::Postgres);
-        assert!(sql.contains("information_schema.columns"), "{sql}");
+        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
         assert!(sql.contains("AS name"), "{sql}");
-        assert!(sql.contains("data_type AS decl_type"), "{sql}");
-        assert!(sql.contains("ORDER BY ordinal_position"), "{sql}");
+        assert!(sql.contains("AS decl_type"), "{sql}");
+        assert!(sql.contains("ORDER BY a.attnum"), "{sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
     }
 
@@ -376,6 +516,82 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(cols.is_empty());
+    }
+
+    // Which `id` keys SQLite fills itself, on a real SQLite engine: only the
+    // rowid alias. Each "no" is proven by inserting without an id and reading
+    // back NULL (or a NOT NULL refusal for WITHOUT ROWID). Then which of the
+    // rest hold integers the caller must supply.
+    #[test]
+    fn test_id_policy_executes_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE alias (id INTEGER PRIMARY KEY, n TEXT);
+             CREATE TABLE alias_lower (id integer, n TEXT, PRIMARY KEY (id));
+             CREATE TABLE alias_autoinc (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT);
+             CREATE TABLE alias_table_desc (id INTEGER, n TEXT, PRIMARY KEY (id DESC));
+             CREATE TABLE int_key (id INT PRIMARY KEY, n TEXT);
+             CREATE TABLE bigint_key (id BIGINT PRIMARY KEY, n TEXT);
+             CREATE TABLE column_desc (id INTEGER PRIMARY KEY DESC, n TEXT);
+             CREATE TABLE composite (id INTEGER, n TEXT, PRIMARY KEY (id, n));
+             CREATE TABLE no_rowid (id INTEGER PRIMARY KEY, n TEXT) WITHOUT ROWID;
+             CREATE TABLE text_key (id TEXT PRIMARY KEY, n TEXT);
+             CREATE TABLE other_alias (n INTEGER PRIMARY KEY, id TEXT);
+             CREATE TABLE keyless (id INTEGER, n TEXT);",
+        )
+        .unwrap();
+        let policy = |table: &str| -> IdPolicy {
+            let (sql, params) = build_id_policy(table, Backend::Sqlite);
+            let code = conn
+                .query_row(&sql, [params[0].as_str().unwrap()], |r| r.get::<_, i64>(0))
+                .unwrap();
+            IdPolicy::from_code(code).unwrap()
+        };
+        let generated = |table: &str| policy(table) == IdPolicy::Database;
+        for table in ["alias", "alias_lower", "alias_autoinc", "alias_table_desc"] {
+            assert!(generated(table), "{table} fills id");
+            conn.execute(&format!("INSERT INTO {table} DEFAULT VALUES"), [])
+                .unwrap();
+            let id: Option<i64> = conn
+                .query_row(&format!("SELECT id FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(id, Some(1), "{table}");
+        }
+        for table in [
+            "int_key",
+            "bigint_key",
+            "column_desc",
+            "composite",
+            "text_key",
+            "other_alias",
+            "keyless",
+        ] {
+            assert!(!generated(table), "{table} does not fill id");
+            conn.execute(&format!("INSERT INTO {table} DEFAULT VALUES"), [])
+                .unwrap();
+            let id: Option<i64> = conn
+                .query_row(&format!("SELECT id FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(id, None, "{table} leaves id NULL");
+        }
+        assert!(!generated("no_rowid"));
+        conn.execute("INSERT INTO no_rowid DEFAULT VALUES", [])
+            .expect_err("a WITHOUT ROWID key is NOT NULL and never filled");
+        // Of the tables that do not fill `id`, the ones whose `id` holds
+        // integers need the caller's; the rest take a minted string.
+        for table in [
+            "int_key",
+            "bigint_key",
+            "column_desc",
+            "composite",
+            "no_rowid",
+            "keyless",
+        ] {
+            assert_eq!(policy(table), IdPolicy::Caller, "{table}");
+        }
+        for table in ["text_key", "other_alias", "no_such_table"] {
+            assert_eq!(policy(table), IdPolicy::Mint, "{table}");
+        }
     }
 
     #[test]

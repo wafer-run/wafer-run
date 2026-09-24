@@ -86,6 +86,50 @@
   anything but a positive integer fails construction). Without it an
   upstream that sends a byte within every idle `read_timeout` holds a
   stream open indefinitely.
+- The database schema cache never records that a table is missing.
+  `SchemaCache::table_exists` / `set_table_exists_if_gen` are replaced by
+  `table_known_present` / `mark_table_present_if_gen`, which can only say
+  a table exists; `SchemaCache` gains `id_policy` / `set_id_policy_if_gen`.
+  `DbExec::run_insert` and `DbExec::table_autogenerates_id` are removed;
+  the shared `DbExec::id_policy` (returning `introspect::IdPolicy`)
+  replaces them, so a backend that overrode either drops the override.
+  See Fixed for the behaviour.
+- `create` (and `create_many`, `batch`, `insert_guarded`) refuses a row
+  without an `id` for a table whose `id` holds integers that nothing fills
+  — SQLite `id INT`/`BIGINT PRIMARY KEY`, a composite or `WITHOUT ROWID`
+  key, a Postgres `integer` key with no identity or sequence — with
+  `InvalidArgument` naming the table. Postgres already failed these
+  inserts (a minted string bound into an integer); SQLite stored them with
+  a `NULL` id. Such a row must carry its `id`, or the key must be declared
+  so the database numbers rows.
+
+  **Existing SQLite tables declared this way hold `NULL`-id rows** written
+  by the old executor, which reported each row's rowid to the caller as
+  its id. The executor refuses new id-less rows rather than minting string
+  ids among them, so the table's ids stay one type; the old rows still
+  need repair. For each such table (`PRAGMA table_info(t)` shows `id` with
+  an `INT`-containing type and `pk` > 0, not declared exactly
+  `INTEGER PRIMARY KEY`):
+  1. `SELECT COUNT(*) FROM t WHERE id IS NULL;` — any rows are affected.
+  2. `UPDATE t SET id = rowid WHERE id IS NULL;` — gives each row the id
+     callers were given. On a composite key, check first that no
+     `(rowid, …)` pair collides with an existing key.
+  3. Either keep supplying ids on every create, or rebuild the table so
+     SQLite numbers rows: `CREATE TABLE t_new (id INTEGER PRIMARY KEY, …);
+     INSERT INTO t_new SELECT * FROM t; DROP TABLE t;
+     ALTER TABLE t_new RENAME TO t;` (recreate its indexes), in one
+     transaction.
+- The `wafer-run/postgres` URL config var is `InputType::Password`
+  (sensitive), so a `user:password@` URL is masked wherever config is
+  served back.
+- `VectorError` has a new `Unavailable(String)` variant (a busy or locked
+  store); an exhaustive `match` on it needs an arm. The vector handler
+  answers it with `ErrorCode::Unavailable`.
+- The `wafer-run/postgres` block reads `WAFER_RUN__POSTGRES__DATABASE_URL`
+  through its declared config (`ctx.config_get`), resolved by the
+  embedder's `ConfigSource`, instead of from the process environment. An
+  embedder whose `ConfigSource` is not the environment and who set only
+  the env var must supply the value through the source.
 
 - `wafer_block_security_headers::merge_csp` returns a `CspMerge`
   (`policy` plus the `refused` directives and sources) instead of a
@@ -1329,6 +1373,37 @@
   read-only.
 
 ### Fixed
+
+- A table another process creates is visible to a database service that
+  saw it missing. The schema cache memoized "missing" for its lifetime, so
+  on a non-strict backend shared by several processes (replicas, an
+  out-of-band migration) `list` stayed empty and `count` zero until the
+  process restarted. A missing table now costs one existence probe per
+  operation. `sum` and `aggregate` on a missing table answer `0` and no
+  groups, as `count` does, instead of failing in the backend.
+- Postgres introspection resolves a table name through the session's
+  `search_path`, as the (unqualified) statements do, instead of looking
+  only in `public`: with another schema first, every existence, column and
+  key check missed the table the statements wrote to.
+  `introspect::build_list_tables[_like]` list the tables an unqualified
+  name reaches,
+  and `build_table_info`'s Postgres arm no longer matches the name in
+  every schema.
+- A table that numbers its own rows gets its id from the database on every
+  create path (`create`, `create_many`, `batch`, `insert_guarded`). On
+  Postgres a `pk_int` (`SERIAL`) or identity key was never detected, so
+  `create` bound a minted UUID string into it and every insert without an
+  id failed. On SQLite any `id` key whose type contained `INT` (`INT`,
+  `BIGINT`, a composite key) was taken for the rowid alias, so the row was
+  stored with a `NULL` id and `create` returned SQLite's rowid as its id.
+  The new `introspect::build_id_policy` answers for both dialects
+  (SQLite: the rowid alias only; Postgres: identity or `nextval` default),
+  cached per table; such a `create` runs `INSERT … RETURNING *`. The
+  Postgres binder accepts a string spelling a decimal integer for an
+  integer parameter (one past `i64` is "integer out of range"), so
+  `get`/`update`/`delete` by such a table's id work.
+- A SQLite vector op that meets another connection's lock past the busy
+  timeout fails as `Unavailable` (retryable), not `Internal`.
 
 - `LlmError::Network` and `ImageError::Network` map to `Unavailable`, not
   `Internal`, so an unreachable model provider surfaces as a 503 rather

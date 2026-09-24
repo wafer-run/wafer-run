@@ -10,11 +10,10 @@
 //!
 //! One worker still processes its jobs strictly in order, which preserves
 //! the previous mutex semantics exactly: anything that needed to happen
-//! under one continuous lock hold (multi-statement DDL, transactions,
-//! `INSERT` + `last_insert_rowid()`) is expressed as ONE job that owns
-//! `&mut Connection` for its whole duration. Cross-job atomicity never
-//! existed under the mutex either — each call took its own lock — so
-//! nothing is lost by queueing.
+//! under one continuous lock hold (multi-statement DDL, transactions) is
+//! expressed as ONE job that owns `&mut Connection` for its whole duration.
+//! Cross-job atomicity never existed under the mutex either — each call took
+//! its own lock — so nothing is lost by queueing.
 
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
