@@ -4,6 +4,20 @@
 
 ### Breaking changes
 
+- `wafer-ffi`: `wafer_resolve`, `wafer_start`, `wafer_stop` and `wafer_run`
+  take their callback as `Option<WaferDoneCb>` (the C `wafer_done_cb`, NULL
+  allowed by the type) and return `int`: `WAFER_ACCEPTED` (0) when they took
+  the work, `WAFER_REFUSED_NULL_CALLBACK` (-1) — having done nothing — when
+  the callback is NULL. A NULL callback used to be undefined behaviour: the
+  Rust `fn` pointer type admits no NULL, and the spawned work called through
+  it. C callers that ignore the return value compile unchanged; a Rust caller
+  of the exports wraps its callback in `Some`.
+- `wafer-run-node` no longer ships a prebuilt `wafer-run.node`: the tracked
+  binary was built from an early revision and no longer matched the source.
+  `npm run build` (or `build-debug`) in `crates/wafer-run-node` writes it,
+  and `package.json` `main` now names it (it named an `index.js` that did not
+  exist, so `require('wafer-run')` failed). `*.node` is gitignored.
+
 - The windowed-counter upsert (`OnConflict::WindowedCounter`) stamps its
   `created_fields`/`updated_fields` with the server's current instant as
   RFC 3339 text, bound as a parameter — the form `database.create` stamps —
@@ -968,8 +982,8 @@
   `wafer-run-node` and the Go SDK) emits a **projection** of each terminal's
   meta instead of all of it: every action but `drop` carries a `meta` object
   holding only the canonical response keys — `resp.status`,
-  `resp.header.*`, `resp.cookie.*`, `resp.content_type` — under their own
-  names. A host that read any other key (`http.header.*`, `http.method`,
+  `resp.header.*`, `resp.set_cookie.*`, `resp.content_type` — under their
+  own names. A host that read any other key (`http.header.*`, `http.method`,
   `http.path`, `req.*`, `auth.*`) off `meta` no longer finds it; those were
   request state, never part of the response (see **Fixed**).
 - The `continue` action replaces its `message` object with the follow-up
@@ -1139,6 +1153,17 @@
   `isWaferServerErrorCode`.
 
 ### Added
+
+- Embedder bindings can bound a WASM guest's capabilities:
+  `embed::register_block_path(wafer, name, path, capabilities_json)`, and the
+  `wafer_register_block` C export, `WaferRuntime.registerBlock(name, path,
+  capabilities)` in `wafer-run-node` and `Wafer.RegisterBlock` in the Go SDK
+  over it. The JSON is a `BlockCapabilities` object (an omitted field
+  denies) passed to `WasmiBlock::load_with_capabilities_and_limits`, so the
+  guest runs under that bound ∩ its declaration. A `.wasm` registered through
+  `register_path` / `wafer_register` / `register` / `Register` still has no
+  bound and, since the bindings cannot set block config, runs with
+  `BlockCapabilities::none()`. Both load with `Wafer::resource_limits()`.
 
 - `vector.rename_index` (`wire::vector::RenameIndexRequest { from, to }`,
   `ServiceOp::VECTOR_RENAME_INDEX`, `VectorService::rename_index`,
@@ -1609,6 +1634,21 @@
   `Vec::from_raw_parts` (undefined behaviour). The Rust SDK now refuses a
   null buffer from `lookup_attachment` and from a stream's response or
   error read with an `Internal` error instead of reclaiming it.
+- The embedder contract (`embed::output_to_json`, `wafer-ffi`'s docs and
+  `wafer.h`, `wafer-run-node`'s docs and `index.d.ts`, the Go SDK's
+  `Result.Meta` and `wafer.h`) named cookies `resp.cookie.*`; they arrive as
+  `resp.set_cookie.{id}`, each value one whole `Set-Cookie` directive. The
+  docs now list every `meta` key form, and say `{id}` (the cookie's
+  `name[;Domain=..][;Path=..]` when a block uses the cookie helpers) carries
+  nothing a host should read. `crates/wafer-ffi/wafer.h` still documented
+  `"meta":{"key":"val"}` messages and no `halt` action; the Node usage
+  example sent `meta: {}`, which `Message` rejects; `index.d.ts` cited the
+  removed `start_without_bind()`. `scripts/check.sh bindings` now fails when
+  the Go copy of `wafer.h` differs from the crate's, when the header does not
+  declare exactly the `wafer_*` symbols `libwafer_ffi` exports, or when
+  `index.d.ts` is not what napi generates, and the Node test runs the usage
+  example as written.
+
 - `wafer-run/ip-rate-limit` charges an IPv6 client per /64 (the new
   `ipv6_prefix` flow config, 1 to 128) instead of per address, which a host
   rotating its own interface id used to get a fresh budget per request;
