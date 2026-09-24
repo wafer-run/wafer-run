@@ -11,6 +11,12 @@ pub enum CryptoError {
     /// `compare_hash` rejected the password.
     #[error("password mismatch")]
     PasswordMismatch,
+    /// `compare_hash` could not check the password: the stored hash is
+    /// malformed, names an unsupported scheme, or carries cost parameters
+    /// outside the accepted range. A fault in the stored credential, not a
+    /// wrong password.
+    #[error("malformed password hash: {0}")]
+    MalformedHash(String),
     /// Failure while issuing / signing a token.
     #[error("sign error: {0}")]
     SignError(String),
@@ -27,7 +33,9 @@ pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Hash produces a one-way hash of a password.
     fn hash(&self, password: &str) -> Result<String, CryptoError>;
 
-    /// CompareHash checks a password against a hash.
+    /// CompareHash checks a password against a stored hash:
+    /// [`CryptoError::PasswordMismatch`] for a wrong password,
+    /// [`CryptoError::MalformedHash`] when the stored hash cannot be checked.
     fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError>;
 
     /// Sign creates a signed token from claims with the given expiry.

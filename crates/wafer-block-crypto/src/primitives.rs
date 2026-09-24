@@ -131,9 +131,10 @@ pub enum JwtExpPolicy {
 /// the two timestamp claims; callers typically build a fresh map per token.
 /// Caller-supplied `iat`/`exp` entries are overwritten.
 ///
-/// Errors when `expiry` overflows the representable range (i64
-/// milliseconds) — a misconfigured expiry must not silently produce a
-/// token with a different lifetime than the caller asked for.
+/// Errors when `now + expiry` is not a representable date (chrono's
+/// calendar ends in year 262143) — a misconfigured expiry must neither
+/// panic nor silently produce a token with a different lifetime than the
+/// caller asked for.
 pub fn jwt_sign(
     mut claims: HashMap<String, serde_json::Value>,
     expiry: Duration,
@@ -142,7 +143,9 @@ pub fn jwt_sign(
     let now = chrono::Utc::now();
     let chrono_expiry = chrono::Duration::from_std(expiry)
         .map_err(|e| CryptoError::SignError(format!("expiry out of range: {e}")))?;
-    let exp = now + chrono_expiry;
+    let exp = now
+        .checked_add_signed(chrono_expiry)
+        .ok_or_else(|| CryptoError::SignError("expiry out of range: past the last date".into()))?;
 
     claims.insert("iat".to_string(), serde_json::json!(now.timestamp()));
     claims.insert("exp".to_string(), serde_json::json!(exp.timestamp()));
@@ -284,7 +287,8 @@ pub fn derive_block_key(master_secret: &[u8], block_id: &str) -> String {
 ///
 /// Cost parameters are baked into the produced PHC string, so
 /// [`verify_password`] handles hashes of either preset (and any other
-/// argon2 parameters) transparently.
+/// argon2 parameters up to [`ARGON2_MAX_M_COST`] and its siblings)
+/// transparently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Argon2Cost {
     /// `argon2` crate defaults (currently 19 MiB memory, 2 iterations,
@@ -318,17 +322,66 @@ pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoE
         .map_err(|e| CryptoError::HashError(e.to_string()))
 }
 
-/// Verify a password against a PHC-format argon2 hash (any cost — the
-/// parameters are read from the hash string itself).
+/// Highest argon2 memory cost (KiB) [`verify_password`] will run: ten times
+/// the strongest preset this crate writes ([`Argon2Cost::Default`]).
+///
+/// The cost parameters of a stored hash come from the stored string, and
+/// the `argon2` crate accepts up to `u32::MAX` for each — one crafted hash
+/// could allocate terabytes or pin a thread for hours. Verification refuses
+/// anything above these ceilings as [`CryptoError::MalformedHash`]. There is
+/// no floor: an old, cheap hash still verifies (see
+/// [`PBKDF2_SHA256_MIN_ITERATIONS`] for why).
+pub const ARGON2_MAX_M_COST: u32 = 10 * argon2::Params::DEFAULT_M_COST;
+
+/// Highest argon2 time cost (passes) [`verify_password`] will run; see
+/// [`ARGON2_MAX_M_COST`].
+pub const ARGON2_MAX_T_COST: u32 = 10 * argon2::Params::DEFAULT_T_COST;
+
+/// Highest argon2 parallelism (lanes) [`verify_password`] will run; see
+/// [`ARGON2_MAX_M_COST`].
+pub const ARGON2_MAX_P_COST: u32 = 10 * argon2::Params::DEFAULT_P_COST;
+
+/// Verify a password against a PHC-format argon2 hash. The parameters are
+/// read from the hash string itself, so any cost up to the
+/// [`ARGON2_MAX_M_COST`] / [`ARGON2_MAX_T_COST`] / [`ARGON2_MAX_P_COST`]
+/// ceilings verifies.
 ///
 /// Returns [`CryptoError::PasswordMismatch`] when the password is wrong and
-/// [`CryptoError::HashError`] when the hash string is malformed.
+/// [`CryptoError::MalformedHash`] when the hash string is malformed, lacks
+/// a salt or an output, or carries parameters the `argon2` crate or the
+/// ceilings refuse.
 pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
-    use argon2::{password_hash::PasswordHash, Argon2, PasswordVerifier};
-    let parsed = PasswordHash::new(hash).map_err(|e| CryptoError::HashError(e.to_string()))?;
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .map_err(|_| CryptoError::PasswordMismatch)
+    use argon2::{
+        password_hash::{self, PasswordHash},
+        Argon2, PasswordVerifier,
+    };
+    let malformed = |what: String| CryptoError::MalformedHash(format!("argon2: {what}"));
+
+    let parsed = PasswordHash::new(hash).map_err(|e| malformed(e.to_string()))?;
+    // The verifier reports a missing salt or output as `Error::Password`,
+    // the same error as a wrong password; refuse both here so that error
+    // below can only mean a mismatch.
+    if parsed.salt.is_none() || parsed.hash.is_none() {
+        return Err(malformed("hash has no salt or no output".to_string()));
+    }
+    let params = argon2::Params::try_from(&parsed).map_err(|e| malformed(e.to_string()))?;
+    for (name, value, max) in [
+        ("m", params.m_cost(), ARGON2_MAX_M_COST),
+        ("t", params.t_cost(), ARGON2_MAX_T_COST),
+        ("p", params.p_cost(), ARGON2_MAX_P_COST),
+    ] {
+        if value > max {
+            return Err(malformed(format!(
+                "cost {name}={value} exceeds the ceiling of {max}"
+            )));
+        }
+    }
+
+    match Argon2::default().verify_password(password.as_bytes(), &parsed) {
+        Ok(()) => Ok(()),
+        Err(password_hash::Error::Password) => Err(CryptoError::PasswordMismatch),
+        Err(e) => Err(malformed(e.to_string())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +419,15 @@ pub const PBKDF2_SHA256_RECOMMENDED_ITERATIONS: u32 = 600_000;
 /// hashes; re-hash on next successful login if you want old ones upgraded.
 pub const PBKDF2_SHA256_MIN_ITERATIONS: u32 = 10_000;
 
+/// Highest iteration count [`pbkdf2_hash`] will write and [`pbkdf2_verify`]
+/// will run: ten times [`PBKDF2_SHA256_RECOMMENDED_ITERATIONS`].
+///
+/// The count of a stored hash comes from the stored string; without a
+/// ceiling one crafted `i=4294967295` pins a thread for hours. Hashing is
+/// held to the same ceiling so this crate never writes a hash it would
+/// refuse to verify.
+pub const PBKDF2_SHA256_MAX_ITERATIONS: u32 = 10 * PBKDF2_SHA256_RECOMMENDED_ITERATIONS;
+
 /// Hash a password with PBKDF2-HMAC-SHA256 at `iterations`, producing a
 /// PHC-style string with a fresh random 16-byte salt.
 ///
@@ -383,7 +445,8 @@ pub const PBKDF2_SHA256_MIN_ITERATIONS: u32 = 10_000;
 /// or the lengths without a migration — every stored credential decodes
 /// through it.
 ///
-/// Errors when `iterations` is below [`PBKDF2_SHA256_MIN_ITERATIONS`].
+/// Errors when `iterations` is below [`PBKDF2_SHA256_MIN_ITERATIONS`] or
+/// above [`PBKDF2_SHA256_MAX_ITERATIONS`].
 pub fn pbkdf2_hash(password: &str, iterations: u32) -> Result<String, CryptoError> {
     use base64ct::{Base64, Encoding};
 
@@ -412,9 +475,10 @@ pub fn pbkdf2_hash(password: &str, iterations: u32) -> Result<String, CryptoErro
 /// The comparison is constant-time.
 ///
 /// Returns [`CryptoError::PasswordMismatch`] when the password is wrong and
-/// [`CryptoError::VerifyError`] when the string is not a well-formed
+/// [`CryptoError::MalformedHash`] when the string is not a well-formed
 /// `pbkdf2-sha256` hash — including when it is some *other* scheme's hash,
-/// which this function cannot check. Use [`verify_password_any_scheme`] when
+/// which this function cannot check, and when its iteration count is zero
+/// or above [`PBKDF2_SHA256_MAX_ITERATIONS`]. Use [`verify_password_any_scheme`] when
 /// the stored hash may be of either scheme this crate supports.
 pub fn pbkdf2_verify(password: &str, hash: &str) -> Result<(), CryptoError> {
     use base64ct::{Base64, Encoding};
@@ -423,7 +487,7 @@ pub fn pbkdf2_verify(password: &str, hash: &str) -> Result<(), CryptoError> {
     // four populated ones.
     let parts: Vec<&str> = hash.split('$').collect();
     if parts.len() != 5 || !parts[0].is_empty() || parts[1] != PBKDF2_SHA256_ID {
-        return Err(CryptoError::VerifyError(format!(
+        return Err(CryptoError::MalformedHash(format!(
             "not a {PBKDF2_SHA256_ID} hash"
         )));
     }
@@ -431,15 +495,15 @@ pub fn pbkdf2_verify(password: &str, hash: &str) -> Result<(), CryptoError> {
     let iterations: u32 = parts[2]
         .strip_prefix("i=")
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| CryptoError::VerifyError("invalid iteration count".to_string()))?;
+        .ok_or_else(|| CryptoError::MalformedHash("invalid iteration count".to_string()))?;
 
     let salt = Base64::decode_vec(parts[3])
-        .map_err(|e| CryptoError::VerifyError(format!("invalid salt: {e}")))?;
+        .map_err(|e| CryptoError::MalformedHash(format!("invalid salt: {e}")))?;
     if salt.is_empty() {
-        return Err(CryptoError::VerifyError("empty salt".to_string()));
+        return Err(CryptoError::MalformedHash("empty salt".to_string()));
     }
     let expected = Base64::decode_vec(parts[4])
-        .map_err(|e| CryptoError::VerifyError(format!("invalid hash: {e}")))?;
+        .map_err(|e| CryptoError::MalformedHash(format!("invalid hash: {e}")))?;
 
     // The derived-key length is fixed rather than taken from the stored
     // string. PBKDF2 with a shorter `dkLen` returns a PREFIX of the longer
@@ -448,14 +512,14 @@ pub fn pbkdf2_verify(password: &str, hash: &str) -> Result<(), CryptoError> {
     // be checked at 64 bits. Nothing this crate writes is anything but
     // `PBKDF2_DK_LEN`, so anything else is malformed.
     if expected.len() != PBKDF2_DK_LEN {
-        return Err(CryptoError::VerifyError(format!(
+        return Err(CryptoError::MalformedHash(format!(
             "derived key must be {PBKDF2_DK_LEN} bytes, got {}",
             expected.len()
         )));
     }
 
     let computed = pbkdf2_derive(password, &salt, iterations, PBKDF2_DK_LEN)
-        .map_err(CryptoError::VerifyError)?;
+        .map_err(CryptoError::MalformedHash)?;
 
     if constant_time_eq(&computed, &expected) {
         Ok(())
@@ -482,6 +546,12 @@ fn pbkdf2_derive(
     // can be talked into it by a malformed stored string.
     if iterations == 0 {
         return Err("PBKDF2 iteration count must be non-zero".to_string());
+    }
+    if iterations > PBKDF2_SHA256_MAX_ITERATIONS {
+        return Err(format!(
+            "PBKDF2 iteration count {iterations} exceeds the ceiling of \
+             {PBKDF2_SHA256_MAX_ITERATIONS}"
+        ));
     }
     if dk_len == 0 {
         return Err("PBKDF2 derived key must be non-empty".to_string());
@@ -544,25 +614,26 @@ pub fn hash_password_with(password: &str, scheme: PasswordScheme) -> Result<Stri
 /// every credential already stored. Both schemes are accepted algorithms, so
 /// nothing is weakened by recognising both.
 ///
-/// A string that names no scheme this crate knows is a
-/// [`CryptoError`], never an accept.
+/// A string that names no scheme this crate knows, or a malformed hash of a
+/// known one, is [`CryptoError::MalformedHash`] — never an accept, and
+/// never [`CryptoError::PasswordMismatch`], which means only that the
+/// password is wrong.
 pub fn verify_password_any_scheme(password: &str, hash: &str) -> Result<(), CryptoError> {
     // The scheme identifier is the first field of a PHC string
     // (`$<id>$<params>$<salt>$<hash>`), so it is what follows the leading
     // `$`. Dispatching on it explicitly — rather than handing an unknown
     // string to one verifier and trusting it to refuse — is what makes
-    // "never an accept" checkable, and it keeps an unrecognised scheme
-    // distinguishable from a wrong password: `verify_password` maps every
-    // argon2 parse failure to `PasswordMismatch`, so a stored hash written
-    // by some third scheme would otherwise be reported forever as the user
-    // typing the wrong password.
+    // "never an accept" checkable, and it names the fault precisely: a hash
+    // written by some third scheme is a broken stored credential, and
+    // reporting it as a mismatch would tell the logs, forever, that the
+    // user keeps typing the wrong password.
     match hash
         .strip_prefix('$')
         .and_then(|rest| rest.split('$').next())
     {
         Some(PBKDF2_SHA256_ID) => pbkdf2_verify(password, hash),
         Some(id) if id.starts_with("argon2") => verify_password(password, hash),
-        _ => Err(CryptoError::VerifyError(
+        _ => Err(CryptoError::MalformedHash(
             "unrecognised password hash scheme".to_string(),
         )),
     }
@@ -684,6 +755,23 @@ mod tests {
                 msg.contains("expiry out of range"),
                 "expected expiry-range error, got: {msg}"
             ),
+            other => panic!("expected SignError, got: {other:?}"),
+        }
+    }
+
+    /// `from_std` admits this expiry (it is under `i64::MAX` milliseconds)
+    /// but `now + expiry` is past the last date chrono can represent; adding
+    /// the two with `+` panics.
+    #[test]
+    fn jwt_sign_rejects_an_expiry_past_the_last_date() {
+        let err = jwt_sign(
+            claims_with_sub("u1"),
+            Duration::from_secs(10_000_000_000_000),
+            SECRET,
+        )
+        .expect_err("an expiry past the last representable date must error");
+        match err {
+            CryptoError::SignError(msg) => assert!(msg.contains("expiry out of range"), "{msg}"),
             other => panic!("expected SignError, got: {other:?}"),
         }
     }
@@ -865,11 +953,71 @@ mod tests {
     fn verify_password_rejects_garbage_hash() {
         assert!(matches!(
             verify_password("anything", "not-a-hash"),
-            Err(CryptoError::HashError(_))
+            Err(CryptoError::MalformedHash(_))
         ));
         assert!(matches!(
             verify_password("anything", ""),
-            Err(CryptoError::HashError(_))
+            Err(CryptoError::MalformedHash(_))
+        ));
+    }
+
+    /// A 16-byte salt and 32-byte output, valid PHC fields, so only the
+    /// cost parameters of the strings built from it are in question.
+    const ARGON2_TAIL: &str = "$AAECAwQFBgcICQoLDA0ODw$AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+    /// Run `f` on its own thread and fail if it has not returned within
+    /// `secs` — the pre-fix behaviour of the cost tests is to run for hours,
+    /// which must read as a failure, not a hung suite.
+    fn within_secs<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs))
+            .unwrap_or_else(|_| panic!("did not return within {secs}s"))
+    }
+
+    /// The costs of a stored hash come from the stored string. Above the
+    /// ceilings, verification is refused before any derivation runs, as a
+    /// malformed hash rather than a wrong password.
+    #[test]
+    fn argon2_costs_above_the_ceiling_are_refused_without_deriving() {
+        for params in [
+            "m=8,t=4294967295,p=1".to_string(),
+            format!("m={},t=2,p=1", ARGON2_MAX_M_COST + 1),
+            "m=4294967295,t=2,p=1".to_string(),
+            format!("m=4096,t={},p=1", ARGON2_MAX_T_COST + 1),
+            format!("m=4096,t=2,p={}", ARGON2_MAX_P_COST + 1),
+        ] {
+            let hash = format!("$argon2id$v=19${params}{ARGON2_TAIL}");
+            let result = within_secs(5, move || verify_password("pw", &hash));
+            match result {
+                Err(CryptoError::MalformedHash(m)) => {
+                    assert!(m.contains("ceiling"), "{params}: {m}");
+                }
+                other => panic!("{params}: expected MalformedHash, got {other:?}"),
+            }
+        }
+    }
+
+    /// The ceilings sit above everything this crate writes, so no hash it
+    /// produced is refused by them.
+    #[test]
+    fn the_argon2_presets_sit_under_the_ceilings() {
+        for cost in [Argon2Cost::Default, Argon2Cost::Constrained] {
+            let hash = hash_password("pw", cost).expect("hash");
+            verify_password("pw", &hash).expect("a preset hash verifies");
+        }
+    }
+
+    /// A hash without an output cannot be checked; the argon2 verifier
+    /// reports that as a wrong password, which it is not.
+    #[test]
+    fn an_argon2_hash_without_output_is_malformed_not_a_mismatch() {
+        let no_output = "$argon2id$v=19$m=4096,t=2,p=1$AAECAwQFBgcICQoLDA0ODw";
+        assert!(matches!(
+            verify_password("pw", no_output),
+            Err(CryptoError::MalformedHash(_))
         ));
     }
 }
@@ -967,7 +1115,7 @@ mod pbkdf2_tests {
     }
 
     #[test]
-    fn malformed_hashes_are_verify_errors_not_panics() {
+    fn malformed_hashes_are_malformed_hash_errors_not_panics() {
         for bad in [
             "",
             "not-a-hash",
@@ -980,8 +1128,8 @@ mod pbkdf2_tests {
             "$pbkdf2-sha256$i=1000$AAECAwQFBgcICQoLDA0ODw==$!!!not-base64!!!",
         ] {
             match pbkdf2_verify(KAT_PASSWORD, bad) {
-                Err(CryptoError::VerifyError(_)) => {}
-                other => panic!("expected VerifyError for {bad:?}, got {other:?}"),
+                Err(CryptoError::MalformedHash(_)) => {}
+                other => panic!("expected MalformedHash for {bad:?}, got {other:?}"),
             }
         }
     }
@@ -995,7 +1143,7 @@ mod pbkdf2_tests {
     fn a_truncated_derived_key_does_not_verify() {
         let truncated = "$pbkdf2-sha256$i=1000$AAECAwQFBgcICQoLDA0ODw==$/6tPyT3P0FDTAPcc3qfsdw==";
         match pbkdf2_verify(KAT_PASSWORD, truncated) {
-            Err(CryptoError::VerifyError(m)) => {
+            Err(CryptoError::MalformedHash(m)) => {
                 assert!(m.contains("derived key"), "got {m}");
             }
             other => panic!("a prefix of the real derived key must be refused, got {other:?}"),
@@ -1007,8 +1155,37 @@ mod pbkdf2_tests {
         let no_salt = "$pbkdf2-sha256$i=1000$$/6tPyT3P0FDTAPcc3qfsdyi1rxNk5iabYJNHAbMJ8Mg=";
         assert!(matches!(
             pbkdf2_verify(KAT_PASSWORD, no_salt),
-            Err(CryptoError::VerifyError(_))
+            Err(CryptoError::MalformedHash(_))
         ));
+    }
+
+    /// The iteration count of a stored hash comes from the stored string;
+    /// above the ceiling, verification is refused before deriving.
+    #[test]
+    fn an_iteration_count_above_the_ceiling_is_refused_without_deriving() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(pbkdf2_verify(
+                KAT_PASSWORD,
+                "$pbkdf2-sha256$i=4294967295$AAECAwQFBgcICQoLDA0ODw==$/6tPyT3P0FDTAPcc3qfsdyi1rxNk5iabYJNHAbMJ8Mg=",
+            ));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Err(CryptoError::MalformedHash(m))) => assert!(m.contains("ceiling"), "{m}"),
+            Ok(other) => panic!("expected MalformedHash, got {other:?}"),
+            Err(_) => panic!("i=4294967295 must be refused, not derived"),
+        }
+    }
+
+    /// This crate never writes a hash it would refuse to verify.
+    #[test]
+    fn hashing_above_the_ceiling_is_refused() {
+        let err = pbkdf2_hash("pw", PBKDF2_SHA256_MAX_ITERATIONS + 1)
+            .expect_err("above the ceiling must be refused");
+        assert!(
+            matches!(&err, CryptoError::HashError(m) if m.contains("ceiling")),
+            "{err:?}"
+        );
     }
 }
 
@@ -1057,7 +1234,7 @@ mod scheme_dispatch_tests {
                 // An unknown scheme is a broken stored credential, not a
                 // wrong password: an operator reading `PasswordMismatch`
                 // here would chase the user instead of the database.
-                Err(CryptoError::VerifyError(m)) => {
+                Err(CryptoError::MalformedHash(m)) => {
                     assert!(m.contains("unrecognised"), "got {m} for {bad:?}");
                 }
                 other => panic!("must refuse {bad:?} as unrecognised, got {other:?}"),

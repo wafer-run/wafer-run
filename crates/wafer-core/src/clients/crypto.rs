@@ -28,8 +28,10 @@ dual_api! {
         Ok(resp.hash)
     }
 
-    /// Verify `password` against `hash`. Returns `Ok(())` on match,
-    /// `Err(UNAUTHENTICATED)` on mismatch, or another `WaferError` on transport failure.
+    /// Verify `password` against `hash`. Returns `Ok(())` on match and
+    /// `Err(UNAUTHENTICATED)` only on a wrong password; a stored hash that
+    /// cannot be checked (malformed, unsupported scheme, cost out of range)
+    /// is `Err(INTERNAL)`, and transport failures carry their own code.
     pub fn compare_hash(ctx, password: &str, hash: &str) -> Result<(), WaferError> {
         let req = CompareHashRequest { password: password.to_string(), hash: hash.to_string() };
         let data = svc!(
