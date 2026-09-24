@@ -6,6 +6,11 @@ use crate::interfaces::storage::{handler, service::StorageService};
 
 crate::service_block! {
     /// Unified storage block. Wraps any `StorageService` implementation.
+    ///
+    /// A caller's plain folders resolve into its own `{org}/{block}/…`
+    /// namespace, and `@{org}/{block}/…` names another block's, admitted by
+    /// WRAP for the owner, the admin block or a Storage grant (see
+    /// `interfaces::storage::handler`).
     block: pub StorageBlock,
     name: "wafer-run/storage",
     version: "0.0.1",

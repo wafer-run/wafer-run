@@ -1,3 +1,11 @@
+//! Typed client for `wafer-run/storage`.
+//!
+//! Folders are addressed from the calling block's side: a plain folder lives
+//! in the caller's own namespace (`uploads` from `acme/app` is stored under
+//! `acme/app/uploads`; the empty folder is `acme/app` itself), and
+//! `@{org}/{block}/…` names a namespace explicitly — admitted for its owner,
+//! the admin block, or a Storage grant. See `wafer_block::wire::storage`.
+
 #[cfg(not(feature = "wasm-component"))]
 use std::pin::Pin;
 #[cfg(not(feature = "wasm-component"))]

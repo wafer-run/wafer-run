@@ -147,6 +147,12 @@ impl Context for RecordingCtx {
         false
     }
 
+    // The calling block: the handler scopes the plain folder `uploads` into
+    // `test/caller/uploads` before it authorizes and before the service runs.
+    fn caller_id(&self) -> Option<&str> {
+        Some("test/caller")
+    }
+
     fn config_get(&self, _key: &str) -> Option<&str> {
         None
     }
@@ -377,11 +383,11 @@ async fn storage_get_streaming_requests_identical_grant_to_buffered_get() {
         ctx_buffered.seen(),
         "streaming download must request the IDENTICAL WRAP grant tuple as the buffered download"
     );
-    // And concretely: a read (is_write=false) of `{folder}/{key}` on Storage.
+    // And concretely: a read (is_write=false) of the caller-scoped `{folder}/{key}` on Storage.
     assert_eq!(
         ctx_streaming.seen(),
         vec![(
-            "uploads/big.bin".to_string(),
+            "test/caller/uploads/big.bin".to_string(),
             ResourceType::Storage,
             ResourceAccess::Read
         )],
@@ -412,7 +418,7 @@ async fn storage_get_streaming_denied_without_the_grant() {
     assert_eq!(
         ctx.seen(),
         vec![(
-            "uploads/big.bin".to_string(),
+            "test/caller/uploads/big.bin".to_string(),
             ResourceType::Storage,
             ResourceAccess::Read
         )],

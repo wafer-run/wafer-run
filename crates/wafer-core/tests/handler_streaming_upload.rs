@@ -135,6 +135,12 @@ impl Context for RecordingCtx {
         false
     }
 
+    // The calling block: the handler scopes the plain folder `uploads` into
+    // `test/caller/uploads` before it authorizes and before the service runs.
+    fn caller_id(&self) -> Option<&str> {
+        Some("test/caller")
+    }
+
     fn config_get(&self, _key: &str) -> Option<&str> {
         None
     }
@@ -331,7 +337,7 @@ async fn put_streaming_dispatch_streams_body_chunks_verbatim_to_put_streaming() 
         "the streaming op must dispatch to put_streaming, never collapse to the buffered put"
     );
     // Header frame decoded correctly.
-    assert_eq!(s.folder, "uploads");
+    assert_eq!(s.folder, "test/caller/uploads");
     assert_eq!(s.key, "big.bin");
     assert_eq!(s.content_type, "image/png");
     // Body arrived as 3 DISTINCT frames — a collapsed/buffered path would have
@@ -427,11 +433,11 @@ async fn put_streaming_requests_identical_write_grant_to_buffered_put() {
         ctx_buffered.seen(),
         "streaming upload must request the IDENTICAL WRAP grant tuple as the buffered upload"
     );
-    // And concretely: a WRITE (is_write=true) of `{folder}/{key}` on Storage.
+    // And concretely: a WRITE (is_write=true) of the caller-scoped `{folder}/{key}` on Storage.
     assert_eq!(
         ctx_streaming.seen(),
         vec![(
-            "uploads/big.bin".to_string(),
+            "test/caller/uploads/big.bin".to_string(),
             ResourceType::Storage,
             ResourceAccess::Write
         )],
@@ -469,7 +475,7 @@ async fn put_streaming_denied_without_the_write_grant() {
     assert_eq!(
         ctx.seen(),
         vec![(
-            "uploads/big.bin".to_string(),
+            "test/caller/uploads/big.bin".to_string(),
             ResourceType::Storage,
             ResourceAccess::Write
         )],
@@ -503,6 +509,12 @@ impl Context for BlockRoutingCtx {
 
     fn is_cancelled(&self) -> bool {
         false
+    }
+
+    // The calling block: the handler scopes the plain folder `uploads` into
+    // `test/caller/uploads` before it authorizes and before the service runs.
+    fn caller_id(&self) -> Option<&str> {
+        Some("test/caller")
     }
 
     fn config_get(&self, _key: &str) -> Option<&str> {
@@ -554,7 +566,7 @@ async fn client_put_stream_round_trips_header_and_body_into_put_streaming() {
 
     let s = snapshot(&state);
     assert_eq!(s.calls, vec!["put_streaming"]);
-    assert_eq!(s.folder, "uploads");
+    assert_eq!(s.folder, "test/caller/uploads");
     assert_eq!(s.key, "media.bin");
     assert_eq!(s.content_type, "video/mp4");
     // The client framed the header separately; the backend saw the body as its
@@ -562,11 +574,11 @@ async fn client_put_stream_round_trips_header_and_body_into_put_streaming() {
     assert_eq!(s.body_chunks, body_chunks);
 
     // The client stamped — and the handler consulted — the SAME write grant as
-    // the buffered put: a WRITE of `{folder}/{key}` on Storage.
+    // the buffered put: a WRITE of the caller-scoped `{folder}/{key}` on Storage.
     assert_eq!(
         *ctx.seen.lock().unwrap(),
         vec![(
-            "uploads/media.bin".to_string(),
+            "test/caller/uploads/media.bin".to_string(),
             ResourceType::Storage,
             ResourceAccess::Write
         )],

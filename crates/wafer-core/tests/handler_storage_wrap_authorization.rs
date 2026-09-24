@@ -123,6 +123,11 @@ fn new_calls() -> Calls {
 // Context fakes
 // ---------------------------------------------------------------------------
 
+/// The calling block both fakes report. The handler scopes a plain folder
+/// into this namespace before it authorizes, so the fakes need a caller for
+/// a request to reach the authorization step at all.
+const CALLER: &str = "test/caller";
+
 /// `Context` stub that denies every resource-access check — models a caller
 /// with no WRAP grant for anything, regardless of what (if any) meta the
 /// message carries.
@@ -149,6 +154,10 @@ impl Context for DenyCtx {
 
     fn clone_arc(&self) -> Arc<dyn Context> {
         unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn caller_id(&self) -> Option<&str> {
+        Some(CALLER)
     }
 
     // `check_resource_access` uses the trait's fail-closed default (deny).
@@ -188,6 +197,10 @@ impl Context for AllowCtx {
 
     fn clone_arc(&self) -> Arc<dyn Context> {
         unimplemented!("not exercised by decode_and_authorize")
+    }
+
+    fn caller_id(&self) -> Option<&str> {
+        Some(CALLER)
     }
 
     fn check_resource_access(

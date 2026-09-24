@@ -199,11 +199,10 @@ fn grant_resource_owner(resource: &str, resource_type: Option<&ResourceType>) ->
         Some(ResourceType::Storage) => {
             // `{org}/{block}/` — the owner's two segments and the `/` that
             // ends the second one.
-            let path = literal.strip_prefix('@').unwrap_or(literal);
-            if path.matches('/').count() < 2 {
+            if literal.matches('/').count() < 2 {
                 return None;
             }
-            wafer_block::wrap::storage_resource_owner(path)
+            wafer_block::wrap::storage_resource_owner(literal)
         }
         // `resource_owner` already requires the `__` that ends the block
         // segment (`acme__files__`), so the literal prefix is enough.

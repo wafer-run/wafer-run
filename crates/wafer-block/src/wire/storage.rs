@@ -1,4 +1,11 @@
 //! Wire-format types for the storage service.
+//!
+//! A request's `folder` (or folder `name`) is addressed from the caller's
+//! side: a plain folder lives in the calling block's own namespace (`uploads`
+//! from `acme/app` is `acme/app/uploads`; the empty folder is `acme/app`
+//! itself), and `@{org}/{block}/…` names a namespace explicitly, which WRAP
+//! admits for its owner, the admin block, or a Storage grant. `key` is always
+//! relative to the folder.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,7 +15,8 @@ use serde::{Deserialize, Serialize};
 /// Request for `storage.put`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutRequest {
-    /// Folder (bucket) name.
+    /// Folder: relative to the calling block's own namespace, or
+    /// `@{org}/{block}/…` to name another block's.
     pub folder: String,
     /// Object key within `folder`.
     pub key: String,
@@ -32,7 +40,8 @@ fn default_content_type() -> String {
 /// encodes them. Field-for-field this is [`PutRequest`] minus `data`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutStreamingHeader {
-    /// Folder (bucket) name.
+    /// Folder: relative to the calling block's own namespace, or
+    /// `@{org}/{block}/…` to name another block's.
     pub folder: String,
     /// Object key within `folder`.
     pub key: String,
@@ -44,7 +53,8 @@ pub struct PutStreamingHeader {
 /// Request for `storage.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRequest {
-    /// Folder (bucket) name.
+    /// Folder: relative to the calling block's own namespace, or
+    /// `@{org}/{block}/…` to name another block's.
     pub folder: String,
     /// Object key within `folder`.
     pub key: String,
@@ -53,7 +63,8 @@ pub struct GetRequest {
 /// Request for `storage.delete`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteRequest {
-    /// Folder (bucket) name.
+    /// Folder: relative to the calling block's own namespace, or
+    /// `@{org}/{block}/…` to name another block's.
     pub folder: String,
     /// Object key within `folder`.
     pub key: String,
@@ -62,7 +73,8 @@ pub struct DeleteRequest {
 /// Request for `storage.list`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListRequest {
-    /// Folder (bucket) name.
+    /// Folder: relative to the calling block's own namespace, or
+    /// `@{org}/{block}/…` to name another block's.
     pub folder: String,
     /// Optional key prefix to filter on.
     #[serde(default)]
@@ -85,7 +97,7 @@ pub struct ListRequest {
 /// Request for `storage.create_folder`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFolderRequest {
-    /// Folder name to create.
+    /// Folder to create, addressed like an object request's `folder`.
     pub name: String,
     /// Whether the folder grants public read access.
     #[serde(default)]
@@ -95,7 +107,7 @@ pub struct CreateFolderRequest {
 /// Request for `storage.delete_folder`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteFolderRequest {
-    /// Folder name to delete.
+    /// Folder to delete, addressed like an object request's `folder`.
     pub name: String,
 }
 

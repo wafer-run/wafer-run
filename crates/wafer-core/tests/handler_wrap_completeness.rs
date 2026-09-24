@@ -609,6 +609,12 @@ impl Context for DenyCtx {
         unimplemented!("not exercised by decode_and_authorize / check_resource_access")
     }
 
+    // An attributable caller, so a storage request is scoped into its
+    // namespace and reaches the WRAP check this stub answers.
+    fn caller_id(&self) -> Option<&str> {
+        Some("test/caller")
+    }
+
     // `check_resource_access` uses the trait's fail-closed default (deny).
     // Denies every access, as the trait's default `check_resource_access` does.
     fn resource_access_admitted(

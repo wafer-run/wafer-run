@@ -59,42 +59,96 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
     }
 }
 
-// --- Path validation (C1) ---------------------------------------------------
+// --- Path resolution ---------------------------------------------------------
 
-/// Validate one caller-supplied path component (`folder`, `key` or a folder
-/// `name`) and return it, or an `InvalidArgument` naming the offender.
+/// Resolve the `folder` (or folder `name`) a caller sent into the one path
+/// the backend touches — the same string WRAP authorizes.
 ///
-/// Storage resources are `/`-separated paths that the WRAP capability check
-/// matches by PREFIX and that nothing anywhere normalizes, so a component
-/// carrying an empty, `.` or `..` segment must never reach
-/// `check_resource_access`: `folder = "site/jhg"`, `key = "../../other/secret"`
-/// composes to `site/jhg/../../other/secret`, which sits textually under a
-/// `site/jhg` grant while naming a folder the caller was never given.
+/// A folder is addressed in one of two ways:
+/// - **Caller-relative** (no leading `@`): the folder lives in the calling
+///   block's own namespace. `uploads` resolves to `{caller}/uploads`, and the
+///   empty folder resolves to `{caller}` itself (the namespace root). The
+///   caller is [`Context::caller_id`], the registration name of the block that
+///   made the call, so a block cannot name its way into another block's
+///   namespace: `other-org/other-block/secrets` from `acme/app` resolves to
+///   `acme/app/other-org/other-block/secrets`.
+/// - **Explicit** (`@{org}/{block}/…`): the path after the `@`, as written.
+///   WRAP admits it when its `{org}/{block}` owner is the caller, when the
+///   caller is the admin block, or when a Storage grant covers it.
 ///
-/// Refused here, at the earliest point the components exist, rather than
-/// normalized: a request that says `..` is malformed, and silently rewriting
-/// it to something else would store or return an object the caller did not
-/// ask for. `BlockCapabilities::allows_storage_folder` refuses the same shape
-/// independently, so neither layer relies on the other.
-fn check_path_component(op: &str, what: &str, value: &str) -> Result<(), WaferError> {
-    if wafer_block::wrap::is_traversal_safe_path(value) {
+/// The resolved path is then refused if any `/`-separated segment is empty,
+/// `.` or `..` ([`wafer_block::wrap::is_traversal_safe_path`]). Storage
+/// authorization is textual and prefix-based and nothing normalizes the
+/// string, so `uploads/../../other-org/x` would sit under the caller's own
+/// namespace as text while naming another block's folder. Such a request is
+/// malformed and is refused rather than normalized: rewriting it would store
+/// or return an object the caller did not ask for.
+///
+/// A caller-relative folder with no caller to scope it to (a top-level call)
+/// is `PermissionDenied`: there is no namespace it could belong to.
+fn resolve_folder(
+    ctx: &dyn Context,
+    op: &str,
+    what: &str,
+    folder: &str,
+) -> Result<String, WaferError> {
+    let resolved = match folder.strip_prefix('@') {
+        Some(explicit) => explicit.to_string(),
+        None => {
+            let Some(caller) = ctx.caller_id() else {
+                return Err(WaferError::new(
+                    ErrorCode::PermissionDenied,
+                    format!(
+                        "{op}: `{what}` {folder:?} is relative to the calling block's \
+                         namespace, and this call has no calling block"
+                    ),
+                ));
+            };
+            if folder.is_empty() {
+                caller.to_string()
+            } else {
+                format!("{caller}/{folder}")
+            }
+        }
+    };
+    check_path(op, what, folder, &resolved)?;
+    Ok(resolved)
+}
+
+/// Refuse `path` unless every `/`-separated segment is a plain name, naming
+/// `sent` — the value as the caller wrote it — in the `InvalidArgument`.
+fn check_path(op: &str, what: &str, sent: &str, path: &str) -> Result<(), WaferError> {
+    if wafer_block::wrap::is_traversal_safe_path(path) {
         return Ok(());
     }
     Err(WaferError::new(
         ErrorCode::InvalidArgument,
         format!(
             "invalid {op} request: `{what}` must be a plain `/`-separated path \
-             with no empty, `.` or `..` segment (got {value:?})"
+             with no empty, `.` or `..` segment (got {sent:?})"
         ),
     ))
 }
 
-/// The `"{folder}/{key}"` resource an object op authorizes on, with both
-/// components validated by [`check_path_component`] first.
-fn object_resource(op: &str, folder: &str, key: &str) -> Result<String, WaferError> {
-    check_path_component(op, "folder", folder)?;
-    check_path_component(op, "key", key)?;
-    Ok(format!("{folder}/{key}"))
+/// An object's resolved folder and the `"{folder}/{key}"` resource an object
+/// op authorizes on and the backend stores under.
+struct ObjectPath {
+    folder: String,
+    resource: String,
+}
+
+/// Resolve an object op's `folder` ([`resolve_folder`]) and validate its
+/// `key`, which is always relative to that folder.
+fn resolve_object(
+    ctx: &dyn Context,
+    op: &str,
+    folder: &str,
+    key: &str,
+) -> Result<ObjectPath, WaferError> {
+    let folder = resolve_folder(ctx, op, "folder", folder)?;
+    check_path(op, "key", key, key)?;
+    let resource = format!("{folder}/{key}");
+    Ok(ObjectPath { folder, resource })
 }
 
 /// Handle a storage message using the given service.
@@ -103,10 +157,13 @@ fn object_resource(op: &str, folder: &str, key: &str) -> Result<String, WaferErr
 /// touches a WRAP-governed resource authorizes via
 /// [`decode_and_authorize_checked`], which bundles the codec decode with a
 /// call to `ctx.check_resource_access` so an arm cannot obtain its typed
-/// request without also being checked — and, for storage, validates the
-/// caller-supplied path components first (see [`check_path_component`]), so a
-/// traversal shape is `InvalidArgument` before authorization rather than a
-/// grant-relative path that escapes its own grant.
+/// request without also being checked. Each arm first resolves the
+/// caller-supplied folder into a backend path ([`resolve_folder`]): a plain
+/// folder is scoped into the calling block's own namespace, an `@`-prefixed
+/// one names a namespace explicitly, and a traversal shape is
+/// `InvalidArgument` before authorization. The arm then authorizes that
+/// resolved path and hands the same path to the service, so the path the
+/// backend touches is always the path WRAP admitted.
 ///
 /// Wire protocol:
 /// - `STORAGE_GET` emits **two frames**: a [`wire::ObjectInfo`] header chunk
@@ -134,23 +191,21 @@ pub async fn handle_message(
 ) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::STORAGE_PUT => {
-            let req = match decode_and_authorize_checked::<wire::PutRequest>(
+            let (req, path) = match decode_and_authorize_checked::<wire::PutRequest, _>(
                 ctx,
                 body,
                 "storage.put",
                 |r| {
-                    Ok((
-                        object_resource("storage.put", &r.folder, &r.key)?,
-                        ResourceType::Storage,
-                        ResourceAccess::Write,
-                    ))
+                    let path = resolve_object(ctx, "storage.put", &r.folder, &r.key)?;
+                    let resource = path.resource.clone();
+                    Ok((path, resource, ResourceType::Storage, ResourceAccess::Write))
                 },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
             match service
-                .put(&req.folder, &req.key, &req.data, &req.content_type)
+                .put(&path.folder, &req.key, &req.data, &req.content_type)
                 .await
             {
                 Ok(()) => OutputStream::respond(vec![]),
@@ -158,22 +213,20 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_GET => {
-            let req = match decode_and_authorize_checked::<wire::GetRequest>(
+            let (req, path) = match decode_and_authorize_checked::<wire::GetRequest, _>(
                 ctx,
                 body,
                 "storage.get",
                 |r| {
-                    Ok((
-                        object_resource("storage.get", &r.folder, &r.key)?,
-                        ResourceType::Storage,
-                        ResourceAccess::Read,
-                    ))
+                    let path = resolve_object(ctx, "storage.get", &r.folder, &r.key)?;
+                    let resource = path.resource.clone();
+                    Ok((path, resource, ResourceType::Storage, ResourceAccess::Read))
                 },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            match service.get(&req.folder, &req.key).await {
+            match service.get(&path.folder, &req.key).await {
                 Ok((data, info)) => {
                     let header = service_object_info_to_wire(info);
                     OutputStream::from_producer(|sink, _cancel| async move {
@@ -213,22 +266,20 @@ pub async fn handle_message(
             // Same request shape and WRAP authorization as `STORAGE_GET` — a
             // read of `{folder}/{key}` — so the streaming download can never be
             // reached with a weaker grant than the buffered download.
-            let req = match decode_and_authorize_checked::<wire::GetRequest>(
+            let (req, path) = match decode_and_authorize_checked::<wire::GetRequest, _>(
                 ctx,
                 body,
                 "storage.get_streaming",
                 |r| {
-                    Ok((
-                        object_resource("storage.get_streaming", &r.folder, &r.key)?,
-                        ResourceType::Storage,
-                        ResourceAccess::Read,
-                    ))
+                    let path = resolve_object(ctx, "storage.get_streaming", &r.folder, &r.key)?;
+                    let resource = path.resource.clone();
+                    Ok((path, resource, ResourceType::Storage, ResourceAccess::Read))
                 },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            match service.get_streaming(&req.folder, &req.key).await {
+            match service.get_streaming(&path.folder, &req.key).await {
                 Ok((body_stream, info)) => {
                     // Two-frame response: an `ObjectInfo` header chunk followed
                     // by the body forwarded verbatim from the service's stream
@@ -240,35 +291,35 @@ pub async fn handle_message(
             }
         }
         ServiceOp::STORAGE_DELETE => {
-            let req = match decode_and_authorize_checked::<wire::DeleteRequest>(
+            let (req, path) = match decode_and_authorize_checked::<wire::DeleteRequest, _>(
                 ctx,
                 body,
                 "storage.delete",
                 |r| {
-                    Ok((
-                        object_resource("storage.delete", &r.folder, &r.key)?,
-                        ResourceType::Storage,
-                        ResourceAccess::Write,
-                    ))
+                    let path = resolve_object(ctx, "storage.delete", &r.folder, &r.key)?;
+                    let resource = path.resource.clone();
+                    Ok((path, resource, ResourceType::Storage, ResourceAccess::Write))
                 },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            match service.delete(&req.folder, &req.key).await {
+            match service.delete(&path.folder, &req.key).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_LIST => {
-            let req = match decode_and_authorize_checked::<wire::ListRequest>(
+            let (req, folder) = match decode_and_authorize_checked::<wire::ListRequest, _>(
                 ctx,
                 body,
                 "storage.list",
                 |r| {
-                    check_path_component("storage.list", "folder", &r.folder)?;
+                    let folder = resolve_folder(ctx, "storage.list", "folder", &r.folder)?;
+                    let resource = folder.clone();
                     Ok((
-                        r.folder.clone(),
+                        folder,
+                        resource,
                         ResourceType::Storage,
                         ResourceAccess::Read,
                     ))
@@ -283,43 +334,45 @@ pub async fn handle_message(
                 offset: req.offset,
                 cursor: req.cursor,
             };
-            match service.list(&req.folder, &opts).await {
+            match service.list(&folder, &opts).await {
                 Ok(list) => to_output(service_object_list_to_wire(list)),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_CREATE_FOLDER => {
-            let req = match decode_and_authorize_checked::<wire::CreateFolderRequest>(
+            let (req, name) = match decode_and_authorize_checked::<wire::CreateFolderRequest, _>(
                 ctx,
                 body,
                 "storage.create_folder",
                 |r| {
-                    check_path_component("storage.create_folder", "name", &r.name)?;
-                    Ok((r.name.clone(), ResourceType::Storage, ResourceAccess::Write))
+                    let name = resolve_folder(ctx, "storage.create_folder", "name", &r.name)?;
+                    let resource = name.clone();
+                    Ok((name, resource, ResourceType::Storage, ResourceAccess::Write))
                 },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            match service.create_folder(&req.name, req.public).await {
+            match service.create_folder(&name, req.public).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
         }
         ServiceOp::STORAGE_DELETE_FOLDER => {
-            let req = match decode_and_authorize_checked::<wire::DeleteFolderRequest>(
+            let (_, name) = match decode_and_authorize_checked::<wire::DeleteFolderRequest, _>(
                 ctx,
                 body,
                 "storage.delete_folder",
                 |r| {
-                    check_path_component("storage.delete_folder", "name", &r.name)?;
-                    Ok((r.name.clone(), ResourceType::Storage, ResourceAccess::Write))
+                    let name = resolve_folder(ctx, "storage.delete_folder", "name", &r.name)?;
+                    let resource = name.clone();
+                    Ok((name, resource, ResourceType::Storage, ResourceAccess::Write))
                 },
             ) {
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            match service.delete_folder(&req.name).await {
+            match service.delete_folder(&name).await {
                 Ok(()) => OutputStream::respond(vec![]),
                 Err(e) => OutputStream::error(storage_error_to_wafer(e)),
             }
@@ -364,9 +417,9 @@ pub async fn handle_message(
 ///
 /// WRAP authorization parity (security-critical): the caller is authorized for
 /// the IDENTICAL `(resource, ResourceType::Storage, is_write = true)` tuple as
-/// the buffered [`ServiceOp::STORAGE_PUT`] — a WRITE of `{folder}/{key}` —
-/// decoded from the header frame and checked BEFORE any body frame is consumed
-/// or written. So the streaming upload can never be reached with a weaker (or
+/// the buffered [`ServiceOp::STORAGE_PUT`] — a WRITE of the resolved
+/// `{folder}/{key}` ([`resolve_folder`]) — decoded from the header frame and
+/// checked BEFORE any body frame is consumed or written. So the streaming upload can never be reached with a weaker (or
 /// read-only) grant than the buffered upload.
 pub async fn handle_put_streaming(
     service: &dyn StorageService,
@@ -389,16 +442,14 @@ pub async fn handle_put_streaming(
     // Decode + authorize the header BEFORE consuming any body frame. Same
     // resource tuple as the buffered `storage.put` write, so the check can't
     // be forgotten and can't be weaker than the buffered path.
-    let header = match decode_and_authorize_checked::<wire::PutStreamingHeader>(
+    let (header, path) = match decode_and_authorize_checked::<wire::PutStreamingHeader, _>(
         ctx,
         &header_bytes,
         "storage.put_streaming",
         |h| {
-            Ok((
-                object_resource("storage.put_streaming", &h.folder, &h.key)?,
-                ResourceType::Storage,
-                ResourceAccess::Write,
-            ))
+            let path = resolve_object(ctx, "storage.put_streaming", &h.folder, &h.key)?;
+            let resource = path.resource.clone();
+            Ok((path, resource, ResourceType::Storage, ResourceAccess::Write))
         },
     ) {
         Ok(h) => h,
@@ -409,7 +460,7 @@ pub async fn handle_put_streaming(
     // the first body chunk (its cancellation token is preserved), so
     // `put_streaming` receives a live body stream — never a buffered blob.
     match service
-        .put_streaming(&header.folder, &header.key, input, &header.content_type)
+        .put_streaming(&path.folder, &header.key, input, &header.content_type)
         .await
     {
         Ok(()) => OutputStream::respond(vec![]),
