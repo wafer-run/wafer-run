@@ -694,6 +694,9 @@ async fn a_transferred_flow_error_keeps_the_outer_and_inner_headers() {
     assert_eq!(parts.status, 401);
     assert_middleware_headers(&parts);
     assert_eq!(header(&parts, "X-Inner"), vec!["1"]);
+    // The same precedence as within one flow: the failing step's own value
+    // replaces the outer security-headers step's, and appears once.
+    assert_eq!(header(&parts, "X-Frame-Options"), vec!["SAMEORIGIN"]);
 }
 
 /// A parallel branch's message changes are discarded at the join, on

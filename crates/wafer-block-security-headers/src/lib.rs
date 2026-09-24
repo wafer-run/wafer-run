@@ -5,6 +5,11 @@
 //! [`ConfigVar`] but the operator-supplied directives are merged on top of
 //! a restrictive baseline (see [`merge_csp`]) so they can only widen the
 //! policy in safe ways.
+//!
+//! These are defaults for the flow's response, not a floor: under the flow
+//! executor's precedence rule, a later step's own value for one of these
+//! headers replaces this block's. A WASM step can set one only when its
+//! capabilities allow writing it.
 
 #![warn(missing_docs)]
 
