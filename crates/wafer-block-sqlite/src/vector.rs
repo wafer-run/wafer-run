@@ -1588,6 +1588,18 @@ mod tests {
             .expect("vector worker alive")
     }
 
+    /// Catalog entries of any kind — shadow tables included — still spelled
+    /// with the legacy name or the staging stem (`GLOB` is case-sensitive).
+    /// vec0 has no `xRename`, so an `ALTER TABLE` of the vec table would
+    /// leave its shadow tables here under `…Docs_vec_*`.
+    async fn leftovers(svc: &SqliteVecService) -> i64 {
+        query_i64_for_tests(
+            svc,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name GLOB '*Docs*' OR name GLOB '*-rename*'",
+        )
+        .await
+    }
+
     async fn nearest(svc: &SqliteVecService, index: &str, v: Vec<f32>) -> VectorMatch {
         svc.query(index, v, 1, None, SearchMode::Vector, None)
             .await
@@ -1677,6 +1689,7 @@ mod tests {
             ]
         );
         assert_eq!(svc.list_indexes("my_org__vector__").await.unwrap(), [LOWER]);
+        assert_eq!(leftovers(&svc).await, 0);
     }
 
     #[tokio::test]
@@ -1692,6 +1705,7 @@ mod tests {
             catalog(&svc).await,
             ["my_org__vector__docs_meta", "my_org__vector__docs_vec"]
         );
+        assert_eq!(leftovers(&svc).await, 0);
     }
 
     /// Once moved, `from` is gone: a second run reports it missing, which a
