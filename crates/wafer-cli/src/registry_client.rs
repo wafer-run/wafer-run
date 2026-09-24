@@ -181,13 +181,17 @@ pub async fn get_version(
 }
 
 /// `GET /registry/download/{org}/{block}/{version}.wafer` — returns the
-/// raw gzipped tarball bytes. Callers are responsible for hashing +
-/// verifying against the registry's stored sha256.
+/// raw gzipped tarball bytes, refusing more than `max_bytes`: an advertised
+/// `Content-Length` over the cap is refused before any body is read, and the
+/// body is read chunk by chunk and refused as soon as it passes the cap.
+/// Callers are responsible for hashing + verifying the bytes against the
+/// pinned sha256.
 pub async fn download_tarball(
     registry: &Registry,
     org: &str,
     block: &str,
     version: &str,
+    max_bytes: usize,
 ) -> Result<Vec<u8>> {
     let url = registry.join(&format!(
         "/registry/download/{}/{}/{}.wafer",
@@ -201,12 +205,26 @@ pub async fn download_tarball(
         .send()
         .await
         .with_context(|| format!("GET {url}"))?;
-    let resp = ensure_ok(resp, "install").await?;
-    let bytes = resp
-        .bytes()
+    let mut resp = ensure_ok(resp, "install").await?;
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes as u64 {
+            anyhow::bail!(
+                "{org}/{block}@{version}: tarball is {len} bytes, over the {max_bytes}-byte limit"
+            );
+        }
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .with_context(|| format!("read tarball bytes from {url}"))?;
-    Ok(bytes.to_vec())
+        .with_context(|| format!("read tarball bytes from {url}"))?
+    {
+        if bytes.len() + chunk.len() > max_bytes {
+            anyhow::bail!("{org}/{block}@{version}: tarball exceeds the {max_bytes}-byte limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Minimal percent-encoder for the subset we care about: path segments and

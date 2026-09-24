@@ -5,13 +5,21 @@
 //!    filter yanked, pick highest semver.
 //! 2. Emit a yanked-version warning if the caller asked for an explicit
 //!    yanked version (still proceeds; reproducibility over warning).
-//! 3. Cache-hit check: if the version dir exists AND the lockfile already
+//! 3. Lock check: when `wafer.lock` already pins the resolved version, the
+//!    registry's sha256 must equal the pin — a version's tarball never
+//!    changes, so a different sha is refused as an integrity failure and
+//!    `wafer.lock` is left as it was. Only a different version (an explicit
+//!    upgrade: a new `@version`, a bare `org/block` resolving past the pin,
+//!    or a bumped `[dependencies]` entry) records a new sha.
+//! 4. Cache-hit check: if the version dir exists AND the lockfile already
 //!    has a matching entry (same sha256), skip the download entirely.
-//! 4. Acquire the cache flock; re-check the cache under the lock (another
-//!    process may have populated it while we waited); download, hash,
-//!    verify, extract into a sibling temp dir, then `rename` into place.
-//!    Release the lock.
-//! 5. Update the lockfile with the new entry and write atomically.
+//! 5. Acquire the cache flock; re-check the cache and the lock pin under the
+//!    lock (another process may have populated it while we waited);
+//!    download (at most the registry's `size_bytes`, never more than
+//!    `MAX_PACKAGE_BYTES`), hash, verify, extract into a sibling temp dir
+//!    (bounded by `MAX_PACKAGE_ENTRIES` / `MAX_UNPACKED_BYTES`), then
+//!    `rename` into place. Release the lock.
+//! 6. Update the lockfile with the new entry and write atomically.
 
 use std::{
     fs::{self, File},
@@ -22,7 +30,8 @@ use std::{
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use semver::Version;
-use tar::{Archive, EntryType};
+use tar::Archive;
+use wafer_block::lockfile::{MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES, MAX_UNPACKED_BYTES};
 
 use crate::{
     block_name::parse_org_block,
@@ -174,6 +183,45 @@ fn wasm_artifact_digest(dir: &Path) -> Result<String> {
     Ok(sha256_hex(&bytes))
 }
 
+/// Refuse a registry sha256 that differs from the one `wafer.lock` pins for
+/// the same `org/block@version`: a published version's tarball is
+/// immutable, so a different sha means the registry (or something between
+/// it and us) now serves other bytes under the pinned version. `wafer.lock`
+/// is the authority; nothing is downloaded or re-pinned.
+fn ensure_lock_pin(
+    lockfile: &Lockfile,
+    org: &str,
+    block: &str,
+    version: &str,
+    registry_sha: &str,
+) -> Result<()> {
+    let name = format!("{org}/{block}");
+    match lockfile
+        .packages
+        .iter()
+        .find(|p| p.name == name && p.version == version)
+    {
+        Some(pinned) if pinned.sha256 != registry_sha => bail!(
+            "integrity check failed: {name}@{version} — wafer.lock pins sha256 {}, but the \
+             registry now reports {registry_sha} for the same version. A published version \
+             never changes; wafer.lock is unchanged. Remove the entry from wafer.lock only if \
+             you have verified the new tarball.",
+            pinned.sha256
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// The most bytes to accept for a tarball the registry says is `size_bytes`
+/// long: that size when it is a plausible one, and never more than
+/// [`MAX_PACKAGE_BYTES`].
+fn download_cap(size_bytes: i64) -> usize {
+    usize::try_from(size_bytes)
+        .ok()
+        .filter(|&size| size > 0 && size <= MAX_PACKAGE_BYTES)
+        .unwrap_or(MAX_PACKAGE_BYTES)
+}
+
 /// Check whether the cache+lockfile pair already satisfies this version.
 /// Returns `Some(sha256)` if satisfied and the download can be skipped.
 ///
@@ -201,11 +249,25 @@ pub(crate) fn cache_hit(
 /// Extract a gzipped tar into `dest` (which must not exist yet; `fs::rename`
 /// into the final cache path is the caller's job). Returns number of
 /// regular files written.
+///
+/// Bounded like the runtime's in-memory unpack of the same packages: at
+/// most [`MAX_PACKAGE_ENTRIES`] entries and [`MAX_UNPACKED_BYTES`] of file
+/// content in total, so a small, highly compressed tarball cannot fill the
+/// disk. Only regular files and directories are written; any other entry
+/// type (links, devices, FIFOs) is refused.
 pub(crate) fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<usize> {
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
     let mut archive = Archive::new(GzDecoder::new(bytes));
     let mut count = 0usize;
-    for entry in archive.entries().context("read tarball entries")? {
+    let mut unpacked: u64 = 0;
+    for (index, entry) in archive
+        .entries()
+        .context("read tarball entries")?
+        .enumerate()
+    {
+        if index >= MAX_PACKAGE_ENTRIES {
+            bail!("tarball has more than {MAX_PACKAGE_ENTRIES} entries");
+        }
         let mut entry = entry.context("read tarball entry")?;
         let entry_path = entry.path().context("read entry path")?.into_owned();
 
@@ -218,28 +280,35 @@ pub(crate) fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<usize> {
             bail!("tarball contains unsafe path: {}", entry_path.display());
         }
 
-        // Refuse symlink / hardlink entries. A symlink entry whose target
+        // Only regular files and directories. A symlink entry whose target
         // escapes `dest` (e.g. `foo -> ../../etc`) followed by a regular
         // file written through that symlink would bypass the path check
-        // above. Block archives shouldn't contain links at all.
+        // above; block archives have no use for links or special files.
         let entry_type = entry.header().entry_type();
-        if entry_type == EntryType::Symlink || entry_type == EntryType::Link {
-            bail!(
-                "tarball contains link entry (not allowed): {}",
-                entry_path.display()
-            );
-        }
-
         let target = dest.join(&entry_path);
         if entry_type.is_dir() {
             fs::create_dir_all(&target).with_context(|| format!("mkdir {}", target.display()))?;
             continue;
         }
+        if !entry_type.is_file() {
+            bail!(
+                "tarball entry {} is not a regular file or directory ({entry_type:?})",
+                entry_path.display()
+            );
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
         }
+        let budget = MAX_UNPACKED_BYTES - unpacked;
         let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).context("read entry body")?;
+        (&mut entry)
+            .take(budget + 1)
+            .read_to_end(&mut buf)
+            .context("read entry body")?;
+        if buf.len() as u64 > budget {
+            bail!("tarball unpacks to more than {MAX_UNPACKED_BYTES} bytes");
+        }
+        unpacked += buf.len() as u64;
         let mut f =
             File::create(&target).with_context(|| format!("create {}", target.display()))?;
         f.write_all(&buf)
@@ -273,74 +342,79 @@ pub async fn install_cache_only(
 
     // Step 1: resolve version. For explicit versions, try the lockfile first
     // to avoid a network call if we already have it cached.
-    let (resolved_version, expected_sha, yanked_warning): (String, String, Option<String>) =
-        match version_req {
-            Some(ver) => {
-                // Reject malformed version requests before `ver` can reach
-                // any cache path construction — the fast-path
-                // `is_populated` check below runs before any registry
-                // round-trip, so this has to happen first, not just before
-                // `final_dir` further down.
-                Version::parse(ver).with_context(|| {
-                    format!("invalid version {ver:?} for {org}/{block}: must be valid semver (e.g. 1.2.3)")
-                })?;
+    let (resolved_version, expected_sha, size_bytes, yanked_warning): (
+        String,
+        String,
+        i64,
+        Option<String>,
+    ) = match version_req {
+        Some(ver) => {
+            // Reject malformed version requests before `ver` can reach
+            // any cache path construction — the fast-path
+            // `is_populated` check below runs before any registry
+            // round-trip, so this has to happen first, not just before
+            // `final_dir` further down.
+            Version::parse(ver).with_context(|| {
+                format!(
+                    "invalid version {ver:?} for {org}/{block}: must be valid semver (e.g. 1.2.3)"
+                )
+            })?;
 
-                // Fast path: if the lockfile already has this version + the
-                // cache is populated with it, skip the registry call entirely.
-                let name = format!("{org}/{block}");
-                if let Some(entry) = pre_lock_lf
-                    .packages
-                    .iter()
-                    .find(|p| p.name == name && p.version == ver)
-                {
-                    if cache.is_populated(org, block, ver)? {
-                        // Network-free: use the lockfile entry.
-                        return Ok(InstallOutcome::cached(
-                            org,
-                            block,
-                            entry.version.clone(),
-                            entry.sha256.clone(),
-                        ));
-                    }
+            // Fast path: if the lockfile already has this version + the
+            // cache is populated with it, skip the registry call entirely.
+            let name = format!("{org}/{block}");
+            if let Some(entry) = pre_lock_lf
+                .packages
+                .iter()
+                .find(|p| p.name == name && p.version == ver)
+            {
+                if cache.is_populated(org, block, ver)? {
+                    // Network-free: use the lockfile entry.
+                    return Ok(InstallOutcome::cached(
+                        org,
+                        block,
+                        entry.version.clone(),
+                        entry.sha256.clone(),
+                    ));
                 }
-                // Fallback: ask the registry.
-                let vd: VersionDetail =
-                    registry_client::get_version(registry, org, block, ver).await?;
-                // The registry response is untrusted network input — a
-                // hostile/compromised registry could echo back a
-                // `version` field that differs from what we requested
-                // (e.g. "../../.."). Require it to be valid semver before
-                // it's ever used to build a cache path.
-                Version::parse(&vd.version).with_context(|| {
-                    format!(
-                        "registry returned invalid version {:?} for {org}/{block}",
-                        vd.version
-                    )
-                })?;
-                let warn = if vd.yanked != 0 {
-                    Some(format!("warning: {org}/{block}@{ver} was yanked"))
-                } else {
-                    None
-                };
-                (vd.version, vd.sha256, warn)
             }
-            None => {
-                let pd = registry_client::get_package(registry, org, block).await?;
-                let pick = pick_latest_non_yanked(&pd.versions)
-                    .ok_or_else(|| anyhow::anyhow!("no non-yanked versions of {org}/{block}"))?
-                    .clone();
-                (pick.version, pick.sha256, None)
-            }
-        };
+            // Fallback: ask the registry.
+            let vd: VersionDetail = registry_client::get_version(registry, org, block, ver).await?;
+            // The registry response is untrusted network input — a
+            // hostile/compromised registry could echo back a
+            // `version` field that differs from what we requested
+            // (e.g. "../../.."). Require it to be valid semver before
+            // it's ever used to build a cache path.
+            Version::parse(&vd.version).with_context(|| {
+                format!(
+                    "registry returned invalid version {:?} for {org}/{block}",
+                    vd.version
+                )
+            })?;
+            let warn = if vd.yanked != 0 {
+                Some(format!("warning: {org}/{block}@{ver} was yanked"))
+            } else {
+                None
+            };
+            (vd.version, vd.sha256, vd.size_bytes, warn)
+        }
+        None => {
+            let pd = registry_client::get_package(registry, org, block).await?;
+            let pick = pick_latest_non_yanked(&pd.versions)
+                .ok_or_else(|| anyhow::anyhow!("no non-yanked versions of {org}/{block}"))?
+                .clone();
+            (pick.version, pick.sha256, pick.size_bytes, None)
+        }
+    };
 
     if let Some(w) = &yanked_warning {
         eprintln!("{w}");
     }
 
-    // Step 2 (pre-lock): load the lockfile for the fast-path cache_hit check.
-    // (Already loaded above for the explicit-version optimization.)
+    // Step 3: the lockfile's pin for this version is the authority.
+    ensure_lock_pin(&pre_lock_lf, org, block, &resolved_version, &expected_sha)?;
 
-    // Step 3: pre-lock cache-hit shortcut.
+    // Step 4: pre-lock cache-hit shortcut.
     if let Some(cached_sha) = cache_hit(cache, &pre_lock_lf, org, block, &resolved_version)? {
         if cached_sha == expected_sha {
             return Ok(InstallOutcome::cached(
@@ -352,13 +426,16 @@ pub async fn install_cache_only(
         }
     }
 
-    // Step 4: acquire the flock.
+    // Step 5: acquire the flock.
     let guard = cache.acquire_lock()?;
 
     // Reload the lockfile under the lock — another installer may have
     // written a newer lockfile while we were waiting for the flock, and
-    // we must not stomp their entry when we write below.
+    // we must not stomp their entry when we write below. Its pin, if it
+    // gained one, binds us the same way.
     let mut lf = Lockfile::load(lockfile_path)?.unwrap_or_else(Lockfile::new);
+    ensure_lock_pin(&lf, org, block, &resolved_version, &expected_sha)?;
+    let max_bytes = download_cap(size_bytes);
 
     let final_dir = cache.package_dir(org, block, &resolved_version)?;
     let bytes = if final_dir.is_dir() {
@@ -380,9 +457,11 @@ pub async fn install_cache_only(
         // re-download.
         fs::remove_dir_all(&final_dir)
             .with_context(|| format!("remove stale {}", final_dir.display()))?;
-        registry_client::download_tarball(registry, org, block, &resolved_version).await?
+        registry_client::download_tarball(registry, org, block, &resolved_version, max_bytes)
+            .await?
     } else {
-        registry_client::download_tarball(registry, org, block, &resolved_version).await?
+        registry_client::download_tarball(registry, org, block, &resolved_version, max_bytes)
+            .await?
     };
 
     // Verify sha256, extract, and atomically promote into the cache.
@@ -396,7 +475,7 @@ pub async fn install_cache_only(
     // just sha256-verified), so the chain is registry sha → tarball → wasm.
     let wasm_sha256 = wasm_artifact_digest(&final_dir)?;
 
-    // Step 5: update lockfile. This must happen while we still hold the
+    // Step 6: update lockfile. This must happen while we still hold the
     // flock, otherwise another installer could acquire the lock, write its
     // own entry, and our write below would silently overwrite it.
     lf.record_resolved(lockfile_entry(
@@ -460,7 +539,8 @@ pub async fn install_cache_only_frozen(
         return Ok(InstallOutcome::cached(org, block, version, expected_sha));
     }
 
-    let bytes = registry_client::download_tarball(registry, org, block, version).await?;
+    let bytes =
+        registry_client::download_tarball(registry, org, block, version, MAX_PACKAGE_BYTES).await?;
 
     // Verify sha256, extract, and atomically promote into the cache.
     verify_and_promote(&bytes, expected_sha, &final_dir, |actual| {
@@ -688,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_tarball_rejects_symlink_and_hardlink_entries() {
+    fn extract_tarball_rejects_link_entries() {
         use flate2::{write::GzEncoder, Compression};
         use tempfile::tempdir;
 
@@ -714,13 +794,62 @@ mod tests {
         let err = extract_tarball(&sym_bytes, &tmp.path().join("sym"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("link entry"), "{err}");
+        assert!(err.contains("not a regular file"), "{err}");
 
         let hard_bytes = build(tar::EntryType::Link);
         let err = extract_tarball(&hard_bytes, &tmp.path().join("hard"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("link entry"), "{err}");
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    /// A gzip bomb — a small tarball of zeros unpacking past
+    /// `MAX_UNPACKED_BYTES` — is refused while extracting, and so is a
+    /// tarball with more entries than `MAX_PACKAGE_ENTRIES`.
+    #[test]
+    fn extract_tarball_is_bounded() {
+        use flate2::{write::GzEncoder, Compression};
+        use tempfile::tempdir;
+
+        fn build(files: &[(String, u64)]) -> Vec<u8> {
+            let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+            {
+                let mut tb = tar::Builder::new(&mut gz);
+                for (path, size) in files {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_path(path).unwrap();
+                    h.set_size(*size);
+                    h.set_cksum();
+                    tb.append(&h, std::io::repeat(0).take(*size)).unwrap();
+                }
+                tb.finish().unwrap();
+            }
+            gz.finish().unwrap()
+        }
+        let tmp = tempdir().unwrap();
+
+        let bomb = build(&[("block.wasm".to_string(), MAX_UNPACKED_BYTES + 1)]);
+        assert!(bomb.len() < MAX_PACKAGE_BYTES, "the bomb downloads");
+        let err = extract_tarball(&bomb, &tmp.path().join("bomb"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unpacks to more than"), "{err}");
+
+        let many: Vec<(String, u64)> = (0..=MAX_PACKAGE_ENTRIES)
+            .map(|i| (format!("f{i}"), 0))
+            .collect();
+        let err = extract_tarball(&build(&many), &tmp.path().join("many"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than"), "{err}");
+    }
+
+    #[test]
+    fn download_cap_is_the_advertised_size_within_the_ceiling() {
+        assert_eq!(download_cap(1234), 1234);
+        for implausible in [0, -1, MAX_PACKAGE_BYTES as i64 + 1, i64::MAX] {
+            assert_eq!(download_cap(implausible), MAX_PACKAGE_BYTES);
+        }
     }
 
     #[test]
