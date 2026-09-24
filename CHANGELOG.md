@@ -224,6 +224,16 @@
 
 ### Added
 
+- CI builds and tests the embedder bindings (the `bindings` job in
+  `ci-jobs.yml`, gated by `ci-ok`; `scripts/check.sh bindings`): `wafer-ffi`
+  is built and driven through its `extern "C"` functions (register a wasm
+  block and a flow, seal, run, stop, free), the Go SDK runs `gofmt`,
+  `go vet` and `go test` linked against that `libwafer_ffi`, the Node addon
+  is built from source by `npm run build-test` and a `node --test` smoke
+  test runs a flow through it, and `packages/wafer-client-js` is
+  typechecked, tested (vitest) and built. None of these had a CI job
+  before. The root `package.json` no longer lists the `crates/wafer-site`
+  workspace, which moved to its own repository.
 - CI runs on every pull request and every push to `main`; the path filters
   that let a `rust-toolchain.toml`-, `rustfmt.toml`- or `.cargo/`-only change
   merge unbuilt are gone. A `ci-ok` job (`ci / ci-ok`) passes only when every

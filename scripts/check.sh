@@ -9,7 +9,7 @@
 #   ./scripts/check.sh              # run all steps
 #   ./scripts/check.sh <step>...    # run only the named steps
 #
-# Steps: fixtures fmt clippy test postgres wasm audit
+# Steps: fixtures fmt clippy test postgres wasm bindings audit
 #
 # The postgres step runs the shared DatabaseService conformance suite
 # against a live PostgreSQL server named by WAFER_CONFORMANCE_POSTGRES_URL
@@ -32,6 +32,12 @@
 # in scripts/build-fixtures.sh: a Cargo.lock (the workspace's or a
 # fixture's) that no longer matches its manifests fails the step instead of
 # being silently re-resolved, so what CI tests is what the lockfile pins.
+#
+# The bindings step builds and tests the non-Rust embedder surfaces: the C
+# ABI (wafer-ffi), the Go SDK linked against it, the Node addon
+# (wafer-run-node) and packages/wafer-client-js. It needs `go` and `npm` on
+# PATH and the wasm fixtures built. Named explicitly, it fails without
+# them; the no-argument full run skips it, loudly, when either is missing.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -161,6 +167,43 @@ run_wasm() {
         --manifest-path crates/wafer-block-crypto/tests/wasm32_consumer/Cargo.toml
 }
 
+run_bindings() {
+    local lib_dir="${CARGO_TARGET_DIR:-$PWD/target}/debug"
+
+    echo "==> C ABI: build libwafer_ffi and run its extern \"C\" smoke tests"
+    cargo build --locked -p wafer-ffi
+    cargo test --locked -p wafer-ffi
+
+    echo "==> Go SDK (cgo, linked against libwafer_ffi)"
+    local unformatted
+    unformatted="$(gofmt -l go)"
+    if [ -n "$unformatted" ]; then
+        echo "error: gofmt would reformat:" >&2
+        echo "$unformatted" >&2
+        exit 1
+    fi
+    (
+        cd go/wafer-run-go
+        export CGO_LDFLAGS="-L$lib_dir" LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        go vet ./...
+        # -count=1: go's test cache keys on Go sources, not on the
+        # libwafer_ffi it links, so a cached pass could hide an ABI change.
+        go test -count=1 ./...
+    )
+
+    echo "==> npm workspaces install (package-lock.json)"
+    npm ci
+
+    echo "==> Node addon (wafer-run-node): build from source, load, run a flow"
+    npm run build-test -w crates/wafer-run-node
+    npm test -w crates/wafer-run-node
+
+    echo "==> wafer-client-js: typecheck, test, build"
+    npm run typecheck -w packages/wafer-client-js
+    npm test -w packages/wafer-client-js
+    npm run build -w packages/wafer-client-js
+}
+
 run_audit() {
     echo "==> Security audit"
     cargo audit
@@ -177,6 +220,11 @@ if [ "$#" -eq 0 ]; then
         echo "==> SKIPPED PostgreSQL conformance: WAFER_CONFORMANCE_POSTGRES_URL is not set (CI runs it)"
     fi
     run_wasm
+    if command -v go >/dev/null && command -v npm >/dev/null; then
+        run_bindings
+    else
+        echo "==> SKIPPED bindings: needs go and npm on PATH (CI runs it)"
+    fi
     run_audit
     echo "==> All checks passed."
 else
@@ -188,9 +236,10 @@ else
             test) run_test ;;
             postgres) run_postgres ;;
             wasm) run_wasm ;;
+            bindings) run_bindings ;;
             audit) run_audit ;;
             *)
-                echo "error: unknown step '$step' (valid: fixtures fmt clippy test postgres wasm audit)" >&2
+                echo "error: unknown step '$step' (valid: fixtures fmt clippy test postgres wasm bindings audit)" >&2
                 exit 2
                 ;;
         esac

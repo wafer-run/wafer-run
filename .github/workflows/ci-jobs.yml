@@ -176,6 +176,44 @@ jobs:
       - name: Wasm & feature builds
         run: ./scripts/check.sh wasm
 
+  # The embedder bindings: the C ABI (wafer-ffi), the Go SDK linked
+  # against it, the Node addon (wafer-run-node) and
+  # packages/wafer-client-js. See run_bindings in scripts/check.sh.
+  bindings:
+    name: Bindings (C ABI, Go, Node, JS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: bindings
+
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go/wafer-run-go/go.mod
+          cache: false
+
+      - name: Install Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+
+      # The C ABI and Node smoke tests run a flow through the echo guest.
+      - name: Build wasm test fixtures
+        run: ./scripts/check.sh fixtures
+
+      - name: Bindings
+        run: ./scripts/check.sh bindings
+
   # audit.yml is also scheduled weekly on its own, so a new advisory
   # against an unchanged Cargo.lock is reported without waiting for a PR.
   audit:
@@ -195,6 +233,7 @@ jobs:
       - test
       - postgres
       - wasm
+      - bindings
       - audit
     runs-on: ubuntu-latest
     steps:

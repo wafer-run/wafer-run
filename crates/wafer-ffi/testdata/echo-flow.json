@@ -1,0 +1,6 @@
+{
+  "id": "smoke",
+  "name": "FFI smoke",
+  "version": "0.1.0",
+  "steps": [{ "id": "root", "block": "example/echo" }]
+}
