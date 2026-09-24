@@ -183,6 +183,24 @@ async fn echo_round_trip() {
     assert_eq!(body, b"hello streaming");
 }
 
+/// A flow whose request body fails ends with the body's error: the steps
+/// never see a prefix of it as the whole body.
+#[tokio::test]
+async fn flow_with_a_failed_body_ends_with_the_body_error() {
+    let mut w = setup();
+    w.seal().await.unwrap();
+    let failure = WaferError::new(ErrorCode::DeadlineExceeded, "request body timed out");
+    let input = InputStream::from_stream(futures::stream::iter(vec![
+        Ok(b"first half".to_vec()),
+        Err(failure.clone()),
+    ]));
+    let output = w.run("test/echo", Message::new("test"), input).await;
+    match output.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(e, failure),
+        other => panic!("expected the body's error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn uppercase_transforms() {
     let mut w = setup();

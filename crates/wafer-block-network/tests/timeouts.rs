@@ -1,8 +1,8 @@
 //! `HttpNetworkService` timeouts against a live server that trickles its body.
 //!
 //! A streaming download is bounded by how long the server goes quiet
-//! (`read_timeout`), not by a total; the buffered path keeps its total
-//! (`request_timeout`). Runs under `allow-private-network` so the loopback
+//! (`read_timeout`), and by a total only when `stream_timeout` is set; the
+//! buffered path keeps its total (`request_timeout`). Runs under `allow-private-network` so the loopback
 //! server is dialable (see `redirect_ssrf.rs`).
 #![cfg(feature = "allow-private-network")]
 
@@ -64,6 +64,7 @@ fn limits() -> HttpNetworkLimits {
         connect_timeout: Duration::from_secs(1),
         read_timeout: Duration::from_secs(1),
         request_timeout: Duration::from_secs(1),
+        stream_timeout: None,
     }
 }
 
@@ -129,5 +130,31 @@ async fn buffered_request_is_bounded_by_the_total_timeout() {
     assert!(
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_millis(1800),
         "the failure must be the 1 s total timeout, took {elapsed:?}"
+    );
+}
+
+/// A trickling stream that would otherwise outlive every idle timeout ends
+/// with an `Error` terminal once `stream_timeout` has run out.
+#[tokio::test]
+async fn streaming_body_is_bounded_by_the_stream_timeout_when_set() {
+    let url = trickle_server(8, Duration::from_millis(250)).await;
+    let svc = HttpNetworkService::new(HttpNetworkLimits {
+        stream_timeout: Some(Duration::from_secs(1)),
+        ..limits()
+    });
+    let started = std::time::Instant::now();
+    let (_, body) = svc
+        .do_request_streaming(&get(&url))
+        .await
+        .expect("response head");
+    let events: Vec<StreamEvent> = body.collect().await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::Error(_))),
+        "a stream past its total must end in Error, got: {events:?}"
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_millis(1800),
+        "the failure must be the 1 s stream timeout, took {elapsed:?}"
     );
 }

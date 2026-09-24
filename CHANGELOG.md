@@ -32,6 +32,55 @@
   `ResourceExhausted` instead of recursing without bound, and transfers run
   as a loop rather than nested calls. `flow_end` hooks for a chain fire once
   it finishes, last-entered flow first.
+- `InputStream` can fail. Its items are `Result<Vec<u8>, WaferError>`
+  (were `Vec<u8>`): an `Err` item means the body did not arrive whole — the
+  connection dropped, a size cap or read deadline was hit, the producer
+  aborted — and it is terminal (every later poll is `None`). A body that
+  failed used to end like a complete one, so a truncated upload was stored
+  as a success. `from_stream` / `from_stream_with_cancel` take a stream of
+  `Result<Vec<u8>, WaferError>`: an adapter maps its transport's read error
+  to `Err`, never to an empty chunk (`body.map(|c| c.map_err(…))`; an
+  infallible source maps its chunks with `Ok`). `collect_to_bytes` returns
+  `Result<Vec<u8>, WaferError>` and discards the prefix on failure; a block
+  answering a failed body passes the error on
+  (`Err(e) => return OutputStream::error(e)`). In-tree consumers treat the
+  failure as a failure: the `service_block!` buffered path, the flow
+  executor and the wasm guest boundary answer with the body's error without
+  running the handler, flow or guest; `storage.put_streaming` stores
+  nothing.
+- `StorageError` has two new variants. `Body(WaferError)`: the body stream
+  of a `put_streaming` failed, and nothing was stored at the key (the
+  previous object, if any, is left whole); the trait default returns it
+  before calling `put`, and the storage handler answers with the body's own
+  error. `InvalidArgument(String)`: a malformed request (the storage handler
+  maps it to `InvalidArgument`); `LocalStorageService` returns it for a
+  path that escapes the root and for an invalid list cursor, which were
+  `Internal`. An exhaustive `match` on `StorageError` needs both arms.
+- `LocalStorageService` stages writes in `.wafer-staging/` directly under
+  its root instead of a hidden temp file next to the object, so `list`
+  never returned an in-flight or orphaned `.{key}.tmp.{pid}.{seq}` as an
+  object. `list` and `list_folders` skip the directory, a request for a
+  path inside it is `InvalidArgument`, and `LocalStorageService::new`
+  deletes whatever it holds (writes a stopped process left behind). One
+  process owns a storage root, and every folder must be on the root's
+  filesystem (the staged file is renamed onto the key).
+- `wafer-run/http-listener` streams the request body to the flow or block
+  instead of buffering it before dispatch. A `Content-Length` over
+  `max_body_bytes` is still refused with `413` before dispatch; a body that
+  grows past the cap, is not complete within `body_read_timeout_secs`, or
+  whose connection drops fails the `InputStream` (`ResourceExhausted`,
+  `DeadlineExceeded`, `InvalidArgument`), and the client gets `413`, `408`
+  or `400` with `Connection: close` whatever the flow or block answered.
+  `body_read_timeout_secs` counts from the request head, including time the
+  flow or block spends between reads.
+- `HttpNetworkLimits` has a new field, `stream_timeout: Option<Duration>`
+  (default `None`), so a struct literal without `..Default::default()`
+  needs it. It is the total for `do_request_streaming`, response body
+  included, read by `HttpNetworkService::from_env` from the new declared
+  key `WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS` (unset or empty: no total;
+  anything but a positive integer fails construction). Without it an
+  upstream that sends a byte within every idle `read_timeout` holds a
+  stream open indefinitely.
 
 - `wafer_block_security_headers::merge_csp` returns a `CspMerge`
   (`policy` plus the `refused` directives and sources) instead of a
@@ -132,8 +181,9 @@
   builder: `axum::serve` also answered cleartext HTTP/2 (prior knowledge)
   in any build where Cargo feature unification enabled `hyper-util/http2`,
   and protocol detection read the connection preface with no deadline.
-  The body is still buffered whole (streaming it into the `InputStream`
-  waits for a stream failure terminal), but no longer copied once more.
+  The request body now streams to the dispatch target; see the
+  `InputStream` failure-terminal entry for how the cap and the body
+  deadline reach it.
 - The network grant covers every redirect hop. `HttpNetworkService`
   followed redirects inside reqwest, after the network handler had
   authorized only the first URL, so an allowed API that redirected (an open
@@ -962,9 +1012,8 @@
   PostgreSQL 16 service container (`scripts/check.sh postgres`, the
   `PostgreSQL Conformance` job). It previously ran only by hand.
 
-- `InputStream::from_stream` and `from_stream_with_cancel` take
-  `S: Stream<Item = Vec<u8>> + MaybeSend + 'static` instead of requiring
-  `Send` outright, and `InputStream` boxes its inner stream as a
+- `InputStream::from_stream` and `from_stream_with_cancel` bound their
+  stream by `MaybeSend + 'static` instead of requiring `Send` outright, and `InputStream` boxes its inner stream as a
   `LocalBoxStream` on `wasm32`. On native, `MaybeSend` *is* `Send` and
   nothing changes.
 
@@ -981,7 +1030,9 @@
 
   ```rust,ignore
   // `body` is a `worker::ByteStream` — `!Send`, and no longer a problem.
-  let input = InputStream::from_stream(body.map(|chunk| chunk.unwrap_or_default()));
+  let input = InputStream::from_stream(body.map(|chunk| {
+      chunk.map_err(|e| WaferError::new(ErrorCode::Unavailable, e.to_string()))
+  }));
   wafer.run_block("files", msg, input).await
   ```
 

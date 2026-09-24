@@ -104,6 +104,27 @@ mod tests {
         assert_eq!(body["meta_count"], 1, "meta_count should be 1");
     }
 
+    /// A request body that fails never reaches the guest: the guest ABI
+    /// hands it the whole body, and a prefix is not the whole body. The echo
+    /// guest answers any body with a Respond, so an `Err` here is the host's.
+    #[tokio::test]
+    async fn test_handle_refuses_a_failed_body_before_the_guest() {
+        let block = WasmiBlock::load_from_bytes(ECHO_WASM).expect("echo_block.wasm should load");
+        let failure = WaferError::new(ErrorCode::DeadlineExceeded, "request body timed out");
+        let input = InputStream::from_stream(futures::stream::iter(vec![
+            Ok(b"first half".to_vec()),
+            Err(failure.clone()),
+        ]));
+
+        let result = block
+            .handle(&MockContext, Message::new("test.echo"), input)
+            .await;
+        match result.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => assert_eq!(e, failure),
+            other => panic!("expected the body's error, got {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test 3: lifecycle Init — should return Ok(())
     // -----------------------------------------------------------------------

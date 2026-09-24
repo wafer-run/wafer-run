@@ -789,6 +789,49 @@ mod tests {
         Object::builder().key(key).size(size).build()
     }
 
+    /// `put_streaming` into S3 (the trait default: collect, then
+    /// `PutObject`) with a body that fails after its first chunk returns the
+    /// body's error and never uploads the prefix.
+    #[tokio::test]
+    async fn put_streaming_with_a_failing_body_uploads_nothing() {
+        use wafer_block::InputStream;
+
+        let put = mock!(aws_sdk_s3::Client::put_object)
+            .then_output(|| aws_sdk_s3::operation::put_object::PutObjectOutput::builder().build());
+        let svc = service(mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&put]));
+        let failure = WaferError::new(ErrorCode::DeadlineExceeded, "request body timed out");
+        let body = InputStream::from_stream(futures::stream::iter(vec![
+            Ok(b"first half".to_vec()),
+            Err(failure.clone()),
+        ]));
+
+        match svc.put_streaming("f", "k", body, "text/plain").await {
+            Err(StorageError::Body(e)) => assert_eq!(e, failure),
+            other => panic!("expected the body's failure, got {other:?}"),
+        }
+        assert_eq!(put.num_calls(), 0, "a truncated body must not be uploaded");
+    }
+
+    /// Positive control: a whole body is uploaded once, whole.
+    #[tokio::test]
+    async fn put_streaming_with_a_whole_body_uploads_it() {
+        use wafer_block::InputStream;
+
+        let put = mock!(aws_sdk_s3::Client::put_object)
+            .match_requests(|req| req.key() == Some("f/k"))
+            .then_output(|| aws_sdk_s3::operation::put_object::PutObjectOutput::builder().build());
+        let svc = service(mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&put]));
+        let body = InputStream::from_stream(futures::stream::iter(vec![
+            Ok(b"first half, ".to_vec()),
+            Ok(b"second half".to_vec()),
+        ]));
+
+        svc.put_streaming("f", "k", body, "text/plain")
+            .await
+            .expect("a whole body is stored");
+        assert_eq!(put.num_calls(), 1);
+    }
+
     /// PERF-04: `list` must stop paging as soon as `offset + limit` (plus
     /// the one-object peek) is satisfied, cap `MaxKeys` to what the scan
     /// still needs, and thread continuation tokens between requests. A

@@ -32,6 +32,11 @@ pub const READ_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__READ_TIMEOUT_SECS";
 /// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`].
 pub const REQUEST_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__REQUEST_TIMEOUT_SECS";
 
+/// Config var key for [`HttpNetworkLimits::stream_timeout`], in whole
+/// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`], except that unset or empty
+/// means no total (`None`) rather than a default.
+pub const STREAM_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS";
+
 /// Default response body cap: 50 MiB. SEC-020 — prevents unbounded memory
 /// growth from hostile or runaway upstream servers.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
@@ -49,8 +54,14 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// The timeouts are split so a long streaming download is bounded by how long
 /// the server goes quiet, not by how long the whole body takes:
-/// `connect_timeout` and `read_timeout` apply to every request, and only the
-/// buffered `do_request` also has the total `request_timeout`.
+/// `connect_timeout` and `read_timeout` apply to every request, the buffered
+/// `do_request` also has the total `request_timeout`, and
+/// `do_request_streaming` has a total only when `stream_timeout` is set.
+///
+/// Without `stream_timeout`, an upstream that trickles its body (one byte
+/// just inside every `read_timeout`) holds a stream open for up to
+/// `max_response_bytes` × `read_timeout` — in practice, indefinitely. Set it
+/// when the streams this service serves have a known upper duration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HttpNetworkLimits {
     /// Response body cap in bytes (SEC-020), on both paths.
@@ -66,6 +77,10 @@ pub struct HttpNetworkLimits {
     /// `do_request_streaming`, whose body may legitimately take longer than
     /// any fixed total while `read_timeout` still bounds a stall.
     pub request_timeout: Duration,
+    /// Total time allowed for a `do_request_streaming` exchange, response
+    /// body included, or `None` for no total (the default): a stream that
+    /// keeps delivering bytes then lasts as long as its body.
+    pub stream_timeout: Option<Duration>,
 }
 
 impl Default for HttpNetworkLimits {
@@ -75,6 +90,7 @@ impl Default for HttpNetworkLimits {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             read_timeout: DEFAULT_READ_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            stream_timeout: None,
         }
     }
 }
@@ -121,12 +137,31 @@ where
     }
 }
 
+/// Read `key` like [`positive_env`], except that unset or empty is `None`.
+fn optional_positive_env(key: &str) -> Result<Option<u64>, NetworkError> {
+    match std::env::var(key) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(raw) if raw.is_empty() => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(NetworkError::Other(format!(
+            "{key} is not valid UTF-8: expected a positive integer"
+        ))),
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(v) if v > 0 => Ok(Some(v)),
+            _ => Err(NetworkError::Other(format!(
+                "{key}={raw:?} is invalid: expected a positive integer (unset it for no limit)"
+            ))),
+        },
+    }
+}
+
 impl HttpNetworkService {
     /// Construct the service, reading [`MAX_RESPONSE_BYTES_KEY`],
-    /// [`CONNECT_TIMEOUT_SECS_KEY`], [`READ_TIMEOUT_SECS_KEY`] and
-    /// [`REQUEST_TIMEOUT_SECS_KEY`] from the process env exactly once.
+    /// [`CONNECT_TIMEOUT_SECS_KEY`], [`READ_TIMEOUT_SECS_KEY`],
+    /// [`REQUEST_TIMEOUT_SECS_KEY`] and [`STREAM_TIMEOUT_SECS_KEY`] from the
+    /// process env exactly once.
     ///
-    /// - Unset → the matching [`HttpNetworkLimits::default`] value.
+    /// - Unset → the matching [`HttpNetworkLimits::default`] value (for
+    ///   [`STREAM_TIMEOUT_SECS_KEY`], unset or empty → no total).
     /// - Present but not a positive integer → explicit error, so a typo'd
     ///   limit fails the boot loudly instead of silently reverting to the
     ///   default.
@@ -140,6 +175,8 @@ impl HttpNetworkService {
             connect_timeout: secs(CONNECT_TIMEOUT_SECS_KEY, defaults.connect_timeout)?,
             read_timeout: secs(READ_TIMEOUT_SECS_KEY, defaults.read_timeout)?,
             request_timeout: secs(REQUEST_TIMEOUT_SECS_KEY, defaults.request_timeout)?,
+            stream_timeout: optional_positive_env(STREAM_TIMEOUT_SECS_KEY)?
+                .map(Duration::from_secs),
         }))
     }
 
@@ -178,7 +215,8 @@ impl HttpNetworkService {
                 reqwest::Client::builder()
                     // No total timeout on the client: it would cut off a
                     // streaming download that is still making progress. The
-                    // buffered path sets `request_timeout` per request.
+                    // buffered path sets `request_timeout` per request, the
+                    // streaming path `stream_timeout` when configured.
                     .connect_timeout(self.limits.connect_timeout)
                     .read_timeout(self.limits.read_timeout)
                     // Never follow: a 3xx goes back to the network handler,
@@ -419,14 +457,16 @@ impl NetworkService for HttpNetworkService {
     /// too). Chunked / unknown-length responses have no advertised length, so
     /// the per-chunk check is the only guard for them.
     ///
-    /// No total timeout applies here (see [`HttpNetworkLimits`]): a body that
-    /// keeps arriving streams for as long as it takes, and a connection that
-    /// goes quiet for `read_timeout` ends the stream with an `Error` terminal.
+    /// A connection that goes quiet for `read_timeout` ends the stream with an
+    /// `Error` terminal. The total is `stream_timeout` (see
+    /// [`HttpNetworkLimits`]): unset, a body that keeps arriving streams for
+    /// as long as it takes; set, the exchange ends with an `Error` terminal
+    /// once it has run that long.
     async fn do_request_streaming(
         &self,
         req: &Request,
     ) -> Result<(ResponseHead, OutputStream), NetworkError> {
-        let response = self.send_request(req, None).await?;
+        let response = self.send_request(req, self.limits.stream_timeout).await?;
         let status_code = response.status().as_u16();
         let headers = collect_headers(&response);
 
@@ -585,6 +625,7 @@ mod tests {
             CONNECT_TIMEOUT_SECS_KEY,
             READ_TIMEOUT_SECS_KEY,
             REQUEST_TIMEOUT_SECS_KEY,
+            STREAM_TIMEOUT_SECS_KEY,
         ];
         let prev: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
 
@@ -598,6 +639,7 @@ mod tests {
         std::env::set_var(CONNECT_TIMEOUT_SECS_KEY, "3");
         std::env::set_var(READ_TIMEOUT_SECS_KEY, "4");
         std::env::set_var(REQUEST_TIMEOUT_SECS_KEY, "5");
+        std::env::set_var(STREAM_TIMEOUT_SECS_KEY, "6");
         let svc = HttpNetworkService::from_env().expect("valid values parse");
         assert_eq!(
             svc.limits,
@@ -606,12 +648,23 @@ mod tests {
                 connect_timeout: Duration::from_secs(3),
                 read_timeout: Duration::from_secs(4),
                 request_timeout: Duration::from_secs(5),
+                stream_timeout: Some(Duration::from_secs(6)),
             }
         );
 
+        // Empty is "no total" for the one optional limit.
+        std::env::set_var(STREAM_TIMEOUT_SECS_KEY, "");
+        let svc = HttpNetworkService::from_env().expect("empty stream timeout parses");
+        assert_eq!(svc.limits.stream_timeout, None);
+        std::env::set_var(STREAM_TIMEOUT_SECS_KEY, "6");
+
         for key in keys {
             let valid = std::env::var(key).expect("set above");
+            let empty_is_valid = key == STREAM_TIMEOUT_SECS_KEY;
             for invalid in ["not-a-number", "0", "-5", "12.5", ""] {
+                if invalid.is_empty() && empty_is_valid {
+                    continue;
+                }
                 std::env::set_var(key, invalid);
                 let err = HttpNetworkService::from_env()
                     .expect_err("present-but-invalid value must fail construction");

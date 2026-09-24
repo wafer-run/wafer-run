@@ -46,13 +46,22 @@ crate::service_block! {
         ConfigVar::new(
             "WAFER_RUN__NETWORK__REQUEST_TIMEOUT_SECS",
             "Total seconds allowed for a buffered request, response body \
-             included. Streaming requests have no total limit; the idle \
-             read timeout bounds them. Defaults to 30. Parsed once at \
-             startup: an invalid value fails service construction \
-             (requires restart to apply).",
+             included. Streaming requests use the stream timeout \
+             instead. Defaults to 30. Parsed once at startup: an invalid \
+             value fails service construction (requires restart to apply).",
             "30",
         )
         .name("Buffered Request Timeout (s)"),
+        ConfigVar::new(
+            "WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS",
+            "Total seconds allowed for a streaming request, response body \
+             included. Empty (the default): no total, so an upstream that \
+             keeps sending a byte within every idle read timeout holds the \
+             stream open indefinitely. Parsed once at startup: an invalid \
+             value fails service construction (requires restart to apply).",
+            "",
+        )
+        .name("Streaming Request Timeout (s)"),
     ]),
     handle: |this, ctx, msg, body| {
         handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
