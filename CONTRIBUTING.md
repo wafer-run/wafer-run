@@ -94,7 +94,7 @@ go/                      Go bindings.
 
 ## Code style
 
-- **Format with stable for local, nightly before push.** The pre-commit hook runs `cargo fmt` (stable). CI's Format & Lint runs `cargo +nightly fmt --all -- --check`. **Run `cargo +nightly fmt --all` before every push** or CI fails.
+- **Format with nightly rustfmt.** `rustfmt.toml` uses nightly-only options (`imports_granularity`, `group_imports`) that stable rustfmt ignores. CI's Format & Lint runs `cargo +nightly fmt --all -- --check`, and the pre-commit hook runs `cargo +nightly fmt --all`, so install it once: `rustup toolchain install nightly --component rustfmt`.
 - **Clippy clean:** `./scripts/check.sh clippy` (`cargo clippy --workspace --all-targets -- -D warnings`, the CI command; the pre-commit hook runs the same lint set with `--fix`). `--all-targets` compiles the integration tests, so it needs the fixtures — see the gotcha above.
 - **No sync bridges.** No `poll_once`, no `block_on`. If something is async, callers must remain async. (See `CLAUDE.md`.)
 - **No raw SQL in block code.** Use `wafer-sql-utils` builders (`query::*`, `aggregate::*`, `upsert::*`, `ddl::*`, `introspect::*`). If a builder is missing for what you need, add it to `wafer-sql-utils` — don't fall back to `exec_raw`/`query_raw`. Exceptions: the admin SQL explorer (user-typed query), migration-file runners, and test-fixture setup.
@@ -112,7 +112,7 @@ go/                      Go bindings.
 
 2. Use conventional commit prefixes: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`. The PR title mirrors the leading commit's prefix.
 
-3. The pre-commit hook runs `cargo fmt` + `cargo clippy --all-targets --fix`. Don't bypass with `--no-verify`. If the hook fails, fix the underlying issue.
+3. The pre-commit hook runs `cargo +nightly fmt` + `cargo clippy --all-targets --fix`. Don't bypass with `--no-verify`. If the hook fails, fix the underlying issue.
 
 4. Before pushing:
    ```
