@@ -34,13 +34,12 @@ function parseHeaders(headers: Headers): Record<string, string> {
  * Settle with `promise`, or reject with the abort reason as soon as `signal`
  * aborts. A fetch implementation need not stop a pending `fetch()` or body
  * read on abort; this makes the timeout and the caller's signal bound both
- * regardless.
+ * regardless. `promise` always gets a handler, so its own later rejection is
+ * never unhandled — also when `signal` has already aborted.
  */
 function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
     promise.then(
       (value) => {
         signal.removeEventListener('abort', onAbort);
@@ -51,7 +50,53 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
         reject(err);
       },
     );
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
+}
+
+/**
+ * Read `res`'s body as UTF-8 text (as `Response.text()` does) until `signal`
+ * aborts. On abort the body stream is cancelled through its reader, and the
+ * reader is released either way, so a fetch implementation that ignores the
+ * signal does not leave the body locked or its source open.
+ */
+async function readText(res: Response, signal: AbortSignal): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const cancel = () => {
+    reader.cancel(signal.reason).catch(() => {});
+  };
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    if (signal.aborted) cancel();
+    const decoder = new TextDecoder();
+    let text = '';
+    for (;;) {
+      const { done, value } = await untilAborted(reader.read(), signal);
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Release the body of a response that arrives after the request was given up
+ * on (a fetch implementation that ignores the abort signal).
+ */
+function discardLate(fetched: Promise<Response>): void {
+  fetched.then(
+    (late) => {
+      late.body?.cancel().catch(() => {});
+    },
+    () => {},
+  );
 }
 
 function defaultCredentials(): RequestCredentials | undefined {
@@ -107,24 +152,25 @@ export async function send(config: WaferConfig, request: TransportRequest): Prom
 
   let res: Response;
   let rawData: string;
+  let fetched: Promise<Response> | undefined;
   try {
-    res = await untilAborted(
-      fetchFn(url, {
-        method: request.method,
-        headers,
-        body,
-        signal: controller.signal,
-        ...(credentials ? { credentials } : {}),
-      }),
-      controller.signal,
-    );
-    rawData = await untilAborted(res.text(), controller.signal);
+    fetched = fetchFn(url, {
+      method: request.method,
+      headers,
+      body,
+      signal: controller.signal,
+      ...(credentials ? { credentials } : {}),
+    });
+    res = await untilAborted(fetched, controller.signal);
+    fetched = undefined;
+    rawData = await readText(res, controller.signal);
   } catch (err: unknown) {
+    if (fetched) discardLate(fetched);
     if (timedOut) {
       throw new WaferError('timeout', `Request timed out after ${timeout}ms`);
     }
     if (externalSignal?.aborted) {
-      throw new WaferError('network_error', 'Request aborted');
+      throw new WaferError('aborted', 'Request aborted');
     }
     const message = err instanceof Error ? err.message : 'Network request failed';
     throw new WaferError('network_error', message);

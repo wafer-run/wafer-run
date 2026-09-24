@@ -2,12 +2,12 @@ import type { WaferMeta } from './message';
 import { WAFER_SERVER_ERROR_CODES, type WaferServerErrorCode } from './error-codes';
 
 /**
- * Codes the client assigns itself when the exchange did not complete:
- * `'timeout'` when sending the request and reading the whole response body
- * outlived the timeout, `'network_error'` when the fetch or the body read
- * failed or the caller's signal aborted it. Both carry status 0.
+ * Codes the client assigns itself when the exchange did not complete, all
+ * with status 0: `'timeout'` when sending the request and reading the whole
+ * response body outlived the timeout, `'aborted'` when the caller's `signal`
+ * aborted it, and `'network_error'` when the fetch or the body read failed.
  */
-export type WaferClientErrorCode = 'network_error' | 'timeout';
+export type WaferClientErrorCode = 'network_error' | 'timeout' | 'aborted';
 
 /** Every code a `WaferError` can carry. */
 export type WaferErrorCode = WaferServerErrorCode | WaferClientErrorCode;

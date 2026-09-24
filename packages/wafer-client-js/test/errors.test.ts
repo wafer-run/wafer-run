@@ -1,6 +1,13 @@
+import { spawnSync } from 'node:child_process';
 import { getEventListeners } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { build } from 'esbuild';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -88,7 +95,7 @@ describe('error codes', () => {
   });
 
   it('types the union as the wire vocabulary only', () => {
-    const wire: WaferErrorCode[] = [...WAFER_SERVER_ERROR_CODES, 'timeout', 'network_error'];
+    const wire: WaferErrorCode[] = [...WAFER_SERVER_ERROR_CODES, 'timeout', 'aborted', 'network_error'];
     expect(wire).toContain('NotFound');
     // @ts-expect-error — snake_case is not what a Wafer server sends
     const snake: WaferErrorCode = 'not_found';
@@ -124,7 +131,7 @@ describe('timeout and abort', () => {
     expect(err.code).toBe('timeout');
   }, 5_000);
 
-  it("reports the caller's abort during the body read as network_error", async () => {
+  it("reports the caller's abort during the body read as aborted", async () => {
     const url = await serve((res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{"partial":');
@@ -134,7 +141,7 @@ describe('timeout and abort', () => {
     setTimeout(() => controller.abort(), 100);
     const err = await rejection(pending);
 
-    expect(err.code).toBe('network_error');
+    expect(err.code).toBe('aborted');
     expect(err.message).toBe('Request aborted');
   }, 5_000);
 
@@ -154,4 +161,98 @@ describe('timeout and abort', () => {
 
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
+
+  it('reports a network failure as network_error', async () => {
+    const url = await serve(() => {});
+    const port = new URL(url).port;
+    await new Promise((resolve) => server!.close(resolve));
+    server = undefined;
+    const err = await rejection(new WaferClient(`http://127.0.0.1:${port}`).get('/'));
+
+    expect(err.code).toBe('network_error');
+  });
+
+  it('cancels the body of a fetch that ignores the signal', async () => {
+    let cancelled: unknown = 'not cancelled';
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"partial":'));
+      },
+      cancel(reason) {
+        cancelled = reason;
+      },
+    });
+    const fetch = (async () => new Response(stream, { status: 200 })) as typeof globalThis.fetch;
+    const err = await rejection(
+      new WaferClient({ url: 'https://app.example.com', timeout: 50, fetch }).get('/'),
+    );
+
+    expect(err.code).toBe('timeout');
+    expect(cancelled).toBeInstanceOf(DOMException);
+    expect(stream.locked).toBe(false);
+  }, 5_000);
+
+  it('cancels the body of a response that arrives after the timeout', async () => {
+    let cancelled = false;
+    let arrived!: () => void;
+    const late = new Promise<void>((resolve) => (arrived = resolve));
+    const fetch = (() =>
+      new Promise<Response>((resolve) =>
+        setTimeout(() => {
+          const stream = new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelled = true;
+              arrived();
+            },
+          });
+          resolve(new Response(stream, { status: 200 }));
+        }, 100),
+      )) as typeof globalThis.fetch;
+    const err = await rejection(
+      new WaferClient({ url: 'https://app.example.com', timeout: 20, fetch }).get('/'),
+    );
+    expect(err.code).toBe('timeout');
+
+    await late;
+    expect(cancelled).toBe(true);
+  }, 5_000);
+
+  // Run in a child `node` so an unhandled rejection takes Node's default
+  // action (the process exits non-zero) instead of vitest's handler.
+  it('does not leave an unhandled rejection when the signal is already aborted', async () => {
+    const bundle = await build({
+      entryPoints: [fileURLToPath(new URL('../src/index.ts', import.meta.url))],
+      bundle: true,
+      format: 'esm',
+      platform: 'node',
+      write: false,
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'wafer-client-js-'));
+    const client = join(dir, 'client.mjs');
+    writeFileSync(client, bundle.outputFiles[0].text);
+    const script = `
+      const { WaferClient } = await import(${JSON.stringify(pathToFileURL(client).href)});
+      const controller = new AbortController();
+      controller.abort();
+      try {
+        await new WaferClient('http://127.0.0.1:9').get('/', { signal: controller.signal });
+      } catch (err) {
+        console.log('code=' + err.code);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      console.log('alive');
+    `;
+    try {
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      });
+
+      expect(result.stderr).toBe('');
+      expect(result.stdout).toBe('code=aborted\nalive\n');
+      expect(result.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

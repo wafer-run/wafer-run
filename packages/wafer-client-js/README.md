@@ -119,9 +119,10 @@ try {
 
 A body without an `"error"` field gives `"Internal"`; an `"error"` this client
 does not know gives `"Unknown"` (the body stays in `err.data`). When the
-exchange does not complete, `code` is `"timeout"` (the timeout covers sending
-the request and reading the whole body) or `"network_error"` (the fetch failed
-or the request's `signal` aborted it), with `status` 0.
+exchange does not complete, `status` is 0 and `code` is `"timeout"` (the
+timeout covers sending the request and reading the whole body), `"aborted"`
+(the request's `signal` aborted it) or `"network_error"` (the fetch or the body
+read failed).
 
 ### Meta Constants
 
@@ -142,7 +143,7 @@ import { META_REQ_ACTION, META_AUTH_USER_ID, META_RESP_STATUS } from 'wafer-clie
 | `WaferError` | Error with `code`, `status`, `meta`, `data`, `detailCode` |
 | `WaferErrorCode` | `WaferServerErrorCode` or `WaferClientErrorCode` |
 | `WaferServerErrorCode` | A code the server sends; generated from Rust's `ErrorCode` |
-| `WaferClientErrorCode` | `'timeout'` or `'network_error'` |
+| `WaferClientErrorCode` | `'timeout'`, `'aborted'` or `'network_error'` |
 | `WaferMeta` | `Record<string, string>` |
 | `RequestOptions` | Per-request options |
 
