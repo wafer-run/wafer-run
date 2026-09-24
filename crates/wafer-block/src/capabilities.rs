@@ -146,12 +146,17 @@ fn path_prefix_covers(entry: &str, resource: &str) -> bool {
 
 /// The HTTP headers (lowercase) a WASM guest may neither read nor write
 /// unless its [`HeaderPolicy`] names them: credentials, and the response
-/// headers that steer the browser's security model.
+/// headers that steer the browser's security model — including the ones that
+/// navigate (`location`, `refresh`) or wipe the origin's state
+/// (`clear-site-data`).
 pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
+    "proxy-authorization",
     "cookie",
     "set-cookie",
     "location",
+    "refresh",
+    "clear-site-data",
     "access-control-allow-origin",
     "access-control-allow-credentials",
     "access-control-allow-methods",
@@ -183,20 +188,20 @@ pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
 pub struct HeaderPolicy {
     /// Sensitive inbound headers the block may READ.
     /// Example: `["authorization"]`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lowercase_header_names")]
     pub readable: Vec<String>,
 
     /// Sensitive headers the block may WRITE: response headers it sets, and
     /// request headers it changes on a message it hands on.
     /// Example: `["set-cookie"]`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lowercase_header_names")]
     pub writable: Vec<String>,
 
     /// Additional headers to mask beyond the default sensitive set.
     /// Applies to both directions. Operator extension for app-specific
     /// sensitive headers.
     /// Example: `["x-internal-token"]`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lowercase_header_names")]
     pub masked: Vec<String>,
 }
 
@@ -596,28 +601,69 @@ pub struct ConfigCapabilityOverrides {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HeaderPolicyOverrides {
     /// Override for [`HeaderPolicy::readable`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lowercase_optional_header_names"
+    )]
     pub readable: Option<Vec<String>>,
     /// Override for [`HeaderPolicy::writable`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lowercase_optional_header_names"
+    )]
     pub writable: Option<Vec<String>>,
     /// Override for [`HeaderPolicy::masked`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lowercase_optional_header_names"
+    )]
     pub masked: Option<Vec<String>>,
 }
 
-fn intersect_vec(a: &[String], b: &[String]) -> Vec<String> {
-    a.iter()
-        .filter(|x| b.iter().any(|y| y == *x))
-        .cloned()
-        .collect()
+// HTTP header names are case-insensitive, and the runtime enforces them that
+// way. Header-name lists are therefore held in lowercase: a declaration or an
+// override is lowercased as it is deserialized, and the narrowing below
+// compares and emits lowercase, so `Authorization` in a declaration and
+// `authorization` in an override name the same header.
+
+fn lowercase_header_names<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Vec::<String>::deserialize(deserializer)?;
+    Ok(names.iter().map(|n| n.to_ascii_lowercase()).collect())
 }
 
+fn lowercase_optional_header_names<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let names = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(names.map(|names| names.iter().map(|n| n.to_ascii_lowercase()).collect()))
+}
+
+/// Header names in both `a` and `b`, compared case-insensitively, lowercased.
+fn intersect_vec(a: &[String], b: &[String]) -> Vec<String> {
+    let mut r: Vec<String> = Vec::new();
+    for x in a {
+        let x = x.to_ascii_lowercase();
+        if b.iter().any(|y| y.eq_ignore_ascii_case(&x)) && !r.contains(&x) {
+            r.push(x);
+        }
+    }
+    r
+}
+
+/// Header names in `a` or `b`, compared case-insensitively, lowercased.
 fn union_vec(a: &[String], b: &[String]) -> Vec<String> {
-    let mut r: Vec<String> = a.to_vec();
-    for v in b {
-        if !r.iter().any(|x| x == v) {
-            r.push(v.clone());
+    let mut r: Vec<String> = Vec::new();
+    for v in a.iter().chain(b) {
+        let v = v.to_ascii_lowercase();
+        if !r.contains(&v) {
+            r.push(v);
         }
     }
     r
@@ -1261,6 +1307,49 @@ mod tests {
         assert!(eff.collections.allows("users"));
         assert!(eff.collections.allows("sessions"));
         assert!(eff.callable_blocks.allows("wafer-run/crypto"));
+    }
+
+    /// Header names are case-insensitive: a declaration and an override that
+    /// spell one header differently still name the same header, and every
+    /// narrowing path yields the lowercase name the runtime matches.
+    #[test]
+    fn header_names_are_case_insensitive_across_declaration_and_narrowing() {
+        let declared: BlockCapabilities = serde_json::from_value(serde_json::json!({
+            "headers": { "readable": ["Authorization"], "writable": ["Set-Cookie"] }
+        }))
+        .unwrap();
+        assert_eq!(declared.headers.readable, vec!["authorization"]);
+        assert_eq!(declared.headers.writable, vec!["set-cookie"]);
+
+        let overrides: ConfigCapabilityOverrides = serde_json::from_value(serde_json::json!({
+            "headers": { "readable": ["AUTHORIZATION"], "masked": ["X-Internal"] }
+        }))
+        .unwrap();
+        let eff = declared.apply_config_overrides(&overrides);
+        assert_eq!(eff.headers.readable, vec!["authorization"]);
+        assert_eq!(eff.headers.masked, vec!["x-internal"]);
+
+        // A policy built in code (not deserialized) narrows the same way.
+        let in_code = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["Authorization".into()],
+                writable: vec!["Set-Cookie".into()],
+                masked: vec!["X-Internal".into()],
+            },
+            ..Default::default()
+        };
+        let host = BlockCapabilities {
+            headers: HeaderPolicy {
+                readable: vec!["authorization".into()],
+                writable: vec!["SET-COOKIE".into()],
+                masked: vec!["x-internal".into()],
+            },
+            ..Default::default()
+        };
+        let r = in_code.intersect(&host);
+        assert_eq!(r.headers.readable, vec!["authorization"]);
+        assert_eq!(r.headers.writable, vec!["set-cookie"]);
+        assert_eq!(r.headers.masked, vec!["x-internal"]);
     }
 
     #[test]

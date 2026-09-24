@@ -446,6 +446,49 @@ mod sanitize_tests {
     }
 
     #[test]
+    fn refresh_and_clear_site_data_are_withheld_on_every_egress() {
+        // `Refresh: 0;url=…` navigates exactly like `Location`, and
+        // `Clear-Site-Data` wipes the origin's cookies and storage (it logs the
+        // user out); neither is the guest's to set.
+        for egress in [
+            GuestEgress::Respond,
+            GuestEgress::Error,
+            GuestEgress::Continue,
+            GuestEgress::Call,
+        ] {
+            let out = sanitize_guest_egress(
+                vec![
+                    meta("resp.header.Refresh", "0;url=https://evil.example/"),
+                    meta("resp.header.clear-site-data", "\"cookies\", \"storage\""),
+                ],
+                &BlockCapabilities::none(),
+                &HostOwnedMeta::default(),
+                egress,
+            );
+            assert!(out.meta.is_empty(), "{egress:?}: {:?}", out.meta);
+            assert_eq!(
+                out.stripped,
+                vec!["refresh", "clear-site-data"],
+                "{egress:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inbound_withholds_proxy_authorization() {
+        let msg = build_http_message(
+            "GET",
+            "/b/guest/",
+            "",
+            "127.0.0.1",
+            [("Proxy-Authorization", "Basic cHJveHk6c2VjcmV0")],
+        );
+        let inbound = prepare_guest_inbound(msg.meta, &BlockCapabilities::none());
+        assert_eq!(get(&inbound.meta, "http.header.proxy-authorization"), None);
+        assert_eq!(inbound.withheld, vec!["proxy-authorization"]);
+    }
+
+    #[test]
     fn writable_declaration_admits_only_the_named_header() {
         let caps = with_headers(HeaderPolicy {
             writable: vec!["set-cookie".into()],
