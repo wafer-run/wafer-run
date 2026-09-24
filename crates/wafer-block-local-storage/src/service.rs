@@ -1369,15 +1369,23 @@ mod tests {
         assert!(staged.is_empty(), "the staged temp file is removed");
     }
 
+    /// Tests of this process that have taken a tempdir.
+    static TEMPDIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.
+    // Unique per test: the counter separates tests running in parallel
+    // (their clock readings can be equal), the pid and time separate
+    // processes, and `create_dir` fails rather than share a directory that
+    // already exists.
     fn tempdir() -> PathBuf {
         let base = std::env::temp_dir();
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let pid = std::process::id();
-        let dir = base.join(format!("wafer-local-storage-test-{pid}-{nonce}"));
-        fs::create_dir_all(&dir).expect("create tempdir");
+        let seq = TEMPDIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = base.join(format!("wafer-local-storage-test-{pid}-{nonce}-{seq}"));
+        fs::create_dir(&dir).expect("create tempdir");
         dir
     }
 }
