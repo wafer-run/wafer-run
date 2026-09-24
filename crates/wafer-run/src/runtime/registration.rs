@@ -190,9 +190,9 @@ impl RegistrationCore {
         names.sort();
         for name in names {
             let block = &self.blocks[name];
-            let info = block.info();
             let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
-                &info,
+                name,
+                &block.info().grants,
                 &admin_block,
             );
             merged.extend(outcome.accepted);
@@ -234,12 +234,32 @@ impl RegistrationCore {
         Ok(())
     }
 
+    /// Refuse a block whose `info()` names it anything other than `name`, the
+    /// name it is being registered under.
+    ///
+    /// A block's identity is its registration name: `check_access` attributes
+    /// calls to it, and grant ownership, the admin-block match and `requires`
+    /// are keyed on it. The reported name is block-supplied data — for a WASM
+    /// guest, bytes the guest wrote — so a mismatch is refused rather than
+    /// resolved in either direction.
+    fn check_reported_name(name: &str, info: &wafer_block::BlockInfo) -> Result<(), RuntimeError> {
+        if info.name == name {
+            Ok(())
+        } else {
+            Err(RuntimeError::BlockNameMismatch {
+                registered: name.to_string(),
+                reported: info.name.clone(),
+            })
+        }
+    }
+
     /// Shared registration tail used by both
     /// [`register_block_inner`](Self::register_block_inner) and
     /// [`register_remote_block`](Self::register_remote_block): validate the
-    /// block's WRAP grant declarations (accepted grants are appended, rejected
-    /// ones accumulate for `seal()` to surface as `GrantsRejected`), insert
-    /// the block, and pair it with a fresh init slot.
+    /// block's WRAP grant declarations against its registration `name`
+    /// (accepted grants are appended, rejected ones accumulate for `seal()` to
+    /// surface as `GrantsRejected`), insert the block, and pair it with a
+    /// fresh init slot.
     fn insert_block_with_grants(
         &mut self,
         name: &str,
@@ -250,8 +270,11 @@ impl RegistrationCore {
         // Typed grants declared before `set_admin_block` are deferred — that
         // rescan re-collects them, so registration order doesn't matter.
         let admin_block: String = (*self.wrap.admin_block).clone();
-        let outcome =
-            crate::runtime::lifecycle::validate_and_collect_grants_for_block(info, &admin_block);
+        let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
+            name,
+            &info.grants,
+            &admin_block,
+        );
         self.wrap.append_grants(outcome.accepted);
         self.wrap.validation_errors.extend(outcome.rejected);
 
@@ -287,12 +310,14 @@ impl RegistrationCore {
         // Validate block name format.
         crate::runtime::validate_block_name(name)?;
 
+        let info = block.info();
+        Self::check_reported_name(name, &info)?;
+
         // Reject declared config keys under platform-reserved prefixes
         // (e.g. WAFER_RUN_SHARED__): those keys are platform-owned, not
         // block-owned. Also rejects an agent-tool name an MCP client would
         // refuse, which would otherwise vanish silently inside a consumer's
         // per-tool try/catch. Fails boot loudly rather than accepting either.
-        let info = block.info();
         info.validate()?;
 
         // Validate that all config_keys use the block's own prefix.

@@ -126,7 +126,8 @@ pub async fn output_to_json(output: OutputStream) -> String {
 /// Register a block or flow definition from a file path.
 ///
 /// If `path` ends with `.wasm`, loads the file as a WASM block and registers
-/// it under `name`; otherwise reads the file as a WaferFlow JSON definition
+/// it under `name`, which must equal the name the guest reports from
+/// `__wafer_info` (registration refuses a mismatch); otherwise reads the file as a WaferFlow JSON definition
 /// (the flow's id comes from the JSON itself, not from `name`). This
 /// extension-dispatch rule is owned here so every embedder binding resolves
 /// paths identically.

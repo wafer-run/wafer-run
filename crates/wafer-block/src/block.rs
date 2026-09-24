@@ -21,6 +21,9 @@ use crate::{
 pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
     /// Static metadata describing this block (name, version, routes,
     /// declared config keys, capabilities, etc).
+    ///
+    /// `name` must equal the name the block is registered under: the runtime
+    /// refuses registration otherwise (`RuntimeError::BlockNameMismatch`).
     fn info(&self) -> BlockInfo;
 
     /// Handle an incoming message. Request body bytes (if any) flow in via `input`.

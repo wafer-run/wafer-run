@@ -73,7 +73,8 @@ func (w *Wafer) Close() {
 }
 
 // Register registers a block or flow definition from a file path.
-// If path ends with .wasm, registers a WASM block with the given name.
+// If path ends with .wasm, registers a WASM block with the given name, which
+// must be the name the block reports in its BlockInfo (a mismatch is refused).
 // Otherwise, reads the file as a JSON flow definition.
 //
 // This is a synchronous operation in the FFI layer.

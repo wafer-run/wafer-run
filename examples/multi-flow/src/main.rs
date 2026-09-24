@@ -28,7 +28,7 @@ struct GreeterBlock;
 #[async_trait::async_trait]
 impl Block for GreeterBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("greeter", "0.0.1", "http-handler@v1", "Greeter")
+        BlockInfo::new("example/greeter", "0.0.1", "http-handler@v1", "Greeter")
             .instance_mode(InstanceMode::Singleton)
     }
 
@@ -50,7 +50,7 @@ struct HealthBlock;
 #[async_trait::async_trait]
 impl Block for HealthBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("health", "0.0.1", "http-handler@v1", "Health check")
+        BlockInfo::new("example/health", "0.0.1", "http-handler@v1", "Health check")
             .instance_mode(InstanceMode::Singleton)
     }
 
@@ -65,8 +65,13 @@ struct NotFoundBlock;
 #[async_trait::async_trait]
 impl Block for NotFoundBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("not-found", "0.0.1", "http-handler@v1", "404 fallback")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/not-found",
+            "0.0.1",
+            "http-handler@v1",
+            "404 fallback",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

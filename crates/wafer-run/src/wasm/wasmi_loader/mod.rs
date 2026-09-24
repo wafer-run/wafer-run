@@ -1071,18 +1071,17 @@ impl Block for WasmiBlock {
             Err(e) => {
                 // A block that cannot report its own `BlockInfo` is a hard
                 // failure, not a routine warning. The `Block::info()` contract
-                // is infallible, so we must return *something* — but the
-                // placeholder name "unknown" is exactly what the registry and
-                // router key off, so a failed block silently registers under
-                // "unknown", collides with any other failed block, and never
-                // routes. Log at `error!` so the failure is visible in volume
-                // rather than masquerading as a normal block. The failure is
-                // deliberately NOT cached: a transient instantiation fault
-                // (e.g. fuel exhaustion) can recover on a later call.
+                // is infallible, so we must return *something*: the
+                // placeholder name "unknown", which is never a valid
+                // registration name, so registering this block fails with
+                // `RuntimeError::BlockNameMismatch` (reported "unknown"). Log
+                // at `error!` so the cause is visible next to that refusal.
+                // The failure is deliberately NOT cached: a transient
+                // instantiation fault (e.g. fuel exhaustion) can recover on a
+                // later call.
                 error!(
-                    "WasmiBlock::info() failed: {e}; registering with placeholder \
-                     name \"unknown\" — this block will not route correctly and \
-                     should be treated as a load failure"
+                    "WasmiBlock::info() failed: {e}; reporting placeholder name \
+                     \"unknown\", so registering this block will be refused"
                 );
                 BlockInfo::new("unknown", "0.0.0", "unknown", "failed to load info")
             }

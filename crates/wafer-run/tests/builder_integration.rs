@@ -4,10 +4,11 @@
 //! lockfile loading (Path B). They manipulate process-global state
 //! (`HOME`, `WAFER_LOCKFILE`) so they are serialised via `#[serial]`.
 //!
-//! Fixture strategy: the same MINIMAL_WASM bytes used by the in-`src/`
-//! `registry_loader` tests — the magic + version-1 header is sufficient
-//! for `WasmiBlock::load_from_bytes` to succeed when the loaded block is
-//! only registered, not started/invoked.
+//! Fixture strategy: the same `block_wasm` modules the in-`src/`
+//! `registry_loader` tests use — a module whose `__wafer_info` reports the
+//! block's name, which is all a block needs to be registered (registration
+//! refuses a reported name that differs from the lockfile name) when it is
+//! not started/invoked.
 
 use std::{env, fs, path::PathBuf};
 
@@ -15,13 +16,25 @@ use serial_test::serial;
 use tempfile::tempdir;
 use wafer_run::Wafer;
 
-/// Minimal valid wasm module: "\0asm" magic + version 1 (matches the constant
-/// in `registry_loader.rs`'s test module).
-const MINIMAL_WASM: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+/// A wasm module whose only behavior is reporting `BlockInfo { name }` from
+/// `__wafer_info` (matches the helper in `registry_loader.rs`'s test module).
+fn block_wasm(name: &str) -> Vec<u8> {
+    let info =
+        format!(r#"{{"name":"{name}","version":"0.1.0","interface":"handler@v1","summary":""}}"#);
+    let packed = (64u64 << 32) | info.len() as u64;
+    let escaped = info.replace('"', "\\\"");
+    wat::parse_str(format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (data (i32.const 64) "{escaped}")
+            (func (export "__wafer_info") (result i64) (i64.const {packed})))"#
+    ))
+    .expect("block_wasm WAT parses")
+}
 
 /// Seed a fake cache entry under `root/.wafer/cache/{org}/{block}/{version}/`.
 /// Writes `wafer.toml` (with separate `org` and `name` fields as the parser
-/// expects) and a single `{block}.wasm` (MINIMAL_WASM bytes).
+/// expects) and a single `{block}.wasm` (`block_wasm("{org}/{block}")`).
 fn seed_cache(home: &std::path::Path, org: &str, block: &str, version: &str) {
     let dir = home
         .join(".wafer")
@@ -37,7 +50,11 @@ fn seed_cache(home: &std::path::Path, org: &str, block: &str, version: &str) {
         ),
     )
     .unwrap();
-    fs::write(dir.join(format!("{block}.wasm")), MINIMAL_WASM).unwrap();
+    fs::write(
+        dir.join(format!("{block}.wasm")),
+        block_wasm(&format!("{org}/{block}")),
+    )
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -57,17 +74,20 @@ fn explicit_lockfile_path_loads_block_from_cache() {
     let lock_path = home.join("wafer.lock");
     fs::write(
         &lock_path,
-        // wasm_sha256 is the sha256 of MINIMAL_WASM (what seed_cache writes),
-        // so the SEC-05 integrity check passes.
-        r#"version = 2
+        // wasm_sha256 is the sha256 of what seed_cache writes, so the SEC-05
+        // integrity check passes.
+        format!(
+            r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.1.0"
 source = "registry+https://example.test"
 sha256 = "deadbeef"
-wasm_sha256 = "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
+wasm_sha256 = "{}"
 "#,
+            wafer_block::lockfile::sha256_hex(&block_wasm("acme/widget"))
+        ),
     )
     .unwrap();
 
@@ -165,16 +185,20 @@ fn wafer_lockfile_env_var_takes_precedence() {
     let lock_path: PathBuf = home.join("env.lock");
     fs::write(
         &lock_path,
-        // wasm_sha256 = sha256(MINIMAL_WASM) so the SEC-05 integrity check passes.
-        r#"version = 2
+        // wasm_sha256 = sha256 of what seed_cache writes, so the SEC-05
+        // integrity check passes.
+        format!(
+            r#"version = 2
 
 [[package]]
 name = "acme/envvar"
 version = "0.2.0"
 source = "registry+https://example.test"
 sha256 = "deadbeef"
-wasm_sha256 = "93a44bbb96c751218e4c00d479e4c14358122a389acca16205b1e4d0dc5f9476"
+wasm_sha256 = "{}"
 "#,
+            wafer_block::lockfile::sha256_hex(&block_wasm("acme/envvar"))
+        ),
     )
     .unwrap();
 

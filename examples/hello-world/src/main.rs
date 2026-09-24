@@ -12,8 +12,13 @@ struct HelloBlock;
 #[async_trait::async_trait]
 impl Block for HelloBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new("hello", "0.0.1", "http-handler@v1", "Hello World block")
-            .instance_mode(InstanceMode::Singleton)
+        BlockInfo::new(
+            "example/hello",
+            "0.0.1",
+            "http-handler@v1",
+            "Hello World block",
+        )
+        .instance_mode(InstanceMode::Singleton)
     }
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {

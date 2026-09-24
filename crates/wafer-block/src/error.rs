@@ -7,8 +7,8 @@
 ///
 /// The variants fall into three domains, marked by the section comments below:
 ///
-/// - **Registration** (`DuplicateBlock`, `InvalidBlockName`, `ConfigVarPrefix`,
-///   `Inventory`): raised while blocks are being added to a [`crate`]-level
+/// - **Registration** (`DuplicateBlock`, `InvalidBlockName`, `BlockNameMismatch`,
+///   `ConfigVarPrefix`, `Inventory`): raised while blocks are being added to a [`crate`]-level
 ///   registry, before the runtime is sealed. They name the offending block so
 ///   the misconfiguration can be fixed at its source.
 /// - **Boot / seal-time** (`GrantsRejected`, `BlocksNotFound`,
@@ -41,6 +41,19 @@ pub enum RuntimeError {
         name: String,
         /// Why the name was rejected.
         reason: String,
+    },
+
+    /// A block reports a `BlockInfo::name` other than the name it is being
+    /// registered under. A block's identity is its registration name: WRAP
+    /// grant ownership, the admin-block match and `requires` all key on it,
+    /// so a block that names itself something else is refused rather than
+    /// trusted — for a WASM guest the reported name is guest-controlled data.
+    #[error("block registered as '{registered}' reports its name as '{reported}'; a block's BlockInfo::name must equal its registration name")]
+    BlockNameMismatch {
+        /// The name the block was being registered under.
+        registered: String,
+        /// The name the block's own `info()` reported.
+        reported: String,
     },
 
     /// A block's config var doesn't match its expected prefix.

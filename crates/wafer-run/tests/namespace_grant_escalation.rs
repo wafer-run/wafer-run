@@ -21,7 +21,7 @@ use wafer_run::{RuntimeError, StaticConfigSource, Wafer};
 
 /// Block that declares a namespace grant for a resource owned by another
 /// block. Will be rejected by validate_and_collect_grants_for_block with
-/// `Some(owner)` where owner != block_info.name.
+/// `Some(owner)` where owner != the registration name.
 struct OtherOwnerOffender;
 
 #[async_trait]
@@ -180,8 +180,10 @@ async fn unnamespaced_grant_rejected_via_seal() {
                 "expected rejection from example/foo, got: {errors:?}",
             );
             assert!(
-                errors.iter().any(|e| e.reason.contains("unnamespaced")
-                    && e.reason.contains("legacy_table_no_prefix")),
+                errors
+                    .iter()
+                    .any(|e| e.reason.contains("not namespaced to a single block")
+                        && e.reason.contains("legacy_table_no_prefix")),
                 "reason should flag the unnamespaced resource by name: {errors:?}",
             );
         }

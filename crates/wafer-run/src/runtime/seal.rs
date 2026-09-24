@@ -372,9 +372,7 @@ impl Wafer {
     fn finalize_snapshot(&mut self) {
         self.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
-            blocks: super::lifecycle::sorted_snapshot(
-                self.registration.blocks.values().map(|b| b.info()),
-            ),
+            blocks: super::lifecycle::sorted_snapshot(&self.registration.blocks),
             flow_infos: self.flows_info(),
             flow_defs: self.flow_defs(),
             block_configs: self.registration.block_configs.clone(),
