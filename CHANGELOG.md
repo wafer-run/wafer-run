@@ -4,6 +4,33 @@
 
 ### Breaking changes
 
+- A block's storage is its own. WRAP admitted every Storage path without a
+  leading `@` for any attributable caller, assuming the storage block would
+  rewrite it into the caller's namespace, and wafer-core's storage handler
+  never did — so any block could read, overwrite and delete another block's
+  objects by spelling their path (`folder: "acme/files/uploads"`). The storage
+  handler now resolves every `folder` / folder `name` before it authorizes:
+  a plain folder is relative to the calling block's own namespace
+  (`uploads` from `acme/app` is `acme/app/uploads`; the empty folder is
+  `acme/app` itself), and `@{org}/{block}/…` names a namespace explicitly.
+  The handler authorizes the resolved path and hands that same path to the
+  `StorageService`. WRAP's Storage rule is now plain ownership: a path is
+  admitted for the block its `{org}/{block}` prefix names, the admin block,
+  or a Storage grant, and a path with an empty, `.` or `..` segment is
+  refused; `@` is request syntax the handler strips and WRAP no longer reads
+  (`storage_resource_owner("@a/b/c")` is `@a/b`, and a Storage grant written
+  with `@` no longer passes the owner check). A plain folder from a call with
+  no calling block is `PermissionDenied`. `decode_and_authorize_checked`
+  takes a resolver returning `(resolved, resource, type, access)` and returns
+  `(request, resolved)`. Embedders registering
+  `wafer_core::service_blocks::storage::StorageBlock` directly: objects a
+  block stored under a plain folder `f` now resolve to `{block}/f`, so data
+  written before this change under the raw path is not found there — move it
+  under the writer's namespace, or have callers address it as `@f` (admin or
+  grant). `wafer-run/web` serves `web_root` from `wafer-run/web/{web_root}`.
+  Embedders that already scoped paths in a wrapper block (impresspress's
+  `ImpresspressStorageBlock`) must drop that rewrite in the same upgrade, or
+  every path is prefixed twice.
 - A block is the name it is registered under. `register_block` (and every
   path built on it: `load_inventory_blocks`, the lockfile loader,
   `embed::register_path` behind the Node/Go/C bindings) refuses a block whose
