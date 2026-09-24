@@ -1152,7 +1152,7 @@ pub fn config_v1() -> InterfaceSpec {
 fn config_action_spec(op: &str) -> ActionSpec {
     match op {
         ServiceOp::CONFIG_GET => ActionSpec {
-            description: "Read a config value by key.".into(),
+            description: "Read a config value by key. An unset key is a NotFound error.".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -1163,7 +1163,7 @@ fn config_action_spec(op: &str) -> ActionSpec {
             response_schema: Some(json!({
                 "type": "object",
                 "properties": {
-                    "value": { "type": "string", "description": "Resolved value, or \"\" when the key is unset" }
+                    "value": { "type": "string", "description": "Resolved value" }
                 }
             })),
         },

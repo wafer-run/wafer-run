@@ -4,6 +4,14 @@
 
 ### Breaking changes
 
+- Config reads fail closed. `wafer_core::clients::config::get_default`
+  returns `Result<String, WaferError>` (was `String`) and falls back to the
+  default only when the key is not set (`ErrorCode::NotFound`); a WRAP
+  denial, a transport or a decode failure is returned instead of the
+  default. New `get_optional` returns `Result<Option<String>, WaferError>`,
+  `Ok(None)` for an unset key. The config block's `config.get` reads the key
+  from the request body only: a body that does not decode is
+  `InvalidArgument`, and a `key` message meta is no longer a fallback.
 - Flow config is typed and a flow is validated wherever it is added.
   `wafer_flow::FlowConfig` fields are `on_error: Option<OnError>` (`Stop` /
   `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms:
