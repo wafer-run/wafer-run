@@ -8,15 +8,19 @@
 
 #![warn(missing_docs)]
 
+mod csp;
+
 use std::sync::OnceLock;
 
+pub use csp::{merge_csp, CspMerge, Refusal};
 use wafer_block::*;
 
 /// Baseline CSP that the block always enforces, regardless of `cfg.csp`.
 ///
 /// `cfg.csp` directives are merged *on top of* this baseline rather than
 /// replacing it — tenants can extend (add hashes/origins/etc.) but cannot
-/// weaken `default-src` to `*` or re-enable `unsafe-eval`.
+/// admit script from arbitrary origins, re-enable `unsafe-eval`, widen
+/// `base-uri`/`form-action`, or touch `frame-ancestors` (see [`merge_csp`]).
 const DEFAULT_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
 /// Who may frame this site's documents. Drives both `frame-ancestors` in
@@ -92,13 +96,13 @@ impl CrossOriginIsolation {
 /// via `OnceLock<String>` because `handle` takes `&self` and the config is
 /// written once at Init, then read on every request.
 ///
-/// The CSP applied at request time is `merge_csp(DEFAULT_CSP, cfg.csp)`,
-/// which guarantees:
-/// * `default-src` never widens past the baseline (no `*`),
-/// * `script-src` never gains `'unsafe-eval'`,
-///
-/// regardless of what the operator puts in `cfg.csp`. See `merge_csp`.
+/// The CSP applied at request time is `merge_csp(DEFAULT_CSP, cfg.csp)` with
+/// `frame-ancestors` set from `cfg.frame_ancestors`, composed once at Init.
+/// Whatever the operator puts in `cfg.csp`, no script directive admits an
+/// arbitrary origin or `'unsafe-eval'`; each refused directive or source is
+/// logged at Init. See [`merge_csp`].
 pub struct SecurityHeadersBlock {
+    /// Init-composed policy, `frame-ancestors` included.
     csp: OnceLock<String>,
     /// Init-resolved `frame_ancestors` policy. Unset until Init parses the
     /// `frame_ancestors` config key; `effective_frame_ancestors` falls back
@@ -121,9 +125,9 @@ impl SecurityHeadersBlock {
     /// Build a new block. The effective CSP defaults to the restrictive
     /// [`DEFAULT_CSP`] until `lifecycle(Init)` sets a merged operator policy.
     ///
-    /// Any operator-supplied `csp` config replaces the default (after merging
-    /// through [`merge_csp`]) the first time the runtime fires the `Init`
-    /// lifecycle event.
+    /// The first `Init` lifecycle event replaces the default with the
+    /// operator `csp` config merged through [`merge_csp`] and the
+    /// `frame_ancestors` config applied.
     pub fn new() -> Self {
         Self {
             csp: OnceLock::new(),
@@ -132,8 +136,9 @@ impl SecurityHeadersBlock {
         }
     }
 
-    /// The CSP applied to responses: the Init-set merged value, or
-    /// [`DEFAULT_CSP`] when Init has not (yet) supplied one.
+    /// The CSP applied to responses: the Init-composed value, or
+    /// [`DEFAULT_CSP`] (whose `frame-ancestors 'none'` matches the
+    /// [`FrameAncestors::None`] default) when Init has not (yet) run.
     fn effective_csp(&self) -> &str {
         self.csp.get().map_or(DEFAULT_CSP, String::as_str)
     }
@@ -173,7 +178,10 @@ impl Block for SecurityHeadersBlock {
             ConfigVar::new(
                 "csp",
                 "Operator-supplied Content-Security-Policy directives, merged \
-                 on top of the block's restrictive baseline (see merge_csp).",
+                 on top of the block's restrictive baseline (see merge_csp). \
+                 Sources that would admit script from any origin, 'unsafe-eval', \
+                 widenings of base-uri/form-action and frame-ancestors are \
+                 refused and logged at Init.",
                 "",
             )
             .name("CSP"),
@@ -204,7 +212,7 @@ impl Block for SecurityHeadersBlock {
 
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         let frame_ancestors = self.effective_frame_ancestors();
-        let csp = with_frame_ancestors(self.effective_csp(), frame_ancestors);
+        let csp = self.effective_csp();
         let cross_origin_isolation = self.effective_cross_origin_isolation();
 
         let mut out_msg = msg;
@@ -252,19 +260,21 @@ impl Block for SecurityHeadersBlock {
     ) -> std::result::Result<(), WaferError> {
         if event.event_type == LifecycleType::Init {
             let config = BlockConfig::from_event(&event);
-            if let Some(custom_csp) = config.get("csp").and_then(|v| v.as_str()) {
-                let merged = merge_csp(DEFAULT_CSP, custom_csp);
-                // Write-once: Init fires a single time per registration.
-                let _ = self.csp.set(merged);
+            let frame_ancestors = match config.str_or("frame_ancestors", "none") {
+                "self" => FrameAncestors::SelfOrigin,
+                _ => FrameAncestors::None,
+            };
+            let custom_csp = config.str_or("csp", "");
+            check_csp_characters(custom_csp)?;
+            let merged = merge_csp(DEFAULT_CSP, custom_csp);
+            for refusal in &merged.refused {
+                tracing::warn!("security-headers: CSP config refused {refusal}");
             }
-            match config.str_or("frame_ancestors", "none") {
-                "self" => {
-                    let _ = self.frame_ancestors.set(FrameAncestors::SelfOrigin);
-                }
-                _ => {
-                    let _ = self.frame_ancestors.set(FrameAncestors::None);
-                }
-            }
+            // Write-once: Init fires a single time per registration.
+            let _ = self.frame_ancestors.set(frame_ancestors);
+            let _ = self
+                .csp
+                .set(with_frame_ancestors(&merged.policy, frame_ancestors));
             match config.str_or("cross_origin_isolation", "none") {
                 "credentialless" => {
                     let _ = self
@@ -285,144 +295,41 @@ impl Block for SecurityHeadersBlock {
     }
 }
 
-/// SEC-08: whether a CSP source is "broad" — one that would widen a
-/// script/default policy to essentially any origin. Rejected for `script-src`
-/// and `default-src`:
-/// - the literal wildcard `*`,
-/// - a scheme-only source (`https:`, `http:`, `data:`, `blob:`, …) — matches
-///   every origin on that scheme,
-/// - a bare-wildcard host (`https://*`).
-///
-/// Specific host sources (`https://cdn.example.com`), subdomain wildcards
-/// (`https://*.example.com`, `*.example.com`), nonces (`'nonce-…'`), hashes
-/// (`'sha256-…'`) and keywords (`'self'`, `'unsafe-inline'`) are NOT broad and
-/// pass through.
-pub(crate) fn is_broad_source(src: &str) -> bool {
-    let s = src.trim();
-    if s == "*" {
-        return true;
+/// Fail Init on a `csp` config character that cannot appear in a header
+/// value: anything but visible ASCII and the ASCII whitespace that separates
+/// tokens (which [`merge_csp`] re-serializes as single spaces). A pasted
+/// smart quote or control character is a configuration mistake to fix, not
+/// a source to drop.
+fn check_csp_characters(csp: &str) -> std::result::Result<(), WaferError> {
+    match csp
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_graphic() || c.is_ascii_whitespace()))
+    {
+        Some((at, c)) => Err(WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "security-headers: `csp` config has {c:?} (U+{:04X}) at byte {at}; \
+                 a Content-Security-Policy may only contain visible ASCII and spaces",
+                u32::from(c),
+            ),
+        )),
+        None => Ok(()),
     }
-    if let Some(idx) = s.find(':') {
-        let scheme = &s[..idx];
-        let rest = &s[idx + 1..];
-        let scheme_ok = !scheme.is_empty()
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-        if scheme_ok {
-            // "https:" (scheme-only) or "https://*" (bare-wildcard host).
-            let host = rest.trim_start_matches("//");
-            if rest.is_empty() || host == "*" {
-                return true;
-            }
-        }
-    }
-    false
 }
 
-/// Rewrite `csp`'s `frame-ancestors` directive to `fa`'s source, leaving
+/// Rewrite the `frame-ancestors` directive of a [`merge_csp`] policy (whose
+/// directive names are lower-case and unique) to `fa`'s source, leaving
 /// every other directive untouched. `frame_ancestors` is the only knob that
-/// can change this directive — the operator `csp` config key cannot (see
-/// `merge_csp`).
+/// can change this directive — the operator `csp` config key cannot.
 fn with_frame_ancestors(csp: &str, fa: FrameAncestors) -> String {
     csp.split(';')
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .map(|d| {
-            if d.starts_with("frame-ancestors") {
+            if d.split_ascii_whitespace().next() == Some("frame-ancestors") {
                 format!("frame-ancestors {}", fa.csp_source())
             } else {
                 d.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-/// Merge `custom` into `baseline` directive-by-directive.
-///
-/// Both inputs are standard `directive value...; directive value...` CSP
-/// strings. The result preserves every baseline directive (so the operator
-/// cannot remove `frame-ancestors 'none'` or similar) and then applies the
-/// custom values per directive subject to **non-weakening rules**:
-///
-/// * `default-src` and `script-src` — [broad sources](is_broad_source)
-///   (`*`, scheme-only, bare-wildcard host) are dropped; `default-src`
-///   always re-adds `'self'` if missing.
-/// * `script-src` — `'unsafe-eval'` is always stripped.
-/// * Any directive present only in `custom` is appended verbatim.
-///
-/// All other directives merge as the union of (baseline ∪ custom) sources
-/// with duplicates removed and ordering preserved.
-pub fn merge_csp(baseline: &str, custom: &str) -> String {
-    use std::collections::BTreeMap;
-
-    fn parse(input: &str) -> BTreeMap<String, Vec<String>> {
-        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for raw in input.split(';') {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let mut parts = trimmed.split_whitespace();
-            let directive = match parts.next() {
-                Some(d) => d.to_string(),
-                None => continue,
-            };
-            let sources: Vec<String> = parts.map(|s| s.to_string()).collect();
-            out.entry(directive).or_default().extend(sources);
-        }
-        out
-    }
-
-    let base = parse(baseline);
-    let extra = parse(custom);
-
-    // Start from the baseline and merge each custom directive.
-    let mut merged: BTreeMap<String, Vec<String>> = base;
-
-    for (directive, custom_sources) in extra {
-        let entry = merged.entry(directive.clone()).or_default();
-        for src in custom_sources {
-            // Non-weakening rules.
-            let is_default_src = directive.eq_ignore_ascii_case("default-src");
-            let is_script_src = directive.eq_ignore_ascii_case("script-src");
-            let lower = src.to_lowercase();
-            // SEC-08: reject broad sources (wildcard, scheme-only, bare-wildcard
-            // host) that would widen script/default policy to any origin.
-            // Specific hosts, subdomain wildcards, nonces and hashes still pass.
-            if (is_default_src || is_script_src) && is_broad_source(&lower) {
-                continue;
-            }
-            if is_script_src && lower == "'unsafe-eval'" {
-                continue;
-            }
-            if !entry.iter().any(|s| s == &src) {
-                entry.push(src);
-            }
-        }
-    }
-
-    // Final pass: ensure baseline guarantees survive even if the operator
-    // tried to clear a directive entirely.
-    if let Some(sources) = merged.get_mut("default-src") {
-        if !sources.iter().any(|s| s == "'self'") {
-            sources.insert(0, "'self'".to_string());
-        }
-        sources.retain(|s| !is_broad_source(s));
-    }
-    if let Some(sources) = merged.get_mut("script-src") {
-        sources.retain(|s| s.to_lowercase() != "'unsafe-eval'" && !is_broad_source(s));
-    }
-
-    // Re-serialize in a stable directive order (BTreeMap iterates sorted).
-    merged
-        .into_iter()
-        .map(|(d, srcs)| {
-            if srcs.is_empty() {
-                d
-            } else {
-                format!("{d} {}", srcs.join(" "))
             }
         })
         .collect::<Vec<_>>()
@@ -438,10 +345,11 @@ mod tests {
     #[test]
     fn merge_csp_preserves_baseline_when_custom_empty() {
         let merged = merge_csp(DEFAULT_CSP, "");
+        assert!(merged.refused.is_empty(), "{:?}", merged.refused);
         // Every baseline directive must still appear.
-        assert!(merged.contains("default-src 'self'"));
-        assert!(merged.contains("frame-ancestors 'none'"));
-        assert!(merged.contains("base-uri 'self'"));
+        assert!(merged.policy.contains("default-src 'self'"));
+        assert!(merged.policy.contains("frame-ancestors 'none'"));
+        assert!(merged.policy.contains("base-uri 'self'"));
     }
 
     #[test]
@@ -451,35 +359,11 @@ mod tests {
             "script-src 'self' 'unsafe-eval' https://cdn.example.com",
         );
         // unsafe-eval must be stripped, cdn must be added, baseline values kept.
-        assert!(!merged.contains("'unsafe-eval'"));
-        assert!(merged.contains("https://cdn.example.com"));
-        assert!(merged.contains("'unsafe-inline'")); // from baseline
+        assert!(!merged.policy.contains("'unsafe-eval'"));
+        assert!(merged.policy.contains("https://cdn.example.com"));
+        assert!(merged.policy.contains("'unsafe-inline'")); // from baseline
     }
 
-    // SEC-08: scheme-only and bare-wildcard-host sources are "broad" and must
-    // be rejected from script/default policy; specific hosts, subdomain
-    // wildcards, nonces and hashes are not.
-    #[test]
-    fn is_broad_source_classification() {
-        for broad in ["*", "https:", "http:", "data:", "blob:", "ws:", "https://*"] {
-            assert!(is_broad_source(broad), "{broad} should be broad");
-        }
-        for ok in [
-            "'self'",
-            "'unsafe-inline'",
-            "'nonce-abc123'",
-            "'sha256-xyz'",
-            "https://cdn.example.com",
-            "*.example.com",
-            "https://*.example.com",
-        ] {
-            assert!(!is_broad_source(ok), "{ok} should NOT be broad");
-        }
-    }
-
-    // SEC-08: `script-src https:` (etc.) previously passed, authorizing scripts
-    // from every origin on that scheme. Broad sources are now stripped while
-    // specific hosts and nonces survive.
     #[test]
     fn merge_csp_strips_broad_script_sources_keeps_specific_host() {
         let merged = merge_csp(
@@ -487,6 +371,7 @@ mod tests {
             "script-src https: data: https://cdn.example.com 'nonce-abc'",
         );
         let script = merged
+            .policy
             .split(';')
             .map(|d| d.trim())
             .find(|d| d.starts_with("script-src"))
@@ -507,9 +392,10 @@ mod tests {
     #[test]
     fn merge_csp_rejects_wildcard_default_src() {
         let merged = merge_csp(DEFAULT_CSP, "default-src *");
-        assert!(merged.contains("default-src 'self'"));
+        assert!(merged.policy.contains("default-src 'self'"));
         // `*` must not appear as a default-src source.
         let default_section = merged
+            .policy
             .split(';')
             .find(|s| s.trim().starts_with("default-src"))
             .unwrap_or("");
@@ -518,10 +404,180 @@ mod tests {
 
     #[test]
     fn merge_csp_allows_extension_with_new_directive() {
-        let merged = merge_csp(DEFAULT_CSP, "worker-src 'self' blob:");
-        assert!(merged.contains("worker-src 'self' blob:"));
+        let merged = merge_csp(DEFAULT_CSP, "media-src 'self' blob:");
+        assert!(merged.policy.contains("media-src 'self' blob:"));
         // Baseline still intact.
-        assert!(merged.contains("frame-ancestors 'none'"));
+        assert!(merged.policy.contains("frame-ancestors 'none'"));
+    }
+
+    // --- operator CSP through the block's Init -------------------------
+
+    /// The `Content-Security-Policy` the block sends after Init with `config`.
+    async fn served_csp(config: serde_json::Value) -> String {
+        let block = SecurityHeadersBlock::new();
+        block
+            .lifecycle(&NoopCtx, init_event(&config.to_string()))
+            .await
+            .unwrap();
+        let msg = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        msg.get_meta("resp.header.Content-Security-Policy")
+            .to_string()
+    }
+
+    /// `(name, sources)` for every directive in `policy`, in order, with the
+    /// name lower-cased as a browser reads it.
+    fn directives(policy: &str) -> Vec<(String, Vec<&str>)> {
+        policy
+            .split(';')
+            .filter_map(|d| {
+                let mut tokens = d.split_ascii_whitespace();
+                let name = tokens.next()?.to_ascii_lowercase();
+                Some((name, tokens.collect()))
+            })
+            .collect()
+    }
+
+    /// The sources a browser enforces for `name`: CSP3 lower-cases directive
+    /// names and ignores every occurrence after the first.
+    fn enforced<'a>(policy: &'a str, name: &str) -> Option<Vec<&'a str>> {
+        directives(policy)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, sources)| sources)
+    }
+
+    #[tokio::test]
+    async fn operator_csp_cannot_reenable_framing_or_admit_any_script_origin() {
+        let csp = served_csp(serde_json::json!({
+            "csp": "FRAME-ANCESTORS *; script-src https://*/; script-src-elem https:",
+        }))
+        .await;
+        assert_eq!(
+            enforced(&csp, "frame-ancestors"),
+            Some(vec!["'none'"]),
+            "{csp}"
+        );
+        for name in ["script-src", "script-src-elem"] {
+            let sources = enforced(&csp, name).unwrap_or_default();
+            assert!(
+                !sources.contains(&"https://*/") && !sources.contains(&"https:"),
+                "{name} admits any origin: {csp}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_csp_upper_case_script_src_cannot_replace_the_baseline() {
+        let csp = served_csp(serde_json::json!({
+            "csp": "SCRIPT-SRC https://*/ https://cdn.example.com",
+        }))
+        .await;
+        assert_eq!(
+            enforced(&csp, "script-src"),
+            Some(vec!["'self'", "'unsafe-inline'", "https://cdn.example.com"]),
+            "{csp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_csp_emits_each_directive_once() {
+        let csp = served_csp(serde_json::json!({
+            "csp": "Img-Src https://a.example; IMG-SRC https://b.example; Default-Src https://c.example",
+        }))
+        .await;
+        let mut names: Vec<String> = directives(&csp).into_iter().map(|(n, _)| n).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "a directive is repeated: {csp}");
+    }
+
+    #[tokio::test]
+    async fn operator_csp_wildcard_hosts_at_a_port_or_path_are_refused() {
+        let csp = served_csp(serde_json::json!({
+            "csp": "script-src https://*:443 *:443 */x; worker-src blob: *; \
+                    script-src-attr https://*; default-src https://*/",
+        }))
+        .await;
+        for name in [
+            "script-src",
+            "script-src-elem",
+            "script-src-attr",
+            "worker-src",
+            "default-src",
+        ] {
+            for source in enforced(&csp, name).unwrap_or_default() {
+                assert!(
+                    !source.contains('*') && !source.ends_with(':'),
+                    "{name} kept {source}: {csp}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_ancestors_knob_governs_the_directive_whatever_the_csp_says() {
+        let csp = served_csp(serde_json::json!({
+            "frame_ancestors": "self",
+            "csp": "FRAME-ANCESTORS *",
+        }))
+        .await;
+        assert_eq!(
+            enforced(&csp, "frame-ancestors"),
+            Some(vec!["'self'"]),
+            "{csp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_fails_on_a_csp_character_no_header_can_carry() {
+        for (csp, named) in [
+            ("script-src \u{2018}self\u{2019}", "U+2018"),
+            ("img-src https://a.example\u{1}", "U+0001"),
+            ("img-src\u{a0}https://a.example", "U+00A0"),
+        ] {
+            let block = SecurityHeadersBlock::new();
+            let err = block
+                .lifecycle(
+                    &NoopCtx,
+                    init_event(&serde_json::json!({ "csp": csp }).to_string()),
+                )
+                .await
+                .expect_err("a non-header character must fail Init");
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "{csp:?}");
+            assert!(err.message.contains(named), "{csp:?}: {}", err.message);
+        }
+        // Newlines and tabs only separate tokens.
+        let csp = served_csp(serde_json::json!({
+            "csp": "img-src\n\thttps://a.example",
+        }))
+        .await;
+        assert_eq!(
+            enforced(&csp, "img-src"),
+            Some(vec![
+                "'self'",
+                "data:",
+                "blob:",
+                "https:",
+                "https://a.example"
+            ]),
+            "{csp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_csp_cannot_widen_form_action_or_base_uri() {
+        let csp = served_csp(serde_json::json!({
+            "csp": "form-action https:; base-uri https://evil.example",
+        }))
+        .await;
+        assert_eq!(enforced(&csp, "form-action"), Some(vec!["'self'"]), "{csp}");
+        assert_eq!(enforced(&csp, "base-uri"), Some(vec!["'self'"]), "{csp}");
     }
 
     // --- frame_ancestors -----------------------------------------------
@@ -629,7 +685,11 @@ mod tests {
     fn merge_csp_cannot_relax_frame_ancestors_through_the_csp_key() {
         // The knob is `frame_ancestors`, never the operator CSP string.
         let merged = merge_csp(DEFAULT_CSP, "frame-ancestors 'self'");
-        assert!(merged.contains("frame-ancestors 'none'"), "{merged}");
+        assert!(
+            merged.policy.contains("frame-ancestors 'none'"),
+            "{}",
+            merged.policy
+        );
     }
 
     // --- cross_origin_isolation ------------------------------------------
