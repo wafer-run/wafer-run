@@ -23,10 +23,14 @@ pub trait LoggerService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     fn error(&self, caller: Option<&str>, msg: &str, fields: &[Field]);
 }
 
-/// Escape `text` so it renders on one line and cannot be read as more than
-/// one log record: `\` becomes `\\`, newline, carriage return and tab become
-/// `\n`, `\r` and `\t`, and every other control character, and the Unicode
-/// line and paragraph separators (U+2028, U+2029), become `\u{..}`.
+/// Escape `text` so it renders on one line, as the characters it holds, and
+/// cannot be read as more than one log record: `\` becomes `\\`, newline,
+/// carriage return and tab become `\n`, `\r` and `\t`, and every other
+/// control character, the Unicode line and paragraph separators (U+2028,
+/// U+2029), the bidirectional embeddings, overrides and isolates
+/// (U+202A-U+202E, U+2066-U+2069), the zero-width and directional marks
+/// (U+200B-U+200F) and the byte-order mark (U+FEFF) become `\u{..}` — the
+/// last three groups because they reorder or hide what a reader sees.
 /// Escaping the backslash keeps the result unambiguous: an escaped newline
 /// and a literal `\n` typed by the block read differently.
 pub fn escape_log_text(text: &str) -> String {
@@ -39,7 +43,7 @@ pub fn escape_log_text(text: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+            c if c.is_control() || is_invisible_or_reordering(c) => {
                 // Writing into a `String` cannot fail.
                 let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
             }
@@ -47,6 +51,55 @@ pub fn escape_log_text(text: &str) -> String {
         }
     }
     out
+}
+
+/// The non-control characters [`escape_log_text`] escapes: line and
+/// paragraph separators, bidirectional formatting, zero-width characters and
+/// the byte-order mark.
+fn is_invisible_or_reordering(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2028}'
+            | '\u{2029}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{feff}'
+    )
+}
+
+/// `Display` adapter rendering structured fields for a text log line as
+/// space-separated `key=value` pairs. A key or value that is empty or holds
+/// a space, `=` or `"` is written in double quotes with its `"` escaped as
+/// `\"`, so no pair can read as two, and no text can read as a field of
+/// the line it sits in. Expects texts already escaped by
+/// [`escape_log_text`] (as the handler delivers them), which leaves no
+/// other character that could split the line.
+pub struct RenderedFields<'a>(pub &'a [Field]);
+
+impl fmt::Display for RenderedFields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, field) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(" ")?;
+            }
+            write_quoted(f, &field.key)?;
+            f.write_str("=")?;
+            write_quoted(f, &field.value.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// Write `text` for [`RenderedFields`]: bare when that is unambiguous,
+/// otherwise double-quoted with `"` escaped.
+fn write_quoted(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
+    if !text.is_empty() && !text.contains([' ', '=', '"']) {
+        return f.write_str(text);
+    }
+    f.write_str("\"")?;
+    f.write_str(&text.replace('"', "\\\""))?;
+    f.write_str("\"")
 }
 
 /// Field is a key-value pair for structured log output.
@@ -161,5 +214,39 @@ mod tests {
         // escaped newline.
         assert_eq!(escape_log_text("a\\nb"), "a\\\\nb");
         assert_ne!(escape_log_text("a\\nb"), escape_log_text("a\nb"));
+    }
+
+    #[test]
+    fn escape_log_text_escapes_bidi_and_zero_width_characters() {
+        // `\u{202e}` would render the rest of the line right to left.
+        assert_eq!(
+            escape_log_text("a\u{202e}b\u{2066}c\u{2069}"),
+            "a\\u{202e}b\\u{2066}c\\u{2069}"
+        );
+        for c in [
+            '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{2067}', '\u{2068}', '\u{200b}',
+            '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{feff}',
+        ] {
+            let escaped = escape_log_text(&c.to_string());
+            assert_eq!(escaped, format!("\\u{{{:x}}}", u32::from(c)));
+        }
+    }
+
+    #[test]
+    fn rendered_fields_quote_what_would_be_ambiguous() {
+        use super::{any, int, string, RenderedFields};
+        let fields = [
+            string("plain", "value"),
+            string("spaced", "hi caller=wafer-run/admin"),
+            string("quoted", "say \"x\""),
+            string("empty", ""),
+            string("odd key", "v"),
+            int("n", 3),
+            any("eq", "a=b"),
+        ];
+        assert_eq!(
+            RenderedFields(&fields).to_string(),
+            r#"plain=value spaced="hi caller=wafer-run/admin" quoted="say \"x\"" empty="" "odd key"=v n=3 eq="a=b""#
+        );
     }
 }

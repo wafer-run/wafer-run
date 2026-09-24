@@ -541,14 +541,22 @@
   forged records after a newline. `LoggerService`'s four methods take the
   caller first (`fn info(&self, caller: Option<&str>, msg: &str, fields:
   &[Field])`): the handler passes `ctx.caller_id()`, the runtime's
-  registered name for the calling block, and escapes control characters and
-  U+2028/U+2029 in the message and in every field key and text value
-  (`interfaces::logger::service::escape_log_text`; `\` is escaped too, so
-  the result is unambiguous), handing the fields over in key order.
-  `interfaces::logger::handler::handle_message` takes the block's `ctx`. `TracingLogger` emits `caller` (`-` for no
-  caller), the message, and the fields as one `fields` value. Every
-  `LoggerService` implementation must add the parameter and record the
-  caller.
+  registered name for the calling block, and escapes control characters,
+  U+2028/U+2029, bidirectional embeddings, overrides and isolates
+  (U+202A-U+202E, U+2066-U+2069), zero-width and directional marks
+  (U+200B-U+200F) and U+FEFF in the message and in every field key and text
+  value (`interfaces::logger::service::escape_log_text`; `\` is escaped too,
+  so the result is unambiguous), handing the fields over in key order.
+  `interfaces::logger::handler::handle_message` takes the block's `ctx`.
+  `TracingLogger` emits no event message: an event is three string fields,
+  `caller` (`-` for no caller), `msg` and `fields`, which the text
+  formatter writes quoted, so a message spelling `caller=…` cannot read as a
+  field of its line (a JSON formatter now shows the block's text under
+  `msg`, not `message`). `fields` is rendered by the new
+  `interfaces::logger::service::RenderedFields`, which quotes any key or
+  value that is empty or holds a space, `=` or `"`; text-rendering
+  `LoggerService` implementations can use it too. Every `LoggerService`
+  implementation must add the parameter and record the caller.
 
 ### Added
 
