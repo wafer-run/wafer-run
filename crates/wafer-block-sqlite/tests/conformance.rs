@@ -75,19 +75,21 @@ async fn two_sqlite_services_on_one_file_see_each_others_tables() {
 }
 
 /// An `id` key that is not SQLite's rowid alias is an ordinary column, which
-/// a rowid table lets hold `NULL`: `create` without an id must mint one, not
-/// leave the row keyed `NULL` and report SQLite's internal rowid as its id.
-/// Covers the declarations whose type merely contains `INT` (`INT`,
-/// `BIGINT`), a composite key and a `WITHOUT ROWID` table, against the one
-/// that is the alias (`INTEGER PRIMARY KEY`, numbered by SQLite).
+/// a rowid table lets hold `NULL`: `create` without an id must not leave the
+/// row keyed `NULL` and report SQLite's internal rowid as its id. Covers the
+/// declarations whose type merely contains `INT` (`INT`, `BIGINT`), a
+/// composite key and a `WITHOUT ROWID` table — integer ids nothing fills, so
+/// a row without one is refused and nothing is written — against the one
+/// that is the alias (`INTEGER PRIMARY KEY`, numbered by SQLite) and a text
+/// key (a minted id).
 #[tokio::test]
 async fn only_the_rowid_alias_numbers_its_own_rows() {
     use std::collections::HashMap;
 
-    use wafer_core::interfaces::database::service::DatabaseService;
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
 
     let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
-    let tables = [
+    let caller_supplied = [
         (
             "t_int",
             "CREATE TABLE t_int (id INT PRIMARY KEY, name TEXT)",
@@ -104,20 +106,50 @@ async fn only_the_rowid_alias_numbers_its_own_rows() {
             "t_no_rowid",
             "CREATE TABLE t_no_rowid (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID",
         ),
+    ];
+    let filled = [
         (
             "t_alias",
             "CREATE TABLE t_alias (id INTEGER PRIMARY KEY, name TEXT)",
         ),
+        (
+            "t_text",
+            "CREATE TABLE t_text (id TEXT PRIMARY KEY, name TEXT)",
+        ),
     ];
-    for (_, ddl) in tables {
+    for (_, ddl) in caller_supplied.iter().chain(&filled) {
         svc.exec_raw(ddl, &[]).await.expect(ddl);
     }
-    for (table, _) in tables {
+    let named = |table: &str| HashMap::from([("name".to_string(), serde_json::json!(table))]);
+    let rows = |table: &'static str| {
+        let svc = &svc;
+        async move {
+            svc.query_raw(&format!("SELECT id, name FROM {table}"), &[])
+                .await
+                .expect("query")
+        }
+    };
+
+    for (table, _) in caller_supplied {
+        let err = svc
+            .create(table, named(table))
+            .await
+            .expect_err("an integer id nothing fills must be supplied");
+        assert!(
+            matches!(&err, DatabaseError::InvalidArgument(msg) if msg.contains(table)),
+            "{table}: {err:?}"
+        );
+        assert!(rows(table).await.is_empty(), "{table}: nothing is written");
+        let mut with_id = named(table);
+        with_id.insert("id".to_string(), serde_json::json!(7));
+        let created = svc.create(table, with_id).await.expect("a supplied id");
+        let got = svc.get(table, &created.id).await.expect("get");
+        assert_eq!(got.data["name"], serde_json::json!(table));
+    }
+
+    for (table, _) in filled {
         let created = svc
-            .create(
-                table,
-                HashMap::from([("name".to_string(), serde_json::json!(table))]),
-            )
+            .create(table, named(table))
             .await
             .unwrap_or_else(|e| panic!("create in {table}: {e}"));
         let got = svc
@@ -125,11 +157,6 @@ async fn only_the_rowid_alias_numbers_its_own_rows() {
             .await
             .unwrap_or_else(|e| panic!("{table}: get({:?}): {e}", created.id));
         assert_eq!(got.data["name"], serde_json::json!(table));
-        let null_ids = svc
-            .query_raw(&format!("SELECT name FROM {table} WHERE id IS NULL"), &[])
-            .await
-            .expect("query");
-        assert!(null_ids.is_empty(), "{table} holds a NULL id: {null_ids:?}");
         if table == "t_alias" {
             assert_eq!(
                 created.data["id"],
@@ -139,9 +166,49 @@ async fn only_the_rowid_alias_numbers_its_own_rows() {
         } else {
             assert!(
                 created.data["id"].is_string(),
-                "{table}: a minted id, not a rowid: {:?}",
+                "a minted id: {:?}",
                 created.data
             );
         }
+    }
+}
+
+/// The repair the CHANGELOG gives for an `id INT PRIMARY KEY` table written
+/// by the executor that took any `INT` key for the rowid alias: those rows
+/// hold a `NULL` id, and `create` reported each row's rowid as its id. Setting
+/// the id to the rowid makes the ids callers were given find their rows.
+#[tokio::test]
+async fn the_changelog_repair_gives_null_id_rows_the_ids_callers_were_given() {
+    use wafer_core::interfaces::database::service::DatabaseService;
+
+    let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
+    svc.exec_raw("CREATE TABLE legacy (id INT PRIMARY KEY, name TEXT)", &[])
+        .await
+        .expect("create");
+    // What the old `create` wrote, and the ids it returned (the rowids).
+    for name in ["first", "second"] {
+        svc.exec_raw(&format!("INSERT INTO legacy (name) VALUES ('{name}')"), &[])
+            .await
+            .expect("a legacy row");
+    }
+    let before = svc
+        .query_raw("SELECT COUNT(*) AS n FROM legacy WHERE id IS NULL", &[])
+        .await
+        .expect("count");
+    assert_eq!(
+        before[0].data["n"],
+        serde_json::json!(2),
+        "the detection query"
+    );
+
+    svc.exec_raw("UPDATE legacy SET id = rowid WHERE id IS NULL", &[])
+        .await
+        .expect("the repair");
+    for (id, name) in [("1", "first"), ("2", "second")] {
+        let got = svc
+            .get("legacy", id)
+            .await
+            .expect("the id the caller was given");
+        assert_eq!(got.data["name"], serde_json::json!(name));
     }
 }

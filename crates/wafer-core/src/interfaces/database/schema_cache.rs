@@ -7,8 +7,8 @@
 //! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes both
 //! facts per table — the column list together with which columns are declared
 //! to hold JSON, which every row read decodes by — plus the table's primary
-//! key, which a sorted or paged `list` appends to its `ORDER BY`, and whether
-//! the table fills `id` itself, which `create` asks before minting one, so a
+//! key, which a sorted or paged `list` appends to its `ORDER BY`, and where a
+//! created row's `id` comes from, which `create` asks before minting one, so a
 //! warm backend issues zero introspection round-trips in steady state.
 //!
 //! Only facts about a table that exists are kept. That a table is *missing*
@@ -64,6 +64,7 @@
 use std::collections::HashMap;
 
 use parking_lot::RwLock;
+use wafer_sql_utils::introspect::IdPolicy;
 
 use super::codec::JsonColumns;
 
@@ -81,7 +82,7 @@ pub struct TableColumns {
 /// Memoized introspection facts for one table. Each fact is independently
 /// populated (`dbx_table_exists` sets `present`, the column-list
 /// introspection fills `columns`, the primary-key introspection fills
-/// `primary_key`, the generated-id introspection fills `generates_id`), so
+/// `primary_key`, the id-policy introspection fills `id_policy`), so
 /// each optional fact's `None` means "not yet probed".
 #[derive(Debug, Default)]
 struct TableSchema {
@@ -93,8 +94,8 @@ struct TableSchema {
     /// Primary-key column names in key order, as the catalog spells them;
     /// empty for a table with no primary key.
     primary_key: Option<Vec<String>>,
-    /// Whether the table fills `id` itself when an insert omits it.
-    generates_id: Option<bool>,
+    /// Where the `id` of a row inserted without one comes from.
+    id_policy: Option<IdPolicy>,
 }
 
 /// Lock-protected cache state: the per-table facts plus the generation counter
@@ -239,41 +240,42 @@ impl SchemaCache {
         entry.primary_key = Some(key);
     }
 
-    /// Cached answer to "does `table` fill `id` itself?", or `None` on a miss.
+    /// Cached [`IdPolicy`] of `table`, or `None` on a miss.
     #[must_use]
-    pub fn generates_id(&self, table: &str) -> Option<bool> {
+    pub fn id_policy(&self, table: &str) -> Option<IdPolicy> {
         self.inner
             .read()
             .tables
             .get(table)
-            .and_then(|t| t.generates_id)
+            .and_then(|t| t.id_policy)
     }
 
-    /// Record whether `table` fills `id` itself, but only if the cache has not
-    /// been mutated since `expected_gen` (see the module docs).
+    /// Record `table`'s [`IdPolicy`], but only if the cache has not been
+    /// mutated since `expected_gen` (see the module docs).
     ///
-    /// `true` proves the table exists, so the table is marked present
-    /// alongside it. `false` is also the answer for a table that does not
-    /// exist yet, so it is recorded only when the entry already knows the
-    /// table exists; otherwise it is dropped and the next lookup asks again.
+    /// [`IdPolicy::Database`] and [`IdPolicy::Caller`] describe an `id`
+    /// column, so they prove the table exists and mark it present.
+    /// [`IdPolicy::Mint`] is also the answer for a table that does not exist
+    /// yet, so it is recorded only when the entry already knows the table
+    /// exists; otherwise it is dropped and the next lookup asks again.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "the write guard covers the whole critical section — the \
                   generation check, the presence check and the fact-set \
                   mutate the same entry and are the entire body"
     )]
-    pub fn set_generates_id_if_gen(&self, table: &str, generates_id: bool, expected_gen: u64) {
+    pub fn set_id_policy_if_gen(&self, table: &str, policy: IdPolicy, expected_gen: u64) {
         let mut inner = self.inner.write();
         if inner.generation != expected_gen {
             return;
         }
         let entry = inner.tables.entry(table.to_string()).or_default();
-        if generates_id {
+        if policy != IdPolicy::Mint {
             entry.present = true;
         } else if !entry.present {
             return;
         }
-        entry.generates_id = Some(generates_id);
+        entry.id_policy = Some(policy);
     }
 
     /// Invalidate every cached fact for `table` and bump the generation.
@@ -381,27 +383,28 @@ mod tests {
     }
 
     #[test]
-    fn generates_id_is_cached_only_for_a_table_known_to_exist() {
+    fn id_policy_mint_is_cached_only_for_a_table_known_to_exist() {
+        use wafer_sql_utils::introspect::IdPolicy;
+
         let c = SchemaCache::new();
-        assert_eq!(c.generates_id("t"), None);
-        c.set_generates_id_if_gen("t", true, c.generation());
-        assert_eq!(c.generates_id("t"), Some(true));
-        assert!(
-            c.table_known_present("t"),
-            "a generated id proves the table"
-        );
-        // "No" is also a missing table's answer: dropped until the table is
-        // known to exist.
-        c.set_generates_id_if_gen("later", false, c.generation());
-        assert_eq!(c.generates_id("later"), None);
+        assert_eq!(c.id_policy("t"), None);
+        c.set_id_policy_if_gen("t", IdPolicy::Database, c.generation());
+        assert_eq!(c.id_policy("t"), Some(IdPolicy::Database));
+        assert!(c.table_known_present("t"), "an id column proves the table");
+        c.set_id_policy_if_gen("u", IdPolicy::Caller, c.generation());
+        assert!(c.table_known_present("u"), "an id column proves the table");
+        // "Mint" is also a missing table's answer: dropped until the table
+        // is known to exist.
+        c.set_id_policy_if_gen("later", IdPolicy::Mint, c.generation());
+        assert_eq!(c.id_policy("later"), None);
         c.mark_table_present_if_gen("later", c.generation());
-        c.set_generates_id_if_gen("later", false, c.generation());
-        assert_eq!(c.generates_id("later"), Some(false));
+        c.set_id_policy_if_gen("later", IdPolicy::Mint, c.generation());
+        assert_eq!(c.id_policy("later"), Some(IdPolicy::Mint));
         let stale = c.generation();
         c.invalidate("t");
-        assert_eq!(c.generates_id("t"), None);
-        c.set_generates_id_if_gen("t", true, stale);
-        assert_eq!(c.generates_id("t"), None, "a raced write-back is dropped");
+        assert_eq!(c.id_policy("t"), None);
+        c.set_id_policy_if_gen("t", IdPolicy::Database, stale);
+        assert_eq!(c.id_policy("t"), None, "a raced write-back is dropped");
     }
 
     #[test]

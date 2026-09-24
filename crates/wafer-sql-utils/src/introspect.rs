@@ -198,48 +198,93 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
     }
 }
 
-/// Build query asking whether a table fills its `id` column itself when an
-/// insert leaves it out.
+/// Where the `id` of a row inserted without one comes from, as
+/// [`build_id_policy`] reports it for a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdPolicy {
+    /// The caller's executor mints one: the table's `id` column holds text
+    /// (or the table has no `id` column yet).
+    Mint,
+    /// The database fills it: a SQLite rowid alias, a Postgres identity or
+    /// sequence-backed column.
+    Database,
+    /// `id` is declared to hold integers and nothing fills it, so the insert
+    /// must carry one. A minted string id does not fit such a column:
+    /// Postgres refuses it, and SQLite would store a string among integers.
+    Caller,
+}
+
+impl IdPolicy {
+    /// The policy a [`build_id_policy`] result code names: `0` [`Mint`],
+    /// `1` [`Database`], `2` [`Caller`]; `None` for any other code.
+    ///
+    /// [`Mint`]: IdPolicy::Mint
+    /// [`Database`]: IdPolicy::Database
+    /// [`Caller`]: IdPolicy::Caller
+    #[must_use]
+    pub const fn from_code(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Mint),
+            1 => Some(Self::Database),
+            2 => Some(Self::Caller),
+            _ => None,
+        }
+    }
+}
+
+/// Build query asking where a table's `id` comes from when an insert leaves
+/// it out (see [`IdPolicy`]).
 ///
 /// Returns `(sql, params)`. The result is a single row with one integer
-/// column `generated`, `1` or `0` in both dialects, so callers can read it as
-/// an `i64` scalar. A missing table answers `0`.
+/// column `id_policy` — `0` mint, `1` database, `2` caller, decoded by
+/// [`IdPolicy::from_code`] — in both dialects, so callers can read it as an
+/// `i64` scalar. A missing table answers `0`.
 ///
-/// SQLite: `id` is the table's rowid alias — the sole primary-key column of
-/// a rowid table, declared exactly `INTEGER` — whose value SQLite assigns.
-/// Of the tables whose sole key column is `id`, the rowid alias is the one
-/// for which SQLite builds no primary-key index (`pragma_index_list` origin
-/// `pk`): `INT`, `BIGINT` or `TEXT` keys, a column-level `INTEGER PRIMARY
-/// KEY DESC`, a composite key and a `WITHOUT ROWID` table all get one. Any
-/// other `id` key is an ordinary column, which a rowid table even lets hold
-/// `NULL`.
+/// Database-filled — SQLite: `id` is the table's rowid alias — the sole
+/// primary-key column of a rowid table, declared exactly `INTEGER` — whose
+/// value SQLite assigns. Of the tables whose sole key column is `id`, the
+/// rowid alias is the one for which SQLite builds no primary-key index
+/// (`pragma_index_list` origin `pk`): `INT`, `BIGINT` or `TEXT` keys, a
+/// column-level `INTEGER PRIMARY KEY DESC`, a composite key and a `WITHOUT
+/// ROWID` table all get one. Any other `id` key is an ordinary column, which
+/// a rowid table even lets hold `NULL`. Postgres: the `id` column of the
+/// table the name resolves to (see the module docs) is an identity column,
+/// or its default draws from a sequence (`nextval(...)`, what `SERIAL` and
+/// `BIGSERIAL` declare).
 ///
-/// Postgres: the `id` column of the table the name resolves to (see the
-/// module docs) is an identity column, or its default draws from a sequence
-/// (`nextval(...)`, what `SERIAL` and `BIGSERIAL` declare).
+/// Caller-supplied — otherwise, an `id` column of integer type: on SQLite a
+/// declared type with INTEGER affinity (one containing `INT`), on Postgres
+/// `smallint`, `integer` or `bigint`.
 ///
 /// The table name is parameter-bound in both dialects, so this builder is
 /// infallible.
-pub fn build_id_is_generated(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
     let params = vec![serde_json::Value::String(table.to_string())];
     match backend {
         Backend::Sqlite => (
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) \
+            "SELECT CASE \
+             WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) \
              WHERE pk = 1 AND name = 'id' COLLATE NOCASE) \
              AND NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk > 1) \
              AND NOT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE origin = 'pk') \
-             AS generated"
+             THEN 1 \
+             WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) \
+             WHERE name = 'id' COLLATE NOCASE AND upper(type) LIKE '%INT%') \
+             THEN 2 ELSE 0 END AS id_policy"
                 .to_string(),
             params,
         ),
         Backend::Postgres => (
-            "SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a \
-             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' \
+            "SELECT CASE \
+             WHEN a.attidentity <> '' \
+             OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' THEN 1::int8 \
+             WHEN a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype) \
+             THEN 2::int8 ELSE 0::int8 END AS id_policy \
+             FROM (SELECT 1) AS one \
+             LEFT JOIN pg_catalog.pg_attribute a \
+             ON a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' \
              AND NOT a.attisdropped \
-             AND (a.attidentity <> '' \
-             OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%')) \
-             THEN 1::int8 ELSE 0::int8 END AS generated"
+             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
                 .to_string(),
             params,
         ),
@@ -475,9 +520,10 @@ mod tests {
 
     // Which `id` keys SQLite fills itself, on a real SQLite engine: only the
     // rowid alias. Each "no" is proven by inserting without an id and reading
-    // back NULL (or a NOT NULL refusal for WITHOUT ROWID).
+    // back NULL (or a NOT NULL refusal for WITHOUT ROWID). Then which of the
+    // rest hold integers the caller must supply.
     #[test]
-    fn test_id_is_generated_executes_in_sqlite() {
+    fn test_id_policy_executes_in_sqlite() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE alias (id INTEGER PRIMARY KEY, n TEXT);
@@ -494,12 +540,14 @@ mod tests {
              CREATE TABLE keyless (id INTEGER, n TEXT);",
         )
         .unwrap();
-        let generated = |table: &str| -> bool {
-            let (sql, params) = build_id_is_generated(table, Backend::Sqlite);
-            conn.query_row(&sql, [params[0].as_str().unwrap()], |r| r.get::<_, i64>(0))
-                .unwrap()
-                == 1
+        let policy = |table: &str| -> IdPolicy {
+            let (sql, params) = build_id_policy(table, Backend::Sqlite);
+            let code = conn
+                .query_row(&sql, [params[0].as_str().unwrap()], |r| r.get::<_, i64>(0))
+                .unwrap();
+            IdPolicy::from_code(code).unwrap()
         };
+        let generated = |table: &str| policy(table) == IdPolicy::Database;
         for table in ["alias", "alias_lower", "alias_autoinc", "alias_table_desc"] {
             assert!(generated(table), "{table} fills id");
             conn.execute(&format!("INSERT INTO {table} DEFAULT VALUES"), [])
@@ -529,7 +577,21 @@ mod tests {
         assert!(!generated("no_rowid"));
         conn.execute("INSERT INTO no_rowid DEFAULT VALUES", [])
             .expect_err("a WITHOUT ROWID key is NOT NULL and never filled");
-        assert!(!generated("no_such_table"));
+        // Of the tables that do not fill `id`, the ones whose `id` holds
+        // integers need the caller's; the rest take a minted string.
+        for table in [
+            "int_key",
+            "bigint_key",
+            "column_desc",
+            "composite",
+            "no_rowid",
+            "keyless",
+        ] {
+            assert_eq!(policy(table), IdPolicy::Caller, "{table}");
+        }
+        for table in ["text_key", "other_alias", "no_such_table"] {
+            assert_eq!(policy(table), IdPolicy::Mint, "{table}");
+        }
     }
 
     #[test]

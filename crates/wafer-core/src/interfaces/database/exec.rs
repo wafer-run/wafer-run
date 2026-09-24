@@ -18,7 +18,11 @@ use std::collections::HashMap;
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{
-    ddl, guard, ident::validate_ident, introspect, value::sea_values_to_json, Backend,
+    ddl, guard,
+    ident::validate_ident,
+    introspect::{self, IdPolicy},
+    value::sea_values_to_json,
+    Backend,
 };
 
 use super::{
@@ -173,16 +177,36 @@ fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_creat
     }
 }
 
-/// Apply [`DbExec::create`]'s per-row policy to `data`: mint an `id` unless the
-/// row carries one or the table generates its own, then stamp the timestamps.
-fn prepare_created_row(data: &mut HashMap<String, serde_json::Value>, autogenerates_id: bool) {
-    if !data.contains_key("id") && !autogenerates_id {
-        data.insert(
-            "id".to_string(),
-            serde_json::Value::String(mint_record_id()),
-        );
+/// Apply [`DbExec::create`]'s per-row policy to a row for `table`, then stamp
+/// the timestamps. `policy` is the table's [`IdPolicy`] when the row carries
+/// no `id`, `None` when it does: [`IdPolicy::Mint`] mints one,
+/// [`IdPolicy::Database`] leaves it to the insert, and [`IdPolicy::Caller`]
+/// refuses the row with [`DatabaseError::InvalidArgument`] — a minted string
+/// does not belong in an integer `id` that nothing fills.
+fn prepare_created_row(
+    table: &str,
+    data: &mut HashMap<String, serde_json::Value>,
+    policy: Option<IdPolicy>,
+) -> Result<(), DatabaseError> {
+    match policy {
+        Some(IdPolicy::Mint) => {
+            data.insert(
+                "id".to_string(),
+                serde_json::Value::String(mint_record_id()),
+            );
+        }
+        Some(IdPolicy::Caller) => {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "`{table}` declares an integer `id` that the database does not fill: \
+                 give the row an `id`, or declare the key so the database numbers \
+                 rows (SQLite `id INTEGER PRIMARY KEY`, Postgres an identity or \
+                 serial column)"
+            )));
+        }
+        Some(IdPolicy::Database) | None => {}
     }
     stamp_timestamps(data, true);
+    Ok(())
 }
 
 /// Extract the `id` and `key` string values from an upsert `data` list for the
@@ -616,29 +640,46 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(exists)
     }
 
-    /// Whether `table` fills its `id` column itself when an insert leaves it
-    /// out — a SQLite rowid alias, a Postgres identity or sequence-backed
-    /// column (see [`introspect::build_id_is_generated`]) — in which case
-    /// `create` must not mint one.
+    /// Where the `id` of a row created in `table` without one comes from
+    /// ([`IdPolicy`], see [`introspect::build_id_policy`]): minted by
+    /// [`create`](Self::create), filled by the database (a SQLite rowid
+    /// alias, a Postgres identity or sequence-backed column), or required of
+    /// the caller (an integer `id` nothing fills).
     ///
     /// Consults [`schema_cache`](Self::schema_cache) first and populates it
     /// on a miss. Runs in STRICT_SCHEMA mode too: nothing else tells the
     /// executor which tables number their own rows. A missing table answers
-    /// `false`, uncached (see
-    /// [`SchemaCache::set_generates_id_if_gen`]).
-    async fn table_autogenerates_id(&self, table: &str) -> Result<bool, DatabaseError> {
+    /// [`IdPolicy::Mint`], uncached (see [`SchemaCache::set_id_policy_if_gen`]).
+    async fn id_policy(&self, table: &str) -> Result<IdPolicy, DatabaseError> {
         let cache = self.schema_cache();
-        if let Some(generated) = cache.and_then(|c| c.generates_id(table)) {
-            return Ok(generated);
+        if let Some(policy) = cache.and_then(|c| c.id_policy(table)) {
+            return Ok(policy);
         }
         // Generation snapshot before the probe yields, as in `table_columns`.
         let gen0 = cache.map(SchemaCache::generation);
-        let (sql, params) = introspect::build_id_is_generated(table, Self::BACKEND);
-        let generated = self.run_scalar_i64(&sql, &params).await? == 1;
+        let (sql, params) = introspect::build_id_policy(table, Self::BACKEND);
+        let code = self.run_scalar_i64(&sql, &params).await?;
+        let policy = IdPolicy::from_code(code).ok_or_else(|| {
+            DatabaseError::Internal(format!("id policy probe of {table} answered {code}"))
+        })?;
         if let (Some(cache), Some(gen0)) = (cache, gen0) {
-            cache.set_generates_id_if_gen(table, generated, gen0);
+            cache.set_id_policy_if_gen(table, policy, gen0);
         }
-        Ok(generated)
+        Ok(policy)
+    }
+
+    /// The [`IdPolicy`] that applies to `data`, a row about to be created in
+    /// `table`: `None` when it carries its own `id`, so no probe is issued.
+    async fn created_row_id_policy(
+        &self,
+        table: &str,
+        data: &HashMap<String, serde_json::Value>,
+    ) -> Result<Option<IdPolicy>, DatabaseError> {
+        if data.contains_key("id") {
+            Ok(None)
+        } else {
+            self.id_policy(table).await.map(Some)
+        }
     }
 
     /// Column names (lowercased) of `table`; empty if the table is missing.
@@ -1108,11 +1149,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `create`: id/timestamp defaulting → lazy column-add → INSERT.
     ///
-    /// A missing `id` gets a synthesized UUIDv7 string ([`mint_record_id`])
-    /// unless the table fills its own
-    /// ([`table_autogenerates_id`](Self::table_autogenerates_id)); then the
-    /// INSERT returns the stored row (`RETURNING *`, on the write path) and
-    /// the id the database assigned is folded into the returned record.
+    /// A missing `id` is settled by the table's [`IdPolicy`]
+    /// ([`id_policy`](Self::id_policy)): a synthesized UUIDv7 string
+    /// ([`mint_record_id`]); or, for a table that fills its own, an INSERT
+    /// that returns the stored row (`RETURNING *`, on the write path), the id
+    /// the database assigned folded into the returned record; or, for an
+    /// integer `id` nothing fills, [`DatabaseError::InvalidArgument`].
     async fn create(
         &self,
         collection: &str,
@@ -1121,10 +1163,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sql_name(collection)?;
         let mut data = data;
 
-        // The key probe only matters for a row without an id.
-        let autogenerates_id =
-            !data.contains_key("id") && self.table_autogenerates_id(table).await?;
-        prepare_created_row(&mut data, autogenerates_id);
+        let policy = self.created_row_id_policy(table, &data).await?;
+        prepare_created_row(table, &mut data, policy)?;
 
         // Ensure any new columns exist. Table creation itself is the block
         // migration's job; a failure here is a real DDL error and propagates
@@ -1134,7 +1174,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
         let json = self.json_columns(table).await?;
         let pairs = sorted_pairs(&data, &json)?;
-        if autogenerates_id {
+        if policy == Some(IdPolicy::Database) {
             let stmt = wafer_sql_utils::query::build_insert_returning(table, &pairs, Self::BACKEND);
             let stored = self
                 .run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values), &json)
@@ -1682,14 +1722,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             return Ok(0);
         }
         let table = sql_name(collection)?;
-        let autogenerates_id = self.table_autogenerates_id(table).await?;
+        let policy = if rows.iter().any(|row| !row.contains_key("id")) {
+            Some(self.id_policy(table).await?)
+        } else {
+            None
+        };
 
         // One representative value per column across every row, for the lazy
         // column-add's type choice.
         let mut columns: HashMap<String, serde_json::Value> = HashMap::new();
         let mut rows = rows;
         for data in &mut rows {
-            prepare_created_row(data, autogenerates_id);
+            prepare_created_row(table, data, policy.filter(|_| !data.contains_key("id")))?;
             for (key, value) in data.iter() {
                 match columns.get(key) {
                     Some(seen) if !seen.is_null() || value.is_null() => {}
@@ -1765,9 +1809,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     mut data,
                 } => {
                     let table = sql_name(&collection)?;
-                    let autogenerates_id =
-                        !data.contains_key("id") && self.table_autogenerates_id(table).await?;
-                    prepare_created_row(&mut data, autogenerates_id);
+                    let policy = self.created_row_id_policy(table, &data).await?;
+                    prepare_created_row(table, &mut data, policy)?;
                     self.ensure_data_columns(table, &data).await?;
                     let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_insert_returning(
@@ -2010,9 +2053,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sql_name(collection)?;
         self.require_columns(table, &guard_columns(guards)).await?;
         let mut data = data;
-        let autogenerates_id =
-            !data.contains_key("id") && self.table_autogenerates_id(table).await?;
-        prepare_created_row(&mut data, autogenerates_id);
+        let policy = self.created_row_id_policy(table, &data).await?;
+        prepare_created_row(table, &mut data, policy)?;
         self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
         let stmt =

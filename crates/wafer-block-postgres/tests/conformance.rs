@@ -643,3 +643,194 @@ async fn a_stamped_timestamp_binds_into_a_timestamptz_column() {
 
     svc.schema_drop_table(&table.name).await.expect("drop");
 }
+
+/// A service connected with `search_path = first, second`, where both
+/// schemas hold a table named `conf_dup` with different columns and a
+/// second table exists only in `second`.
+async fn two_schema_session(url: &str) -> (sqlx::PgPool, sqlx::PgPool, PostgresDatabaseService) {
+    use std::str::FromStr as _;
+
+    use sqlx::postgres::{PgConnectOptions, PgPool};
+
+    let admin = PgPool::connect(url).await.expect("connect as admin");
+    for stmt in [
+        "DROP SCHEMA IF EXISTS conf_sp_first CASCADE",
+        "DROP SCHEMA IF EXISTS conf_sp_second CASCADE",
+        "CREATE SCHEMA conf_sp_first",
+        "CREATE SCHEMA conf_sp_second",
+        "CREATE TABLE conf_sp_first.conf_dup (id TEXT PRIMARY KEY, only_first TEXT)",
+        "CREATE TABLE conf_sp_second.conf_dup (id TEXT PRIMARY KEY, only_second TEXT)",
+        "INSERT INTO conf_sp_second.conf_dup (id, only_second) VALUES ('shadowed', 'x')",
+        "CREATE TABLE conf_sp_second.conf_second_only (id TEXT PRIMARY KEY, name TEXT)",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    // No space after the comma: the connect options split on whitespace.
+    let options = PgConnectOptions::from_str(url)
+        .expect("parse the conformance URL")
+        .options([("search_path", "conf_sp_first,conf_sp_second")]);
+    let session = PgPool::connect_with(options)
+        .await
+        .expect("connect with the search_path");
+    let svc = PostgresDatabaseService::from_pool(session.clone()).expect("service");
+    (admin, session, svc)
+}
+
+/// With the same table name in two schemas on the `search_path`, every
+/// introspection answers for the table an unqualified statement reaches —
+/// the one in the first schema — and a table only the second schema holds
+/// is still found. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_name_in_two_schemas_resolves_as_the_statements_do() {
+    use wafer_block::db::{Filter, FilterOp, ListOptions};
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+    use wafer_sql_utils::{introspect::build_list_tables_like, Backend};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres two-schema resolution check: set {URL_ENV} to run");
+        return;
+    };
+    let (admin, session, svc) = two_schema_session(&url).await;
+    svc.set_strict_schema(false);
+
+    assert_eq!(
+        svc.schema_columns("conf_dup").await.expect("columns"),
+        ["id", "only_first"],
+        "the columns of the table the statements reach"
+    );
+    let err = svc
+        .list(
+            "conf_dup",
+            &ListOptions {
+                filters: vec![Filter {
+                    field: "only_second".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!("x"),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("the shadowed table's column is not the resolved table's");
+    assert!(matches!(err, DatabaseError::InvalidArgument(_)), "{err:?}");
+    svc.create(
+        "conf_dup",
+        std::collections::HashMap::from([
+            ("id".to_string(), serde_json::json!("first-1")),
+            ("only_first".to_string(), serde_json::json!("y")),
+        ]),
+    )
+    .await
+    .expect("create in the resolved table");
+    let listed = svc
+        .list("conf_dup", &ListOptions::default())
+        .await
+        .expect("list");
+    assert_eq!(
+        listed
+            .records
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect::<Vec<_>>(),
+        ["first-1"],
+        "list reads the resolved table, not the shadowed one"
+    );
+    assert!(
+        svc.schema_table_exists("conf_second_only")
+            .await
+            .expect("exists"),
+        "a table only the later schema holds is reachable"
+    );
+    assert_eq!(svc.count("conf_second_only", &[]).await.expect("count"), 0);
+
+    let (sql, params) = build_list_tables_like("conf_", Backend::Postgres);
+    let names: Vec<String> = sqlx::query_scalar(&sql)
+        .bind(params[0].as_str().expect("pattern"))
+        .fetch_all(&session)
+        .await
+        .expect("list tables like");
+    assert_eq!(
+        names.iter().filter(|n| n.as_str() == "conf_dup").count(),
+        1,
+        "a shadowed table is not listed twice: {names:?}"
+    );
+    assert!(names.contains(&"conf_second_only".to_string()), "{names:?}");
+
+    drop(svc);
+    session.close().await;
+    for stmt in [
+        "DROP SCHEMA conf_sp_first CASCADE",
+        "DROP SCHEMA conf_sp_second CASCADE",
+    ] {
+        sqlx::query(stmt).execute(&admin).await.expect(stmt);
+    }
+}
+
+/// Identity keys (`GENERATED ALWAYS` and `BY DEFAULT AS IDENTITY`) number
+/// their rows as `SERIAL` does: `create` without an id gets the assigned
+/// integer, which `get` finds. An integer key with no default is the
+/// caller's to supply: a row without one is refused, not given a minted
+/// string. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn identity_keys_number_rows_and_a_plain_integer_key_is_the_callers() {
+    use std::collections::HashMap;
+
+    use sqlx::postgres::PgPool;
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres identity key check: set {URL_ENV} to run");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect as admin");
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_identity_always, conf_identity_default, conf_plain_int",
+        "CREATE TABLE conf_identity_always \
+         (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name TEXT)",
+        "CREATE TABLE conf_identity_default \
+         (id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT)",
+        "CREATE TABLE conf_plain_int (id INTEGER PRIMARY KEY, name TEXT)",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let svc = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("service");
+    let named = |name: &str| HashMap::from([("name".to_string(), serde_json::json!(name))]);
+
+    for table in ["conf_identity_always", "conf_identity_default"] {
+        let first = svc.create(table, named("a")).await.expect("create");
+        let second = svc.create(table, named("b")).await.expect("create");
+        assert_eq!(first.data["id"], serde_json::json!(1), "{table}: {first:?}");
+        assert_eq!(second.id, "2", "{table}");
+        let got = svc.get(table, &second.id).await.expect("get");
+        assert_eq!(got.data["name"], serde_json::json!("b"));
+    }
+
+    let err = svc
+        .create("conf_plain_int", named("a"))
+        .await
+        .expect_err("an integer key nothing fills is the caller's");
+    assert!(
+        matches!(&err, DatabaseError::InvalidArgument(m) if m.contains("conf_plain_int")),
+        "{err:?}"
+    );
+    let mut with_id = named("a");
+    with_id.insert("id".to_string(), serde_json::json!(5));
+    let created = svc
+        .create("conf_plain_int", with_id)
+        .await
+        .expect("supplied id");
+    assert_eq!(created.id, "5");
+
+    sqlx::query("DROP TABLE conf_identity_always, conf_identity_default, conf_plain_int")
+        .execute(&admin)
+        .await
+        .expect("drop");
+}
