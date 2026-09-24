@@ -77,6 +77,37 @@ pub fn is_auth_credential_resource(resource: &str) -> bool {
     )
 }
 
+/// WRAP resource ([`ResourceType::Llm`](crate::types::ResourceType::Llm) or
+/// [`ResourceType::Image`](crate::types::ResourceType::Image)) of one model
+/// a model-serving block serves: `{org}__{block}__{backend_id}/{model_id}`,
+/// with `block` the serving block's registered name. The resource sits in
+/// that block's namespace, so [`check_access`] admits the block itself, the
+/// admin block, or a caller holding a grant — which only the serving block
+/// can declare.
+///
+/// A `backend_id` containing `/` is refused with `InvalidArgument`: the `/`
+/// that ends the backend would be ambiguous, and a grant on one backend's
+/// models (`{prefix}openai/*`) would also match a backend named `openai/x`.
+pub fn model_resource(block: &str, backend_id: &str, model_id: &str) -> Result<String, WaferError> {
+    if backend_id.contains('/') {
+        return Err(WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!("backend_id `{backend_id}` must not contain `/`"),
+        ));
+    }
+    Ok(format!("{}{backend_id}/{model_id}", resource_prefix(block)))
+}
+
+/// WRAP resource of a service operation that names no model:
+/// `{org}__{block}__{name}`, where `name` is `op` after its family's `.`
+/// (`llm.list_models` → `list_models`) and `block` is the serving block's
+/// registered name. Namespaced like [`model_resource`], and never equal to
+/// one: an op name has no `/`.
+pub fn op_resource(block: &str, op: &str) -> String {
+    let name = op.split_once('.').map_or(op, |(_, name)| name);
+    format!("{}{name}", resource_prefix(block))
+}
+
 /// Extract the owning block ID from a namespaced resource name.
 ///
 /// Convention: `my_org__auth__users` → `my-org/auth`
@@ -178,7 +209,8 @@ pub fn is_traversal_safe_path(path: &str) -> bool {
 ///
 /// `ResourceType::Storage` parses slash-separated `{org}/{block}/...` paths
 /// via [`storage_resource_owner`]. Everything else (Db, Config, Vector,
-/// untyped) parses double-underscore `{org}__{block}__...` names via
+/// Auth, Llm, Image, Embedding, untyped) parses double-underscore
+/// `{org}__{block}__...` names via
 /// [`resource_owner`].
 ///
 /// Used by `check_access` and by the lifecycle grant validator to apply
@@ -195,7 +227,8 @@ pub fn typed_resource_owner(
 
 /// Check whether `caller_id` is allowed to access `resource`.
 ///
-/// For namespace-based resources (Db, Config, Vector, Auth, or untyped):
+/// For namespace-based resources (Db, Config, Vector, Auth, Llm, Image,
+/// Embedding, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
 /// 2. `__ddl__` / `__schema__` → any attributable caller (NOT admin-only).
 ///    Convention is that blocks only reshape their own (`{org}__{block}__*`)
@@ -237,8 +270,8 @@ pub fn check_access(
     grants: &[ResourceGrant],
     admin_block: &str,
 ) -> Result<(), WaferError> {
-    // Namespace-based rules apply to Db, Config, Vector, Auth, or untyped
-    // resources.
+    // Namespace-based rules apply to Db, Config, Vector, Auth, Llm, Image,
+    // Embedding, or untyped resources.
     // Network, Storage, and Crypto resources use URLs / file-paths /
     // operation-names, not the {org}__{block}__{name} convention.
     let namespace_based = !matches!(
@@ -1858,5 +1891,60 @@ mod tests {
             .is_err());
         }
         assert!(!is_auth_credential_resource(AUTH_USER_PROFILE_RESOURCE));
+    }
+
+    #[test]
+    fn model_and_op_resources_sit_in_the_serving_blocks_namespace() {
+        assert_eq!(
+            model_resource("wafer-run/llm", "openai", "meta-llama/Llama-3").unwrap(),
+            "wafer_run__llm__openai/meta-llama/Llama-3"
+        );
+        assert_eq!(
+            resource_owner(&model_resource("acme/image-gen", "sd", "xl").unwrap()).as_deref(),
+            Some("acme/image-gen")
+        );
+        assert_eq!(
+            op_resource("wafer-run/llm", crate::common::ServiceOp::LLM_LIST_MODELS),
+            "wafer_run__llm__list_models"
+        );
+        assert_eq!(
+            op_resource("acme/embedder", crate::common::ServiceOp::EMBEDDING_EMBED),
+            "acme__embedder__embed"
+        );
+        let err = model_resource("wafer-run/llm", "openai/x", "m").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    /// A model resource takes the namespace rules: the serving block and the
+    /// admin are admitted, anyone else needs that block's grant, a read
+    /// grant admits use (`Read`) but not load/unload (`Write`), and a grant
+    /// typed for another service family admits nothing.
+    #[test]
+    fn model_resource_needs_own_admin_or_a_grant_of_the_right_kind() {
+        let admin = "my-org/admin";
+        let llm = Some(&ResourceType::Llm);
+        let res = model_resource("wafer-run/llm", "openai", "gpt").unwrap();
+        let check = |caller: Option<&str>, access, grants: &[ResourceGrant]| {
+            check_access(caller, &res, access, llm, grants, admin)
+        };
+
+        assert!(check(Some("my-org/chat"), ResourceAccess::Read, &[]).is_err());
+        assert!(check(None, ResourceAccess::Read, &[]).is_err());
+        assert!(check(Some(admin), ResourceAccess::Write, &[]).is_ok());
+        assert!(check(Some("wafer-run/llm"), ResourceAccess::Write, &[]).is_ok());
+
+        let read = [
+            ResourceGrant::read("my-org/chat", "wafer_run__llm__openai/*").typed(ResourceType::Llm),
+        ];
+        assert!(check(Some("my-org/chat"), ResourceAccess::Read, &read).is_ok());
+        assert!(
+            check(Some("my-org/chat"), ResourceAccess::Write, &read).is_err(),
+            "a read grant does not admit loading or unloading a model"
+        );
+        assert!(check(Some("my-org/other"), ResourceAccess::Read, &read).is_err());
+
+        let image_typed =
+            [ResourceGrant::read("my-org/chat", "wafer_run__llm__*").typed(ResourceType::Image)];
+        assert!(check(Some("my-org/chat"), ResourceAccess::Read, &image_typed).is_err());
     }
 }

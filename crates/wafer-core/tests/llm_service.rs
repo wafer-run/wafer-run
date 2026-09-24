@@ -5,7 +5,9 @@
 //! populated with a scripted fake backend. Verifies that streaming chat frames
 //! are codec-encoded onto `Chunk` events, buffered ops produce a single
 //! `Chunk + Complete`, unknown ops return `InvalidArgument`, and consumer
-//! drop cancels the upstream service.
+//! drop cancels the upstream service. The handler runs under a `Context`
+//! that authorizes through the real `wafer_block::wrap::check_access`, as a
+//! caller holding the llm block's read-write grant on its models.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,7 +17,15 @@ use std::sync::{
 use futures::{stream::BoxStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use wafer_block::{
-    codec, common::ServiceOp, core_types::Message, stream::StreamEvent, wire::llm as wire,
+    codec,
+    common::ServiceOp,
+    context::Context,
+    core_types::Message,
+    stream::StreamEvent,
+    streams::{input::InputStream, output::OutputStream},
+    types::{ResourceAccess, ResourceGrant, ResourceType},
+    wire::llm as wire,
+    WaferError,
 };
 use wafer_core::interfaces::llm::{
     handler,
@@ -25,6 +35,68 @@ use wafer_core::interfaces::llm::{
         ModelStatus, TokenUsage,
     },
 };
+
+/// The block the handler serves as.
+const LLM: &str = "wafer-run/llm";
+/// Holds the llm block's read-write grant on every resource it names.
+const CALLER: &str = "acme/chat";
+
+/// The llm block's context for one call from [`CALLER`], authorizing
+/// through the real WRAP check.
+struct GrantedCtx {
+    grants: Vec<ResourceGrant>,
+}
+
+fn granted() -> GrantedCtx {
+    GrantedCtx {
+        grants: vec![
+            ResourceGrant::read_write(CALLER, "wafer_run__llm__*").typed(ResourceType::Llm)
+        ],
+    }
+}
+
+#[wafer_block::wafer_async_trait]
+impl Context for GrantedCtx {
+    async fn call_block(&self, _b: &str, _m: Message, _i: InputStream) -> OutputStream {
+        unimplemented!("the llm handler makes no calls")
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        unimplemented!("the llm handler keeps no context")
+    }
+    fn caller_id(&self) -> Option<&str> {
+        Some(CALLER)
+    }
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> Result<(), WaferError> {
+        wafer_block::wrap::check_access(
+            Some(CALLER),
+            resource,
+            access,
+            Some(&resource_type),
+            &self.grants,
+            "acme/admin",
+        )
+    }
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: ResourceType,
+        access: ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
+    }
+}
 
 /// Scriptable fake with observable cancellation + configurable stream contents.
 struct ScriptedLlm {
@@ -146,7 +218,8 @@ async fn chat_streams_chunks_then_completes() {
     let service = build_router(ScriptedLlm::new("test").with_chunks(chunks.clone()));
 
     let body = wire_chat_request_bytes();
-    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_CHAT), &body).await;
+    let stream =
+        handler::handle_message(&service, &granted(), LLM, &msg(ServiceOp::LLM_CHAT), &body).await;
     let events: Vec<_> = stream.collect().await;
 
     // 3 Chunks + 1 Complete
@@ -172,7 +245,8 @@ async fn chat_streams_chunks_then_completes() {
 async fn chat_invalid_body_yields_error_terminal() {
     let service = build_router(ScriptedLlm::new("test"));
     let body = b"not json".to_vec();
-    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_CHAT), &body).await;
+    let stream =
+        handler::handle_message(&service, &granted(), LLM, &msg(ServiceOp::LLM_CHAT), &body).await;
     let events: Vec<_> = stream.collect().await;
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0], StreamEvent::Error(_)));
@@ -181,7 +255,7 @@ async fn chat_invalid_body_yields_error_terminal() {
 #[tokio::test]
 async fn unknown_operation_yields_error() {
     let service = build_router(ScriptedLlm::new("test"));
-    let stream = handler::handle_message(&service, &msg("llm.mystery"), &[]).await;
+    let stream = handler::handle_message(&service, &granted(), LLM, &msg("llm.mystery"), &[]).await;
     let events: Vec<_> = stream.collect().await;
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0], StreamEvent::Error(_)));
@@ -199,7 +273,14 @@ async fn list_models_buffered_payload_is_aggregated_json() {
     ];
     let service = build_router(ScriptedLlm::new("test").with_models(models.clone()));
 
-    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_LIST_MODELS), &[]).await;
+    let stream = handler::handle_message(
+        &service,
+        &granted(),
+        LLM,
+        &msg(ServiceOp::LLM_LIST_MODELS),
+        &[],
+    )
+    .await;
     let buffered = stream.collect_buffered().await.unwrap();
     let decoded: Vec<wire::ModelInfo> = codec::decode(&buffered.body).unwrap();
     assert_eq!(decoded.len(), models.len());
@@ -218,7 +299,14 @@ async fn status_dispatches_and_returns_state() {
         model_id: "m1".into(),
     })
     .unwrap();
-    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_STATUS), &body).await;
+    let stream = handler::handle_message(
+        &service,
+        &granted(),
+        LLM,
+        &msg(ServiceOp::LLM_STATUS),
+        &body,
+    )
+    .await;
     let buffered = stream.collect_buffered().await.unwrap();
     let decoded: wire::ModelStatus = codec::decode(&buffered.body).unwrap();
     assert!(matches!(decoded.state, wire::ModelState::Ready));
@@ -232,7 +320,14 @@ async fn unload_model_returns_empty_complete() {
         model_id: "m1".into(),
     })
     .unwrap();
-    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_UNLOAD_MODEL), &body).await;
+    let stream = handler::handle_message(
+        &service,
+        &granted(),
+        LLM,
+        &msg(ServiceOp::LLM_UNLOAD_MODEL),
+        &body,
+    )
+    .await;
     let buffered = stream.collect_buffered().await.unwrap();
     assert!(buffered.body.is_empty());
 }
@@ -244,7 +339,8 @@ async fn dropping_chat_stream_cancels_service() {
     let service = build_router(scripted);
 
     let body = wire_chat_request_bytes();
-    let stream = handler::handle_message(&service, &msg(ServiceOp::LLM_CHAT), &body).await;
+    let stream =
+        handler::handle_message(&service, &granted(), LLM, &msg(ServiceOp::LLM_CHAT), &body).await;
     // Consumer drop should cancel the service through the OutputStream cancel token.
     drop(stream);
 

@@ -1249,6 +1249,9 @@ mod tests {
             ("logger.", ServiceOp::LOGGER_OPS),
             ("config.", ServiceOp::CONFIG_OPS),
             ("auth.", ServiceOp::AUTH_OPS),
+            ("embedding.", ServiceOp::EMBEDDING_OPS),
+            ("llm.", ServiceOp::LLM_OPS),
+            ("image.", ServiceOp::IMAGE_OPS),
         ] {
             for op in ops {
                 assert!(
@@ -1277,17 +1280,21 @@ mod tests {
     }
 
     /// Drift guard for the families whose handler guarantee is driven by a
-    /// slice, not by an interface catalog: every `AUTH_*` / `LOGGER_*` op
-    /// constant must be in `AUTH_OPS` / `LOGGER_OPS`. wafer-core's
-    /// `handler_wrap_completeness.rs` sends every op of those slices through
-    /// the real handler (auth under a deny-all context, logger checked for
-    /// caller attribution), so a new op left out of its slice would ship
-    /// untested — this fails first.
+    /// slice, not by an interface catalog: every `AUTH_*`, `LOGGER_*`,
+    /// `EMBEDDING_*`, `LLM_*` and `IMAGE_*` op constant must be in its
+    /// `*_OPS` slice. wafer-core's `handler_wrap_completeness.rs` sends every
+    /// op of those slices through the real handler (auth, embedding, llm and
+    /// image under a deny-all context, logger checked for caller
+    /// attribution), so a new op left out of its slice would ship untested —
+    /// this fails first.
     #[test]
-    fn every_auth_and_logger_op_constant_is_in_its_slice() {
+    fn every_slice_driven_op_constant_is_in_its_slice() {
         for (prefix, family, ops) in [
             ("AUTH_", "auth.", ServiceOp::AUTH_OPS),
             ("LOGGER_", "logger.", ServiceOp::LOGGER_OPS),
+            ("EMBEDDING_", "embedding.", ServiceOp::EMBEDDING_OPS),
+            ("LLM_", "llm.", ServiceOp::LLM_OPS),
+            ("IMAGE_", "image.", ServiceOp::IMAGE_OPS),
         ] {
             let declared: Vec<_> = declared_op_constants(prefix)
                 .into_iter()

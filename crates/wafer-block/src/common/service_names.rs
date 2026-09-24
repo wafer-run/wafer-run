@@ -214,9 +214,9 @@ impl ServiceOp {
     // families requires adding it to the family slice AND declaring an
     // `ActionSpec` for it in the matching `*_action_spec` fn in
     // `crate::interfaces`; the drift tests there enforce slice ↔ catalog
-    // agreement. `AUTH_OPS` is the one slice without an interface catalog:
-    // it drives only the handler authorization completeness test. Embedding,
-    // llm and image have no slice yet.
+    // agreement. `AUTH_OPS`, `EMBEDDING_OPS`, `LLM_OPS` and `IMAGE_OPS` have
+    // no interface catalog: they drive only the handler authorization
+    // completeness test.
     // -----------------------------------------------------------------------
 
     /// Every `database.*` op — drives the `database@v1` action catalog in
@@ -310,6 +310,30 @@ impl ServiceOp {
         Self::AUTH_REQUIRE_TOKEN,
         Self::AUTH_REQUIRE_ROLE,
         Self::AUTH_USER_PROFILE,
+    ];
+
+    /// Every `embedding.*` op. No interface catalog is derived from it; the
+    /// embedding handler's authorization completeness test iterates it.
+    pub const EMBEDDING_OPS: &[&str] = &[Self::EMBEDDING_EMBED, Self::EMBEDDING_COUNT_TOKENS];
+
+    /// Every `llm.*` op. No interface catalog is derived from it; the llm
+    /// handler's authorization completeness test iterates it.
+    pub const LLM_OPS: &[&str] = &[
+        Self::LLM_CHAT,
+        Self::LLM_LIST_MODELS,
+        Self::LLM_STATUS,
+        Self::LLM_LOAD_MODEL,
+        Self::LLM_UNLOAD_MODEL,
+    ];
+
+    /// Every `image.*` op. No interface catalog is derived from it; the
+    /// image handler's authorization completeness test iterates it.
+    pub const IMAGE_OPS: &[&str] = &[
+        Self::IMAGE_GENERATE,
+        Self::IMAGE_LIST_MODELS,
+        Self::IMAGE_STATUS,
+        Self::IMAGE_LOAD_MODEL,
+        Self::IMAGE_UNLOAD_MODEL,
     ];
 
     /// Every `config.*` op — drives the `config@v1` action catalog in

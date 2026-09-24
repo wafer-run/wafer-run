@@ -114,6 +114,22 @@ pub trait LlmService: wafer_block::MaybeSend + wafer_block::MaybeSync + 'static 
     fn claims_backend(&self, _backend_id: &str) -> bool {
         false
     }
+
+    /// WRAP grants the block serving this service declares for other blocks.
+    ///
+    /// The llm handler authorizes every op against a resource in the serving
+    /// block's own namespace: a model is
+    /// [`model_resource`](wafer_block::wrap::model_resource)
+    /// (`wafer_run__llm__{backend_id}/{model_id}` for `wafer-run/llm`), read
+    /// by `chat` and `status` and written by `load_model` and `unload_model`;
+    /// `list_models` is [`op_resource`](wafer_block::wrap::op_resource)
+    /// (`wafer_run__llm__list_models`). `LlmBlock::info()` embeds these
+    /// grants into its `BlockInfo::grants`, and the runtime rejects a grant
+    /// on any resource outside that namespace. Default empty: no block but
+    /// the admin block may call the service.
+    fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

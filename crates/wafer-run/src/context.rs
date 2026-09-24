@@ -439,7 +439,8 @@ impl Context for RuntimeContext {
     ///
     /// WRAP resource access (grant + resource-capability checks) is NOT
     /// enforced here. It moved host-side into [`Context::check_resource_access`],
-    /// called by each service handler (database/storage/config/network/crypto/vector/auth)
+    /// called by each service handler
+    /// (database/storage/config/network/crypto/vector/auth/llm/image/embedding)
     /// via `decode_and_authorize` — see that method's doc comment. This is the
     /// sole resource-access enforcement point; `dispatch_call` only routes the
     /// call and checks call-eligibility (`requires`, `allows_call_block`).
@@ -512,8 +513,9 @@ impl Context for RuntimeContext {
     /// longer performs either check itself (removed in SP-A Stage 2; it used
     /// to run the same two checks from message metas as a fail-open backstop
     /// that duplicated this method). Every service handler
-    /// (database/storage/config/network/crypto/vector/auth) must call this — directly or
-    /// via `decode_and_authorize` — before touching the resource.
+    /// (database/storage/config/network/crypto/vector/auth/llm/image/embedding)
+    /// must call this — directly or via `decode_and_authorize` — before
+    /// touching the resource.
     ///
     /// # Identity: `caller_id`, not `node_id`
     ///
@@ -623,10 +625,14 @@ impl RuntimeContext {
                     ResourceType::Crypto => caps.crypto,
                     ResourceType::Network => caps.allows_network_url(resource),
                     ResourceType::Vector => caps.allows_vector_index(resource),
-                    // Capabilities scope the auth service by call
-                    // eligibility alone (`callable_blocks`, checked in
-                    // `dispatch_call`); there is no per-op auth capability.
-                    ResourceType::Auth => true,
+                    // Capabilities scope the auth, llm, image and
+                    // embedding services by call eligibility alone
+                    // (`callable_blocks`, checked in `dispatch_call`);
+                    // there is no per-op or per-model capability.
+                    ResourceType::Auth
+                    | ResourceType::Llm
+                    | ResourceType::Image
+                    | ResourceType::Embedding => true,
                 };
                 if !allowed {
                     return Err((

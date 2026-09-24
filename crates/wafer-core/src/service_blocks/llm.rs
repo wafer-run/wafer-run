@@ -13,5 +13,8 @@ crate::service_block! {
     description: "LLM service (chat streaming, model listing, local-model load/unload)",
     category: Service,
     fields: { service: Arc<dyn LlmService> },
-    handle: |this, _ctx, msg, body| handler::handle_message(&this.service, &msg, &body).await,
+    info_extras: |this, info| info.grants(this.service.grants()),
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(&this.service, ctx, LlmBlock::NAME, &msg, &body).await
+    },
 }

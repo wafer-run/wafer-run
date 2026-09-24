@@ -13,5 +13,8 @@ crate::service_block! {
     description: "Image generation service (text-to-image; model listing + load/unload)",
     category: Service,
     fields: { service: Arc<dyn ImageService> },
-    handle: |this, _ctx, msg, body| handler::handle_message(&this.service, &msg, &body).await,
+    info_extras: |this, info| info.grants(this.service.grants()),
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(&this.service, ctx, ImageBlock::NAME, &msg, &body).await
+    },
 }

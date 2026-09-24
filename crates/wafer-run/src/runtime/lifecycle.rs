@@ -53,11 +53,11 @@ pub(crate) struct GrantValidationOutcome {
 ///   point. This accommodates the common pattern of constructing a
 ///   `Wafer` (which auto-registers linkme-collected blocks during
 ///   `WaferBuilder::build`) and only then calling `set_admin_block`.
-/// - Storage, Auth and Db / untyped grants are namespace-based: every
-///   resource a grant can match must be owned by the declaring block, per
-///   [`grant_resource_owner`]. Unnamespaced or owned-by-other grants are
-///   pushed into `rejected` so `seal()` surfaces them via
-///   `RuntimeError::GrantsRejected`.
+/// - Storage, Auth, Llm, Image, Embedding and Db / untyped grants are
+///   namespace-based: every resource a grant can match must be owned by the
+///   declaring block, per [`grant_resource_owner`]. Unnamespaced or
+///   owned-by-other grants are pushed into `rejected` so `seal()` surfaces
+///   them via `RuntimeError::GrantsRejected`.
 /// - Every grant must pass [`wafer_block::types::ResourceGrant::check_shape`]
 ///   (an append-only grant is typed `Db`) before any other rule looks at it;
 ///   a malformed grant is rejected the same way.
