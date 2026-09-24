@@ -6,13 +6,15 @@
 
 - Flow config is typed and a flow is validated wherever it is added.
   `wafer_flow::FlowConfig` fields are `on_error: Option<OnError>` (`Stop` /
-  `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms` and `max_steps:
-  Option<NonZeroU64>`, and the struct denies unknown keys. `wafer_flow::parse`
-  refuses an `on_error` other than exactly `"stop"` or `"continue"` (a
-  `"Stop"` used to mean "continue past a failed step"), a `timeout` that is
-  not `<n>ms`/`<n>s`/`<n>m`/`<n>h`/`<n>` with a non-zero result whose
-  seconds fit in `u64` (a malformed one used to mean "no timeout"), a zero
-  `timeout_ms` or `max_steps`, and a misspelled config key. `validate`
+  `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms:
+  Option<FlowTimeoutMillis>`, `max_steps: Option<NonZeroU64>`, and the struct
+  denies unknown keys. `wafer_flow::parse` refuses an `on_error` other than
+  exactly `"stop"` or `"continue"` (a `"Stop"` used to mean "continue past a
+  failed step"), a `timeout` that is not `<n>ms`/`<n>s`/`<n>m`/`<n>h`/`<n>`
+  (a malformed one used to mean "no timeout"), a `timeout` or `timeout_ms`
+  that is zero or above `wafer_flow::MAX_FLOW_TIMEOUT` (24h; an overflowing
+  value such as `"5124095576030428h"` used to panic the first run), a zero
+  `max_steps`, and a misspelled config key. `validate`
   also refuses a config setting both `timeout` and `timeout_ms`, a
   `next.step` naming a step inside a `parallel` branch (the executor only
   jumps to top-level steps), `next` on a step inside a branch, a `next`

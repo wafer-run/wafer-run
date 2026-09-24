@@ -155,8 +155,7 @@ pub(crate) struct TransferChain {
     steps_used: AtomicUsize,
     /// The smallest `max_steps` of the flows entered so far.
     max_steps: usize,
-    /// The earliest deadline of the flows entered so far. A timeout too
-    /// large to add to the entry instant is never reached, so it sets none.
+    /// The earliest deadline of the flows entered so far.
     deadline: Option<Instant>,
 }
 
@@ -174,7 +173,9 @@ impl TransferChain {
     /// Enter `flow` at `now`: tighten the chain's limits by the flow's own.
     pub(crate) fn enter(&mut self, flow: &CompiledFlow, now: Instant) {
         self.max_steps = self.max_steps.min(flow.max_steps);
-        if let Some(own) = flow.timeout.and_then(|t| now.checked_add(t)) {
+        // A flow timeout is at most `wafer_flow::MAX_FLOW_TIMEOUT` (24h) by
+        // construction, so adding it to the current instant cannot overflow.
+        if let Some(own) = flow.timeout.map(|t| now + t) {
             self.deadline = Some(self.deadline.map_or(own, |chain| chain.min(own)));
         }
     }

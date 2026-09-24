@@ -2,8 +2,8 @@
 //!
 //! - `add_flow_json` / `add_flow` refuse a flow whose config or routing the
 //!   executor would otherwise misread: an `on_error` other than `"stop"` /
-//!   `"continue"`, a malformed timeout, a `next` into a parallel branch, a
-//!   transfer to the flow itself.
+//!   `"continue"`, a malformed or over-24h timeout, a `next` into a parallel
+//!   branch, a transfer to the flow itself.
 //! - A `next.flow` transfer carries the step budget and the deadline of the
 //!   flow that transferred, so a cycle of transfers ends and a timeout still
 //!   holds after a hand-off.
@@ -120,7 +120,6 @@ fn a_malformed_timeout_is_refused() {
     for config in [
         json!({ "timeout": "30 seconds" }),
         json!({ "timeout": "0s" }),
-        json!({ "timeout": "5124095576030432h" }),
         json!({ "timeout_ms": 0 }),
         json!({ "timeout": "30s", "timeout_ms": 30000 }),
     ] {
@@ -132,6 +131,36 @@ fn a_malformed_timeout_is_refused() {
         flow_error(result);
     }
     assert!(w.flow_defs().is_empty());
+}
+
+/// A timeout above 24h is a typo, not a long timeout. `5124095576030428h`
+/// fits in u64 seconds, and its deadline used to overflow `Instant` on the
+/// first run; it now fails at load, as does `timeout_ms` past 24h.
+#[test]
+fn a_timeout_above_24h_is_refused() {
+    let mut w = wafer();
+    for config in [
+        json!({ "timeout": "5124095576030428h" }),
+        json!({ "timeout": "25h" }),
+        json!({ "timeout_ms": 86_400_001 }),
+    ] {
+        let message = flow_error(w.add_flow_json(&flow_json(
+            "f",
+            &json!([{ "id": "a", "block": "x/y" }]),
+            &config,
+        )));
+        assert!(
+            message.contains("must be at most 24h"),
+            "{config}: {message}"
+        );
+    }
+    assert!(w.flow_defs().is_empty());
+    w.add_flow_json(&flow_json(
+        "f",
+        &json!([{ "id": "a", "block": "x/y" }]),
+        &json!({ "timeout": "24h" }),
+    ))
+    .expect("24h is the maximum, and allowed");
 }
 
 /// The executor routes `next` over top-level steps only.
@@ -175,27 +204,6 @@ fn a_transfer_to_the_flow_itself_is_refused() {
 // ---------------------------------------------------------------------------
 // Run time
 // ---------------------------------------------------------------------------
-
-/// A flow timeout past the end of the clock is one no run reaches: the flow
-/// runs instead of the deadline arithmetic overflowing.
-#[tokio::test]
-async fn a_timeout_past_the_end_of_the_clock_runs() {
-    let mut w = wafer();
-    let calls = counter(&mut w, "test/count", Duration::ZERO);
-    w.add_flow_json(&flow_json(
-        "f",
-        &json!([{ "id": "a", "block": "test/count" }]),
-        &json!({ "timeout": "5124095576030431h" }),
-    ))
-    .unwrap();
-    w.seal().await.unwrap();
-
-    let out = w
-        .run("f", Message::new("http.request"), InputStream::empty())
-        .await;
-    assert!(out.collect_buffered().await.is_ok());
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
 
 /// `a` (5 steps) and `b` (the default 1000) hand off to each other forever.
 /// The chain's step counter carries across every transfer and `a`'s budget
