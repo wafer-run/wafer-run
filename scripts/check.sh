@@ -9,7 +9,11 @@
 #   ./scripts/check.sh              # run all steps
 #   ./scripts/check.sh <step>...    # run only the named steps
 #
-# Steps: fixtures fmt clippy test postgres wasm bindings audit
+# Steps: fixtures fmt clippy test postgres wasm bindings audit coverage
+#
+# coverage runs only when named (it needs cargo-llvm-cov); CI's
+# push-to-main Coverage job runs `fixtures coverage`, as the Tests job runs
+# `fixtures test`, so both run the tests against the same fixtures.
 #
 # The postgres step runs the shared DatabaseService conformance suite
 # against a live PostgreSQL server named by WAFER_CONFORMANCE_POSTGRES_URL
@@ -238,6 +242,11 @@ run_bindings() {
     npm run build -w packages/wafer-client-js
 }
 
+run_coverage() {
+    echo "==> Coverage (cargo llvm-cov, lcov.info)"
+    cargo llvm-cov --locked --workspace --exclude wafer-run --lcov --output-path lcov.info
+}
+
 run_audit() {
     echo "==> Security audit"
     cargo audit
@@ -272,8 +281,9 @@ else
             wasm) run_wasm ;;
             bindings) run_bindings ;;
             audit) run_audit ;;
+            coverage) run_coverage ;;
             *)
-                echo "error: unknown step '$step' (valid: fixtures fmt clippy test postgres wasm bindings audit)" >&2
+                echo "error: unknown step '$step' (valid: fixtures fmt clippy test postgres wasm bindings audit coverage)" >&2
                 exit 2
                 ;;
         esac
