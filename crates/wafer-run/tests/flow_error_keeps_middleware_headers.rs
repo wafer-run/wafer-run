@@ -193,6 +193,8 @@ impl Block for CachedAsset {
                     "public, max-age=31536000, immutable",
                 ),
                 meta("resp.header.ETag", "\"v1\""),
+                meta("resp.header.Vary", "Accept-Encoding"),
+                meta("resp.header.x-frame-options", "SAMEORIGIN"),
                 meta("resp.set_cookie.0", "session=s1; Path=/"),
             ],
         )
@@ -527,6 +529,31 @@ async fn a_responding_steps_headers_and_cookies_do_not_reach_a_later_error() {
         header(&parts, "Set-Cookie").is_empty(),
         "a responder's session cookie was set on a failed request: {parts:?}"
     );
+}
+
+/// A responder that overwrote a middleware header leaves the middleware's
+/// value to carry: CORS's `Vary: Origin` is not lost with the asset's
+/// `Vary: Accept-Encoding`, and `X-Frame-Options` reverts to the
+/// security-headers block's `DENY` instead of vanishing.
+#[tokio::test]
+async fn a_header_a_responder_overwrote_reverts_to_the_middlewares_value() {
+    let wafer = start(&[flow(
+        "api",
+        vec![
+            security_headers_step(),
+            cors_step(),
+            serde_json::json!({ "id": "asset", "block": "test/cached-asset" }),
+            serde_json::json!({ "id": "handler", "block": "test/partial-then-error" }),
+        ],
+    )])
+    .await;
+
+    let parts = run_http(&wafer, "api").await;
+
+    assert_eq!(parts.status, 500);
+    assert_middleware_headers(&parts);
+    assert_eq!(header(&parts, "Vary"), vec!["Origin"], "{parts:?}");
+    assert_eq!(header(&parts, "X-Frame-Options"), vec!["DENY"], "{parts:?}");
 }
 
 /// Cookies are identified by name (and path/domain), not by their

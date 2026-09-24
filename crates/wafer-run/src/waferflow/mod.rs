@@ -10,3 +10,4 @@ pub(crate) mod plan;
 mod response_meta;
 
 pub(crate) use executor::execute as execute_waferflow;
+pub(crate) use response_meta::ResponderRecord;

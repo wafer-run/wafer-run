@@ -55,13 +55,18 @@
   discarded, so a login step's session cookie is never set on a failed
   request — and neither is any header a responding step set (a static
   file's `Cache-Control: immutable` must not cache a 500), unless a later
-  middleware rewrote it. Never carried, whatever set them: body-describing
+  middleware rewrote it; where a responding step overwrote a middleware's
+  header or cookie, the middleware's entry is carried in its place (CORS's
+  `Vary: Origin` survives an asset step's `Vary: Accept-Encoding`, and
+  `X-Frame-Options` reverts to the security-headers value). Never carried, whatever set them: body-describing
   headers (`Content-*`, `ETag`, `Last-Modified`, `Location`,
   `Accept-Ranges`), `resp.status`, `resp.content_type`, the stopping step's
   own partial output (streamed `Meta` before an `Error`), and a parallel
   branch's message (discarded at the join, as on success). The terminal's
   own entries win: a header by name, case-insensitively; a cookie by name,
-  `Path` and `Domain` — not by its `resp.set_cookie.*` key, which
+  `Path` (case-sensitive; a missing `Path` is not `Path=/`, since the
+  browser derives it from the request URI) and `Domain` — not by its
+  `resp.set_cookie.*` key, which
   `ResponseBuilder` assigns by position (`.0`, `.1`, …) so unrelated cookies
   from two producers collide. `Vary` values are unioned, so the CORS
   middleware's `Vary: Origin` survives a terminal's own `Vary`. The same

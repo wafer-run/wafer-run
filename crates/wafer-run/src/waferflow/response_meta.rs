@@ -1,20 +1,23 @@
 //! How response meta combines inside a flow: a responding step's meta laid
 //! over the flow message ([`overlay`]), and the middleware headers a
-//! short-circuit terminal inherits ([`carried`]). See the executor's module
-//! docs for where each applies.
+//! short-circuit terminal inherits ([`carried`]) — where a responding step
+//! overwrote a middleware's entry, the displaced middleware entry recorded
+//! by [`apply_response`]. See the executor's module docs for where each
+//! applies.
 //!
 //! Identity rules, shared by both:
 //! - a header is identified by its name, case-insensitively — except the
 //!   list-valued [`UNION_HEADERS`], whose values are unioned (so a `Vary:
 //!   Origin` a CORS middleware set survives a terminal's own `Vary`);
 //! - a cookie is identified by its name plus its `Path` and `Domain`
-//!   attributes (RFC 6265 §5.3 step 11), not by its `resp.set_cookie.*` key:
+//!   attributes (RFC 6265 §5.3 step 11; see [`cookie_id`]), not by its
+//!   `resp.set_cookie.*` key:
 //!   [`wafer_block::response::ResponseBuilder`] keys cookies by position
 //!   (`resp.set_cookie.0`, `.1`, …), so two producers' keys collide for
 //!   unrelated cookies;
 //! - any other key is identified by the key itself.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use wafer_block::{
     core_types::MetaEntry,
@@ -46,8 +49,12 @@ fn is_listed(list: &[&str], name: &str) -> bool {
     list.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
-/// A `Set-Cookie` directive's identity: name, `Path`, `Domain` (attribute
-/// values compared case-insensitively, the name exactly).
+/// A `Set-Cookie` directive's identity: name and `Path` compared exactly
+/// (both are case-sensitive, RFC 6265 §5.1.4), `Domain` case-insensitively
+/// and without a leading dot. A directive without `Path` is NOT the same
+/// cookie as one with `Path=/`: the browser gives it the request URI's
+/// default path (§5.1.4), which this layer cannot know, so the two are kept
+/// apart rather than guessed equal.
 #[derive(PartialEq, Eq)]
 struct CookieId {
     name: String,
@@ -67,11 +74,11 @@ fn cookie_id(directive: &str) -> CookieId {
     let mut domain = String::new();
     for attr in parts {
         let (key, value) = attr.split_once('=').unwrap_or((attr, ""));
-        let value = value.trim().to_ascii_lowercase();
+        let value = value.trim();
         if key.trim().eq_ignore_ascii_case("path") {
-            path = value;
+            path = value.to_string();
         } else if key.trim().eq_ignore_ascii_case("domain") {
-            domain = value.trim_start_matches('.').to_string();
+            domain = value.trim_start_matches('.').to_ascii_lowercase();
         }
     }
     CookieId { name, path, domain }
@@ -123,40 +130,78 @@ fn fresh_cookie_key(meta: &[MetaEntry]) -> String {
         .expect("an unbounded range has an unused key")
 }
 
+/// One response header or cookie [`overlay`] wrote into `base`.
+pub(super) struct Written {
+    /// The key it was written under — a cookie whose key collided with an
+    /// unrelated cookie of `base` is written under a fresh
+    /// `resp.set_cookie.*` key.
+    pub(super) key: String,
+    /// The `base` entries it displaced: the header of the same name (for a
+    /// [`UNION_HEADERS`] header, whose values it absorbed) or the cookies of
+    /// the same identity.
+    pub(super) displaced: Vec<MetaEntry>,
+}
+
 /// Lay `top` over `base`, `top` winning (see the module docs for identity).
-/// Returns the keys of the response headers and cookies `top` wrote into
-/// `base` — a cookie whose key collided with an unrelated cookie of `base`
-/// is written under a fresh `resp.set_cookie.*` key.
-pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<String> {
+/// Returns the response headers and cookies `top` wrote, with what each
+/// displaced.
+pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<Written> {
     // Cookies first, as a set: a producer may legitimately emit two cookies
-    // of one name (different attributes), so only `base`'s are replaced.
-    let replaced: Vec<CookieId> = top
-        .iter()
-        .filter(|e| matches!(kind(e), Kind::Cookie))
-        .map(|e| cookie_id(&e.value))
-        .collect();
-    base.retain(|e| !matches!(kind(e), Kind::Cookie) || !replaced.contains(&cookie_id(&e.value)));
+    // of one identity, so only `base`'s are displaced — each by the first
+    // `top` cookie of that identity.
+    let mut displaced_cookies: Vec<(CookieId, Vec<MetaEntry>)> = Vec::new();
+    for entry in top.iter().filter(|e| matches!(kind(e), Kind::Cookie)) {
+        let id = cookie_id(&entry.value);
+        if displaced_cookies.iter().all(|(seen, _)| *seen != id) {
+            let displaced = base
+                .iter()
+                .filter(|e| matches!(kind(e), Kind::Cookie) && cookie_id(&e.value) == id)
+                .cloned()
+                .collect();
+            displaced_cookies.push((id, displaced));
+        }
+    }
+    base.retain(|e| {
+        !matches!(kind(e), Kind::Cookie)
+            || displaced_cookies
+                .iter()
+                .all(|(id, _)| *id != cookie_id(&e.value))
+    });
 
     let mut written = Vec::new();
     for entry in top {
         match kind(&entry) {
             Kind::Cookie => {
+                let id = cookie_id(&entry.value);
+                let displaced = displaced_cookies
+                    .iter_mut()
+                    .find(|(seen, _)| *seen == id)
+                    .map(|(_, displaced)| std::mem::take(displaced))
+                    .unwrap_or_default();
                 let key = if base.iter().any(|e| e.key == entry.key) {
                     fresh_cookie_key(base)
                 } else {
                     entry.key
                 };
-                written.push(key.clone());
+                written.push(Written {
+                    key: key.clone(),
+                    displaced,
+                });
                 base.push(MetaEntry {
                     key,
                     value: entry.value,
                 });
             }
             Kind::Header { name } => {
+                let displaced: Vec<MetaEntry> = base
+                    .iter()
+                    .filter(|e| header_name_is(e, &name))
+                    .cloned()
+                    .collect();
                 let value = if is_listed(UNION_HEADERS, &name) {
                     union_tokens(
-                        base.iter()
-                            .filter(|e| header_name_is(e, &name))
+                        displaced
+                            .iter()
                             .map(|e| e.value.as_str())
                             .chain(std::iter::once(entry.value.as_str())),
                     )
@@ -169,7 +214,10 @@ pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<Str
                     key: entry.key,
                     value,
                 };
-                written.push(replacement.key.clone());
+                written.push(Written {
+                    key: replacement.key.clone(),
+                    displaced,
+                });
                 match at {
                     Some(at) => base.insert(at.min(base.len()), replacement),
                     None => base.push(replacement),
@@ -184,37 +232,61 @@ pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<Str
     written
 }
 
+/// The executor's record of the flow message's response headers and
+/// cookies a responding step wrote: each such key, mapped to the
+/// middleware entries it displaced (what a short-circuit terminal inherits
+/// in its place).
+pub(crate) type ResponderRecord = HashMap<String, Vec<MetaEntry>>;
+
+/// Lay a responding step's meta (`top`) over the flow message `msg_meta`
+/// and record what it wrote in `record`. What an entry displaced is
+/// resolved to middleware entries: a displaced entry an earlier responder
+/// wrote contributes the middleware entries IT displaced.
+pub(super) fn apply_response(
+    record: &mut ResponderRecord,
+    msg_meta: &mut Vec<MetaEntry>,
+    top: Vec<MetaEntry>,
+) {
+    for written in overlay(msg_meta, top) {
+        let middleware: Vec<MetaEntry> = written
+            .displaced
+            .into_iter()
+            .flat_map(|d| record.get(&d.key).cloned().unwrap_or_else(|| vec![d]))
+            .collect();
+        record.insert(written.key, middleware);
+    }
+}
+
 /// The entries of `flow_meta` a short-circuit terminal inherits: its response
-/// headers and cookies, except a body-describing header ([`BODY_HEADERS`])
-/// and anything a responding step wrote (`responder_written`, kept by the
-/// executor).
-pub(super) fn carried(
-    flow_meta: &[MetaEntry],
-    responder_written: &HashSet<String>,
-) -> Vec<MetaEntry> {
+/// headers and cookies as the middleware left them — an entry a responding
+/// step wrote is replaced by the middleware entries it displaced (`record`)
+/// — except a body-describing header ([`BODY_HEADERS`]).
+pub(super) fn carried(flow_meta: &[MetaEntry], record: &ResponderRecord) -> Vec<MetaEntry> {
     flow_meta
         .iter()
-        .filter(|e| !responder_written.contains(&e.key))
+        .flat_map(|e| match record.get(&e.key) {
+            Some(middleware) => middleware.clone(),
+            None => vec![e.clone()],
+        })
         .filter(|e| match kind(e) {
             Kind::Cookie => true,
             Kind::Header { name } => !is_listed(BODY_HEADERS, &name),
             Kind::Other => false,
         })
-        .cloned()
         .collect()
 }
 
-/// After a middleware step returned `next`, keep in `responder_written` only
-/// the keys whose entry the step passed through unchanged: one it rewrote or
-/// removed is the middleware's decision now.
+/// After a middleware step returned `next`, keep in `record` only the keys
+/// whose entry the step passed through unchanged: one it rewrote or removed
+/// is the middleware's decision now.
 pub(super) fn after_continue(
-    responder_written: &mut HashSet<String>,
+    record: &mut ResponderRecord,
     before: &[MetaEntry],
     next: &[MetaEntry],
 ) {
     let value =
         |meta: &[MetaEntry], key: &str| meta.iter().find(|e| e.key == key).map(|e| e.value.clone());
-    responder_written.retain(|key| {
+    record.retain(|key, _| {
         let old = value(before, key);
         old.is_some() && old == value(next, key)
     });
@@ -242,7 +314,9 @@ mod tests {
                 e("resp.set_cookie.1", "theme=dark"),
             ]
         );
-        assert_eq!(written, vec!["resp.set_cookie.1".to_string()]);
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].key, "resp.set_cookie.1");
+        assert!(written[0].displaced.is_empty());
     }
 
     #[test]
@@ -314,9 +388,9 @@ mod tests {
             e("resp.set_cookie.1", "theme=dark"),
             e("http.header.cookie", "sid=a"),
         ];
-        let responder: HashSet<String> = ["resp.set_cookie.1".to_string()].into();
+        let record: ResponderRecord = [("resp.set_cookie.1".to_string(), Vec::new())].into();
         assert_eq!(
-            carried(&flow_meta, &responder),
+            carried(&flow_meta, &record),
             vec![
                 e(
                     "resp.header.Access-Control-Allow-Origin",
@@ -336,10 +410,70 @@ mod tests {
             e("resp.header.C", "1"),
         ];
         let next = vec![e("resp.header.A", "1"), e("resp.header.B", "2")];
-        let mut set: HashSet<String> = ["resp.header.A", "resp.header.B", "resp.header.C"]
-            .map(String::from)
+        let mut record: ResponderRecord = ["resp.header.A", "resp.header.B", "resp.header.C"]
+            .map(|k| (k.to_string(), Vec::new()))
             .into();
-        after_continue(&mut set, &before, &next);
-        assert_eq!(set, ["resp.header.A".to_string()].into());
+        after_continue(&mut record, &before, &next);
+        assert_eq!(
+            record.into_keys().collect::<Vec<_>>(),
+            vec!["resp.header.A"]
+        );
+    }
+
+    /// A responder that rewrites a middleware header leaves the middleware's
+    /// value to carry: `Vary` reverts to the middleware's tokens,
+    /// `X-Frame-Options` to its value, a displaced cookie comes back.
+    #[test]
+    fn a_displaced_middleware_entry_is_what_is_carried() {
+        let mut msg = vec![
+            e("resp.header.Vary", "Origin"),
+            e("resp.header.X-Frame-Options", "DENY"),
+            e("resp.set_cookie.0", "sid=mw; Path=/"),
+        ];
+        let mut record = ResponderRecord::new();
+        apply_response(
+            &mut record,
+            &mut msg,
+            vec![
+                e("resp.header.Vary", "Accept-Encoding"),
+                e("resp.header.x-frame-options", "SAMEORIGIN"),
+                e("resp.set_cookie.0", "sid=resp; Path=/"),
+            ],
+        );
+        // A second responder over the first still resolves to the middleware.
+        apply_response(&mut record, &mut msg, vec![e("resp.header.VARY", "Cookie")]);
+        assert_eq!(
+            carried(&msg, &record),
+            vec![
+                e("resp.header.Vary", "Origin"),
+                e("resp.header.X-Frame-Options", "DENY"),
+                e("resp.set_cookie.0", "sid=mw; Path=/"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cookie_paths_are_case_sensitive_and_a_missing_path_is_its_own() {
+        let mut base = vec![
+            e("resp.set_cookie.a", "sid=1; Path=/API"),
+            e("resp.set_cookie.b", "sid=2"),
+            e("resp.set_cookie.c", "sid=3; Path=/; Domain=.A.example"),
+        ];
+        overlay(
+            &mut base,
+            vec![
+                e("resp.set_cookie.x", "sid=9; Path=/api"),
+                e("resp.set_cookie.y", "sid=8; path=/; domain=a.example"),
+            ],
+        );
+        assert_eq!(
+            base.iter().map(|e| e.value.as_str()).collect::<Vec<_>>(),
+            vec![
+                "sid=1; Path=/API",
+                "sid=2",
+                "sid=9; Path=/api",
+                "sid=8; path=/; domain=a.example"
+            ]
+        );
     }
 }

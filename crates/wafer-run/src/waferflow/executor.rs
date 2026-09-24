@@ -73,7 +73,11 @@
 //! - what a responding step wrote (its headers and cookies describe a
 //!   response the flow discarded: a static file's year-long `Cache-Control`
 //!   must not cache a 500, a login step's session cookie must not be set on a
-//!   failed request), unless a later middleware rewrote the entry;
+//!   failed request), unless a later middleware rewrote the entry. Where a
+//!   responder overwrote a middleware's header or cookie, the middleware's
+//!   entry is carried in its place: CORS's `Vary: Origin` survives an asset
+//!   step's `Vary: Accept-Encoding`, `X-Frame-Options` reverts to the
+//!   security-headers value;
 //! - body-describing headers (`Content-*`, `ETag`, `Last-Modified`,
 //!   `Location`, `Accept-Ranges`) and `resp.status` / `resp.content_type`,
 //!   whatever set them: the terminal has its own body;
@@ -91,7 +95,7 @@
 //! carried headers.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -133,10 +137,11 @@ struct ExecState {
     acc: Accumulator,
     body: Arc<Vec<u8>>,
     msg: Message,
-    /// Keys of the `msg` response headers and cookies a responding step
-    /// wrote and no middleware has rewritten since: not carried onto a
-    /// short-circuit terminal (see the module docs).
-    responder_written: HashSet<String>,
+    /// The `msg` response headers and cookies a responding step wrote and
+    /// no middleware has rewritten since, each with the middleware entries
+    /// it displaced — what a short-circuit terminal carries in its place
+    /// (see the module docs).
+    responder_record: response_meta::ResponderRecord,
 }
 
 /// How a single block invocation concluded (when it did not short-circuit
@@ -167,7 +172,7 @@ impl ShortCircuit {
     /// response headers of `state`'s message (see the module docs).
     fn into_output(self, state: &ExecState) -> OutputStream {
         let with_carried = |own: Vec<MetaEntry>| {
-            let mut meta = response_meta::carried(&state.msg.meta, &state.responder_written);
+            let mut meta = response_meta::carried(&state.msg.meta, &state.responder_record);
             response_meta::overlay(&mut meta, own);
             meta
         };
@@ -202,9 +207,9 @@ fn unwrap_body(body: Arc<Vec<u8>>) -> Vec<u8> {
 ///
 /// Short-circuits on a step's Error (under `on_error = "stop"`), Halt or Drop
 /// terminal, carrying the middleware's response headers onto it (see the
-/// module docs). `responder_written` names the `msg` entries a responding
-/// step already wrote: empty for a fresh run, the transferring flow's record
-/// for a `next` transfer.
+/// module docs). `responder_record` is the record of the `msg` entries a
+/// responding step already wrote: empty for a fresh run, the transferring
+/// flow's record for a `next` transfer.
 pub(crate) async fn execute(
     flow: &CompiledFlow,
     msg: Message,
@@ -212,7 +217,7 @@ pub(crate) async fn execute(
     wafer: &Wafer,
     cancelled: &Arc<AtomicBool>,
     deadline: Option<Instant>,
-    responder_written: HashSet<String>,
+    responder_record: response_meta::ResponderRecord,
 ) -> OutputStream {
     let mut acc = Accumulator::new();
 
@@ -241,7 +246,7 @@ pub(crate) async fn execute(
         acc,
         body: Arc::new(body),
         msg,
-        responder_written,
+        responder_record,
     };
 
     let steps = &flow.steps;
@@ -315,7 +320,7 @@ pub(crate) async fn execute(
                                 &target,
                                 state.msg,
                                 InputStream::from_bytes(unwrap_body(state.body)),
-                                state.responder_written,
+                                state.responder_record,
                             ))
                             .await;
                         }
@@ -527,7 +532,7 @@ async fn run_parallel(
             acc: Accumulator::branch_from(parent.clone()),
             body: state.body.clone(),
             msg: state.msg.clone(),
-            responder_written: state.responder_written.clone(),
+            responder_record: state.responder_record.clone(),
         };
         async move {
             run_branch_steps(env, &branch.steps, &mut branch_state)
@@ -707,9 +712,12 @@ async fn run_invocation(
             state.body = Arc::new(response.body);
 
             // Lay the response's meta over the message (see the module docs)
-            // and remember which headers and cookies it wrote.
-            let written = response_meta::overlay(&mut state.msg.meta, response.meta);
-            state.responder_written.extend(written);
+            // and record which headers and cookies it wrote over what.
+            response_meta::apply_response(
+                &mut state.responder_record,
+                &mut state.msg.meta,
+                response.meta,
+            );
             Ok(InvocationOutcome::Responded)
         }
         Err(TerminalNotResponse::Error(e)) => {
@@ -736,7 +744,7 @@ async fn run_invocation(
             // taken out of `state`, so the next step sees the original
             // input with no restore copy.
             response_meta::after_continue(
-                &mut state.responder_written,
+                &mut state.responder_record,
                 &state.msg.meta,
                 &next_msg.meta,
             );

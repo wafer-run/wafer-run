@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use wafer_block::{
     core_types::*,
@@ -11,8 +8,10 @@ use wafer_block::{
 
 use super::Wafer;
 use crate::{
-    context::RuntimeContext, observability::ObservabilityBus, platform::Instant,
-    waferflow::plan::CompiledFlow,
+    context::RuntimeContext,
+    observability::ObservabilityBus,
+    platform::Instant,
+    waferflow::{plan::CompiledFlow, ResponderRecord},
 };
 
 /// Identity fields for the observability bracket around one block dispatch.
@@ -169,7 +168,10 @@ impl Wafer {
             return refused;
         }
         match self.flow_plan(flow_id) {
-            Some(plan) => self.run_plan(&plan, msg, input, HashSet::new()).await,
+            Some(plan) => {
+                self.run_plan(&plan, msg, input, ResponderRecord::new())
+                    .await
+            }
             None => OutputStream::error(flow_not_found(flow_id)),
         }
     }
@@ -189,14 +191,14 @@ impl Wafer {
     }
 
     /// Execute `plan` with the observability hooks and its timeout.
-    /// `responder_written` is the executor's record of the `msg` entries a
+    /// `responder_record` is the executor's record of the `msg` entries a
     /// responding step wrote (empty unless this is a `next` transfer).
     pub(crate) async fn run_plan(
         &self,
         plan: &CompiledFlow,
         msg: Message,
         input: InputStream,
-        responder_written: HashSet<String>,
+        responder_record: ResponderRecord,
     ) -> OutputStream {
         // Observability: flow start
         self.hooks.fire_flow_start(&plan.id, &msg);
@@ -213,7 +215,7 @@ impl Wafer {
             self,
             &cancelled,
             deadline,
-            responder_written,
+            responder_record,
         )
         .await;
 
