@@ -331,12 +331,17 @@ fn header<'a>(parts: &'a HttpResponseParts, name: &str) -> Vec<&'a str> {
 
 /// The CORS and security headers the two middleware steps set.
 fn assert_middleware_headers(parts: &HttpResponseParts) {
+    assert_middleware_headers_varying_on(parts, "Origin");
+}
+
+/// [`assert_middleware_headers`], with the `Vary` the CORS step left.
+fn assert_middleware_headers_varying_on(parts: &HttpResponseParts, vary: &str) {
     assert_eq!(
         header(parts, "Access-Control-Allow-Origin"),
         vec![ORIGIN],
         "CORS header lost: {parts:?}"
     );
-    assert_eq!(header(parts, "Vary"), vec!["Origin"], "{parts:?}");
+    assert_eq!(header(parts, "Vary"), vec![vary], "{parts:?}");
     assert_eq!(
         header(parts, "X-Content-Type-Options"),
         vec!["nosniff"],
@@ -643,7 +648,11 @@ async fn a_transfer_keeps_the_responder_record() {
     let parts = run_http(&wafer, "outer").await;
 
     assert_eq!(parts.status, 401);
-    assert_middleware_headers(&parts);
+    // CORS runs after the asset and adds `Origin` to the asset's `Vary`
+    // rather than replacing it; a middleware that rewrites an entry makes
+    // it its own (see `response_meta::after_continue`), so the union is
+    // carried. Varying on more than needed only narrows what a cache reuses.
+    assert_middleware_headers_varying_on(&parts, "Accept-Encoding, Origin");
     assert!(header(&parts, "Cache-Control").is_empty(), "{parts:?}");
     assert!(header(&parts, "Set-Cookie").is_empty(), "{parts:?}");
 }

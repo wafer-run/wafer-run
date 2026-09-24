@@ -179,9 +179,10 @@ impl Block for SecurityHeadersBlock {
                 "csp",
                 "Operator-supplied Content-Security-Policy directives, merged \
                  on top of the block's restrictive baseline (see merge_csp). \
-                 Sources that would admit script from any origin, 'unsafe-eval', \
-                 widenings of base-uri/form-action and frame-ancestors are \
-                 refused and logged at Init.",
+                 Script sources that would admit any origin, a host wildcard, \
+                 a non-https host or 'unsafe-eval', widenings of \
+                 base-uri/form-action, a report-uri off this origin and \
+                 frame-ancestors are refused and logged at Init.",
                 "",
             )
             .name("CSP"),

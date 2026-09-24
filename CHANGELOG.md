@@ -88,6 +88,20 @@
   the userinfo of any other value that is a URL with credentials
   (`postgres://redacted:redacted@db/x`), at any depth of block configs and
   flow step configs.
+- `wafer-run/security-headers` refuses more operator CSP. In `default-src`,
+  `script-src`, `script-src-elem`, `script-src-attr`, `worker-src` and
+  `child-src`, every host wildcard is refused (`*.example.com` included:
+  the old single-label check passed `*.github.io`, `*.pages.dev`,
+  `*.workers.dev` and `*.co.uk`, where anyone can register a subdomain), as
+  is a host-source with an explicit scheme other than `https`
+  (`http://cdn.example.com`). `report-uri` accepts only a path on this
+  origin (`/csp-reports`), because reports carry page URLs and, under
+  `'report-sample'`, script samples; `report-to` takes exactly one group
+  name. A `base-uri` / `form-action` the baseline lacks is added only when
+  every source is well-formed. Refused sources are dropped and logged at
+  Init as before. `wafer-run/cors` adds `Origin` to an earlier block's
+  `Vary` (folding every `resp.header.{vary}` spelling into one
+  `resp.header.Vary`) instead of replacing it.
 - Flow config is typed and a flow is validated wherever it is added.
   `wafer_flow::FlowConfig` fields are `on_error: Option<OnError>` (`Stop` /
   `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms:

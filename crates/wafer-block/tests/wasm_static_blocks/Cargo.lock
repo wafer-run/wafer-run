@@ -1529,6 +1529,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "tracing",
+ "url",
  "wafer-block",
  "wafer-block-macro",
 ]
