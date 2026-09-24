@@ -16,8 +16,10 @@
   The handler authorizes the resolved path and hands that same path to the
   `StorageService`. WRAP's Storage rule is now plain ownership: a path is
   admitted for the block its `{org}/{block}` prefix names, the admin block,
-  or a Storage grant, and a path with an empty, `.` or `..` segment is
-  refused; `@` is request syntax the handler strips and WRAP no longer reads
+  or a Storage grant, and a path with an empty, `.` or `..` segment — or any
+  `\`, which a Windows filesystem backend reads as a separator — is
+  refused (`wafer_block::wrap::is_traversal_safe_path`; the handler answers
+  `InvalidArgument`); `@` is request syntax the handler strips and WRAP no longer reads
   (`storage_resource_owner("@a/b/c")` is `@a/b`, and a Storage grant written
   with `@` no longer passes the owner check). A plain folder from a call with
   no calling block is `PermissionDenied`. `decode_and_authorize_checked`
@@ -32,7 +34,11 @@
   grant). `wafer-run/web` serves `web_root` from `wafer-run/web/{web_root}`.
   Embedders that already scoped paths in a wrapper block (impresspress's
   `ImpresspressStorageBlock`) must drop that rewrite in the same upgrade, or
-  every path is prefixed twice.
+  every path is prefixed twice. `BlockCapabilities::storage_folders` entries
+  are checked against that resolved path, so they name
+  `{org}/{block}/{folder}`: a block writing its plain folder `uploads` needs
+  the entry `acme/app/uploads`, and a bare `uploads` entry (which the field
+  doc used to describe as covering `uploads/*`) now admits nothing.
 - A block is the name it is registered under. `register_block` (and every
   path built on it: `load_inventory_blocks`, the lockfile loader,
   `embed::register_path` behind the Node/Go/C bindings) refuses a block whose
