@@ -9,6 +9,16 @@ use wafer_block::{common::ErrorCode, InputStream, OutputStream, WaferError};
 use wafer_block_macro::wafer_async_trait;
 use wafer_core::interfaces::storage::service::*;
 
+/// Refuse a read of a file larger than [`DEFAULT_MAX_OBJECT_BYTES`].
+fn check_object_size(path: &Path, len: u64) -> Result<(), StorageError> {
+    if len > DEFAULT_MAX_OBJECT_BYTES {
+        return Err(StorageError::TooLarge(format!(
+            "file {path:?} is {len} bytes, exceeds limit of {DEFAULT_MAX_OBJECT_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
 /// Lexically normalize an absolute path: resolve `.` and `..` components
 /// without consulting the filesystem.
 ///
@@ -316,16 +326,8 @@ impl StorageService for LocalStorageService {
         let path = self.validate_path(&self.object_path(folder, key))?;
         let metadata = metadata_or_not_found(&path, tokio::fs::metadata(&path).await)?;
 
-        // Limit file reads to 100 MB to prevent OOM on huge files
-        const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-        if metadata.len() > MAX_FILE_SIZE {
-            return Err(StorageError::Internal(format!(
-                "file {:?} is {} bytes, exceeds limit of {} bytes",
-                path,
-                metadata.len(),
-                MAX_FILE_SIZE
-            )));
-        }
+        // Refuse a file past the shared read cap rather than reading it whole.
+        check_object_size(&path, metadata.len())?;
 
         let data = tokio::fs::read(&path)
             .await
@@ -377,15 +379,7 @@ impl StorageService for LocalStorageService {
             .map_err(|e| StorageError::Internal(format!("metadata {path:?}: {e}")))?;
 
         // Same guard as `get`: refuse absurdly large files up front.
-        const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
-        if metadata.len() > MAX_FILE_SIZE {
-            return Err(StorageError::Internal(format!(
-                "file {:?} is {} bytes, exceeds limit of {} bytes",
-                path,
-                metadata.len(),
-                MAX_FILE_SIZE
-            )));
-        }
+        check_object_size(&path, metadata.len())?;
 
         let last_modified = metadata
             .modified()
@@ -1006,6 +1000,37 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    /// A file past [`DEFAULT_MAX_OBJECT_BYTES`] is refused by both reads with
+    /// `TooLarge`, which the storage handler maps to `ResourceExhausted`. The
+    /// file is sparse, so the test writes no real data.
+    #[tokio::test]
+    async fn get_and_get_streaming_refuse_a_file_over_the_cap() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        svc.put("f", "huge.bin", b"", "application/octet-stream")
+            .await
+            .expect("put");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.join("f").join("huge.bin"))
+            .expect("open")
+            .set_len(DEFAULT_MAX_OBJECT_BYTES + 1)
+            .expect("extend sparse");
+
+        match svc.get("f", "huge.bin").await {
+            Err(StorageError::TooLarge(_)) => {}
+            other => panic!("get: expected TooLarge, got {:?}", other.map(|(_, i)| i)),
+        }
+        match svc.get_streaming("f", "huge.bin").await {
+            Err(StorageError::TooLarge(_)) => {}
+            other => panic!(
+                "get_streaming: expected TooLarge, got {:?}",
+                other.map(|(_, i)| i)
+            ),
+        }
+        fs::remove_dir_all(&tmp).ok();
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.

@@ -10,11 +10,15 @@ pub mod service;
 use std::sync::Arc;
 
 use service::S3StorageService;
-use wafer_block::{BlockConfig, ConfigVar, ErrorCode, LifecycleType, WaferError};
-use wafer_core::interfaces::storage::{handler, service::StorageService};
+use wafer_block::{BlockConfig, ConfigVar, ErrorCode, InputType, LifecycleType, WaferError};
+use wafer_core::interfaces::storage::{
+    handler,
+    service::{StorageService, DEFAULT_MAX_OBJECT_BYTES},
+};
 
 const ENDPOINT_ENV: &str = "WAFER_RUN__S3__ENDPOINT";
 const REGION_ENV: &str = "WAFER_RUN__S3__REGION";
+const MAX_OBJECT_BYTES_ENV: &str = "WAFER_RUN__S3__MAX_OBJECT_BYTES";
 const DEFAULT_REGION: &str = "us-east-1";
 const DEFAULT_BUCKET: &str = "wafer";
 
@@ -25,7 +29,8 @@ wafer_core::service_block! {
     /// - Per-flow JSON (declared in `BlockInfo::flow_config`): `bucket`, `prefix`.
     ///   Each S3 block instance can serve a different bucket / prefix per flow.
     /// - Process env (declared in `BlockInfo::config_keys`):
-    ///   `WAFER_RUN__S3__ENDPOINT`, `WAFER_RUN__S3__REGION`.
+    ///   `WAFER_RUN__S3__ENDPOINT`, `WAFER_RUN__S3__REGION`,
+    ///   `WAFER_RUN__S3__MAX_OBJECT_BYTES`.
     ///   These are typically uniform across flows in a single wafer-run process.
     lazy block: pub(crate) S3StorageBlock,
     name: "wafer-run/s3",
@@ -62,6 +67,15 @@ wafer_core::service_block! {
                 DEFAULT_REGION,
             )
             .name("Region"),
+            ConfigVar::new(
+                MAX_OBJECT_BYTES_ENV,
+                "Largest object, in bytes, a read returns; a larger one fails with \
+                 ResourceExhausted. Defaults to 100 MiB (104857600) when unset. Read \
+                 once at Init: an invalid value fails Init (restart to apply).",
+                &DEFAULT_MAX_OBJECT_BYTES.to_string(),
+            )
+            .name("Max Object Bytes")
+            .input_type(InputType::Number),
         ]),
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
@@ -92,13 +106,15 @@ wafer_core::service_block! {
             // Process env (SCREAMING_SNAKE).
             let endpoint = std::env::var(ENDPOINT_ENV).unwrap_or_default();
             let region = std::env::var(REGION_ENV).unwrap_or_else(|_| DEFAULT_REGION.to_string());
+            let max_object_bytes = max_object_bytes_from_env()?;
 
             let svc = if endpoint.is_empty() {
                 S3StorageService::new(&bucket, &prefix).await
             } else {
                 S3StorageService::with_endpoint(&bucket, &prefix, &endpoint, &region).await
             }
-            .map_err(|e| WaferError::new(ErrorCode::Internal, format!("wafer-run/s3 init: {e}")))?;
+            .map_err(|e| WaferError::new(ErrorCode::Internal, format!("wafer-run/s3 init: {e}")))?
+            .with_max_object_bytes(max_object_bytes);
 
             tracing::info!(bucket = %bucket, "S3 storage service initialized");
             this.service.set(Arc::new(svc)).ok();
@@ -108,6 +124,38 @@ wafer_core::service_block! {
 }
 
 wafer_block::register_static_block!("wafer-run/s3", S3StorageBlock);
+
+/// The read cap from [`MAX_OBJECT_BYTES_ENV`]: unset is
+/// [`DEFAULT_MAX_OBJECT_BYTES`]; anything but a positive integer fails Init
+/// rather than silently falling back to the default.
+fn max_object_bytes_from_env() -> Result<u64, WaferError> {
+    match std::env::var(MAX_OBJECT_BYTES_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_MAX_OBJECT_BYTES),
+        Err(std::env::VarError::NotUnicode(_)) => Err(WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "wafer-run/s3 init: {MAX_OBJECT_BYTES_ENV} is not valid UTF-8: expected a \
+                 positive integer byte count"
+            ),
+        )),
+        Ok(raw) => parse_max_object_bytes(&raw),
+    }
+}
+
+/// Parse a set [`MAX_OBJECT_BYTES_ENV`] value: a positive integer.
+fn parse_max_object_bytes(raw: &str) -> Result<u64, WaferError> {
+    match raw.parse::<u64>() {
+        Ok(v) if v > 0 => Ok(v),
+        _ => Err(WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "wafer-run/s3 init: {MAX_OBJECT_BYTES_ENV}={raw:?} is invalid: expected a \
+                 positive integer byte count (unset it to use the default \
+                 {DEFAULT_MAX_OBJECT_BYTES})"
+            ),
+        )),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -151,6 +199,15 @@ mod tests {
             _access: wafer_block::types::ResourceAccess,
         ) -> bool {
             false
+        }
+    }
+
+    #[test]
+    fn max_object_bytes_accepts_only_a_positive_integer() {
+        assert_eq!(super::parse_max_object_bytes("5").expect("valid"), 5);
+        for bad in ["0", "-1", "abc", "", "1.5"] {
+            let err = super::parse_max_object_bytes(bad).expect_err(bad);
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
         }
     }
 

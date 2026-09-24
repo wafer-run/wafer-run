@@ -4,12 +4,21 @@ use thiserror::Error;
 use wafer_block::{InputStream, OutputStream};
 use wafer_block_macro::wafer_async_trait;
 
+/// Default read cap, in bytes, the `LocalStorageService` and
+/// `S3StorageService` backends apply to [`StorageService::get`] and
+/// [`StorageService::get_streaming`]: 100 MiB. A read past it fails with
+/// [`StorageError::TooLarge`] instead of pulling the object into memory.
+pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Errors returned by [`StorageService`] operations.
 #[derive(Error, Debug)]
 pub enum StorageError {
     /// No object exists at the requested folder/key.
     #[error("object not found")]
     NotFound,
+    /// The object is larger than the backend's read limit.
+    #[error("object too large: {0}")]
+    TooLarge(String),
     /// Backend-internal failure.
     #[error("storage error: {0}")]
     Internal(String),
@@ -56,7 +65,8 @@ pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.put(folder, key, &bytes, content_type).await
     }
 
-    /// Get retrieves an object and its metadata from a folder.
+    /// Get retrieves an object and its metadata from a folder. A backend
+    /// refuses an object over its read cap with [`StorageError::TooLarge`].
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError>;
 
     /// Streaming variant of [`get`](Self::get): retrieve an object as an
@@ -85,7 +95,9 @@ pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// CreateFolder creates a new storage folder.
     async fn create_folder(&self, name: &str, public: bool) -> Result<(), StorageError>;
 
-    /// DeleteFolder removes a storage folder and all its contents.
+    /// DeleteFolder removes a storage folder and all its contents. `Ok`
+    /// means every object is gone: a backend that removed only some of them
+    /// returns `Err`.
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError>;
 
     /// ListFolders returns all storage folders.

@@ -22,6 +22,7 @@ use crate::interfaces::handler_util::{
 fn storage_error_to_wafer(e: StorageError) -> WaferError {
     match e {
         StorageError::NotFound => WaferError::new(ErrorCode::NotFound, "object not found"),
+        StorageError::TooLarge(msg) => WaferError::new(ErrorCode::ResourceExhausted, msg),
         StorageError::Internal(msg) => WaferError::new(ErrorCode::Internal, msg),
         StorageError::Other(err) => WaferError::new(ErrorCode::Internal, err.to_string()),
     }
@@ -470,5 +471,19 @@ pub async fn handle_put_streaming(
     {
         Ok(()) => OutputStream::respond(vec![]),
         Err(e) => OutputStream::error(storage_error_to_wafer(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A read over a backend's size cap is the caller's resource limit, not a
+    /// server fault.
+    #[test]
+    fn too_large_maps_to_resource_exhausted() {
+        let err = storage_error_to_wafer(StorageError::TooLarge("over".into()));
+        assert_eq!(err.code, ErrorCode::ResourceExhausted);
+        assert_eq!(err.message, "over");
     }
 }
