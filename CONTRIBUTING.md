@@ -123,6 +123,35 @@ go/                      Go bindings.
 
 5. Open the PR. CI must pass before merge: the `ci / ci-ok` check is green only when every job in `.github/workflows/ci-jobs.yml` succeeded. A new CI job goes in that file and in `ci-ok`'s `needs` (`scripts/lint-workflows.sh` fails the build otherwise), and every action is pinned by full commit SHA. Squash-merge is the default.
 
+## Security advisories
+
+The `audit` job (`scripts/check.sh audit`, part of `ci / ci-ok`) runs
+`cargo audit` against the RustSec database as it is **at run time**, not as
+it was when a branch was cut. When an advisory is published against a crate
+already in `Cargo.lock`, every open PR and every push to `main` turns red at
+once, including PRs that touch nothing near that crate, until someone
+handles the advisory on `main`. The weekly scheduled run of
+`.github/workflows/audit.yml` reports it even when no PR is open.
+
+To handle one, in a PR of its own:
+
+1. Run `cargo audit` locally to see the advisory, the affected versions, and
+   the `patched` range. `cargo tree --locked -i <crate>@<version>` shows
+   who pulls the crate in.
+2. If a patched version is semver-compatible, update just that crate
+   (`cargo update -p <crate>@<old> --precise <new>`) and commit
+   `Cargo.lock`. This is the normal case.
+3. If the fix needs a newer major of a direct dependency, bump it in the
+   owning crate's `Cargo.toml` and fix what breaks.
+4. Only when no fix is reachable (no patched release, or a transitive
+   dependency pins the vulnerable line), add the id to
+   `.cargo/audit.toml`'s `ignore` list: on its own line, directly below a
+   comment block with a `REASON:` line (why it cannot be fixed now and
+   where the crate comes from, including whether it reaches a production
+   artifact) and a `REMOVE WHEN:` line (the concrete condition that retires
+   the ignore). `scripts/lint-workflows.sh` fails CI when either line is
+   missing. Remove the entry as soon as its condition is met.
+
 ## Worktrees for parallel work
 
 When you have multiple in-flight branches and want to avoid context-switching the main checkout, use a worktree:
