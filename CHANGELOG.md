@@ -127,10 +127,55 @@
   it is a request, not a grant: an embedder that loads untrusted guests MUST
   approve or narrow it (the `capabilities` block-config subkey, or refusing
   the guest — impresspress refuses any sandbox guest that declares one,
-  `CAP_HEADERS`). Note that `Wafer::seal` currently replaces the
-  capabilities passed to `WasmiBlock::load_with_capabilities*` with the
-  guest's declared ones (∩ config), so a loader-supplied cap does not bound
-  the declaration yet; WR-09 fixes that.
+  `CAP_HEADERS`), or load it with `WasmiBlock::load_with_capabilities*`,
+  whose capabilities bound what the guest's declaration can obtain.
+- The capabilities an embedder loads a WASM guest with are an upper bound.
+  `Wafer::seal` computed each block's capabilities from the guest's own
+  `__wafer_info` declaration (∩ config) and installed them, replacing the set
+  passed to `WasmiBlock::load_with_capabilities*` /
+  `load_with_engine*` — so a guest loaded with `BlockCapabilities::none()`
+  that declared `collections: Any`, raw SQL or a header opt-in ran with them.
+  The guest now enforces `loaded ∩ declared ∩ config`, and
+  `Wafer::effective_capabilities` reports that set. `WasmiBlock::load`,
+  `load_from_bytes*` (and the lockfile loader built on them) state no bound:
+  the guest runs under its declaration ∩ config, as before. The `Block` trait
+  documents the rule on `runtime_capabilities_mut`; `BlockCapabilities` and
+  `HeaderPolicy` derive `PartialEq`/`Eq`.
+- `Wafer::seal` runs once. A second call — after a successful seal or a
+  failed one — returns the new `RuntimeError::AlreadySealed`, and
+  `Wafer::start`/`start_with_priority`, which seal, refuse a runtime already
+  sealed. A second pass recomputed capabilities after the first had consumed
+  each block config's `capabilities` narrowing, widening every narrowed WASM
+  block back to its declaration; and a seal refused for rejected grants could
+  be retried into success, since the refusal drained the rejections. New
+  `Wafer::is_sealed`. The Node binding's `start()` and the C ABI's
+  `wafer_start` (Go `Start`) seal only a runtime `resolve()` has not; a second
+  `resolve()` / `wafer_resolve` reports the error.
+- A block `seal()` downloads from the registry is admitted like a
+  code-registered one. It is registered under its unversioned `{org}/{block}`
+  (a version selects the artifact; the block's tables, config keys and grants
+  belong to `{org}/{block}` whatever version runs), must report that name
+  (`BlockNameMismatch`), and passes `BlockInfo::validate`, including the
+  config-key prefix rule — it could declare another block's secret, or an
+  unprefixed infrastructure key, and receive its value in its `Init`
+  payload. A versioned reference (`acme/widget@1.2.0`) becomes an alias of
+  the identity, aliases that targeted it are retargeted, and block config
+  written under it becomes the block's config (config under both names is a
+  `Config` error). One runtime holds one version of a block: a second
+  version, or a download whose name a registered block already has, is
+  `DuplicateBlock`. Blocks named only by a flow step, route or block config
+  are now downloaded and registered before the grant gate and the capability
+  computation, so their rejected grants refuse boot (`GrantsRejected`)
+  instead of being dropped, and they get effective capabilities (they kept
+  none). `block_infos()` and the startup snapshot therefore carry the
+  registration name for every block.
+- The `{ORG}__{BLOCK}__` config-key prefix rule moved into
+  `BlockInfo::validate`, which now takes the registration name:
+  `validate(&self, registered_name: &str)`, failing with the new
+  `BlockInfoError::ConfigVarPrefix { block, key, prefix }`.
+  `RuntimeError::ConfigVarPrefix` is removed — registration reports the
+  failure as `RuntimeError::InvalidBlockInfo`. The prefix derivation is public
+  as `BlockInfo::config_var_prefix(block_name)`.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`
