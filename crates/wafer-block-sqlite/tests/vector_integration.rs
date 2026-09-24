@@ -19,7 +19,8 @@ async fn ingest_then_query_returns_ranked_matches() {
     }
     use wafer_block_fastembed::FastembedService;
 
-    let emb = FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap();
+    let emb =
+        FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2", "data/models").unwrap();
     let vec_svc = SqliteVecService::open_in_memory().unwrap();
     vec_svc
         .create_index(VectorIndexConfig {

@@ -820,10 +820,11 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Add a column to an existing table.
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError>;
 
-    /// Apply the resolved STRICT_SCHEMA flag
-    /// (`WAFER_RUN__DATABASE__STRICT_SCHEMA`). Called once at lifecycle `Init`
-    /// by the shared database handler, which reads the value from the node
-    /// config on `ctx`.
+    /// Apply the resolved STRICT_SCHEMA flag. Called once at lifecycle `Init`
+    /// by the shared database handler, with the value the database block read
+    /// from its own Init config (`WAFER_RUN__DATABASE__STRICT_SCHEMA` on
+    /// `wafer-run/database`, `WAFER_RUN__POSTGRES__STRICT_SCHEMA` on
+    /// `wafer-run/postgres`).
     ///
     /// SQL backends store it so the shared executor
     /// ([`DbExec::strict_schema`](super::exec::DbExec::strict_schema)) can skip

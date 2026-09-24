@@ -14,9 +14,7 @@ use tokio::{
     net::TcpListener,
 };
 use wafer_block::StreamEvent;
-use wafer_block_network::service::{
-    HttpNetworkLimits, HttpNetworkService, NetworkService, Request, DEFAULT_MAX_RESPONSE_BYTES,
-};
+use wafer_block_network::service::{HttpNetworkService, NetworkLimits, NetworkService, Request};
 
 /// Serve one HTTP/1.1 response per connection: the head at once, then
 /// `chunks` one-byte chunks `gap` apart, then the terminating chunk.
@@ -58,9 +56,9 @@ fn get(url: &str) -> Request {
 }
 
 /// Total 1 s, idle 1 s; the body takes ~2 s at one chunk per 250 ms.
-fn limits() -> HttpNetworkLimits {
-    HttpNetworkLimits {
-        max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+fn limits() -> NetworkLimits {
+    NetworkLimits {
+        max_response_bytes: wafer_core::interfaces::network::service::DEFAULT_MAX_RESPONSE_BYTES,
         connect_timeout: Duration::from_secs(1),
         read_timeout: Duration::from_secs(1),
         request_timeout: Duration::from_secs(1),
@@ -138,7 +136,7 @@ async fn buffered_request_is_bounded_by_the_total_timeout() {
 #[tokio::test]
 async fn streaming_body_is_bounded_by_the_stream_timeout_when_set() {
     let url = trickle_server(8, Duration::from_millis(250)).await;
-    let svc = HttpNetworkService::new(HttpNetworkLimits {
+    let svc = HttpNetworkService::new(NetworkLimits {
         stream_timeout: Some(Duration::from_secs(1)),
         ..limits()
     });

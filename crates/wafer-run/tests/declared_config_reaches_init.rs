@@ -94,3 +94,115 @@ async fn s3_endpoint_is_optional() {
     assert!(report.broken.is_empty(), "{report:?}");
     assert_eq!(report.ok, vec![S3.to_string()]);
 }
+
+/// A runtime whose only config is `source`, with nothing registered.
+fn runtime(source: &[(&str, &str)]) -> Wafer {
+    for (key, _) in source {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "{key} is set in the process env; this test proves the ConfigSource path"
+        );
+    }
+    let data: HashMap<String, String> = source
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .config_source(Arc::new(StaticConfigSource::new(data)))
+        .build()
+        .expect("build")
+}
+
+mod network {
+    use std::{sync::Mutex, time::Duration};
+
+    use wafer_core::interfaces::network::service::{
+        NetworkError, NetworkLimits, NetworkService, Request, Response, CONNECT_TIMEOUT_SECS_KEY,
+        STREAM_TIMEOUT_SECS_KEY,
+    };
+
+    use super::*;
+
+    const NETWORK: &str = "wafer-run/network";
+
+    /// Records the limits the network block hands it.
+    #[derive(Default)]
+    struct RecordingNetwork {
+        configured: Mutex<Vec<NetworkLimits>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NetworkService for RecordingNetwork {
+        async fn do_request(&self, _req: &Request) -> Result<Response, NetworkError> {
+            Err(NetworkError::Other("not used".into()))
+        }
+
+        fn configure(&self, limits: NetworkLimits) {
+            self.configured.lock().unwrap().push(limits);
+        }
+    }
+
+    /// The limits the ConfigSource holds reach the service at the block's
+    /// Init; one it leaves unset keeps its default.
+    #[tokio::test]
+    async fn network_init_hands_the_config_source_limits_to_the_service() {
+        let mut wafer = runtime(&[
+            (CONNECT_TIMEOUT_SECS_KEY, "3"),
+            (STREAM_TIMEOUT_SECS_KEY, "60"),
+        ]);
+        let service = Arc::new(RecordingNetwork::default());
+        wafer_core::service_blocks::network::register_with(&mut wafer, service.clone())
+            .expect("register");
+        wafer.init_block(NETWORK).await.expect("Init");
+
+        let configured = service.configured.lock().unwrap().clone();
+        assert_eq!(
+            configured,
+            vec![NetworkLimits {
+                connect_timeout: Duration::from_secs(3),
+                stream_timeout: Some(Duration::from_secs(60)),
+                ..NetworkLimits::default()
+            }],
+            "Init must configure the service once, with the ConfigSource's values"
+        );
+    }
+
+    /// An invalid limit in the ConfigSource fails Init, naming the var.
+    #[tokio::test]
+    async fn an_invalid_network_limit_fails_init() {
+        let mut wafer = runtime(&[(CONNECT_TIMEOUT_SECS_KEY, "soon")]);
+        let service = Arc::new(RecordingNetwork::default());
+        wafer_core::service_blocks::network::register_with(&mut wafer, service.clone())
+            .expect("register");
+        let message = permanent_message(wafer.init_block(NETWORK).await);
+        assert!(message.contains(CONNECT_TIMEOUT_SECS_KEY), "{message}");
+        assert!(service.configured.lock().unwrap().is_empty());
+    }
+}
+
+mod database {
+    use wafer_block_sqlite::service::SQLiteDatabaseService;
+    use wafer_core::interfaces::database::{
+        exec::DbExec, handler::STRICT_SCHEMA_CONFIG_KEY, service::DatabaseService,
+    };
+
+    use super::*;
+
+    /// STRICT_SCHEMA set only in the ConfigSource reaches the backend at the
+    /// database block's Init.
+    #[tokio::test]
+    async fn database_init_reads_strict_schema_from_the_config_source() {
+        let mut wafer = runtime(&[(STRICT_SCHEMA_CONFIG_KEY, "true")]);
+        let service = Arc::new(SQLiteDatabaseService::open_in_memory().expect("sqlite"));
+        let as_service: Arc<dyn DatabaseService> = service.clone();
+        wafer_core::service_blocks::database::register_with(&mut wafer, as_service)
+            .expect("register");
+        wafer.init_block("wafer-run/database").await.expect("Init");
+        assert!(
+            DbExec::strict_schema(service.as_ref()),
+            "the ConfigSource's STRICT_SCHEMA must reach the backend"
+        );
+    }
+}

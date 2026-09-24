@@ -4,6 +4,35 @@
 
 ### Breaking changes
 
+- The `wafer-run/network` block's declared limits
+  (`WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`, `…__CONNECT_TIMEOUT_SECS`,
+  `…__READ_TIMEOUT_SECS`, `…__REQUEST_TIMEOUT_SECS`,
+  `…__STREAM_TIMEOUT_SECS`) come from the embedder's `ConfigSource`: the
+  block reads them from its `lifecycle(Init)` config and hands them to its
+  service through the new `NetworkService::configure(NetworkLimits)` (a
+  default no-op for backends without such knobs). An invalid value fails
+  Init, naming the key. `HttpNetworkService::from_env` is removed — the
+  process environment was the only source it read; construct with
+  `HttpNetworkService::new(NetworkLimits::default())` and let Init apply
+  the configured limits. `HttpNetworkLimits`, the `*_KEY` constants and the
+  `DEFAULT_*` limits move to `wafer_core::interfaces::network::service`
+  (`HttpNetworkLimits` is now `NetworkLimits`).
+- STRICT_SCHEMA comes from the database block's own Init config.
+  `wafer-run/database` reads `WAFER_RUN__DATABASE__STRICT_SCHEMA` from its
+  Init payload, not from `ctx.config_get` (the embedder's synchronous
+  snapshot, which a `ConfigSource`-only embedder never fills), and
+  `wafer-run/postgres` declares and reads `WAFER_RUN__POSTGRES__STRICT_SCHEMA`
+  (it cannot declare the `WAFER_RUN__DATABASE__` key). A postgres-block
+  deployment that set `WAFER_RUN__DATABASE__STRICT_SCHEMA` sets the
+  postgres key instead. `database::handler::handle_lifecycle` takes the
+  resolved flag (`strict_schema: bool`) in place of the context;
+  `handler::strict_schema_from(event, key)` reads it.
+- `FastembedService::new(model_id, cache_dir)` and
+  `FastembedService::default_model(cache_dir)` take the model cache
+  directory from the embedder; the service no longer reads
+  `WAFER_RUN__FASTEMBED__CACHE_DIR` from the process environment (the old
+  default was `data/models`).
+
 - `wafer-ffi`: `wafer_resolve`, `wafer_start`, `wafer_stop` and `wafer_run`
   take their callback as `Option<WaferDoneCb>` (the C `wafer_done_cb`, NULL
   allowed by the type) and return `int`: `WAFER_ACCEPTED` (0) when they took

@@ -26,7 +26,7 @@ use wafer_block::{
     wire::network::{Request as WireRequest, ResponseHeader},
     Context, Message, OutputStream, WaferError,
 };
-use wafer_block_network::service::{HttpNetworkLimits, HttpNetworkService};
+use wafer_block_network::service::{HttpNetworkService, NetworkLimits};
 use wafer_core::interfaces::network::handler::handle_message;
 use wiremock::{
     matchers::{method, path},
@@ -91,10 +91,10 @@ impl Context for GrantCtx {
 }
 
 async fn call(op: &str, ctx: &GrantCtx, url: &str) -> OutputStream {
-    call_with(HttpNetworkLimits::default(), op, ctx, url).await
+    call_with(NetworkLimits::default(), op, ctx, url).await
 }
 
-async fn call_with(limits: HttpNetworkLimits, op: &str, ctx: &GrantCtx, url: &str) -> OutputStream {
+async fn call_with(limits: NetworkLimits, op: &str, ctx: &GrantCtx, url: &str) -> OutputStream {
     let svc = HttpNetworkService::new(limits);
     let body = codec::encode(&WireRequest {
         method: "GET".into(),
@@ -199,9 +199,9 @@ async fn buffered_total_timeout_covers_the_whole_redirect_chain() {
         .mount(&server)
         .await;
 
-    let limits = HttpNetworkLimits {
+    let limits = NetworkLimits {
         request_timeout: std::time::Duration::from_secs(1),
-        ..HttpNetworkLimits::default()
+        ..NetworkLimits::default()
     };
     let ctx = GrantCtx::allowing(&format!("{}/api", server.uri()));
     let started = std::time::Instant::now();

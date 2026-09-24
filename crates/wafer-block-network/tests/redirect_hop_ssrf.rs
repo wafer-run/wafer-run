@@ -20,7 +20,7 @@ use wafer_block::{
     Context, Message, OutputStream, WaferError,
 };
 use wafer_block_network::service::{
-    HttpNetworkLimits, HttpNetworkService, NetworkError, NetworkService, Request, Response,
+    HttpNetworkService, NetworkError, NetworkLimits, NetworkService, Request, Response,
 };
 use wafer_core::interfaces::network::handler::handle_message;
 
@@ -96,11 +96,11 @@ async fn redirect_to(target: &str) -> WaferError {
         target: target.to_string(),
         // Short timeouts so a missing gate fails fast instead of hanging on
         // an unroutable address.
-        real: HttpNetworkService::new(HttpNetworkLimits {
+        real: HttpNetworkService::new(NetworkLimits {
             connect_timeout: Duration::from_secs(1),
             read_timeout: Duration::from_secs(1),
             request_timeout: Duration::from_secs(2),
-            ..HttpNetworkLimits::default()
+            ..NetworkLimits::default()
         }),
     };
     let ctx = AnyNetwork(BlockCapabilities {

@@ -5,95 +5,9 @@ use wafer_block::{common::ErrorCode, OutputStream, WaferError};
 use wafer_block_macro::wafer_async_trait;
 // Re-export the trait and types from wafer-core.
 pub use wafer_core::interfaces::network::service::{
-    NetworkError, NetworkService, Request, Response, ResponseHead,
+    NetworkError, NetworkLimits, NetworkService, Request, Response, ResponseHead,
 };
 use wafer_net_security::SsrfFilteringResolver;
-
-/// Config var key controlling the maximum response body size accepted by
-/// `HttpNetworkService`. Read from the process env **once** at service
-/// construction ([`HttpNetworkService::from_env`], PERF-04). When unset,
-/// defaults to [`DEFAULT_MAX_RESPONSE_BYTES`]; a present-but-invalid value
-/// is an explicit construction error, never a silent fallback. Changes
-/// take effect on the next boot.
-///
-/// Declared on the `wafer-run/network` block's `BlockInfo::config_keys` so
-/// the admin UI can surface and edit it (see `service_blocks::network`).
-pub const MAX_RESPONSE_BYTES_KEY: &str = "WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES";
-
-/// Config var key for [`HttpNetworkLimits::connect_timeout`], in whole
-/// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`].
-pub const CONNECT_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__CONNECT_TIMEOUT_SECS";
-
-/// Config var key for [`HttpNetworkLimits::read_timeout`], in whole seconds.
-/// Read like [`MAX_RESPONSE_BYTES_KEY`].
-pub const READ_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__READ_TIMEOUT_SECS";
-
-/// Config var key for [`HttpNetworkLimits::request_timeout`], in whole
-/// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`].
-pub const REQUEST_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__REQUEST_TIMEOUT_SECS";
-
-/// Config var key for [`HttpNetworkLimits::stream_timeout`], in whole
-/// seconds. Read like [`MAX_RESPONSE_BYTES_KEY`], except that unset or empty
-/// means no total (`None`) rather than a default.
-pub const STREAM_TIMEOUT_SECS_KEY: &str = "WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS";
-
-/// Default response body cap: 50 MiB. SEC-020 — prevents unbounded memory
-/// growth from hostile or runaway upstream servers.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
-
-/// Default [`HttpNetworkLimits::connect_timeout`]: 10 s.
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Default [`HttpNetworkLimits::read_timeout`]: 30 s.
-pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Default [`HttpNetworkLimits::request_timeout`]: 30 s.
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Size and time limits of an [`HttpNetworkService`].
-///
-/// The timeouts are split so a long streaming download is bounded by how long
-/// the server goes quiet, not by how long the whole body takes:
-/// `connect_timeout` and `read_timeout` apply to every request, the buffered
-/// `do_request` also has the total `request_timeout`, and
-/// `do_request_streaming` has a total only when `stream_timeout` is set.
-///
-/// Without `stream_timeout`, an upstream that trickles its body (one byte
-/// just inside every `read_timeout`) holds a stream open for up to
-/// `max_response_bytes` × `read_timeout` — in practice, indefinitely. Set it
-/// when the streams this service serves have a known upper duration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HttpNetworkLimits {
-    /// Response body cap in bytes (SEC-020), on both paths.
-    pub max_response_bytes: usize,
-    /// Longest wait to establish a connection (DNS, TCP and TLS).
-    pub connect_timeout: Duration,
-    /// Longest the connection may go without delivering a byte, while waiting
-    /// for the response head and between body chunks. Resets on every read.
-    pub read_timeout: Duration,
-    /// Total time allowed for a buffered `do_request`, response body included;
-    /// through the network handler, for the whole redirect chain (see
-    /// `NetworkService::buffered_deadline`). Not applied to
-    /// `do_request_streaming`, whose body may legitimately take longer than
-    /// any fixed total while `read_timeout` still bounds a stall.
-    pub request_timeout: Duration,
-    /// Total time allowed for a `do_request_streaming` exchange, response
-    /// body included, or `None` for no total (the default): a stream that
-    /// keeps delivering bytes then lasts as long as its body.
-    pub stream_timeout: Option<Duration>,
-}
-
-impl Default for HttpNetworkLimits {
-    fn default() -> Self {
-        Self {
-            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
-            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            read_timeout: DEFAULT_READ_TIMEOUT,
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
-            stream_timeout: None,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // HTTP client concrete implementation (reqwest async)
@@ -101,92 +15,53 @@ impl Default for HttpNetworkLimits {
 
 /// Async reqwest-based network service for outbound HTTP calls.
 ///
-/// The client is lazily initialised on first use. If
-/// `reqwest::Client::builder().build()` fails (e.g. the platform TLS
-/// stack can't be configured) the error is cached and returned to
-/// every caller — the old code silently fell back to
-/// `reqwest::Client::new()`, which has no SSRF resolver, no timeout,
-/// and no redirect policy, so a TLS build failure quietly disabled
-/// the security middleware.
+/// Runs under the [`NetworkLimits`] it was constructed with until
+/// [`NetworkService::configure`] replaces them — which the `wafer-run/network`
+/// block does at its `lifecycle(Init)`, with the limits its config declares.
+///
+/// The client for the current limits is built lazily on first use. If
+/// `reqwest::Client::builder().build()` fails (e.g. the platform TLS stack
+/// can't be configured) the error is cached and returned to every caller,
+/// never replaced by a client without the SSRF resolver, timeouts or
+/// redirect policy.
 #[derive(Debug)]
 pub struct HttpNetworkService {
-    client: std::sync::OnceLock<Result<reqwest::Client, String>>,
-    /// Parsed once at construction (PERF-04), never per request.
-    limits: HttpNetworkLimits,
-}
-
-/// Read `key` from the process env as a positive integer, or `default` when
-/// unset. A present value that is not a positive integer is an error naming
-/// the key and the value, never a silent fallback to the default.
-fn positive_env<T>(key: &str, default: T) -> Result<T, NetworkError>
-where
-    T: std::str::FromStr + PartialOrd + From<u8> + std::fmt::Display,
-{
-    match std::env::var(key) {
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(NetworkError::Other(format!(
-            "{key} is not valid UTF-8: expected a positive integer"
-        ))),
-        Ok(raw) => match raw.parse::<T>() {
-            Ok(v) if v > T::from(0) => Ok(v),
-            _ => Err(NetworkError::Other(format!(
-                "{key}={raw:?} is invalid: expected a positive integer (unset it to use the \
-                 default {default})"
-            ))),
-        },
-    }
-}
-
-/// Read `key` like [`positive_env`], except that unset or empty is `None`.
-fn optional_positive_env(key: &str) -> Result<Option<u64>, NetworkError> {
-    match std::env::var(key) {
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Ok(raw) if raw.is_empty() => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(NetworkError::Other(format!(
-            "{key} is not valid UTF-8: expected a positive integer"
-        ))),
-        Ok(raw) => match raw.parse::<u64>() {
-            Ok(v) if v > 0 => Ok(Some(v)),
-            _ => Err(NetworkError::Other(format!(
-                "{key}={raw:?} is invalid: expected a positive integer (unset it for no limit)"
-            ))),
-        },
-    }
+    /// The limits in force and the client built for them. `configure` swaps
+    /// in a fresh pair; a request keeps the pair it started with.
+    current: std::sync::RwLock<Arc<Configured>>,
 }
 
 impl HttpNetworkService {
-    /// Construct the service, reading [`MAX_RESPONSE_BYTES_KEY`],
-    /// [`CONNECT_TIMEOUT_SECS_KEY`], [`READ_TIMEOUT_SECS_KEY`],
-    /// [`REQUEST_TIMEOUT_SECS_KEY`] and [`STREAM_TIMEOUT_SECS_KEY`] from the
-    /// process env exactly once.
-    ///
-    /// - Unset → the matching [`HttpNetworkLimits::default`] value (for
-    ///   [`STREAM_TIMEOUT_SECS_KEY`], unset or empty → no total).
-    /// - Present but not a positive integer → explicit error, so a typo'd
-    ///   limit fails the boot loudly instead of silently reverting to the
-    ///   default.
-    pub fn from_env() -> Result<Self, NetworkError> {
-        let defaults = HttpNetworkLimits::default();
-        let secs = |key: &str, default: Duration| {
-            positive_env(key, default.as_secs()).map(Duration::from_secs)
-        };
-        Ok(Self::new(HttpNetworkLimits {
-            max_response_bytes: positive_env(MAX_RESPONSE_BYTES_KEY, defaults.max_response_bytes)?,
-            connect_timeout: secs(CONNECT_TIMEOUT_SECS_KEY, defaults.connect_timeout)?,
-            read_timeout: secs(READ_TIMEOUT_SECS_KEY, defaults.read_timeout)?,
-            request_timeout: secs(REQUEST_TIMEOUT_SECS_KEY, defaults.request_timeout)?,
-            stream_timeout: optional_positive_env(STREAM_TIMEOUT_SECS_KEY)?
-                .map(Duration::from_secs),
-        }))
+    /// Construct under `limits`. The underlying `reqwest::Client` is built on
+    /// the first request.
+    pub fn new(limits: NetworkLimits) -> Self {
+        Self {
+            current: std::sync::RwLock::new(Configured::new(limits)),
+        }
     }
 
-    /// Construct with explicit limits (no env read). The underlying
-    /// `reqwest::Client` is built on the first request.
-    pub fn new(limits: HttpNetworkLimits) -> Self {
-        Self {
-            client: std::sync::OnceLock::new(),
+    /// The limits and client a request runs under.
+    fn current(&self) -> Arc<Configured> {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// One set of limits and the client that applies them.
+#[derive(Debug)]
+struct Configured {
+    limits: NetworkLimits,
+    client: std::sync::OnceLock<Result<reqwest::Client, String>>,
+}
+
+impl Configured {
+    fn new(limits: NetworkLimits) -> Arc<Self> {
+        Arc::new(Self {
             limits,
-        }
+            client: std::sync::OnceLock::new(),
+        })
     }
 
     /// Borrow the shared reqwest client, building it on first call. A
@@ -403,9 +278,19 @@ where
 
 #[wafer_async_trait]
 impl NetworkService for HttpNetworkService {
+    /// Requests issued from now on run under `limits`, on a client built for
+    /// them; a request already in flight keeps the limits it started with.
+    fn configure(&self, limits: NetworkLimits) {
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Configured::new(limits);
+    }
+
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
-        let response = self
-            .send_request(req, Some(self.limits.request_timeout))
+        let current = self.current();
+        let response = current
+            .send_request(req, Some(current.limits.request_timeout))
             .await?;
         let status_code = response.status().as_u16();
         let headers = collect_headers(&response);
@@ -415,7 +300,7 @@ impl NetworkService for HttpNetworkService {
         // stream and bail once the cap is exceeded (handles chunked /
         // unknown-length responses without buffering the whole thing in
         // reqwest's internal Bytes first).
-        let cap = self.limits.max_response_bytes;
+        let cap = current.limits.max_response_bytes;
         check_advertised_len(&response, cap)?;
 
         let mut body: Vec<u8> = Vec::new();
@@ -442,7 +327,8 @@ impl NetworkService for HttpNetworkService {
     /// same total, so a direct caller is bounded too; through the network
     /// handler this one bounds the whole redirect chain.
     async fn buffered_deadline(&self) {
-        tokio::time::sleep(self.limits.request_timeout).await;
+        let total = self.current().limits.request_timeout;
+        tokio::time::sleep(total).await;
     }
 
     /// Streams the response body via reqwest's `bytes_stream` instead of
@@ -459,18 +345,21 @@ impl NetworkService for HttpNetworkService {
     ///
     /// A connection that goes quiet for `read_timeout` ends the stream with an
     /// `Error` terminal. The total is `stream_timeout` (see
-    /// [`HttpNetworkLimits`]): unset, a body that keeps arriving streams for
+    /// [`NetworkLimits`]): unset, a body that keeps arriving streams for
     /// as long as it takes; set, the exchange ends with an `Error` terminal
     /// once it has run that long.
     async fn do_request_streaming(
         &self,
         req: &Request,
     ) -> Result<(ResponseHead, OutputStream), NetworkError> {
-        let response = self.send_request(req, self.limits.stream_timeout).await?;
+        let current = self.current();
+        let response = current
+            .send_request(req, current.limits.stream_timeout)
+            .await?;
         let status_code = response.status().as_u16();
         let headers = collect_headers(&response);
 
-        let cap = self.limits.max_response_bytes;
+        let cap = current.limits.max_response_bytes;
         check_advertised_len(&response, cap)?;
 
         let head = ResponseHead {
@@ -509,7 +398,7 @@ mod tests {
     #[cfg(not(feature = "allow-private-network"))]
     #[tokio::test]
     async fn http_request_rejected_when_dns_returns_private_ip() {
-        let svc = HttpNetworkService::new(HttpNetworkLimits::default());
+        let svc = HttpNetworkService::new(NetworkLimits::default());
         // Use a URL whose host is NOT obviously private — `is_blocked_url`
         // only catches the `localhost` literal because that's what's in
         // the URL. We want to ensure the resolver kicks in, so we craft a
@@ -540,7 +429,7 @@ mod tests {
     #[cfg(not(feature = "allow-private-network"))]
     #[tokio::test]
     async fn streaming_request_rejected_for_private_address() {
-        let svc = HttpNetworkService::new(HttpNetworkLimits::default());
+        let svc = HttpNetworkService::new(NetworkLimits::default());
         let req = Request {
             method: "GET".into(),
             url: "http://localhost/".into(),
@@ -597,91 +486,47 @@ mod tests {
     }
 
     /// `client()` caches the built client across calls — two requests on
-    /// the same service must observe the same `&reqwest::Client`. This
-    /// is the contract that lets the OnceLock-of-Result pattern keep
-    /// the hot path branch-free after the first successful init.
+    /// the same limits must observe the same `&reqwest::Client`. This is
+    /// the contract that lets the OnceLock-of-Result pattern keep the hot
+    /// path branch-free after the first successful init.
     #[test]
     fn client_is_cached_across_calls() {
-        let svc = HttpNetworkService::new(HttpNetworkLimits::default());
-        let first = svc.client().expect("first build succeeds");
-        let second = svc.client().expect("second call returns cached client");
+        let svc = HttpNetworkService::new(NetworkLimits::default());
+        let current = svc.current();
+        let first = current.client().expect("first build succeeds");
+        let second = current.client().expect("second call returns cached client");
         // Same shared instance — the closure ran exactly once.
         assert!(std::ptr::eq(first, second));
     }
 
-    /// PERF-04: every limit is parsed exactly once, at construction.
-    /// Unset → documented default; valid → parsed value; present-but-invalid
-    /// (non-numeric, zero, negative, empty) → explicit construction error,
-    /// never a silent fallback to the default.
-    ///
-    /// All cases live in one test so the env mutation is serialized — cargo
-    /// runs `#[test]`s in parallel threads which would otherwise race on the
-    /// shared process env. (The other tests in this module deliberately use
-    /// `HttpNetworkService::new`, which never touches the env.)
+    /// `configure` puts later requests under the new limits, on a client
+    /// built for them: the old client's connect and read timeouts are baked
+    /// in, so it must not be reused.
     #[test]
-    fn from_env_parses_limits_once_with_default_and_loud_invalid() {
-        let keys = [
-            MAX_RESPONSE_BYTES_KEY,
-            CONNECT_TIMEOUT_SECS_KEY,
-            READ_TIMEOUT_SECS_KEY,
-            REQUEST_TIMEOUT_SECS_KEY,
-            STREAM_TIMEOUT_SECS_KEY,
-        ];
-        let prev: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
+    fn configure_replaces_the_limits_and_the_client() {
+        let svc = HttpNetworkService::new(NetworkLimits::default());
+        let before = svc.current();
+        before.client().expect("client builds");
 
-        for key in keys {
-            std::env::remove_var(key);
-        }
-        let svc = HttpNetworkService::from_env().expect("unset env uses the defaults");
-        assert_eq!(svc.limits, HttpNetworkLimits::default());
+        let limits = NetworkLimits {
+            max_response_bytes: 1234,
+            connect_timeout: Duration::from_secs(3),
+            read_timeout: Duration::from_secs(4),
+            request_timeout: Duration::from_secs(5),
+            stream_timeout: Some(Duration::from_secs(6)),
+        };
+        svc.configure(limits);
 
-        std::env::set_var(MAX_RESPONSE_BYTES_KEY, "1234");
-        std::env::set_var(CONNECT_TIMEOUT_SECS_KEY, "3");
-        std::env::set_var(READ_TIMEOUT_SECS_KEY, "4");
-        std::env::set_var(REQUEST_TIMEOUT_SECS_KEY, "5");
-        std::env::set_var(STREAM_TIMEOUT_SECS_KEY, "6");
-        let svc = HttpNetworkService::from_env().expect("valid values parse");
-        assert_eq!(
-            svc.limits,
-            HttpNetworkLimits {
-                max_response_bytes: 1234,
-                connect_timeout: Duration::from_secs(3),
-                read_timeout: Duration::from_secs(4),
-                request_timeout: Duration::from_secs(5),
-                stream_timeout: Some(Duration::from_secs(6)),
-            }
+        let after = svc.current();
+        assert_eq!(after.limits, limits);
+        assert!(
+            after.client.get().is_none(),
+            "the new limits must get a client of their own"
         );
-
-        // Empty is "no total" for the one optional limit.
-        std::env::set_var(STREAM_TIMEOUT_SECS_KEY, "");
-        let svc = HttpNetworkService::from_env().expect("empty stream timeout parses");
-        assert_eq!(svc.limits.stream_timeout, None);
-        std::env::set_var(STREAM_TIMEOUT_SECS_KEY, "6");
-
-        for key in keys {
-            let valid = std::env::var(key).expect("set above");
-            let empty_is_valid = key == STREAM_TIMEOUT_SECS_KEY;
-            for invalid in ["not-a-number", "0", "-5", "12.5", ""] {
-                if invalid.is_empty() && empty_is_valid {
-                    continue;
-                }
-                std::env::set_var(key, invalid);
-                let err = HttpNetworkService::from_env()
-                    .expect_err("present-but-invalid value must fail construction");
-                let msg = err.to_string();
-                assert!(
-                    msg.contains(key) && msg.contains(&format!("{invalid:?}")),
-                    "error must name the key and the offending value, got: {msg}"
-                );
-            }
-            std::env::set_var(key, valid);
-        }
-
-        for (key, prev) in keys.iter().zip(prev) {
-            match prev {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
+        assert_eq!(
+            before.limits,
+            NetworkLimits::default(),
+            "a request in flight keeps the limits it started with"
+        );
     }
 }
