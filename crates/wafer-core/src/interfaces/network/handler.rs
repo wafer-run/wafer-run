@@ -111,13 +111,32 @@ fn authorize_hop(ctx: &dyn Context, next: &Request, hops: usize) -> Result<(), W
     ctx.check_resource_access(&next.url, ResourceType::Network, ResourceAccess::Read)
 }
 
-/// Issue `request` through `service`, following redirects hop by hop.
+/// Issue `request` through `service`, following redirects hop by hop, within
+/// the service's [`buffered_deadline`](NetworkService::buffered_deadline) for
+/// the whole chain.
 ///
 /// The service never follows a redirect itself (see [`NetworkService`]); each
 /// hop comes back here, is authorized with [`authorize_hop`] — the same grant
 /// check the first URL passed — and is issued as a new service call, so the
 /// service's own per-request gates (SSRF on native) run on every hop too.
 async fn do_request_following(
+    service: &dyn NetworkService,
+    ctx: &dyn Context,
+    request: Request,
+) -> Result<Response, WaferError> {
+    let chain = std::pin::pin!(follow_buffered(service, ctx, request));
+    let deadline = std::pin::pin!(service.buffered_deadline());
+    match futures::future::select(chain, deadline).await {
+        futures::future::Either::Left((result, _)) => result,
+        futures::future::Either::Right(((), _)) => Err(WaferError::new(
+            ErrorCode::Unavailable,
+            "request timed out (the total covers every redirect hop)",
+        )),
+    }
+}
+
+/// The redirect loop of [`do_request_following`], without the deadline.
+async fn follow_buffered(
     service: &dyn NetworkService,
     ctx: &dyn Context,
     mut request: Request,
@@ -511,6 +530,10 @@ mod tests {
     struct ScriptedNet {
         redirects: HashMap<String, (u16, String)>,
         issued: std::sync::Mutex<Vec<Request>>,
+        /// How long each `do_request` takes.
+        hop_delay: std::time::Duration,
+        /// `buffered_deadline`; `None` keeps the trait default (never).
+        deadline: Option<std::time::Duration>,
     }
 
     impl ScriptedNet {
@@ -521,6 +544,8 @@ mod tests {
                     .map(|(from, status, to)| (from.to_string(), (*status, to.to_string())))
                     .collect(),
                 issued: std::sync::Mutex::new(Vec::new()),
+                hop_delay: std::time::Duration::ZERO,
+                deadline: None,
             }
         }
 
@@ -536,8 +561,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl NetworkService for ScriptedNet {
+        async fn buffered_deadline(&self) {
+            match self.deadline {
+                Some(d) => tokio::time::sleep(d).await,
+                None => futures::future::pending::<()>().await,
+            }
+        }
+
         async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
             self.issued.lock().unwrap().push(req.clone());
+            tokio::time::sleep(self.hop_delay).await;
             Ok(match self.redirects.get(&req.url) {
                 Some((status, location)) => Response {
                     status_code: *status,
@@ -634,6 +667,35 @@ mod tests {
         .await;
         assert_eq!(error_code(out).await, ErrorCode::Unavailable);
         assert_eq!(svc.issued_urls().len(), MAX_REDIRECT_HOPS + 1);
+    }
+
+    /// The buffered total bounds the whole redirect chain, not each hop: five
+    /// 40 ms hops (each well inside the 100 ms total) fail once the chain
+    /// passes 100 ms, and the chain stops being issued.
+    #[tokio::test]
+    async fn buffered_deadline_bounds_the_whole_redirect_chain() {
+        let mut svc = ScriptedNet::new(&[
+            ("https://api.example/1", 302, "/2"),
+            ("https://api.example/2", 302, "/3"),
+            ("https://api.example/3", 302, "/4"),
+            ("https://api.example/4", 302, "/5"),
+        ]);
+        svc.hop_delay = std::time::Duration::from_millis(40);
+        svc.deadline = Some(std::time::Duration::from_millis(100));
+        let ctx = GrantCtx::allowing(&["https://api.example/"]);
+        let out = run(
+            ServiceOp::NETWORK_DO_REQUEST,
+            &svc,
+            &ctx,
+            "https://api.example/1",
+        )
+        .await;
+        assert_eq!(error_code(out).await, ErrorCode::Unavailable);
+        assert!(
+            svc.issued_urls().len() < 5,
+            "the chain must stop at the deadline, issued: {:?}",
+            svc.issued_urls()
+        );
     }
 
     fn post_with_credentials(url: &str) -> Request {

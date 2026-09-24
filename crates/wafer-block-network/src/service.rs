@@ -60,9 +60,11 @@ pub struct HttpNetworkLimits {
     /// Longest the connection may go without delivering a byte, while waiting
     /// for the response head and between body chunks. Resets on every read.
     pub read_timeout: Duration,
-    /// Total time allowed for a buffered `do_request`, response body included.
-    /// Not applied to `do_request_streaming`, whose body may legitimately take
-    /// longer than any fixed total while `read_timeout` still bounds a stall.
+    /// Total time allowed for a buffered `do_request`, response body included;
+    /// through the network handler, for the whole redirect chain (see
+    /// `NetworkService::buffered_deadline`). Not applied to
+    /// `do_request_streaming`, whose body may legitimately take longer than
+    /// any fixed total while `read_timeout` still bounds a stall.
     pub request_timeout: Duration,
 }
 
@@ -396,6 +398,13 @@ impl NetworkService for HttpNetworkService {
             headers,
             body,
         })
+    }
+
+    /// `request_timeout` from the call. Each hop's own `do_request` carries the
+    /// same total, so a direct caller is bounded too; through the network
+    /// handler this one bounds the whole redirect chain.
+    async fn buffered_deadline(&self) {
+        tokio::time::sleep(self.limits.request_timeout).await;
     }
 
     /// Streams the response body via reqwest's `bytes_stream` instead of

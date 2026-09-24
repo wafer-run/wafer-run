@@ -68,6 +68,15 @@ pub trait NetworkService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Issue `req` and return the upstream response, or a transport error.
     async fn do_request(&self, req: &Request) -> Result<Response, NetworkError>;
 
+    /// Resolves once the total time allowed for one buffered request has
+    /// elapsed, counted from this call. The network handler races a buffered
+    /// request's whole redirect chain against it, so the total bounds the
+    /// chain rather than each hop. Streaming requests are not raced against
+    /// it. The default never resolves: a backend with no timer sets no total.
+    async fn buffered_deadline(&self) {
+        futures::future::pending::<()>().await
+    }
+
     /// Streaming variant of [`do_request`](Self::do_request): issue `req` and
     /// return the [`ResponseHead`] plus the response body as an
     /// [`OutputStream`] of chunks, rather than a fully-buffered [`Response`].

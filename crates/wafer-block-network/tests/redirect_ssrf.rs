@@ -91,7 +91,11 @@ impl Context for GrantCtx {
 }
 
 async fn call(op: &str, ctx: &GrantCtx, url: &str) -> OutputStream {
-    let svc = HttpNetworkService::new(HttpNetworkLimits::default());
+    call_with(HttpNetworkLimits::default(), op, ctx, url).await
+}
+
+async fn call_with(limits: HttpNetworkLimits, op: &str, ctx: &GrantCtx, url: &str) -> OutputStream {
+    let svc = HttpNetworkService::new(limits);
     let body = codec::encode(&WireRequest {
         method: "GET".into(),
         url: url.into(),
@@ -169,4 +173,52 @@ async fn redirect_inside_the_grant_is_followed_to_the_final_response() {
         "expected the final hop, not the 302"
     );
     assert_eq!(chunks[1], b"ok", "expected the final-hop body");
+}
+
+/// `request_timeout` bounds a buffered request's whole redirect chain: four
+/// hops of 400 ms each stay inside a 1 s total one by one, and the call still
+/// fails at about 1 s instead of running the ~1.6 s chain to the end.
+#[tokio::test]
+async fn buffered_total_timeout_covers_the_whole_redirect_chain() {
+    let server = MockServer::start().await;
+    for hop in 0..4 {
+        let next = format!("{}/api/h{}", server.uri(), hop + 1);
+        Mock::given(method("GET"))
+            .and(path(format!("/api/h{hop}")))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", next.as_str())
+                    .set_delay(std::time::Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/h4"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+        .mount(&server)
+        .await;
+
+    let limits = HttpNetworkLimits {
+        request_timeout: std::time::Duration::from_secs(1),
+        ..HttpNetworkLimits::default()
+    };
+    let ctx = GrantCtx::allowing(&format!("{}/api", server.uri()));
+    let started = std::time::Instant::now();
+    let out = call_with(
+        limits,
+        ServiceOp::NETWORK_DO_REQUEST,
+        &ctx,
+        &format!("{}/api/h0", server.uri()),
+    )
+    .await;
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::Unavailable),
+        other => panic!("expected the chain to time out, got {other:?}"),
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(1400),
+        "the chain must stop at the 1 s total, took {elapsed:?}"
+    );
 }

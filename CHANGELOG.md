@@ -52,13 +52,20 @@
   `WWW-Authenticate`. The `NetworkService` contract is now that an
   implementation MUST NOT follow redirects: return the 3xx with its
   `Location`, or fail the request if the platform cannot expose it (a
-  browser `fetch` in `manual` mode). `wafer_net_security::ssrf_redirect_policy`
-  and `wafer_net_security::MAX_REDIRECT_HOPS` are removed.
+  browser `fetch` in `manual` mode). New `NetworkService::buffered_deadline`
+  (default: never) resolves when a buffered request's total has elapsed; the
+  handler races the whole redirect chain against it, so the total bounds the
+  chain, not each hop (`HttpNetworkService`: `request_timeout`).
+  `wafer_net_security::ssrf_redirect_policy` and
+  `wafer_net_security::MAX_REDIRECT_HOPS` are removed.
 - A network capability entry matches paths on segment boundaries.
   `BlockCapabilities::allows_network_url` compared paths with a plain
   prefix, so `https://a.com/v1/public` also admitted `/v1/public-admin` and
   `/v1/publicity`. An entry now admits its own path and paths below it
   (`/v1/public/x`); an entry ending in `/` still admits everything under it.
+  A path whose part below the entry holds an encoded `/` or `\` (`%2F`,
+  `%5C`) is refused, since an upstream that decodes it could resolve `..`
+  out of the granted path.
 - `HttpNetworkService` timeouts no longer cut off streams.
   `do_request_streaming` shared the client's 30 s total timeout, so a
   download still making progress failed at 30 s. The client now has a

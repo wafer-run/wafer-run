@@ -153,14 +153,31 @@ fn path_prefix_covers(entry: &str, resource: &str) -> bool {
 /// Unlike [`path_prefix_covers`] (storage resources, which are named without
 /// a trailing separator), a trailing `/` here is meaningful: every URL path
 /// starts with one, and `https://a.com` parses to the path `/`.
+///
+/// The part of `target` beyond `pattern` must not contain an encoded `/` or
+/// `\` (`%2F`, `%5C`, any case). `url::Url` leaves those encoded, so
+/// `/v1/public/..%2Fadmin` would otherwise sit under `/v1/public` here while
+/// an upstream that decodes them resolves it to `/v1/admin`.
 fn url_path_covers(pattern: &str, target: &str) -> bool {
-    if pattern.ends_with('/') {
-        return target.starts_with(pattern);
-    }
-    target == pattern
-        || target
+    let rest = if pattern.ends_with('/') {
+        target.strip_prefix(pattern)
+    } else if target == pattern {
+        Some("")
+    } else {
+        target
             .strip_prefix(pattern)
-            .is_some_and(|rest| rest.starts_with('/'))
+            .filter(|rest| rest.starts_with('/'))
+    };
+    rest.is_some_and(|rest| !has_encoded_separator(rest))
+}
+
+/// Whether `path` contains a percent-encoded `/` or `\` (`%2F`, `%5C`).
+fn has_encoded_separator(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|w| {
+        w[0] == b'%'
+            && ((w[1] == b'2' && w[2].eq_ignore_ascii_case(&b'f'))
+                || (w[1] == b'5' && w[2].eq_ignore_ascii_case(&b'c')))
+    })
 }
 
 /// The HTTP headers (lowercase) a WASM guest may neither read nor write
@@ -1095,11 +1112,18 @@ mod tests {
         assert!(!c.allows_network_url("https://a.com/v1/publicity"));
         assert!(!c.allows_network_url("https://a.com/v1/public-admin/x"));
         assert!(!c.allows_network_url("https://a.com/v1/public%2Fadmin"));
+        // An encoded separator below the entry is refused: an upstream that
+        // decodes it would resolve `..` out of the granted path.
+        assert!(!c.allows_network_url("https://a.com/v1/public/..%2Fadmin"));
+        assert!(!c.allows_network_url("https://a.com/v1/public/..%2fadmin"));
+        assert!(!c.allows_network_url("https://a.com/v1/public/..%5Cadmin"));
+        assert!(c.allows_network_url("https://a.com/v1/public/a%20b"));
         assert!(!c.allows_network_url("https://a.com/v1/"));
         // A trailing `/` on the entry is a directory prefix.
         let dir = caps_allowing(&["https://a.com/v1/public/"]);
         assert!(dir.allows_network_url("https://a.com/v1/public/x"));
         assert!(!dir.allows_network_url("https://a.com/v1/public-admin/x"));
+        assert!(!dir.allows_network_url("https://a.com/v1/public/..%2Fadmin"));
         // A bare origin parses to the path `/` and admits the whole host.
         let origin = caps_allowing(&["https://a.com"]);
         assert!(origin.allows_network_url("https://a.com/anything/at/all"));
