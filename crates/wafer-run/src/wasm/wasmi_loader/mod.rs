@@ -36,7 +36,7 @@ pub(crate) use pool::wasm_pooling_host_override;
 // Host-facing pooling kill-switch env-var name, re-exported for `wasm::mod`
 // (and, through it, external embedders).
 pub use pool::WASM_POOLING_ENV;
-use pool::{PooledInstance, MAX_CALLS_PER_INSTANCE, MAX_POOLED_INSTANCES};
+use pool::{InstancePool, PoolScope, PooledInstance, MAX_CALLS_PER_INSTANCE};
 use wafer_block::abi::GuestAction;
 
 // ---------------------------------------------------------------------------
@@ -81,22 +81,21 @@ pub struct WasmiBlock {
     /// the two in sync.
     limits: ResourceLimits,
     /// Warm instance pool (PERF-01 Part B). Only the `handle` path checks
-    /// instances out/in, and only when [`is_poolable`](Self::is_poolable)
+    /// instances out/in, and only when [`pool_scope`](Self::pool_scope)
     /// says the block opted into reuse; `info()`/`lifecycle()` always
     /// instantiate fresh. Checkout grants exclusive ownership (a `Store` is
     /// single-caller by construction), so concurrent calls get distinct
     /// instances.
-    pool: parking_lot::Mutex<Vec<PooledInstance>>,
+    pool: parking_lot::Mutex<InstancePool>,
     /// Host-level kill switch, resolved once at load from
     /// [`WASM_POOLING_ENV`]. `false` forces every call cold regardless of
     /// the block's declared `InstanceMode`.
     pooling_enabled: bool,
-    /// Cached policy decision: does this block's declared
-    /// [`InstanceMode`](wafer_block::InstanceMode) opt into reuse
-    /// (`Singleton` / `PerFlow`)? Pinned on first use *after* `info()`
-    /// succeeds, so a transient `info()` failure cannot permanently pin the
-    /// block cold.
-    poolable: std::sync::OnceLock<bool>,
+    /// Cached policy decision: how this block's declared
+    /// [`InstanceMode`](wafer_block::InstanceMode) reuses instances. Pinned
+    /// on first use *after* `info()` succeeds, so a transient `info()`
+    /// failure cannot permanently pin the block cold.
+    pool_scope: std::sync::OnceLock<PoolScope>,
 }
 
 // Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44. The Mutexes
@@ -115,12 +114,18 @@ fn engine_for(limits: ResourceLimits) -> Engine {
 }
 
 impl WasmiBlock {
-    /// Read a WASM module from disk and compile it (native-only convenience wrapper).
+    /// Read a WASM module from disk and compile it with no embedder
+    /// capability bound (see [`load_from_bytes`](Self::load_from_bytes)) and
+    /// the per-call `limits` — pass
+    /// [`Wafer::resource_limits`](crate::Wafer::resource_limits) to run it
+    /// under the runtime's configured fuel budget and memory cap.
+    /// Native-only convenience wrapper over
+    /// [`load_from_bytes_with_limits`](Self::load_from_bytes_with_limits).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn load(path: &str) -> Result<Self, RuntimeError> {
+    pub fn load(path: &str, limits: ResourceLimits) -> Result<Self, RuntimeError> {
         let bytes = std::fs::read(path)
             .map_err(|e| RuntimeError::Wasm(format!("reading WASM file: {e}")))?;
-        Self::load_from_bytes(&bytes)
+        Self::load_from_bytes_with_limits(&bytes, limits)
     }
 
     /// Compile a WASM module from raw bytes with no embedder capability bound
@@ -302,9 +307,9 @@ impl WasmiBlock {
             warned_forged_identity: std::sync::atomic::AtomicBool::new(false),
             asset_loader: parking_lot::RwLock::new(Arc::new(crate::asset_loader::NoopAssetLoader)),
             limits,
-            pool: parking_lot::Mutex::new(Vec::new()),
+            pool: parking_lot::Mutex::new(InstancePool::default()),
             pooling_enabled,
-            poolable: std::sync::OnceLock::new(),
+            pool_scope: std::sync::OnceLock::new(),
         })
     }
 
@@ -497,37 +502,34 @@ impl WasmiBlock {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// Is this block eligible for warm instance pooling?
+    /// How this block's `handle`-path instances are reused.
     ///
     /// Policy: the host kill switch ([`WASM_POOLING_ENV`], resolved at load)
-    /// must permit pooling, AND the block's declared
+    /// must permit pooling, and the block's declared
     /// [`InstanceMode`](wafer_block::InstanceMode) must be a state-retaining
-    /// one (`Singleton` / `PerFlow` — "my state may live across calls").
-    /// `PerNode` (the undeclared default) and `PerExecution` keep today's
-    /// fresh-instance-per-call behavior.
-    fn is_poolable(&self) -> bool {
+    /// one — `Singleton` reuses instances across every call, `PerFlow` only
+    /// within one flow. `PerNode` (the undeclared default) and
+    /// `PerExecution` get a fresh instance per call.
+    fn pool_scope(&self) -> PoolScope {
         if !self.pooling_enabled {
-            return false;
+            return PoolScope::Cold;
         }
-        if let Some(decided) = self.poolable.get() {
+        if let Some(decided) = self.pool_scope.get() {
             return *decided;
         }
-        let mode = self.info().instance_mode;
-        let poolable = matches!(
-            mode,
-            wafer_block::InstanceMode::Singleton | wafer_block::InstanceMode::PerFlow
-        );
+        let scope = PoolScope::of(self.info().instance_mode);
         // Pin the decision only once `info()` has actually succeeded (the
         // cache is populated). A failed `info()` reports the placeholder
         // BlockInfo (default `PerNode`), and that transient fault must not
         // pin the block cold forever.
         if self.info_cache.lock().is_ok_and(|guard| guard.is_some()) {
-            let _ = self.poolable.set(poolable);
+            let _ = self.pool_scope.set(scope);
         }
-        poolable
+        scope
     }
 
-    /// Number of idle instances currently retained in the warm pool.
+    /// Number of idle instances currently retained in the warm pool, across
+    /// every instance set (see [`InstanceMode::PerFlow`](wafer_block::InstanceMode::PerFlow)).
     ///
     /// Observability/test accessor — the pool is otherwise invisible from
     /// the outside. Always `0` for blocks that did not opt into reuse.
@@ -535,14 +537,15 @@ impl WasmiBlock {
         self.pool.lock().len()
     }
 
-    /// Check an instance out of the warm pool, or instantiate fresh when the
-    /// pool is empty. Checkout grants exclusive ownership; a pooled instance
+    /// Check an instance out of the warm pool's set `set` (a flow id under
+    /// [`PoolScope::Flow`], `None` for the shared set), or instantiate fresh
+    /// when that set is empty. Checkout grants exclusive ownership; a pooled instance
     /// gets its fuel refilled (same budget as a fresh instantiation) and its
     /// capabilities snapshot refreshed so a set narrowed after the instance
     /// was created (e.g. by `seal()`'s effective-capability propagation) can
     /// never be widened back by reuse.
-    fn checkout(&self) -> Result<PooledInstance, RuntimeError> {
-        let popped = self.pool.lock().pop();
+    fn checkout(&self, set: Option<&str>) -> Result<PooledInstance, RuntimeError> {
+        let popped = self.pool.lock().pop(set);
         if let Some(mut leased) = popped {
             apply_fuel(
                 &mut leased.store,
@@ -564,10 +567,12 @@ impl WasmiBlock {
             store,
             instance,
             calls_served: 0,
+            set: set.map(Arc::from),
         })
     }
 
-    /// Return an instance to the warm pool after a clean exit.
+    /// Return an instance to the warm-pool set it was checked out of after a
+    /// clean exit.
     ///
     /// Recycles (drops) the instance instead when it has served
     /// [`MAX_CALLS_PER_INSTANCE`] calls or its linear memory has grown to the
@@ -606,11 +611,8 @@ impl WasmiBlock {
         data.streams =
             StreamRegistry::with_limits(self.limits.max_host_bytes, self.limits.max_live_streams);
 
-        let mut pool = self.pool.lock();
-        if pool.len() < MAX_POOLED_INSTANCES {
-            pool.push(leased);
-        }
-        // Beyond the cap: drop on checkin (never queue).
+        // Beyond the set's cap: dropped on checkin (never queued).
+        self.pool.lock().push(leased);
     }
 
     /// Drive one `__wafer_handle` invocation, pool-aware.
@@ -648,8 +650,13 @@ impl WasmiBlock {
             Ok((handle_fn, ptr as i32, len))
         };
 
-        if self.is_poolable() {
-            let mut leased = self.checkout()?;
+        let set = match self.pool_scope() {
+            PoolScope::Cold => None,
+            PoolScope::Block => Some(None),
+            PoolScope::Flow => Some(ctx.flow_id()),
+        };
+        if let Some(set) = set {
+            let mut leased = self.checkout(set)?;
             let instance = leased.instance;
             let bytes = self
                 .run_guest_call(

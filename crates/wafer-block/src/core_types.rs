@@ -195,18 +195,25 @@ impl fmt::Display for WaferError {
 ///   that declares a state-retaining mode (`Singleton`, `PerFlow`) opts
 ///   into the runtime's warm instance pool (PERF-01): `handle`-path
 ///   instances are reused across calls, so guest globals and heap
-///   survive between invocations of the *same* block. Reuse is same-block
-///   only — cross-block isolation is unchanged — and hosts can force
+///   survive between invocations of the *same* block — any call for
+///   `Singleton`, calls in the same flow for `PerFlow`. Concurrent calls
+///   still get distinct instances. Reuse is same-block only — cross-block
+///   isolation is unchanged — and hosts can force
 ///   every wasm block cold with the `WAFER_RUN_WASM_POOLING=off` env
 ///   var (the isolation escape hatch for third-party wasm that wrongly
 ///   declared a state-retaining mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InstanceMode {
-    /// One instance per node (the runtime process).
+    /// The undeclared default. WASM: a fresh instance for every call, as
+    /// `PerExecution` — no guest state survives a call.
     PerNode,
-    /// One instance shared across the entire deployment.
+    /// Guest state may survive between any two calls of the block. WASM:
+    /// warm instances are reused by every call, within one runtime process.
     Singleton,
-    /// One instance per flow definition.
+    /// Guest state may survive between calls in the same flow, never across
+    /// flows. WASM: each flow reuses its own warm instances; calls outside
+    /// every flow (a top-level dispatch, a call made during a block's
+    /// lifecycle) share one more set.
     PerFlow,
     /// A fresh instance for every execution.
     PerExecution,

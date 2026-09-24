@@ -30,9 +30,37 @@ pub const WASM_POOLING_ENV: &str = "WAFER_RUN_WASM_POOLING";
 /// the guest heap until the instance is recycled).
 pub(super) const MAX_CALLS_PER_INSTANCE: u32 = 256;
 
-/// Maximum number of idle instances retained per block. Beyond this, extra
-/// instances are dropped on checkin rather than queued.
+/// Maximum number of idle instances retained per instance set (see
+/// [`InstancePool`]). Beyond this, extra instances are dropped on checkin
+/// rather than queued.
 pub(super) const MAX_POOLED_INSTANCES: usize = 4;
+
+/// How a block's declared [`InstanceMode`](wafer_block::InstanceMode) lets
+/// its `handle`-path instances be reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PoolScope {
+    /// Never reused: a fresh instance per call (`PerNode`, `PerExecution`,
+    /// or any mode while the host kill switch is off).
+    Cold,
+    /// One instance set for every call (`Singleton`).
+    Block,
+    /// One instance set per flow (`PerFlow`): a call reuses only an instance
+    /// that served the same flow, so guest state never crosses flows.
+    Flow,
+}
+
+impl PoolScope {
+    /// The scope `mode` declares.
+    pub(super) fn of(mode: wafer_block::InstanceMode) -> Self {
+        match mode {
+            wafer_block::InstanceMode::Singleton => Self::Block,
+            wafer_block::InstanceMode::PerFlow => Self::Flow,
+            wafer_block::InstanceMode::PerNode | wafer_block::InstanceMode::PerExecution => {
+                Self::Cold
+            }
+        }
+    }
+}
 
 /// A warm store + instance pair retained across `handle` calls for blocks
 /// that opted into reuse via a state-retaining `InstanceMode`.
@@ -42,6 +70,50 @@ pub(super) struct PooledInstance {
     /// Calls this instance has completed; drives the
     /// [`MAX_CALLS_PER_INSTANCE`] recycle bound.
     pub(super) calls_served: u32,
+    /// The instance set it is checked back in to: the flow it serves under
+    /// [`PoolScope::Flow`], `None` for the shared set.
+    pub(super) set: Option<std::sync::Arc<str>>,
+}
+
+/// A block's idle warm instances, grouped into sets: a checkout draws only
+/// from the set its call belongs to, so state never moves between sets.
+///
+/// `Singleton` uses the shared set for every call. `PerFlow` uses one set
+/// per flow id, and the shared set for calls outside every flow (a
+/// top-level dispatch, or a call made during a block's `Init`). The number
+/// of sets is bounded by the flows registered, and each holds at most
+/// [`MAX_POOLED_INSTANCES`].
+#[derive(Default)]
+pub(super) struct InstancePool {
+    shared: Vec<PooledInstance>,
+    per_flow: std::collections::HashMap<std::sync::Arc<str>, Vec<PooledInstance>>,
+}
+
+impl InstancePool {
+    /// Take an idle instance from set `set`, if it has one.
+    pub(super) fn pop(&mut self, set: Option<&str>) -> Option<PooledInstance> {
+        match set {
+            None => self.shared.pop(),
+            Some(flow) => self.per_flow.get_mut(flow).and_then(Vec::pop),
+        }
+    }
+
+    /// Return `leased` to the set it belongs to, or drop it when that set is
+    /// full.
+    pub(super) fn push(&mut self, leased: PooledInstance) {
+        let idle = match &leased.set {
+            None => &mut self.shared,
+            Some(flow) => self.per_flow.entry(flow.clone()).or_default(),
+        };
+        if idle.len() < MAX_POOLED_INSTANCES {
+            idle.push(leased);
+        }
+    }
+
+    /// Idle instances across every set.
+    pub(super) fn len(&self) -> usize {
+        self.shared.len() + self.per_flow.values().map(Vec::len).sum::<usize>()
+    }
 }
 
 /// Parse the raw [`WASM_POOLING_ENV`] value. `None`/empty means "not

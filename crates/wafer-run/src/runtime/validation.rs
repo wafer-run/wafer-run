@@ -5,7 +5,7 @@
 //! `runtime/config_source.rs::validate_block_configs` (the `ConfigSource`-
 //! driven validator behind `Wafer::validate_all_block_configs`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use parking_lot::Mutex;
 use wafer_block::types::InterfaceSpec;
@@ -38,13 +38,15 @@ pub enum ActionCheck {
 /// - If the interface has a non-empty action map, `action` must be a key in it.
 /// - If the interface name matches no registered `InterfaceSpec`, return
 ///   `UnknownInterface` so the caller can warn-once and proceed.
+///
+/// `specs` is keyed by interface name.
 pub fn check_action_interface(
     block_name: &str,
     interface_name: &str,
     action: &str,
-    specs: &[InterfaceSpec],
+    specs: &HashMap<String, InterfaceSpec>,
 ) -> ActionCheck {
-    let Some(spec) = specs.iter().find(|s| s.name == interface_name) else {
+    let Some(spec) = specs.get(interface_name) else {
         return ActionCheck::UnknownInterface;
     };
     if spec.actions.is_empty() {
@@ -91,6 +93,10 @@ mod tests {
 
     use super::*;
 
+    fn specs_of(specs: Vec<InterfaceSpec>) -> HashMap<String, InterfaceSpec> {
+        specs.into_iter().map(|s| (s.name.clone(), s)).collect()
+    }
+
     fn db_interface() -> InterfaceSpec {
         let mut actions = HashMap::new();
         actions.insert(
@@ -118,14 +124,14 @@ mod tests {
 
     #[test]
     fn interface_valid_action() {
-        let specs = vec![db_interface()];
+        let specs = specs_of(vec![db_interface()]);
         let result = check_action_interface("org/sqlite", "database@v1", "retrieve", &specs);
         assert!(matches!(result, ActionCheck::Valid));
     }
 
     #[test]
     fn interface_unknown_action_rejected() {
-        let specs = vec![db_interface()];
+        let specs = specs_of(vec![db_interface()]);
         let result = check_action_interface("org/sqlite", "database@v1", "publish", &specs);
         match result {
             ActionCheck::Invalid { message } => {
@@ -144,7 +150,7 @@ mod tests {
             description: "".into(),
             actions: HashMap::new(),
         };
-        let specs = vec![mw];
+        let specs = specs_of(vec![mw]);
         assert_eq!(
             check_action_interface("org/cors", "middleware@v1", "anything", &specs),
             ActionCheck::Valid
@@ -153,7 +159,7 @@ mod tests {
 
     #[test]
     fn interface_unknown_interface_returns_unknown() {
-        let specs = vec![db_interface()];
+        let specs = specs_of(vec![db_interface()]);
         assert_eq!(
             check_action_interface("org/x", "my-org/custom@v1", "retrieve", &specs),
             ActionCheck::UnknownInterface

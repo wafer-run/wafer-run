@@ -146,3 +146,73 @@ async fn init_data_passes_through_block_configs_when_no_declared_keys() {
         Some(&serde_json::json!([{"path": "/foo"}])),
     );
 }
+
+/// A config registered under an alias configures the alias's target: its
+/// Init payload carries it, whichever name the first dispatch used.
+#[tokio::test]
+async fn init_data_carries_config_registered_under_an_alias() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let block = Arc::new(ConfigCaptureBlock {
+        name: "test/aliased",
+        captured: captured.clone(),
+        declared: vec![],
+    });
+    wafer
+        .register_block("test/aliased", block)
+        .expect("register");
+    wafer.add_alias("short", "test/aliased").expect("alias");
+    wafer.add_block_config("short", serde_json::json!({"routes": [{"path": "/a"}]}));
+    wafer.seal().await.expect("seal");
+
+    // Dispatched by its registered name, not the alias the config used.
+    let _out = Arc::new(wafer)
+        .run_block(
+            "test/aliased",
+            Message::new("test.init"),
+            InputStream::empty(),
+        )
+        .await;
+
+    let cap = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("init must have captured");
+    assert_eq!(
+        cap.get("routes"),
+        Some(&serde_json::json!([{"path": "/a"}])),
+        "a config registered under an alias must reach its target's Init: {cap}"
+    );
+}
+
+/// Two names for one block that each carry a config refuse boot: which one
+/// configures the block would otherwise depend on the name a caller used.
+#[tokio::test]
+async fn config_under_both_an_alias_and_its_target_refuses_seal() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    let block = Arc::new(ConfigCaptureBlock {
+        name: "test/aliased",
+        captured: Arc::new(std::sync::Mutex::new(None)),
+        declared: vec![],
+    });
+    wafer
+        .register_block("test/aliased", block)
+        .expect("register");
+    wafer.add_alias("short", "test/aliased").expect("alias");
+    wafer.add_block_config("short", serde_json::json!({"a": 1}));
+    wafer.add_block_config("test/aliased", serde_json::json!({"b": 2}));
+
+    let err = wafer
+        .seal()
+        .await
+        .expect_err("two configs for one block must refuse seal");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`short`") && msg.contains("`test/aliased`"),
+        "the refusal must name both registrations: {msg}"
+    );
+}

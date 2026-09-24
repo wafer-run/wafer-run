@@ -143,8 +143,9 @@ pub struct Wafer {
     /// [`RuntimeContext`] [`make_context`](Self::make_context) produces.
     /// See [`ConfigState`](crate::runtime::config_source::ConfigState).
     pub(crate) config: crate::runtime::config_source::ConfigState,
-    /// Seal-time compiled dispatch data: parsed per-block configs,
-    /// `requires` allowlists, compiled flows. Empty until [`Wafer::seal`];
+    /// Seal-time compiled dispatch data: parsed per-block configs, each
+    /// block's `requires` allowlist and interface, compiled flows. Empty
+    /// until [`Wafer::seal`];
     /// every consumer falls back to the uncompiled path on a miss.
     /// See [`SealedPlan`](crate::runtime::exec_plan::SealedPlan).
     pub(crate) plan: crate::runtime::exec_plan::SealedPlan,
@@ -455,6 +456,7 @@ impl Wafer {
             slots: self.registration.slots.clone(),
             config_source: self.config.source.clone(),
             hooks: self.hooks.clone(),
+            dispatch: self.plan.dispatch.clone(),
         }
     }
 
@@ -488,8 +490,8 @@ impl Wafer {
     /// uncompiled resolution for a block registered after `seal()` (or any
     /// pre-seal context construction).
     fn resolve_block_requires(&self, resolved_block_name: &str) -> Option<Arc<Vec<String>>> {
-        match self.plan.block_requires.get(resolved_block_name) {
-            Some(cached) => cached.clone(),
+        match self.plan.dispatch.blocks.get(resolved_block_name) {
+            Some(cached) => cached.requires.clone(),
             None => self.resolve_block_requires_uncached(resolved_block_name),
         }
     }
@@ -543,7 +545,7 @@ impl Wafer {
         // every per-call field. It is outside every Init, so this init waits
         // on behalf of no other.
         let template = self.make_context(
-            "init",
+            "",
             name,
             self.plan.empty_config.clone(),
             Arc::new(AtomicBool::new(false)),
@@ -643,10 +645,11 @@ pub(crate) async fn run_init_pipeline(
     let init_ctx = template.for_init(name, block.as_ref(), attempt.clone());
     let init_waits = template.init_waits.clone();
     let config_source = template.config_source.clone();
-    // Snapshot of caller-registered JSON config (via `Wafer::add_block_config`).
-    // Threaded into the init payload alongside env-resolved keys so blocks like
-    // `wafer-run/router` (which read `"routes"` from `event.data`) still see
-    // their config after lazy init. See the regression test
+    // Snapshot of caller-registered JSON config (via `Wafer::add_block_config`),
+    // keyed by registered block name (`seal()` moves a config registered under
+    // an alias to its target). Threaded into the init payload alongside the
+    // ConfigSource-resolved keys so blocks like `wafer-run/router` (which read
+    // `"routes"` from `event.data`) see their config. See the regression tests
     // `init_merges_block_config`.
     let block_configs_snapshot = template.snapshot.block_configs.clone();
 
@@ -669,14 +672,12 @@ pub(crate) async fn run_init_pipeline(
 
         // Build the lifecycle(Init).data payload: start from the JSON config
         // the caller registered via `Wafer::add_block_config` (if any), then
-        // overlay env-resolved values on top. Env-config keys win — operators
-        // can override JSON config via env vars.
+        // overlay the values the ConfigSource resolved for the block's
+        // declared keys. Those win — operators can override JSON config
+        // through the ConfigSource.
         //
         // Blocks parse this via `BlockConfig::from_event`, which does
-        // `serde_json::from_slice` on `event.data`. PR #98 originally serialized
-        // only the env map, silently dropping `add_block_config` JSON (notably
-        // `wafer-run/router`'s `"routes"` array). This merge restores the
-        // pre-#98 contract.
+        // `serde_json::from_slice` on `event.data`.
         let mut merged: serde_json::Map<String, serde_json::Value> = block_configs_snapshot
             .get(name)
             .and_then(|v| v.as_object().cloned())

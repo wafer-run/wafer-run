@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # pool must NOT engage. scripts/build-fixtures.sh builds both variants
 # (pool_guest_singleton.wasm / pool_guest_percall.wasm) from this one crate.
 percall = []
+# Variant build for the per-flow tests: declares InstanceMode::PerFlow, so
+# the warm pool keeps one instance set per flow (pool_guest_perflow.wasm).
+perflow = []
 
 [dependencies]
 wafer-sdk = { path = "../../../../sdks/rust" }

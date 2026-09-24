@@ -8,6 +8,8 @@
 //! Test E: dispatch validation accepts every ServiceOp op for its interface
 //!         (drift guard), and call_block delivers the database ops that the
 //!         hand-maintained catalog used to reject.
+//! Test F: call_block reads the callee's interface and allowlist from the
+//!         plan sealed at boot instead of building its `BlockInfo` per call.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -308,7 +310,10 @@ fn dispatch_validation_accepts_every_service_op() {
     use wafer_block::common::ServiceOp;
     use wafer_run::runtime::validation::{check_action_interface, ActionCheck};
 
-    let specs = wafer_block::interfaces::all();
+    let specs: std::collections::HashMap<_, _> = wafer_block::interfaces::all()
+        .into_iter()
+        .map(|spec| (spec.name.clone(), spec))
+        .collect();
     for (interface, ops) in [
         ("database@v1", ServiceOp::DATABASE_OPS),
         ("storage@v1", ServiceOp::STORAGE_OPS),
@@ -446,4 +451,88 @@ async fn call_block_rejects_removed_raw_execute_query_ops() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test F — call_block reads what it needs about the callee from the plan
+// sealed at boot, not from the callee's `BlockInfo`
+// ---------------------------------------------------------------------------
+
+/// A callee that counts how often its `BlockInfo` is built.
+struct InfoCountingBlock {
+    info_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Block for InfoCountingBlock {
+    fn info(&self) -> BlockInfo {
+        self.info_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        BlockInfo::new("test-org/counted", "0.1.0", "service@v1", "Counted")
+    }
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(b"counted".to_vec())
+    }
+}
+
+/// Calls `test-org/counted`.
+struct CountedCallerBlock;
+
+#[async_trait]
+impl Block for CountedCallerBlock {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test-org/counted-caller",
+            "0.1.0",
+            "service@v1",
+            "CountedCaller",
+        )
+    }
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
+        ctx.call_block("test-org/counted", Message::new("count"), input)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn call_block_does_not_rebuild_the_callees_block_info() {
+    let info_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("empty wafer build is infallible");
+    w.register_block(
+        "test-org/counted",
+        Arc::new(InfoCountingBlock {
+            info_calls: info_calls.clone(),
+        }),
+    )
+    .unwrap();
+    w.register_block("test-org/counted-caller", Arc::new(CountedCallerBlock))
+        .unwrap();
+    w.seal().await.expect("seal");
+
+    let call = || async {
+        let out = w
+            .run_block(
+                "test-org/counted-caller",
+                Message::new("go"),
+                InputStream::empty(),
+            )
+            .await;
+        let buf = out.collect_buffered().await.expect("the call must succeed");
+        assert_eq!(buf.body, b"counted");
+    };
+    // The first call initializes the callee, which reads its `BlockInfo`.
+    call().await;
+    let after_init = info_calls.load(std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..5 {
+        call().await;
+    }
+    assert_eq!(
+        info_calls.load(std::sync::atomic::Ordering::SeqCst),
+        after_init,
+        "call_block must not build the callee's BlockInfo per call"
+    );
 }

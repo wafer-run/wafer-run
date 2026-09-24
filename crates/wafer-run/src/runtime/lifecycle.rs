@@ -369,7 +369,7 @@ impl Wafer {
             // SEC-04: `make_block_context` installs the block's `requires` so
             // any `call_block` during Start is gated by the same allowlist.
             let ctx = self.make_block_context(
-                "startup",
+                "",
                 name.as_str(),
                 self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),
@@ -423,7 +423,7 @@ impl Wafer {
             // SEC-04: `make_block_context` installs the block's `requires` so
             // any `call_block` during Stop is gated by the same allowlist.
             let ctx = self.make_block_context(
-                "shutdown",
+                "",
                 name.as_str(),
                 self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),

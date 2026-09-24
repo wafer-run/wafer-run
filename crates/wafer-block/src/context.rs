@@ -131,6 +131,13 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         None
     }
 
+    /// The id of the flow this call runs in, including a block called from
+    /// one of its steps. `None` outside every flow: a top-level dispatch, or
+    /// a call made during a block's `Init`.
+    fn flow_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Get an owned `Arc<dyn Context>` from a `&dyn Context`. Concrete
     /// implementations clone their inner Arc-shaped state to produce a
     /// new owning handle. Use this when long-lived service objects need

@@ -29,7 +29,9 @@ impl Wafer {
     /// 2. Expand composite configs (e.g. `wafer-run/http-server` →
     ///    `http-listener` + `router`), declarative flow `config_map` /
     ///    `config_defaults`, and `"uses"` contributions across all block
-    ///    configs.
+    ///    configs. Then key each config by the block it configures: one
+    ///    registered under an alias moves to the alias's target, and two
+    ///    names for one block that each carry a config refuse boot.
     /// 3. Check the blocks referenced by flow steps, router routes and
     ///    other block configs are registered, and so is every block named in
     ///    a registered block's `requires` (`optional_requires` is not
@@ -86,6 +88,7 @@ impl Wafer {
         self.expand_composite_configs();
         self.expand_declarative_flow_configs();
         self.gather_uses_configs();
+        self.key_block_configs_by_target()?;
 
         let mut missing = self.unregistered_block_references();
         self.collect_unmet_requires(&mut missing);
@@ -295,8 +298,8 @@ impl Wafer {
     ///
     /// A WASM block declaring a state-retaining `InstanceMode` (`Singleton`,
     /// `PerFlow`) opts into `WasmiBlock`'s warm instance pool: its store +
-    /// instance are reused across `handle` calls, so guest globals and heap
-    /// survive between calls. (This retired the pre-pooling seal warning
+    /// instance are reused across `handle` calls (`PerFlow`: calls in the
+    /// same flow), so guest globals and heap survive between calls. (This retired the pre-pooling seal warning
     /// that such declarations were advisory and unhonorable on the wasm
     /// path.) Validates the `WAFER_RUN_WASM_POOLING` kill switch here too so
     /// a mistyped value refuses boot even before any wasm block loads, then
@@ -428,9 +431,9 @@ impl Wafer {
 
     /// Finalize the startup snapshot. Block configs survive in
     /// `self.registration.block_configs` and are mirrored here for context
-    /// consumers. (Lazy init reads from the runtime's `ConfigSource` — not
-    /// from `self.registration.block_configs` — when dispatching
-    /// `lifecycle(Init)` on first request; see `run_init_pipeline`.)
+    /// consumers and for lazy init: `run_init_pipeline` builds a block's
+    /// `lifecycle(Init)` payload from its config here, with the values its
+    /// `ConfigSource` resolves for its declared keys laid over it.
     ///
     /// Also compiles the [`SealedPlan`](crate::runtime::exec_plan::SealedPlan)
     /// from the snapshot (PERF-03): parsed block configs, `requires`

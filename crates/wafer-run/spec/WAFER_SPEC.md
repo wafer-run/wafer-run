@@ -319,25 +319,25 @@ Implementations MAY add additional capabilities (e.g., `dispatch`, `http.request
 
 ### Instance Modes
 
-Blocks can declare their intended instance lifecycle. **The declaration is advisory: no runtime enforces it today.**
+Blocks declare their instance lifecycle: which calls may observe state an earlier call left in the block.
 
 ```
 InstanceMode enum {
-    PerNode       // One instance per flow node (default)
-    Singleton     // One instance shared across all flows
-    PerFlow       // One instance per flow, shared across nodes
-    PerExecution  // New instance for every message
+    PerNode       // Default. WASM: a fresh instance per call
+    Singleton     // State may survive between any two calls
+    PerFlow       // State may survive between calls in the same flow
+    PerExecution  // A fresh instance per call
 }
 ```
 
-Actual instantiation behavior is fixed by runtime type, regardless of the declared mode:
+How each runtime type honors the declaration:
 
 | Runtime | Behavior |
 |---------|----------|
-| Native | One shared instance per runtime process, serving concurrent calls (blocks must be thread-safe) |
-| Wasm | A fresh store + instance for every call; no guest state survives between calls |
+| Native | One shared instance per runtime process, serving concurrent calls (blocks must be thread-safe); the declaration is advisory |
+| Wasm | `PerNode` / `PerExecution`: a fresh store + instance for every call. `Singleton`: warm instances reused by every call. `PerFlow`: each flow reuses its own warm instances, and calls outside every flow share one more set, so guest state never crosses flows |
 
-A WASM block that declares a state-retaining mode (`Singleton`, `PerFlow`) draws a warning at seal, since per-call instantiation cannot honor it. Enforcement — a real instance manager keyed on the declaration — is future work tied to instance pooling; until then the field only documents intent.
+Concurrent calls always get distinct WASM instances, and a host can force every WASM block cold with `WAFER_RUN_WASM_POOLING=off`.
 
 ---
 
