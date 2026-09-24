@@ -148,13 +148,25 @@
   config read as a full statement
   (`ConfigCapabilityOverrides::as_stated_bound`: an omitted field is denied),
   and runs with `BlockCapabilities::none()` when there is none. Such a guest
-  also runs with `none()` before `seal()` (it ran `unrestricted()`). **An
+  also runs with `none()` before `seal()` (it ran `unrestricted()`).
+  **An existing `capabilities` narrowing on such a guest changes meaning**:
+  `{ "collections": { "Only": [...] } }` used to narrow only `collections`
+  and leave every other declared field as declared; it is now the whole
+  bound, so every field it does not list — storage, config, network,
+  `callable_blocks`, headers, `schema` — is denied. Restate each field the
+  guest needs. **An
   embedder that loaded guests with `load_from_bytes*` and relied on their
   declared capabilities must now state them**: pass a bound to
   `load_with_capabilities*`, state them in the block's `capabilities`
   config, or — for a guest it vetted or built — use the new
   `WasmiBlock::load_approving_declaration(bytes, limits)`, which makes the
-  declaration the bound. New `Block::capability_bound` (default `None`)
+  declaration the bound. Native discovery that loads its own built blocks
+  with `load_from_bytes` — impresspress's
+  (`impresspress-core/src/builder/registration.rs`) — must switch to
+  `WasmiBlock::load_approving_declaration(bytes, wafer.resource_limits())`,
+  or its blocks lose every capability. `wafer install` carries an entry's
+  `capabilities` forward when it reinstalls or upgrades the block
+  (`Lockfile::record_resolved`). New `Block::capability_bound` (default `None`)
   reports a block's embedder bound; `runtime_capabilities_mut` documents
   the rule. `BlockCapabilities` and `HeaderPolicy` derive `PartialEq`/`Eq`.
 - `Wafer::seal` runs once. A second call — after a successful seal or a
@@ -168,7 +180,15 @@
   or `Failed(reason)`). The Node binding's `start()` and the C ABI's
   `wafer_start` (Go `Start`) seal only a runtime `resolve()` has not, and
   after a failed `resolve()` report that failure again rather than start; a
-  second `resolve()` / `wafer_resolve` reports `AlreadySealed`.
+  second `resolve()` / `wafer_resolve` reports `AlreadySealed`. Top-level
+  dispatch — `Wafer::run`, `Wafer::run_block` (so `RuntimeHandle`, the
+  Node `run()` and the C `wafer_run` / Go `Run`) — now answers a
+  `FailedPrecondition` error unless `seal()` succeeded: an unsealed runtime
+  ran blocks under their load-time capabilities with no grant gate, and a
+  failed seal left it half-built. Embedders and tests that dispatched
+  without sealing must call `seal()` (or `start()`) first.
+  `Wafer::rebuild_all_blocks`, whose only use was populating the dispatch
+  map without sealing, is removed; `seal()` does it.
 - A block `seal()` downloads from the registry is admitted like a
   code-registered one. It is registered under its unversioned `{org}/{block}`
   (a version selects the artifact; the block's tables, config keys and grants
