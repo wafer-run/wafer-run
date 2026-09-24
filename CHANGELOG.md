@@ -4,6 +4,27 @@
 
 ### Breaking changes
 
+- `wafer_block::codec::decode` returns the new `codec::DecodeError`
+  instead of a `WaferError` whose code was always `Internal`. The caller
+  now picks the code by who sent the body: `DecodeError::invalid_argument`
+  for a request a caller sent, `DecodeError::internal` for a reply from a
+  service or host the decoder relies on. There is no `From<DecodeError> for
+  WaferError`, so `codec::decode(..)?` in a function returning `WaferError`
+  no longer compiles; `e.code`/`e.message` become that choice and
+  `e.to_string()` (which keeps the `codec decode error in <type>: <cause>`
+  text). `DecodeError::type_name` and `DecodeError::cause` expose the parts;
+  the cause is capped at `codec::MAX_DECODE_CAUSE_LEN` (256) bytes plus `…`,
+  so a value serde echoes into its message cannot make the error unbounded.
+- `wafer-test-support` no longer ships `FakeDb`, `FakeCrypto`,
+  `fake_db::FailureMode`, `WaferBuilder::with_fake_db` or
+  `WaferBuilder::with_fake_crypto`. The
+  fakes parsed JSON request bodies while every production client encodes
+  MessagePack (`wafer_block::codec`), so a test routing
+  `wafer_core::clients::database::*` to them failed with `fake-db: bad
+  request`, and nothing used them. A test that needs a database registers
+  the real handler over an in-memory SQLite service
+  (`wafer_core::service_blocks::database::register_with_tables` with
+  `SQLiteDatabaseService::open_in_memory`); `WaferBuilder` stays.
 - `DEFAULT_SENSITIVE_HEADERS` adds `x-content-type-options`,
   `referrer-policy`, `permissions-policy`, `cross-origin-opener-policy` and
   `cross-origin-embedder-policy` — with HSTS, `x-frame-options` and CSP,
@@ -1671,6 +1692,12 @@
   read-only.
 
 ### Fixed
+
+- A `#[wafer_block]` guest handed a `__wafer_handle` or `__wafer_lifecycle`
+  frame it cannot decode answers with an `Internal` error naming the frame
+  type and the decode cause, which the host surfaces as the call's error.
+  It used to return an empty packet, so the host reported only an EOF while
+  decoding the guest's result. Guests pick this up when rebuilt.
 
 - `wafer-run/network` starts when `WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS`
   is unset. The key was declared with an empty default and without

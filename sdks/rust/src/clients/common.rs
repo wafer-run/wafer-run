@@ -97,14 +97,15 @@ pub(super) fn open_buffered(
     call.finish()
 }
 
-/// Decode an encoded frame, prefixing decode errors with `context` so the
-/// failing operation is identifiable (`"decoding {context}: ..."`).
+/// Decode a frame the service sent, prefixing decode errors with `context`
+/// so the failing operation is identifiable (`"decoding {context}: ..."`).
+/// A reply the service could not encode correctly is `Internal`.
 pub(super) fn decode_frame<Resp>(body: &[u8], context: &str) -> Result<Resp, WaferError>
 where
     Resp: DeserializeOwned,
 {
     codec::decode(body)
-        .map_err(|e| WaferError::new(e.code, format!("decoding {context}: {}", e.message)))
+        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("decoding {context}: {e}")))
 }
 
 /// Drain a single-frame ack response.

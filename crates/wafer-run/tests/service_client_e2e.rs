@@ -90,7 +90,7 @@ impl Block for FakeConfigBlock {
             Err(e) => {
                 return OutputStream::error(WaferError::new(
                     ErrorCode::InvalidArgument,
-                    format!("fake config: undecodable GetRequest: {}", e.message),
+                    format!("fake config: undecodable GetRequest: {e}"),
                 ))
             }
         };
