@@ -29,7 +29,7 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The `WaferDoneCb` every test passes: copies the Rust-owned result (it is
 /// freed once this returns) and hands it to the waiting test thread.
-unsafe extern "C" fn record(result: *const c_char, user_data: *mut c_void) {
+pub(crate) unsafe extern "C" fn record(result: *const c_char, user_data: *mut c_void) {
     let tx = &*user_data.cast::<Sender<Option<String>>>();
     let copy = (!result.is_null()).then(|| {
         CStr::from_ptr(result)
@@ -43,13 +43,13 @@ unsafe extern "C" fn record(result: *const c_char, user_data: *mut c_void) {
 /// One async FFI call: a sender for `user_data` and the receiver the test
 /// blocks on. The sender is boxed so its address is stable while the
 /// callback may still fire.
-struct Pending {
+pub(crate) struct Pending {
     tx: Box<Sender<Option<String>>>,
     rx: Receiver<Option<String>>,
 }
 
 impl Pending {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (tx, rx) = channel();
         Self {
             tx: Box::new(tx),
@@ -57,16 +57,22 @@ impl Pending {
         }
     }
 
-    fn user_data(&self) -> *mut c_void {
+    pub(crate) fn user_data(&self) -> *mut c_void {
         std::ptr::from_ref::<Sender<Option<String>>>(&*self.tx)
             .cast_mut()
             .cast()
     }
 
+    /// The callback's result if it fires within `within`; `None` if it has
+    /// not (it may still fire later).
+    pub(crate) fn fired_within(&self, within: Duration) -> Option<Option<String>> {
+        self.rx.recv_timeout(within).ok()
+    }
+
     /// Blocks until the callback fires. On a timeout the callback may still
     /// fire later, so the sender it points at and the receiver it sends to
     /// are leaked rather than freed before the test panics.
-    fn wait(self) -> Option<String> {
+    pub(crate) fn wait(self) -> Option<String> {
         match self.rx.recv_timeout(CALLBACK_TIMEOUT) {
             Ok(result) => result,
             Err(e) => {
@@ -77,14 +83,14 @@ impl Pending {
     }
 }
 
-const CB: Option<WaferDoneCb> = Some(record);
+pub(crate) const CB: Option<WaferDoneCb> = Some(record);
 
-fn c(s: &str) -> CString {
+pub(crate) fn c(s: &str) -> CString {
     CString::new(s).expect("no interior NUL")
 }
 
 /// Registers `name` from `path`, failing the test with the FFI's error JSON.
-unsafe fn register(w: *mut WaferRuntime, name: &str, path: &str) {
+pub(crate) unsafe fn register(w: *mut WaferRuntime, name: &str, path: &str) {
     let err = wafer_register(w, c(name).as_ptr(), c(path).as_ptr());
     if !err.is_null() {
         let msg = CStr::from_ptr(err).to_string_lossy().into_owned();

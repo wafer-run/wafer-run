@@ -6520,6 +6520,8 @@ dependencies = [
 name = "wafer-ffi"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures",
  "serde_json",
  "tokio",
  "tracing",
