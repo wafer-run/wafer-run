@@ -50,7 +50,8 @@ dual_api! {
         }
     }
 
-    /// Issue a signed JWT carrying `claims`, valid for `expiry`.
+    /// Issue a signed JWT carrying `claims`, valid for `expiry`, under the
+    /// calling block's derived key.
     pub fn sign(
         ctx,
         claims: &HashMap<String, serde_json::Value>,
@@ -69,7 +70,8 @@ dual_api! {
         Ok(resp.token)
     }
 
-    /// Verify the JWT `token` and return the decoded claims map.
+    /// Verify the JWT `token` under the calling block's derived key and
+    /// return the decoded claims map.
     pub fn verify(ctx, token: &str) -> Result<HashMap<String, serde_json::Value>, WaferError> {
         let req = VerifyRequest { token: token.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &req, Some("verify"), false, Some("crypto"))?;

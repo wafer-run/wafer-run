@@ -10,7 +10,8 @@
 //! recording fake `CryptoService`, that the underlying service method never
 //! actually ran. A granting `Context` must let the same requests through and
 //! reach the service. `caller_id` (HKDF key derivation) is orthogonal to
-//! this and stays `None` throughout.
+//! this: it is `None` except where a granted token op needs a key to sign
+//! with.
 
 use std::{
     collections::HashMap,
@@ -63,16 +64,18 @@ mod crypto_fakes {
             self.record("compare_hash");
             Ok(())
         }
-        fn sign(
+        fn sign_for(
             &self,
+            _block_id: &str,
             _claims: std::collections::HashMap<String, serde_json::Value>,
             _expiry: std::time::Duration,
         ) -> Result<String, CryptoError> {
             self.record("sign");
             Ok("token".into())
         }
-        fn verify(
+        fn verify_for(
             &self,
+            _block_id: &str,
             _token: &str,
         ) -> Result<std::collections::HashMap<String, serde_json::Value>, CryptoError> {
             self.record("verify");
@@ -299,7 +302,7 @@ async fn granted_ctx_allows_sign_hash_and_random_bytes() {
     expect_success(wafer_core::interfaces::crypto::handler::handle_message(
         &svc,
         &AllowCtx,
-        None,
+        Some("test/caller"),
         &msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN),
         &sign_body,
     ))
@@ -426,5 +429,52 @@ async fn native_offload_grants_hash_and_compare_and_delegates_other_ops() {
         *calls.lock().unwrap(),
         vec!["hash", "compare_hash", "random_bytes"],
         "every op should have reached the service exactly once, in order"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tokens are keyed per calling block. A granted token op that arrives with no
+// calling block has no key to use and is refused — it never falls back to a
+// shared master key.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn granted_token_ops_without_a_caller_are_refused_before_the_service() {
+    let calls = new_calls();
+    let svc = crypto_fakes::RecordingCrypto::new(calls.clone());
+
+    let sign_body = codec::encode(&wire::crypto::SignRequest {
+        claims: HashMap::new(),
+        expiry_secs: 3600,
+    })
+    .unwrap();
+    let err = expect_permission_denied(wafer_core::interfaces::crypto::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        None,
+        &msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN),
+        &sign_body,
+    ))
+    .await;
+    assert!(err.message.contains("calling block"), "{}", err.message);
+
+    let verify_body = codec::encode(&wire::crypto::VerifyRequest {
+        token: "a.b.c".into(),
+    })
+    .unwrap();
+    let err = expect_permission_denied(wafer_core::interfaces::crypto::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        None,
+        &msg_without_wrap_meta(ServiceOp::CRYPTO_VERIFY),
+        &verify_body,
+    ))
+    .await;
+    assert!(err.message.contains("calling block"), "{}", err.message);
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "no token op may reach the service without a key; calls = {:?}",
+        calls.lock().unwrap()
     );
 }

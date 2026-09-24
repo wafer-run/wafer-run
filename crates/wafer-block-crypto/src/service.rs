@@ -95,21 +95,6 @@ impl CryptoService for Argon2JwtCryptoService {
         primitives::verify_password_any_scheme(password, hash)
     }
 
-    fn sign(
-        &self,
-        claims: HashMap<String, serde_json::Value>,
-        expiry: Duration,
-    ) -> Result<String, CryptoError> {
-        primitives::jwt_sign(claims, expiry, self.jwt_secret.as_bytes())
-    }
-
-    /// Verify with [`JwtExpPolicy::Required`]: [`CryptoService::sign`]
-    /// always stamps `exp`, so a token without one was not minted by this
-    /// service and is rejected rather than treated as never-expiring.
-    fn verify(&self, token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-        primitives::jwt_verify(token, self.jwt_secret.as_bytes(), JwtExpPolicy::Required)
-    }
-
     fn sign_for(
         &self,
         block_id: &str,
@@ -120,6 +105,9 @@ impl CryptoService for Argon2JwtCryptoService {
         primitives::jwt_sign(claims, expiry, derived.as_bytes())
     }
 
+    /// Verify with [`JwtExpPolicy::Required`]: [`CryptoService::sign_for`]
+    /// always stamps `exp`, so a token without one was not minted by this
+    /// service and is rejected rather than treated as never-expiring.
     fn verify_for(
         &self,
         block_id: &str,
@@ -155,30 +143,32 @@ mod tests {
     #[test]
     fn sign_and_verify_roundtrip() {
         let svc = test_service();
-        let token = svc.sign(test_claims(), Duration::from_secs(3600)).unwrap();
-        let claims = svc.verify(&token).unwrap();
+        let token = svc
+            .sign_for("my-org/auth", test_claims(), Duration::from_secs(3600))
+            .unwrap();
+        let claims = svc.verify_for("my-org/auth", &token).unwrap();
         assert_eq!(claims.get("sub").unwrap(), &serde_json::json!("user-1"));
         assert!(claims.contains_key("exp"), "sign must stamp exp");
     }
 
-    /// The service verifies with `JwtExpPolicy::Required`: its own `sign`
-    /// always stamps `exp`, so an exp-less token was not minted by this
-    /// service and must be rejected rather than treated as never-expiring.
-    /// (This pins the resolution of the historical exp-optional vs
-    /// exp-required drift between the runtime and consuming-application copies.)
+    /// The service verifies with `JwtExpPolicy::Required`: its own
+    /// `sign_for` always stamps `exp`, so an exp-less token was not minted by
+    /// this service and must be rejected rather than treated as
+    /// never-expiring.
     #[test]
     fn verify_rejects_token_without_exp() {
-        use crate::primitives::{b64url_encode, hmac_sha256};
+        use crate::primitives::{b64url_encode, derive_block_key, hmac_sha256};
 
         // Hand-craft a correctly signed token whose payload has no `exp`.
+        let key = derive_block_key(TEST_SECRET.as_bytes(), "my-org/auth");
         let header_b64 = b64url_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
         let payload_b64 = b64url_encode(br#"{"sub":"user-1"}"#);
         let signing_input = format!("{header_b64}.{payload_b64}");
-        let sig = hmac_sha256(TEST_SECRET.as_bytes(), signing_input.as_bytes());
+        let sig = hmac_sha256(key.as_bytes(), signing_input.as_bytes());
         let token = format!("{signing_input}.{}", b64url_encode(&sig));
 
         let err = test_service()
-            .verify(&token)
+            .verify_for("my-org/auth", &token)
             .expect_err("exp-less token must be rejected");
         assert!(
             err.to_string().contains("missing exp"),
@@ -222,15 +212,16 @@ mod tests {
         );
     }
 
+    /// A token signed with the master secret itself is no block's token.
     #[test]
-    fn sign_and_sign_for_produce_different_tokens() {
-        let svc = test_service();
-        let expiry = Duration::from_secs(3600);
-
-        let token_plain = svc.sign(test_claims(), expiry).unwrap();
-        let token_block = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
-
-        assert_ne!(token_plain, token_block);
+    fn a_master_key_token_verifies_for_no_block() {
+        let master = crate::primitives::jwt_sign(
+            test_claims(),
+            Duration::from_secs(3600),
+            TEST_SECRET.as_bytes(),
+        )
+        .unwrap();
+        assert!(test_service().verify_for("my-org/auth", &master).is_err());
     }
 
     #[test]
@@ -386,10 +377,10 @@ mod password_scheme_tests {
         claims.insert("sub".to_string(), serde_json::json!("user-1"));
 
         let token = plain
-            .sign(claims.clone(), Duration::from_secs(3600))
+            .sign_for("my-org/auth", claims.clone(), Duration::from_secs(3600))
             .expect("sign");
         let back = scheme
-            .verify(&token)
+            .verify_for("my-org/auth", &token)
             .expect("a token signed by either verifies in both");
         assert_eq!(back.get("sub"), Some(&serde_json::json!("user-1")));
 

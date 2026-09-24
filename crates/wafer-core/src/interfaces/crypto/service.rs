@@ -29,6 +29,33 @@ pub enum CryptoError {
 }
 
 /// Service provides cryptographic operations.
+///
+/// Tokens are always signed and verified under a key derived for the
+/// calling block, so one block cannot mint or accept another's tokens. The
+/// trait deliberately has no master-key `sign`/`verify`: an implementation
+/// must provide [`sign_for`](Self::sign_for) and
+/// [`verify_for`](Self::verify_for) itself.
+///
+/// ```compile_fail,E0046
+/// use std::{collections::HashMap, time::Duration};
+/// use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
+///
+/// struct NoSignFor;
+///
+/// impl CryptoService for NoSignFor {
+///     fn hash(&self, _: &str) -> Result<String, CryptoError> { unimplemented!() }
+///     fn compare_hash(&self, _: &str, _: &str) -> Result<(), CryptoError> { unimplemented!() }
+///     // `sign_for` omitted: there is no default to fall back on.
+///     fn verify_for(
+///         &self,
+///         _: &str,
+///         _: &str,
+///     ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+///         unimplemented!()
+///     }
+///     fn random_bytes(&self, _: usize) -> Result<Vec<u8>, CryptoError> { unimplemented!() }
+/// }
+/// ```
 pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Hash produces a one-way hash of a password.
     fn hash(&self, password: &str) -> Result<String, CryptoError>;
@@ -38,36 +65,22 @@ pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`CryptoError::MalformedHash`] when the stored hash cannot be checked.
     fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError>;
 
-    /// Sign creates a signed token from claims with the given expiry.
-    fn sign(
+    /// Create a signed token from claims with the given expiry, using the
+    /// key derived for `block_id`.
+    fn sign_for(
         &self,
+        block_id: &str,
         claims: HashMap<String, serde_json::Value>,
         expiry: Duration,
     ) -> Result<String, CryptoError>;
 
-    /// Verify validates a token and returns its claims.
-    fn verify(&self, token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError>;
-
-    /// Sign creates a signed token using a per-block derived key.
-    /// Default falls back to `sign` (ignoring block_id).
-    fn sign_for(
-        &self,
-        _block_id: &str,
-        claims: HashMap<String, serde_json::Value>,
-        expiry: Duration,
-    ) -> Result<String, CryptoError> {
-        self.sign(claims, expiry)
-    }
-
-    /// Verify validates a token using a per-block derived key.
-    /// Default falls back to `verify` (ignoring block_id).
+    /// Validate a token under the key derived for `block_id` and return its
+    /// claims.
     fn verify_for(
         &self,
-        _block_id: &str,
+        block_id: &str,
         token: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-        self.verify(token)
-    }
+    ) -> Result<HashMap<String, serde_json::Value>, CryptoError>;
 
     /// RandomBytes generates n cryptographically-secure random bytes.
     fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError>;

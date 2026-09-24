@@ -31,6 +31,14 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
     }
 }
 
+/// Tokens are keyed per calling block, so a token op without one has no key.
+fn no_caller_key(op: &str) -> WaferError {
+    WaferError::new(
+        ErrorCode::PermissionDenied,
+        format!("{op} needs a calling block: tokens are signed under the caller's derived key"),
+    )
+}
+
 /// Handle a crypto message by delegating to the given service.
 ///
 /// `ctx` is the trusted host-side authorization surface: every op arm
@@ -41,11 +49,11 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
 /// the operation, not on request content — and `is_write` is always `false`:
 /// crypto ops aren't resource writes in the WRAP sense.
 ///
-/// JWT sign/verify use per-block HKDF-derived keys when `caller_id` is set
+/// JWT sign/verify always use the per-block key derived for `caller_id`
 /// (the runtime provides this from the calling block's identity). This is a
 /// separate concern from WRAP enforcement above — `caller_id` selects the
-/// derived key, it does not gate access. When `caller_id` is None, the
-/// master key is used.
+/// derived key, it does not gate access. A `sign`/`verify` with no
+/// `caller_id` is refused with `PermissionDenied`: there is no key to use.
 pub fn handle_message(
     service: &dyn CryptoService,
     ctx: &dyn Context,
@@ -107,12 +115,10 @@ pub fn handle_message(
                     Ok(r) => r,
                     Err(out) => return out,
                 };
-            let expiry = Duration::from_secs(req.expiry_secs);
-            let result = match caller_id {
-                Some(id) => service.sign_for(id, req.claims, expiry),
-                None => service.sign(req.claims, expiry),
+            let Some(id) = caller_id else {
+                return OutputStream::error(no_caller_key("crypto.sign"));
             };
-            match result {
+            match service.sign_for(id, req.claims, Duration::from_secs(req.expiry_secs)) {
                 Ok(token) => to_output(&wire::SignResponse { token }),
                 Err(e) => OutputStream::error(crypto_error_to_wafer(e)),
             }
@@ -133,11 +139,10 @@ pub fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            let result = match caller_id {
-                Some(id) => service.verify_for(id, &req.token),
-                None => service.verify(&req.token),
+            let Some(id) = caller_id else {
+                return OutputStream::error(no_caller_key("crypto.verify"));
             };
-            match result {
+            match service.verify_for(id, &req.token) {
                 Ok(claims) => to_output(&wire::VerifyResponse { claims }),
                 Err(e) => OutputStream::error(crypto_error_to_wafer(e)),
             }
