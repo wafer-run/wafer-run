@@ -141,6 +141,27 @@ struct WaferPackage {
     name: String,
 }
 
+/// The `{org}/{name}` a package's `wafer.toml` declares — cross-checked
+/// against the lockfile entry for a cached package and for one `seal()`
+/// downloads.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
+pub(crate) fn packaged_name(wafer_toml: &str) -> Result<String, toml::de::Error> {
+    let wt: WaferTomlForValidation = toml::from_str(wafer_toml)?;
+    Ok(format!("{}/{}", wt.package.org, wt.package.name))
+}
+
+/// A `wafer.lock` entry the loader read. `deferred` is set when the entry
+/// comes from a registry and its cache directory is missing: `seal()`
+/// downloads it from that registry and verifies it against the entry's
+/// digests instead of the loader failing on the cache miss.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct LockedBlock {
+    pub(crate) package: LockfilePackage,
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) deferred: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Pure functions (testable without a Wafer instance)
 // ---------------------------------------------------------------------------
@@ -266,19 +287,7 @@ pub(crate) fn validate_cache(
     cache_root: &Path,
     pkg: &LockfilePackage,
 ) -> Result<PathBuf, LockLoaderError> {
-    let (org, block) = split_name(pkg)?;
-    // SEC-05: the version is joined onto the cache root too, so it must be a
-    // safe single component (registries echo it back — `version = "../../.."`
-    // would escape the cache).
-    if !wafer_block::lockfile::is_valid_path_segment(&pkg.version) {
-        return Err(LockLoaderError::CacheMiss {
-            name: pkg.name.clone(),
-            version: pkg.version.clone(),
-            path: PathBuf::new(),
-            reason: format!("invalid version segment '{}'", pkg.version),
-        });
-    }
-    let dir = cache_root.join(&org).join(&block).join(&pkg.version);
+    let dir = cache_dir(cache_root, pkg)?;
     if !dir.is_dir() {
         return Err(LockLoaderError::CacheMiss {
             name: pkg.name.clone(),
@@ -295,15 +304,12 @@ pub(crate) fn validate_cache(
         path: wt_path.clone(),
         reason: format!("read wafer.toml: {e}"),
     })?;
-    let wt: WaferTomlForValidation =
-        toml::from_str(&wt_body).map_err(|e| LockLoaderError::CacheMiss {
-            name: pkg.name.clone(),
-            version: pkg.version.clone(),
-            path: wt_path.clone(),
-            reason: format!("parse wafer.toml: {e}"),
-        })?;
-
-    let cached_name = format!("{}/{}", wt.package.org, wt.package.name);
+    let cached_name = packaged_name(&wt_body).map_err(|e| LockLoaderError::CacheMiss {
+        name: pkg.name.clone(),
+        version: pkg.version.clone(),
+        path: wt_path.clone(),
+        reason: format!("parse wafer.toml: {e}"),
+    })?;
     if cached_name != pkg.name {
         return Err(LockLoaderError::CacheMiss {
             name: pkg.name.clone(),
@@ -314,6 +320,28 @@ pub(crate) fn validate_cache(
     }
 
     locate_single_wasm(&dir, pkg)
+}
+
+/// The cache directory of `pkg`: `{cache_root}/{org}/{block}/{version}`,
+/// each coordinate refused unless it is one safe path segment.
+#[cfg_attr(not(feature = "wasmi"), allow(dead_code))]
+pub(crate) fn cache_dir(
+    cache_root: &Path,
+    pkg: &LockfilePackage,
+) -> Result<PathBuf, LockLoaderError> {
+    let (org, block) = split_name(pkg)?;
+    // SEC-05: the version is joined onto the cache root too, so it must be a
+    // safe single component (registries echo it back — `version = "../../.."`
+    // would escape the cache).
+    if !wafer_block::lockfile::is_valid_path_segment(&pkg.version) {
+        return Err(LockLoaderError::CacheMiss {
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            path: PathBuf::new(),
+            reason: format!("invalid version segment '{}'", pkg.version),
+        });
+    }
+    Ok(cache_root.join(&org).join(&block).join(&pkg.version))
 }
 
 pub(crate) fn default_cache_root() -> Option<PathBuf> {
@@ -367,8 +395,8 @@ impl Wafer {
     }
 
     // Without the wasmi feature the for-loop body unconditionally returns on
-    // the first iteration (line 343 `return Err`); clippy correctly flags it
-    // as `never_loop`, and `count` is never mutated since `count += 1` only
+    // the first iteration (`return Err`); clippy correctly flags it as
+    // `never_loop`, and `count` is never mutated since `count += 1` only
     // lives inside the wasmi-gated arm. Silencing both lints + the unused
     // `cache_root` param under this feature config keeps the two branches
     // structurally parallel without splitting the function in two.
@@ -395,6 +423,30 @@ impl Wafer {
 
             #[cfg(feature = "wasmi")]
             {
+                // A registry entry with no cache directory is fetched by
+                // `seal()` from its registry and verified against both
+                // digests (`runtime::remote`). Without the `wasm` feature
+                // there is no HTTP client, so it stays a cache miss.
+                #[cfg(feature = "wasm")]
+                if pkg
+                    .source
+                    .starts_with(wafer_block::lockfile::REGISTRY_SOURCE_PREFIX)
+                    && !cache_dir(cache_root, pkg)
+                        .map_err(RuntimeError::from)?
+                        .is_dir()
+                {
+                    self.locked_blocks.push(LockedBlock {
+                        package: pkg.clone(),
+                        deferred: true,
+                    });
+                    tracing::debug!(
+                        name = %pkg.name,
+                        version = %pkg.version,
+                        "lockfile entry not cached; seal() fetches it"
+                    );
+                    continue;
+                }
+
                 let wasm_path = validate_cache(cache_root, pkg).map_err(RuntimeError::from)?;
                 let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
                     RuntimeError::from(LockLoaderError::CacheMiss {
@@ -421,28 +473,11 @@ impl Wafer {
                         actual,
                     }));
                 }
-                // Honour the builder's `fuel_per_call` / `max_wasm_memory_pages`
-                // selection for blocks auto-loaded from the lockfile. The
-                // entry's `capabilities` is the operator's bound; without one
-                // the block is bounded at `seal()` by its `capabilities`
-                // block config, `none()` when absent.
-                let limits = self.wasm.resource_limits();
-                let block = match &pkg.capabilities {
-                    Some(bound) => WasmiBlock::load_with_capabilities_and_limits(
-                        &wasm_bytes,
-                        bound.clone(),
-                        limits,
-                    ),
-                    None => WasmiBlock::load_from_bytes_with_limits(&wasm_bytes, limits),
-                }
-                .map_err(|source| {
-                    RuntimeError::from(LockLoaderError::WasmLoadFailed {
-                        name: pkg.name.clone(),
-                        version: pkg.version.clone(),
-                        source,
-                    })
-                })?;
-                self.register_block(pkg.name.clone(), Arc::new(block))?;
+                self.register_locked_wasm(pkg, &wasm_bytes)?;
+                self.locked_blocks.push(LockedBlock {
+                    package: pkg.clone(),
+                    deferred: false,
+                });
                 tracing::debug!(
                     name = %pkg.name,
                     source = %format!("lockfile:{}", pkg.source),
@@ -452,6 +487,37 @@ impl Wafer {
             }
         }
         Ok(count)
+    }
+
+    /// Compile and register a lockfile entry's `.wasm`, whose digest the
+    /// caller has verified against `pkg.wasm_sha256` — from the cache here,
+    /// or downloaded by `seal()`.
+    ///
+    /// Honours the builder's `fuel_per_call` / `max_wasm_memory_pages`
+    /// selection. The entry's `capabilities` is the operator's bound; without
+    /// one the block is bounded at `seal()` by its `capabilities` block
+    /// config, `none()` when absent.
+    #[cfg(feature = "wasmi")]
+    pub(crate) fn register_locked_wasm(
+        &mut self,
+        pkg: &LockfilePackage,
+        wasm_bytes: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let limits = self.wasm.resource_limits();
+        let block = match &pkg.capabilities {
+            Some(bound) => {
+                WasmiBlock::load_with_capabilities_and_limits(wasm_bytes, bound.clone(), limits)
+            }
+            None => WasmiBlock::load_from_bytes_with_limits(wasm_bytes, limits),
+        }
+        .map_err(|source| {
+            RuntimeError::from(LockLoaderError::WasmLoadFailed {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                source,
+            })
+        })?;
+        self.register_block(pkg.name.clone(), Arc::new(block))
     }
 }
 
@@ -869,32 +935,79 @@ source = "registry+https://wafer.run"
     }
 
     #[cfg(feature = "wasmi")]
-    #[test]
-    fn load_lockfile_cache_missing_surfaces_cache_miss() {
-        let tmp = tempdir().unwrap();
-        let lock_body = r#"version = 2
+    fn lock_one(dir: &Path, source: &str) -> PathBuf {
+        let lock_path = dir.join("wafer.lock");
+        fs::write(
+            &lock_path,
+            format!(
+                r#"version = 2
 
 [[package]]
 name = "acme/widget"
 version = "0.1.0"
 sha256 = "abc"
 wasm_sha256 = "def"
-source = "registry+https://wafer.run"
-"#;
-        let lock_path = tmp.path().join("wafer.lock");
-        fs::write(&lock_path, lock_body).unwrap();
+source = "{source}"
+"#
+            ),
+        )
+        .unwrap();
+        lock_path
+    }
 
-        let mut w = Wafer::builder()
+    fn empty_wafer() -> Wafer {
+        Wafer::builder()
             .disable_inventory()
             .disable_lockfile()
             .build()
-            .expect("empty wafer build is infallible");
-        let err = w
+            .expect("empty wafer build is infallible")
+    }
+
+    /// A `path+` entry cannot be fetched, so its missing cache is an error
+    /// at load in every build.
+    #[test]
+    fn load_lockfile_cache_missing_surfaces_cache_miss() {
+        let tmp = tempdir().unwrap();
+        let lock_path = lock_one(tmp.path(), "path+/srv/blocks");
+        let err = empty_wafer()
             .load_lockfile_with_cache(&lock_path, tmp.path())
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("acme/widget"), "{msg}");
         assert!(msg.contains("cache dir missing"), "{msg}");
+    }
+
+    /// A `registry+` entry whose cache is missing is deferred to `seal()`,
+    /// which downloads it (`tests/remote_integrity.rs`), rather than failing
+    /// the load.
+    #[cfg(feature = "wasm")]
+    #[test]
+    fn load_lockfile_defers_an_uncached_registry_entry() {
+        let tmp = tempdir().unwrap();
+        let lock_path = lock_one(tmp.path(), "registry+https://wafer.run");
+        let mut w = empty_wafer();
+        assert_eq!(
+            w.load_lockfile_with_cache(&lock_path, tmp.path()).unwrap(),
+            0
+        );
+        assert!(!w.has_block("acme/widget"));
+        assert!(matches!(
+            w.locked_blocks.as_slice(),
+            [LockedBlock { package, deferred: true }] if package.name == "acme/widget"
+        ));
+    }
+
+    /// Without the `wasm` feature there is no HTTP client to fetch with, so
+    /// an uncached registry entry stays a cache miss.
+    #[cfg(all(feature = "wasmi", not(feature = "wasm")))]
+    #[test]
+    fn load_lockfile_without_wasm_keeps_a_registry_cache_miss() {
+        let tmp = tempdir().unwrap();
+        let lock_path = lock_one(tmp.path(), "registry+https://wafer.run");
+        let err = empty_wafer()
+            .load_lockfile_with_cache(&lock_path, tmp.path())
+            .unwrap_err();
+        assert!(err.to_string().contains("cache dir missing"), "{err}");
     }
 
     /// Without the `wasmi` feature, loading a lockfile with WASM entries must

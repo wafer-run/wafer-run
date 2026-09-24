@@ -268,9 +268,8 @@ impl RegistrationCore {
         Ok(info)
     }
 
-    /// Shared registration tail used by both
-    /// [`register_block_inner`](Self::register_block_inner) and
-    /// [`register_remote_block`](Self::register_remote_block): validate the
+    /// Registration tail of
+    /// [`register_block_inner`](Self::register_block_inner): validate the
     /// block's WRAP grant declarations against its registration `name`
     /// (accepted grants are appended, rejected ones accumulate for `seal()` to
     /// surface as `GrantsRejected`), insert the block, and pair it with a
@@ -333,105 +332,29 @@ impl RegistrationCore {
         Ok(())
     }
 
-    /// Refuse to download `reference` when registering what it names could
-    /// not succeed, or must not; returns the identity it would register as,
-    /// or `None` when `reference` is not a registry reference at all (there
-    /// is nothing to download).
-    /// `seal()` calls this before fetching anything, and
-    /// [`register_remote_block`](Self::register_remote_block) again before
-    /// registering.
+    /// Refuse to download the lockfile entry `name` when registering it
+    /// could not succeed, or must not. `seal()` calls this for every
+    /// deferred entry before fetching anything.
     ///
-    /// - Its identity is the admin block: the admin block is the one
-    ///   identity WRAP trusts with typed Network/Crypto grants, so it comes
-    ///   from the embedder, never from a registry.
-    /// - Its identity is already registered — a block the embedder linked
-    ///   in, or another version already downloaded (`DuplicateBlock`).
-    /// - Its identity, or the versioned reference itself, is already an
-    ///   operator alias: registering would shadow the alias or overwrite it.
+    /// - `name` is already registered — a block the embedder linked in
+    ///   (`DuplicateBlock`): the lockfile pins a registry artifact under a
+    ///   name something else already holds.
+    /// - `name` is an operator alias: registering would shadow it.
+    ///
+    /// The admin block is refused for every lockfile entry, cached or not,
+    /// by `seal()` itself.
     #[cfg(feature = "wasm")]
-    pub(crate) fn check_downloadable(
-        &self,
-        reference: &str,
-    ) -> Result<Option<String>, RuntimeError> {
-        let Some(identity) = crate::runtime::remote::remote_block_identity(reference) else {
-            return Ok(None);
-        };
-        if !self.wrap.admin_block.is_empty() && identity == *self.wrap.admin_block {
+    pub(crate) fn check_downloadable(&self, name: &str) -> Result<(), RuntimeError> {
+        if self.blocks.contains_key(name) {
+            return Err(RuntimeError::DuplicateBlock {
+                name: name.to_string(),
+            });
+        }
+        if let Some(target) = self.aliases.get(name) {
             return Err(RuntimeError::Config(format!(
-                "{reference} names the admin block {identity}, which is never downloaded; \
-                 register it before seal()"
+                "wafer.lock entry {name} is already an alias of {target}"
             )));
         }
-        if self.blocks.contains_key(&identity) {
-            return Err(RuntimeError::DuplicateBlock { name: identity });
-        }
-        for name in [identity.as_str(), reference] {
-            if let Some(target) = self.aliases.get(name) {
-                return Err(RuntimeError::Config(format!(
-                    "remote block {reference}: {name} is already an alias of {target}"
-                )));
-            }
-        }
-        Ok(Some(identity))
-    }
-
-    /// Register a block `seal()` downloaded from the registry for
-    /// `reference` — `{org}/{block}`, `{org}/{block}@latest` or
-    /// `{org}/{block}@{version}` — through the same checks as a
-    /// code-registered block.
-    ///
-    /// The block's identity is the unversioned `{org}/{block}`. A version
-    /// selects which artifact is fetched; it does not make a different
-    /// block. Everything WRAP keys on is the unversioned name: the block owns
-    /// `{org}__{block}__*` tables and `{ORG}__{BLOCK}__*` config keys whatever
-    /// version runs, and a guest reports `name` and `version` as separate
-    /// `BlockInfo` fields. So the block is admitted and registered under its
-    /// identity, and one runtime holds at most one version of a block — a
-    /// second reference to the same identity at another version is refused
-    /// as a duplicate.
-    ///
-    /// A versioned `reference` becomes an alias of the identity, so flow
-    /// steps and routes that name it still resolve; aliases that targeted
-    /// the reference are retargeted to the identity (aliases stay one hop);
-    /// and config registered under the reference becomes the identity's
-    /// config, where `seal()` reads its `capabilities` narrowing and `Init`
-    /// its payload. Config under both names is refused as ambiguous.
-    #[cfg(feature = "wasm")]
-    pub(crate) fn register_remote_block(
-        &mut self,
-        reference: &str,
-        block: Arc<dyn Block>,
-    ) -> Result<(), RuntimeError> {
-        let identity =
-            self.check_downloadable(reference)?
-                .ok_or_else(|| RuntimeError::InvalidBlockName {
-                    name: reference.to_string(),
-                    reason: "not a registry reference {org}/{block}[@{version}]".to_string(),
-                })?;
-        let info = self.admit(&identity, &block)?;
-
-        if reference != identity {
-            if self.block_configs.contains_key(reference)
-                && self.block_configs.contains_key(&identity)
-            {
-                return Err(RuntimeError::Config(format!(
-                    "remote block {identity} has config under both {identity} and {reference}; \
-                     keep one"
-                )));
-            }
-            if let Some(config) = self.block_configs.remove(reference) {
-                self.block_configs.insert(identity.clone(), config);
-            }
-            let aliases = Arc::make_mut(&mut self.aliases);
-            for target in aliases.values_mut() {
-                if target == reference {
-                    *target = identity.clone();
-                }
-            }
-            aliases.insert(reference.to_string(), identity.clone());
-        }
-
-        self.insert_block_with_grants(&identity, block, &info);
         Ok(())
     }
 

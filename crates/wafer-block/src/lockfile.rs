@@ -53,6 +53,25 @@ use sha2::{Digest, Sha256};
 /// Current `wafer.lock` schema version. Parsers reject any other value.
 pub const SCHEMA_VERSION: u32 = 2;
 
+/// Prefix of a `source` naming a registry: `registry+<base-url>`. The
+/// package tarball is `{base-url}/registry/download/{org}/{block}/{version}.wafer`
+/// for `wafer install` and for the runtime's seal-time fetch of an entry
+/// whose cache is missing.
+pub const REGISTRY_SOURCE_PREFIX: &str = "registry+";
+
+/// Most bytes a package tarball download may carry. Shared by `wafer
+/// install` and the runtime's seal-time fetch so both refuse the same
+/// packages; the runtime compiles at most 64 MiB of `.wasm` anyway.
+pub const MAX_PACKAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Most entries a package tarball may hold when unpacked.
+pub const MAX_PACKAGE_ENTRIES: usize = 256;
+
+/// Most bytes of file content a package tarball may unpack to — the bound
+/// that stops a small, highly compressed tarball (a gzip bomb) from filling
+/// memory or disk.
+pub const MAX_UNPACKED_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Hex-encoded sha256 of `bytes`. The one implementation of the digest
 /// format shared by the CLI installer (recording `sha256`/`wasm_sha256`)
 /// and the runtime loader (verifying the cached `.wasm`), so the producer

@@ -22,7 +22,7 @@
 ///   time. (`BlockInit` is boot-adjacent — it fires per block during the
 ///   lifecycle-start pass and is not aggregated.)
 /// - **Operational** (`Config`, `Flow`, `Wasm`, `Registry`, `Lockfile`,
-///   `AbiMismatch`, `BlockInit`): raised while loading/compiling block assets
+///   `BlockInit`): raised while loading/compiling block assets
 ///   or executing flows. They wrap a single failure with enough context to
 ///   trace the subsystem (config, flow engine, WASM loader, registry, etc.).
 #[derive(Debug, thiserror::Error)]
@@ -106,17 +106,6 @@ pub enum RuntimeError {
     /// free of wafer-run / toml / wasmi deps).
     #[error("lockfile error: {0}")]
     Lockfile(String),
-
-    /// The remote block requires a newer ABI version than the runtime supports.
-    #[error("ABI mismatch for block '{name}': requires {required}, runtime supports {supported}")]
-    AbiMismatch {
-        /// Block name.
-        name: String,
-        /// ABI version the block was built against.
-        required: u32,
-        /// Highest ABI version this runtime understands.
-        supported: u32,
-    },
 
     /// Inventory registration of a block failed.
     #[error("inventory registration of '{name}' failed: {source}")]

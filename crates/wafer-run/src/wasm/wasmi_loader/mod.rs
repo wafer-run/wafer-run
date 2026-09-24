@@ -275,19 +275,6 @@ impl WasmiBlock {
         Ok(block)
     }
 
-    /// Compile a block `seal()` downloaded from the registry. No embedder
-    /// chose its capabilities, so, like
-    /// [`load_from_bytes`](Self::load_from_bytes), it runs with none until
-    /// `seal()` bounds it by the operator's `capabilities` config.
-    #[cfg(feature = "wasm")]
-    pub(crate) fn load_downloaded(
-        engine: &Engine,
-        wasm_bytes: &[u8],
-        limits: ResourceLimits,
-    ) -> Result<Self, RuntimeError> {
-        Self::compile(engine, wasm_bytes, BlockCapabilities::none(), None, limits)
-    }
-
     /// The one constructor body: `caps` is what the guest runs under until
     /// `seal()`, `bound` what `runtime_capabilities_mut` intersects with.
     fn compile(
