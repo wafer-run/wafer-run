@@ -34,7 +34,7 @@ use super::{
 /// characters would turn one name into another (`a-b` into `ab`) and send the
 /// statement to a table or column the caller never named.
 fn sql_name(name: &str) -> Result<&str, DatabaseError> {
-    validate_ident(name).map_err(|e| DatabaseError::InvalidArgument(e.to_string()))
+    Ok(validate_ident(name)?)
 }
 
 /// Sort `data` into deterministic `(column, value)` pairs, refusing a key
@@ -614,9 +614,20 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // the introspection drops the write-back rather than caching a stale
         // column set (see `SchemaCache` docs).
         let gen0 = cache.map(SchemaCache::generation);
+        let columns = self.introspect_columns(table).await?;
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_columns_if_gen(table, columns.clone(), gen0);
+        }
+        Ok(columns)
+    }
+
+    /// Column names (lowercased) of `table` as the database reports them now,
+    /// bypassing and not touching [`schema_cache`](Self::schema_cache); empty
+    /// if the table is missing.
+    async fn introspect_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
         let (sql, params) = introspect::build_list_columns(table, Self::BACKEND);
         let rows = self.run_fetch(&sql, &params).await?;
-        let columns: Vec<String> = rows
+        Ok(rows
             .into_iter()
             .filter_map(|r| {
                 r.data
@@ -624,11 +635,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_lowercase)
             })
-            .collect();
-        if let (Some(cache), Some(gen0)) = (cache, gen0) {
-            cache.set_columns_if_gen(table, columns.clone(), gen0);
-        }
-        Ok(columns)
+            .collect())
     }
 
     /// Primary-key columns of `table`, in key order; empty when the table has
@@ -748,7 +755,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             if existing.contains(&column.to_lowercase()) {
                 continue;
             }
-            let stmt = ddl::build_add_column_for_value(table, column, &data[key], Self::BACKEND);
+            let stmt = ddl::build_add_column_for_value(table, column, &data[key], Self::BACKEND)?;
             self.add_column_checked(table, column, &stmt).await?;
         }
         Ok(())
@@ -763,11 +770,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Every name must also pass [`sql_name`]. In STRICT_SCHEMA mode no column
     /// set is read: the migrated schema is trusted, and a statement naming an
-    /// unknown column fails in the backend.
+    /// unknown column fails in the backend. A table with no columns does not
+    /// exist; the check passes and the statement fails in the backend, as it
+    /// did before the check.
     ///
     /// A cached column list can predate a column another connection added, so
-    /// a name missing from it is looked up once more, uncached, before the
-    /// statement is refused.
+    /// a name missing from it is looked up once more, uncached
+    /// ([`introspect_columns`](Self::introspect_columns)), before the
+    /// statement is refused. That look-up leaves the cache alone unless it
+    /// finds the cached list stale, so a caller sending unknown columns costs
+    /// one introspection per request — what the failing statement would have
+    /// cost — and never evicts the entry other requests are served from.
     async fn require_columns(&self, table: &str, columns: &[&str]) -> Result<(), DatabaseError> {
         for column in columns {
             sql_name(column)?;
@@ -781,13 +794,26 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 .find(|c| !existing.contains(&c.to_lowercase()))
                 .copied()
         };
-        if first_missing(&self.get_columns(table).await?).is_none() {
+        let known = self.get_columns(table).await?;
+        if !known.is_empty() && first_missing(&known).is_none() {
             return Ok(());
         }
-        if let Some(cache) = self.schema_cache() {
-            cache.invalidate(table);
+        let cache = self.schema_cache();
+        let current = match cache {
+            Some(cache) => {
+                let current = self.introspect_columns(table).await?;
+                if current != known {
+                    cache.invalidate(table);
+                }
+                current
+            }
+            // Without a cache `known` was read just now.
+            None => known,
+        };
+        if current.is_empty() {
+            return Ok(());
         }
-        match first_missing(&self.get_columns(table).await?) {
+        match first_missing(&current) {
             Some(column) => Err(DatabaseError::InvalidArgument(format!(
                 "`{table}` has no column `{column}`"
             ))),
@@ -977,8 +1003,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `sum`: SUM(field) with filters (no table-exists guard, no
-    /// column check: an unknown table or column fails in the backend).
+    /// Shared `sum`: [`require_columns`](Self::require_columns) on `field` and
+    /// the filters → SUM(field). No table-exists guard: a missing table fails
+    /// in the backend.
     async fn sum(
         &self,
         collection: &str,
@@ -986,11 +1013,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
         let table = sql_name(collection)?;
-        for column in query_columns(filters, &[], None, None) {
-            sql_name(column)?;
-        }
-        let stmt =
-            wafer_sql_utils::aggregate::build_sum(table, sql_name(field)?, filters, Self::BACKEND);
+        let mut columns = query_columns(filters, &[], None, None);
+        columns.push(field);
+        self.require_columns(table, &columns).await?;
+        let stmt = wafer_sql_utils::aggregate::build_sum(table, field, filters, Self::BACKEND);
         self.run_scalar_f64(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
@@ -1281,6 +1307,15 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sql_name(collection)?;
         let stmt = match spec.on_conflict {
             UpsertConflict::SetColumns(update_cols) => {
+                let named = spec
+                    .data
+                    .iter()
+                    .map(|(column, _)| column)
+                    .chain(&spec.conflict_columns)
+                    .chain(&update_cols);
+                for column in named {
+                    sql_name(column)?;
+                }
                 let conflict: Vec<&str> =
                     spec.conflict_columns.iter().map(String::as_str).collect();
                 let update: Vec<&str> = update_cols.iter().map(String::as_str).collect();
@@ -1344,14 +1379,31 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// inside a nested block whose closing brace drops it (and every
     /// `Rc<dyn Iden>` it holds) *before* the `.await` below — the same pattern
     /// [`DbExec::list`] uses so the future stays `Send` for the native build.
-    /// Identifiers are validated at the trust boundary (the handler's
-    /// `to_aggregate_spec`) before reaching here.
+    /// Every name in the spec must pass [`sql_name`] (the handler's
+    /// `to_aggregate_spec` checks the wire the same way), and every column it
+    /// reads must exist ([`require_columns`](Self::require_columns); a sort
+    /// key may also name an output alias).
     async fn aggregate(
         &self,
         collection: &str,
         spec: AggregateSpec,
     ) -> Result<Vec<Record>, DatabaseError> {
         let table = sql_name(collection)?;
+        let aliases = spec.aliases();
+        for alias in &aliases {
+            sql_name(alias)?;
+        }
+        let columns: Vec<&str> = spec
+            .read_columns()
+            .into_iter()
+            .chain(
+                spec.sort
+                    .iter()
+                    .map(|s| s.field.as_str())
+                    .filter(|f| !aliases.contains(f)),
+            )
+            .collect();
+        self.require_columns(table, &columns).await?;
         let stmt = {
             let cfg = spec.into_grouped_config(table.to_string());
             wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)
@@ -1449,9 +1501,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         for column in &table.columns {
             sql_name(&column.name)?;
         }
-        let create = ddl::build_create_table(table, Self::BACKEND).map_err(|e| {
-            DatabaseError::Internal(format!("build create table {}: {e}", table.name))
-        })?;
+        let create = ddl::build_create_table(table, Self::BACKEND)?;
         self.run_execute(&create.sql, &[])
             .await
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {e}", table.name)))?;
@@ -1467,21 +1517,19 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             if existing.contains(&column.name.to_lowercase()) {
                 continue;
             }
-            let stmt = ddl::build_add_column(&table.name, column, Self::BACKEND);
+            let stmt = ddl::build_add_column(&table.name, column, Self::BACKEND)?;
             self.add_column_checked(&table.name, &column.name, &stmt)
                 .await?;
         }
 
         for index in &table.indexes {
-            let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)
-                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
+            let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)?;
             self.run_execute(&stmt.sql, &[])
                 .await
                 .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }
 
-        let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)
-            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
+        let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)?;
         for stmt in fk_indexes {
             self.run_execute(&stmt.sql, &[])
                 .await

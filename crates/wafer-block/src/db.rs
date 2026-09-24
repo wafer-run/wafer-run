@@ -7,6 +7,27 @@
 
 use crate::{common::ErrorCode, WaferError};
 
+/// Longest table or column name the database layer accepts, in bytes.
+/// PostgreSQL keeps only the first 63 bytes of an identifier and drops the
+/// rest without an error, so two longer names sharing those 63 bytes would
+/// name the same table. SQLite has no such limit; the one rule holds on both.
+pub const MAX_IDENT_LEN: usize = 63;
+
+/// Whether `name` is a table or column name the database layer accepts:
+/// non-empty, at most [`MAX_IDENT_LEN`] bytes, ASCII lowercase letters,
+/// digits and `_` only. The one rule behind the database handler's wire
+/// check and `wafer_sql_utils::ident::validate_ident`. Lowercase only, so a
+/// table has one spelling on every backend: SQLite folds the case of a name,
+/// PostgreSQL keeps it for a quoted one.
+#[must_use]
+pub fn is_plain_ident(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_IDENT_LEN
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// Configures a list query (filters, sort, pagination).
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {

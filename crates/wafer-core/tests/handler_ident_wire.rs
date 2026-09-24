@@ -106,21 +106,25 @@ async fn run(admit: bool, op: &str, request: &Value) -> (Option<ErrorCode>, Vec<
 }
 
 /// Collection spellings that are not plain lowercase identifiers. Each would
-/// have been authorized as written and then rewritten into another table's
-/// name by character stripping (`acme__ab__t`), or is a second spelling of
-/// one on a case-folding backend.
-const BAD_COLLECTIONS: [&str; 5] = [
-    "acme__a-b__t",
-    "Acme__ab__t",
-    "acme__ab__t;",
-    "acme__ab__caf\u{e9}",
-    "",
-];
+/// have been authorized as written and then reached another table: by
+/// character stripping (`acme__ab__t`), by case folding on SQLite, or — the
+/// 64-byte name — by PostgreSQL keeping only its first 63 bytes.
+fn bad_collections() -> Vec<String> {
+    vec![
+        "acme__a-b__t".to_string(),
+        "Acme__ab__t".to_string(),
+        "acme__ab__t;".to_string(),
+        "acme__ab__caf\u{e9}".to_string(),
+        String::new(),
+        format!("acme__ab__{}", "t".repeat(55)),
+    ]
+}
 
 #[tokio::test]
 async fn a_non_identifier_collection_is_refused_before_any_access_check() {
     let mut wrong = Vec::new();
-    for bad in BAD_COLLECTIONS {
+    for bad in bad_collections() {
+        let bad = bad.as_str();
         let requests = [
             (ServiceOp::DATABASE_LIST, json!({ "collection": bad })),
             (
@@ -167,7 +171,8 @@ async fn a_non_identifier_column_is_refused_and_never_reaches_the_service() {
     let t = "acme__ab__t";
     let bad_filter = |field: &str| json!([{ "field": field, "value": 1 }]);
     let mut wrong = Vec::new();
-    for bad in ["na-me", "Name", "name;", ""] {
+    let long = "n".repeat(64);
+    for bad in ["na-me", "Name", "name;", "", long.as_str()] {
         let requests = [
             (
                 "list sort",

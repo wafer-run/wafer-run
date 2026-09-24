@@ -58,7 +58,7 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
-        let stmt = ddl::build_drop_table(name, Backend::Postgres);
+        let stmt = ddl::build_drop_table(name, Backend::Postgres)?;
         sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
@@ -71,7 +71,7 @@ impl PostgresDatabaseService {
         table: &str,
         column: &Column,
     ) -> Result<(), DatabaseError> {
-        let stmt = ddl::build_add_column(table, column, Backend::Postgres);
+        let stmt = ddl::build_add_column(table, column, Backend::Postgres)?;
         sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await

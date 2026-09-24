@@ -93,11 +93,11 @@ pub enum SqlBuildError {
         /// The rejected action string, as supplied by the caller.
         action: String,
     },
-    /// An identifier that is interpolated into raw expression text (rather than
-    /// quoted or parameter-bound) contained characters outside the plain
-    /// identifier set (`[A-Za-z0-9_]`). Rejected so it can't break out of the
-    /// surrounding SQL expression.
-    #[error("identifier {value:?} is not a plain identifier (only ASCII alphanumerics and underscore are allowed)")]
+    /// A table or column name was not a plain identifier: non-empty, at most
+    /// 63 bytes, `[a-z0-9_]` only (see [`ident::validate_ident`]). Rejected
+    /// rather than rewritten, so it can neither break out of the surrounding
+    /// SQL nor name a different table.
+    #[error("identifier {value:?} is not a plain identifier (1 to 63 of: lowercase ASCII letters, digits, underscore)")]
     InvalidIdentifier {
         /// The rejected identifier, as supplied by the caller.
         value: String,

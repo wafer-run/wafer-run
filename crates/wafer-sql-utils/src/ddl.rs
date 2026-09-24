@@ -2,9 +2,13 @@ use wafer_schema::{Column, DataType, DefaultVal, DefaultValue, Index, Table};
 
 use crate::{ident::validate_ident, Backend, SqlBuildError};
 
-/// Quote an identifier for use in DDL (double-quote escaping).
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+/// Quote a table or column name for use in DDL, refusing one that is not a
+/// plain identifier ([`validate_ident`]): every name a DDL statement carries
+/// is held to the rule the executor and the database handler apply, so no
+/// schema op can create or alter a table under a name a query could not
+/// reach, or one PostgreSQL would truncate into another.
+fn quote_ident(name: &str) -> Result<String, SqlBuildError> {
+    Ok(format!("\"{}\"", validate_ident(name)?))
 }
 
 /// Validate a foreign-key referential action against an allowlist.
@@ -72,8 +76,8 @@ fn default_to_sql(d: &DefaultValue, backend: Backend) -> String {
     }
 }
 
-fn column_to_sql(col: &Column, backend: Backend) -> String {
-    let qname = quote_ident(&col.name);
+fn column_to_sql(col: &Column, backend: Backend) -> Result<String, SqlBuildError> {
+    let qname = quote_ident(&col.name)?;
     let mut sql = format!("{} {}", qname, data_type_to_sql(col.data_type, backend));
 
     if col.primary_key && !col.auto_increment {
@@ -86,9 +90,13 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
             Backend::Postgres => {
                 let s = format!("{qname} SERIAL PRIMARY KEY");
                 if let Some(ref default) = col.default {
-                    return format!("{} DEFAULT {}", s, default_to_sql(default, backend));
+                    return Ok(format!(
+                        "{} DEFAULT {}",
+                        s,
+                        default_to_sql(default, backend)
+                    ));
                 }
-                return s;
+                return Ok(s);
             }
         };
     }
@@ -106,18 +114,20 @@ fn column_to_sql(col: &Column, backend: Backend) -> String {
         sql.push_str(&default_to_sql(default, backend));
     }
 
-    sql
+    Ok(sql)
 }
 
 /// Generate a CREATE TABLE IF NOT EXISTS statement from a schema Table definition.
 ///
 /// Returns `Err` if any column's foreign-key referential action is outside the
-/// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT).
+/// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT), or if
+/// any table or column name it quotes is not a plain identifier
+/// ([`validate_ident`]).
 pub fn build_create_table(
     table: &Table,
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
-    let qtable = quote_ident(&table.name);
+    let qtable = quote_ident(&table.name)?;
     let mut sql = format!("CREATE TABLE IF NOT EXISTS {qtable} (\n");
 
     for (i, col) in table.columns.iter().enumerate() {
@@ -125,12 +135,16 @@ pub fn build_create_table(
             sql.push_str(",\n");
         }
         sql.push_str("    ");
-        sql.push_str(&column_to_sql(col, backend));
+        sql.push_str(&column_to_sql(col, backend)?);
     }
 
     // Composite primary key
     if !table.primary_key.is_empty() {
-        let quoted: Vec<String> = table.primary_key.iter().map(|k| quote_ident(k)).collect();
+        let quoted: Vec<String> = table
+            .primary_key
+            .iter()
+            .map(|k| quote_ident(k))
+            .collect::<Result<_, _>>()?;
         sql.push_str(",\n    PRIMARY KEY(");
         sql.push_str(&quoted.join(", "));
         sql.push(')');
@@ -138,7 +152,10 @@ pub fn build_create_table(
 
     // Composite unique constraints
     for uk in &table.unique_keys {
-        let quoted: Vec<String> = uk.iter().map(|k| quote_ident(k)).collect();
+        let quoted: Vec<String> = uk
+            .iter()
+            .map(|k| quote_ident(k))
+            .collect::<Result<_, _>>()?;
         sql.push_str(",\n    UNIQUE(");
         sql.push_str(&quoted.join(", "));
         sql.push(')');
@@ -148,11 +165,11 @@ pub fn build_create_table(
     for col in &table.columns {
         if let Some(ref refs) = col.references {
             sql.push_str(",\n    FOREIGN KEY (");
-            sql.push_str(&quote_ident(&col.name));
+            sql.push_str(&quote_ident(&col.name)?);
             sql.push_str(") REFERENCES ");
-            sql.push_str(&quote_ident(&refs.table));
+            sql.push_str(&quote_ident(&refs.table)?);
             sql.push('(');
-            sql.push_str(&quote_ident(&refs.column));
+            sql.push_str(&quote_ident(&refs.column)?);
             sql.push(')');
             if !refs.on_delete.is_empty() {
                 sql.push_str(" ON DELETE ");
@@ -173,10 +190,10 @@ pub fn build_create_table(
 ///
 /// The index name — caller-supplied via `idx.name`, or synthesised as
 /// `idx_{table}_{columns}` when empty — is spliced into the DDL unquoted, so
-/// every component must be a plain identifier (`[A-Za-z0-9_]`). Anything else
+/// every component must be a plain identifier ([`validate_ident`]). Anything else
 /// is rejected with [`SqlBuildError::InvalidIdentifier`] rather than silently
 /// stripped (stripping would quietly create an index under a different name).
-/// The `ON` table and column list are quoted and need no validation.
+/// The `ON` table and column list are quoted, and held to the same rule.
 pub fn build_create_index(
     table_name: &str,
     idx: &Index,
@@ -201,9 +218,13 @@ pub fn build_create_index(
     };
     sql.push_str(&name);
     sql.push_str(" ON ");
-    sql.push_str(&quote_ident(table_name));
+    sql.push_str(&quote_ident(table_name)?);
     sql.push('(');
-    let quoted_cols: Vec<String> = idx.columns.iter().map(|c| quote_ident(c)).collect();
+    let quoted_cols: Vec<String> = idx
+        .columns
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Result<_, _>>()?;
     sql.push_str(&quoted_cols.join(", "));
     sql.push(')');
 
@@ -238,19 +259,25 @@ pub fn build_fk_indexes(
     Ok(stmts)
 }
 
-/// Generate an ALTER TABLE ADD COLUMN statement.
-pub fn build_add_column(table_name: &str, col: &Column, backend: Backend) -> crate::Statement {
+/// Generate an ALTER TABLE ADD COLUMN statement. `Err` when the table or
+/// column name is not a plain identifier ([`validate_ident`]).
+pub fn build_add_column(
+    table_name: &str,
+    col: &Column,
+    backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
     let sql = format!(
         "ALTER TABLE {} ADD COLUMN {}",
-        quote_ident(table_name),
-        column_to_sql(col, backend)
+        quote_ident(table_name)?,
+        column_to_sql(col, backend)?
     );
-    crate::Statement::new(sql, vec![], table_name)
+    Ok(crate::Statement::new(sql, vec![], table_name))
 }
 
 /// Generate an `ALTER TABLE <table> ADD COLUMN <column> <type_sql>` statement.
 ///
-/// Both `table_name` and `column_name` are quoted as identifiers. `type_sql`
+/// Both `table_name` and `column_name` are quoted as identifiers, and must be
+/// plain identifiers ([`validate_ident`]) or the call is `Err`. `type_sql`
 /// is a dialect column type produced by `data_type_to_sql` (or, for the
 /// write path's lazy column-add, which maps from a `serde_json::Value`, the
 /// column type the backend chose); it is spliced verbatim and must therefore
@@ -272,19 +299,19 @@ pub fn build_add_column_with_type(
     column_name: &str,
     type_sql: &str,
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     let if_not_exists = match backend {
         Backend::Postgres => "IF NOT EXISTS ",
         Backend::Sqlite => "",
     };
     let sql = format!(
         "ALTER TABLE {} ADD COLUMN {}{} {}",
-        quote_ident(table_name),
+        quote_ident(table_name)?,
         if_not_exists,
-        quote_ident(column_name),
+        quote_ident(column_name)?,
         type_sql
     );
-    crate::Statement::new(sql, vec![], table_name)
+    Ok(crate::Statement::new(sql, vec![], table_name))
 }
 
 /// Pick the dialect column type for a lazily added column holding `value`.
@@ -322,7 +349,7 @@ pub fn build_add_column_for_value(
     column_name: &str,
     value: &serde_json::Value,
     backend: Backend,
-) -> crate::Statement {
+) -> Result<crate::Statement, SqlBuildError> {
     build_add_column_with_type(
         table_name,
         column_name,
@@ -331,10 +358,14 @@ pub fn build_add_column_for_value(
     )
 }
 
-/// Generate a DROP TABLE IF EXISTS statement.
-pub fn build_drop_table(table_name: &str, _backend: Backend) -> crate::Statement {
-    let sql = format!("DROP TABLE IF EXISTS {}", quote_ident(table_name));
-    crate::Statement::new(sql, vec![], table_name)
+/// Generate a DROP TABLE IF EXISTS statement. `Err` when the table name is
+/// not a plain identifier ([`validate_ident`]).
+pub fn build_drop_table(
+    table_name: &str,
+    _backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
+    let sql = format!("DROP TABLE IF EXISTS {}", quote_ident(table_name)?);
+    Ok(crate::Statement::new(sql, vec![], table_name))
 }
 
 #[cfg(test)]
@@ -442,14 +473,15 @@ mod tests {
 
     #[test]
     fn test_drop_table() {
-        let stmt = build_drop_table("users", Backend::Sqlite);
+        let stmt = build_drop_table("users", Backend::Sqlite).expect("plain identifiers");
         assert_eq!(stmt.sql, "DROP TABLE IF EXISTS \"users\"");
         assert_eq!(stmt.collection, "users");
     }
 
     #[test]
     fn test_add_column_with_type_sqlite() {
-        let stmt = build_add_column_with_type("users", "nickname", "TEXT", Backend::Sqlite);
+        let stmt = build_add_column_with_type("users", "nickname", "TEXT", Backend::Sqlite)
+            .expect("plain identifiers");
         // SQLite does not support `IF NOT EXISTS` on `ADD COLUMN`.
         assert_eq!(
             stmt.sql,
@@ -460,19 +492,39 @@ mod tests {
     }
 
     #[test]
-    fn test_add_column_with_type_quotes_identifiers() {
-        // A column name containing a double quote must be escaped, not
-        // splatted into the DDL where it could break out of the identifier.
-        let stmt = build_add_column_with_type("posts", "weird\"name", "TEXT", Backend::Sqlite);
-        assert_eq!(
-            stmt.sql,
-            "ALTER TABLE \"posts\" ADD COLUMN \"weird\"\"name\" TEXT"
-        );
+    fn test_ddl_refuses_names_that_are_not_plain_identifiers() {
+        // A quote, a hyphen, uppercase or a name PostgreSQL would truncate
+        // is refused, not escaped or rewritten into another table's name.
+        let long = "a".repeat(64);
+        for bad in ["weird\"name", "a-b", "Users", long.as_str()] {
+            assert!(build_drop_table(bad, Backend::Sqlite).is_err(), "{bad:?}");
+            assert!(
+                build_add_column_with_type("posts", bad, "TEXT", Backend::Sqlite).is_err(),
+                "{bad:?}"
+            );
+            assert!(
+                build_add_column(bad, &Column::new("c", DataType::Text), Backend::Postgres)
+                    .is_err(),
+                "{bad:?}"
+            );
+            let table = Table {
+                name: "t".into(),
+                columns: vec![Column::new(bad, DataType::Text)],
+                indexes: Vec::new(),
+                primary_key: Vec::new(),
+                unique_keys: Vec::new(),
+            };
+            assert!(
+                build_create_table(&table, Backend::Sqlite).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
     fn test_add_column_with_type_postgres_typed() {
-        let stmt = build_add_column_with_type("orders", "amount", "BIGINT", Backend::Postgres);
+        let stmt = build_add_column_with_type("orders", "amount", "BIGINT", Backend::Postgres)
+            .expect("plain identifiers");
         assert_eq!(
             stmt.sql,
             "ALTER TABLE \"orders\" ADD COLUMN IF NOT EXISTS \"amount\" BIGINT"
@@ -512,7 +564,8 @@ mod tests {
             "meta",
             &serde_json::json!({"a": 1}),
             Backend::Postgres,
-        );
+        )
+        .expect("plain identifiers");
         assert_eq!(
             stmt.sql,
             "ALTER TABLE \"orders\" ADD COLUMN IF NOT EXISTS \"meta\" JSONB"
@@ -522,7 +575,8 @@ mod tests {
             "meta",
             &serde_json::json!({"a": 1}),
             Backend::Sqlite,
-        );
+        )
+        .expect("plain identifiers");
         assert_eq!(stmt.sql, "ALTER TABLE \"orders\" ADD COLUMN \"meta\" TEXT");
     }
 
@@ -555,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_create_index_rejects_non_identifier_name() {
-        // Fail-closed: a caller-supplied index name outside [A-Za-z0-9_] is
+        // Fail-closed: a caller-supplied index name outside [a-z0-9_] is
         // rejected, not stripped into a different-but-valid name.
         let idx = Index {
             name: "idx; DROP TABLE users".into(),

@@ -522,33 +522,21 @@ impl SQLiteDatabaseService {
     /// execution queues to the write worker.
     async fn ensure_schema_table_in_one_job(&self, table: &Table) -> Result<(), DatabaseError> {
         let table_name = table.name.clone();
-        let create_sql = ddl::build_create_table(table, Backend::Sqlite)
-            .map_err(|e| {
-                DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
-            })?
-            .sql;
+        let create_sql = ddl::build_create_table(table, Backend::Sqlite)?.sql;
         // (lowercased name, display name, ALTER sql) per declared column.
         let column_adds: Vec<(String, String, String)> = table
             .columns
             .iter()
             .map(|col| {
-                (
-                    col.name.to_lowercase(),
-                    col.name.clone(),
-                    ddl::build_add_column(&table.name, col, Backend::Sqlite).sql,
-                )
+                let add = ddl::build_add_column(&table.name, col, Backend::Sqlite)?;
+                Ok((col.name.to_lowercase(), col.name.clone(), add.sql))
             })
-            .collect();
+            .collect::<Result<_, DatabaseError>>()?;
         let mut index_sqls = Vec::new();
         for idx in &table.indexes {
-            index_sqls.push(
-                ddl::build_create_index(&table.name, idx, Backend::Sqlite)
-                    .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?
-                    .sql,
-            );
+            index_sqls.push(ddl::build_create_index(&table.name, idx, Backend::Sqlite)?.sql);
         }
-        let fk_sqls: Vec<String> = ddl::build_fk_indexes(table, Backend::Sqlite)
-            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?
+        let fk_sqls: Vec<String> = ddl::build_fk_indexes(table, Backend::Sqlite)?
             .into_iter()
             .map(|stmt| stmt.sql)
             .collect();
@@ -649,7 +637,7 @@ forward_database_service! {
         }
 
         async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-            let stmt = ddl::build_drop_table(name, Backend::Sqlite);
+            let stmt = ddl::build_drop_table(name, Backend::Sqlite)?;
             self.run_execute(&stmt.sql, &[]).await?;
             self.schema_cache.invalidate(name);
             Ok(())
@@ -660,7 +648,7 @@ forward_database_service! {
             table: &str,
             column: &Column,
         ) -> Result<(), DatabaseError> {
-            let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
+            let stmt = ddl::build_add_column(table, column, Backend::Sqlite)?;
             self.run_execute(&stmt.sql, &[]).await?;
             self.schema_cache.invalidate(table);
             Ok(())
@@ -2261,6 +2249,43 @@ mod tests {
             .expect("a stale exists cache would error here; invalidation returns empty");
         assert!(after.records.is_empty());
         assert_eq!(after.total_count, 0);
+    }
+
+    /// A request naming an unknown column is refused without evicting the
+    /// cached column list the other requests are served from: the uncached
+    /// re-read that confirms the column is missing leaves the cache alone.
+    #[tokio::test]
+    async fn unknown_column_requests_do_not_evict_the_schema_cache() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
+        let named_a = vec![Filter {
+            field: "name".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("a"),
+        }];
+        let _ = DatabaseService::count(&svc, "widgets", &named_a)
+            .await
+            .unwrap();
+        let cache = DbExec::schema_cache(&svc).expect("the SQLite backend caches");
+        let generation = cache.generation();
+        assert!(
+            cache.columns("widgets").is_some(),
+            "the column list is cached"
+        );
+
+        let unknown = vec![Filter {
+            field: "zz".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("x"),
+        }];
+        for _ in 0..3 {
+            let err = DatabaseService::count(&svc, "widgets", &unknown)
+                .await
+                .expect_err("an unknown column is refused");
+            assert!(matches!(err, DatabaseError::InvalidArgument(_)), "{err:?}");
+        }
+        assert!(cache.columns("widgets").is_some(), "the entry survives");
+        assert_eq!(cache.generation(), generation, "nothing was invalidated");
     }
 
     /// Adding a column out-of-band (via `schema_add_column`) invalidates the

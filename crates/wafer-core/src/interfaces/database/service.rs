@@ -43,6 +43,14 @@ pub enum DatabaseError {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// A statement a builder refused to render is the caller's mistake: a name
+/// that is not a plain identifier, or a foreign-key action off the allowlist.
+impl From<wafer_sql_utils::SqlBuildError> for DatabaseError {
+    fn from(e: wafer_sql_utils::SqlBuildError) -> Self {
+        Self::InvalidArgument(e.to_string())
+    }
+}
+
 /// Plain-data upsert specification handed to [`DatabaseService::upsert`].
 ///
 /// The database handler converts the wire
@@ -319,6 +327,66 @@ pub enum GroupBySpec {
 }
 
 impl AggregateSpec {
+    /// The output aliases of [`aggregates`](Self::aggregates).
+    #[must_use]
+    pub fn aliases(&self) -> Vec<&str> {
+        self.aggregates
+            .iter()
+            .map(|a| match a {
+                AggregateColumnSpec::Count { alias }
+                | AggregateColumnSpec::Sum { alias, .. }
+                | AggregateColumnSpec::Avg { alias, .. }
+                | AggregateColumnSpec::Max { alias, .. }
+                | AggregateColumnSpec::CaseWhenSum { alias, .. }
+                | AggregateColumnSpec::SumWhere { alias, .. } => alias.as_str(),
+            })
+            .collect()
+    }
+
+    /// Every table column the query reads: the selected and grouped columns,
+    /// each aggregated `field`, the columns of every `when` predicate and of
+    /// the filters. [`sort`](Self::sort) keys are not included — one may name
+    /// an alias instead of a column.
+    #[must_use]
+    pub fn read_columns(&self) -> Vec<&str> {
+        fn tree_columns<'a>(nodes: &'a [FilterTree], out: &mut Vec<&'a str>) {
+            for node in nodes {
+                match node {
+                    FilterTree::Leaf(f) => out.push(f.field.as_str()),
+                    FilterTree::ColumnCompare(f) => {
+                        out.push(f.field.as_str());
+                        out.push(f.column.as_str());
+                    }
+                    FilterTree::All(children) | FilterTree::Any(children) => {
+                        tree_columns(children, out);
+                    }
+                }
+            }
+        }
+        let mut out: Vec<&str> = self.select_columns.iter().map(String::as_str).collect();
+        for aggregate in &self.aggregates {
+            match aggregate {
+                AggregateColumnSpec::Count { .. } => {}
+                AggregateColumnSpec::Sum { field, .. }
+                | AggregateColumnSpec::Avg { field, .. }
+                | AggregateColumnSpec::Max { field, .. } => out.push(field),
+                AggregateColumnSpec::CaseWhenSum { when, .. } => tree_columns(when, &mut out),
+                AggregateColumnSpec::SumWhere { field, when, .. } => {
+                    out.push(field);
+                    tree_columns(when, &mut out);
+                }
+            }
+        }
+        for group in &self.group_by {
+            match group {
+                GroupBySpec::Column(column) => out.push(column),
+                GroupBySpec::DateBucket { field } => out.push(field),
+            }
+        }
+        out.extend(self.filters.iter().map(|f| f.field.as_str()));
+        out
+    }
+
     /// Render this validated spec into a
     /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
     /// for `table`.

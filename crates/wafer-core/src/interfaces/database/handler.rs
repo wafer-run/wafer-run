@@ -4,9 +4,9 @@
 //! functions to avoid duplicating the message protocol handling.
 //!
 //! Every collection and column a request names must be a plain identifier —
-//! ASCII lowercase letters, digits and `_` ([`check_name`]) — or the request
-//! is `InvalidArgument`. A collection name is checked before the caller is
-//! authorized on it, and the executor puts the authorized string into SQL
+//! at most 63 bytes of ASCII lowercase letters, digits and `_`
+//! ([`check_name`]) — or the request is `InvalidArgument`. A collection name
+//! is checked before the caller is authorized on it, and the executor puts the authorized string into SQL
 //! byte for byte, so the table a request touches is the table it was
 //! authorized on. Nothing rewrites a name: stripping `-` from `acme__a-b__t`
 //! would authorize the caller as `acme/a-b` and run the statement on
@@ -156,22 +156,18 @@ fn convert_leaf(f: wire::FilterDef) -> Result<FilterTree, WaferError> {
 }
 
 /// Admit `name` as a collection, column or alias name only when it is a plain
-/// identifier: non-empty, ASCII lowercase letters, digits and `_`. Anything
-/// else is `InvalidArgument`, never rewritten (see the module docs).
-///
-/// Lowercase only, so a table has one spelling on every backend: SQLite
-/// folds the case of a name, PostgreSQL keeps it for the quoted names the
-/// executor emits.
+/// identifier ([`wafer_block::db::is_plain_ident`]: non-empty, at most 63
+/// bytes, ASCII lowercase letters, digits and `_`). Anything else is
+/// `InvalidArgument`, never rewritten (see the module docs). The executor
+/// applies the same rule (`wafer_sql_utils::ident::validate_ident`), so a
+/// caller that reaches it without this handler is held to it too.
 pub(super) fn check_name(name: &str) -> Result<(), WaferError> {
-    if !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    {
+    if wafer_block::db::is_plain_ident(name) {
         return Ok(());
     }
     Err(invalid(format!(
-        "{name:?} is not a collection or column name (lowercase letters, digits and `_` only)"
+        "{name:?} is not a collection or column name (1 to 63 of: lowercase letters, digits \
+         and `_`)"
     )))
 }
 

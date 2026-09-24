@@ -264,6 +264,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_raw_sql(svc).await;
     check_json_value_round_trip(svc).await;
     check_names_are_verbatim_and_reads_never_reshape(svc).await;
+    check_names_longer_than_postgres_keeps_are_refused(svc).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2689,6 +2690,41 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
     let columns = svc.schema_columns(t).await.expect("schema_columns");
 
     let twin = "conf_a-b";
+    // Another spelling of the same table (SQLite folds case) is refused too:
+    // there is one name per table on every backend.
+    assert_invalid_argument(
+        svc.list("CONF_AB", &ListOptions::default()).await,
+        "list CONF_AB",
+    );
+    assert_invalid_argument(
+        svc.schema_drop_table(twin).await,
+        "schema_drop_table conf_a-b",
+    );
+    assert_invalid_argument(
+        svc.schema_add_column(twin, &Column::new("extra", DataType::Text).null())
+            .await,
+        "schema_add_column conf_a-b",
+    );
+    assert_invalid_argument(
+        svc.schema_add_column(t, &Column::new("Extra", DataType::Text).null())
+            .await,
+        "schema_add_column Extra",
+    );
+    assert_invalid_argument(
+        svc.upsert(
+            t,
+            UpsertSpec {
+                data: vec![
+                    ("id".to_string(), serde_json::json!("r1")),
+                    ("Name".to_string(), serde_json::json!("u")),
+                ],
+                conflict_columns: vec!["id".to_string()],
+                on_conflict: UpsertConflict::SetColumns(vec!["Name".to_string()]),
+            },
+        )
+        .await,
+        "upsert setting Name",
+    );
     assert_invalid_argument(
         svc.list(twin, &ListOptions::default()).await,
         "list conf_a-b",
@@ -2771,6 +2807,57 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
         "insert_guarded with a guard on an unknown column",
     );
 
+    assert_invalid_argument(svc.sum(t, "zz", &[]).await, "sum of an unknown column");
+    let aggregate =
+        |aggregates: Vec<AggregateColumnSpec>, group_by: Vec<GroupBySpec>| AggregateSpec {
+            select_columns: Vec::new(),
+            aggregates,
+            filters: Vec::new(),
+            group_by,
+            sort: Vec::new(),
+            limit: 0,
+        };
+    assert_invalid_argument(
+        svc.aggregate(
+            t,
+            aggregate(
+                vec![AggregateColumnSpec::Max {
+                    field: "zz".to_string(),
+                    alias: "m".to_string(),
+                }],
+                Vec::new(),
+            ),
+        )
+        .await,
+        "aggregate over an unknown column",
+    );
+    assert_invalid_argument(
+        svc.aggregate(
+            t,
+            aggregate(
+                vec![AggregateColumnSpec::Count {
+                    alias: "c".to_string(),
+                }],
+                vec![GroupBySpec::Column("zz".to_string())],
+            ),
+        )
+        .await,
+        "aggregate grouped by an unknown column",
+    );
+    assert_invalid_argument(
+        svc.aggregate(
+            t,
+            aggregate(
+                vec![AggregateColumnSpec::Count {
+                    alias: "Total".to_string(),
+                }],
+                Vec::new(),
+            ),
+        )
+        .await,
+        "aggregate with a non-identifier alias",
+    );
+
     assert_eq!(
         svc.schema_columns(t).await.expect("schema_columns"),
         columns,
@@ -2782,4 +2869,47 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
         .expect("list conf_ab");
     let ids: Vec<&str> = rows.records.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, ["r1"], "no refused request changed a row");
+}
+
+/// A name longer than PostgreSQL's 63-byte identifier limit is refused: the
+/// server would keep its first 63 bytes and so reach the table of that
+/// shorter name.
+async fn check_names_longer_than_postgres_keeps_are_refused(svc: &dyn DatabaseService) {
+    let kept = format!("conf_{}", "l".repeat(58));
+    assert_eq!(kept.len(), 63);
+    reset(svc, &crud_table(&kept)).await;
+    svc.create(
+        &kept,
+        row([
+            ("id", serde_json::json!("r1")),
+            ("name", serde_json::json!("a")),
+        ]),
+    )
+    .await
+    .expect("seed the 63-byte table");
+
+    let longer = format!("{kept}x");
+    assert_invalid_argument(
+        svc.list(&longer, &ListOptions::default()).await,
+        "list a 64-byte name",
+    );
+    assert_invalid_argument(
+        svc.create(&longer, row([("name", serde_json::json!("b"))]))
+            .await,
+        "create in a 64-byte name",
+    );
+    let long_column = "c".repeat(64);
+    assert_invalid_argument(
+        svc.count(&kept, &[eq(&long_column, serde_json::json!("x"))])
+            .await,
+        "count filtered on a 64-byte column",
+    );
+    assert_eq!(
+        svc.count(&kept, &[]).await.expect("count"),
+        1,
+        "nothing reached the 63-byte table"
+    );
+    svc.schema_drop_table(&kept)
+        .await
+        .expect("drop the 63-byte table");
 }
