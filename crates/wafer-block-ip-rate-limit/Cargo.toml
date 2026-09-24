@@ -10,12 +10,13 @@ wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 parking_lot = { workspace = true }
+# Init checks the registered config values' JSON types.
+serde_json.workspace = true
 
 [dev-dependencies]
 wafer-run = { path = "../wafer-run" }
 wafer-test-support = { path = "../wafer-test-support" }
 tokio = { workspace = true, features = ["macros", "rt"] }
-serde_json.workspace = true
 
 [lints]
 workspace = true

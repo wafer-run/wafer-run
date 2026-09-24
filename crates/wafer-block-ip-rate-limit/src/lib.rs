@@ -30,32 +30,42 @@
 use std::{
     collections::HashMap,
     hash::{BuildHasher, RandomState},
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
 use wafer_block::{
-    Block, BlockInfo, ConfigVar, Context, ErrorCode, InputStream, Message, MetaEntry, OutputStream,
-    WaferError,
+    config::parse_config_map, Block, BlockConfig, BlockInfo, ConfigVar, Context, ErrorCode,
+    InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry, OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
-/// Default maximum requests permitted per IP within one window before the
-/// block returns [`ErrorCode::ResourceExhausted`].
+/// Default maximum requests permitted per client within one window before
+/// the block returns [`ErrorCode::ResourceExhausted`].
 ///
 /// This is the single source of truth for the `max_requests` default: it is
 /// rendered into the `max_requests` [`ConfigVar`] (so it shows up in the flow
-/// editor) and used as the parse fallback in [`RateLimitBlock::handle`]. There
-/// is no separate struct-field default.
+/// editor) and used by [`Limits::read`] when the key is unset. There is no
+/// separate struct-field default.
 const DEFAULT_MAX_REQUESTS: u32 = 1000;
 
 /// Default rate-limit window length in seconds.
 ///
 /// Single source of truth for the `window_seconds` default: rendered into the
-/// `window_seconds` [`ConfigVar`] and used as the parse fallback in
-/// [`RateLimitBlock::handle`].
+/// `window_seconds` [`ConfigVar`] and used by [`Limits::read`] when the key
+/// is unset.
 const DEFAULT_WINDOW_SECONDS: u64 = 60;
+
+/// Default prefix length one IPv6 client is charged under.
+///
+/// A /64 is the smallest network an ISP assigns one subscriber, and a host
+/// picks any of its 2^64 interface ids itself (SLAAC privacy addresses rotate
+/// them routinely), so a bucket per /128 is a fresh budget per request to
+/// anyone who wants one. Single source of truth for the `ipv6_prefix`
+/// default, like the two above.
+const DEFAULT_IPV6_PREFIX: u8 = 64;
 
 /// Source of monotonic time for rate-limit windowing.
 ///
@@ -75,20 +85,135 @@ impl Clock for SystemClock {
     }
 }
 
-/// Per-IP fixed-window rate-limiter block.
+/// Per-client fixed-window rate-limiter block.
 ///
-/// Maintains an in-memory sharded `HashMap<client_ip, RateBucket>` (see
-/// [`ShardedBuckets`]). Each bucket counts requests within a fixed window.
-/// The limit and window are read exclusively from the `max_requests` /
-/// `window_seconds` flow config (defaulting to [`DEFAULT_MAX_REQUESTS`]
-/// requests per [`DEFAULT_WINDOW_SECONDS`]-second window when unset) — the
-/// block holds no duplicate struct-level defaults. On overflow it emits a
-/// [`WaferError`] with [`ErrorCode::ResourceExhausted`] and `Retry-After` /
-/// `X-RateLimit-*` response-header meta; on allow it forwards the message with
-/// `X-RateLimit-Remaining` set. Single-process / native-only — see crate docs.
+/// Maintains an in-memory sharded `HashMap<client network, RateBucket>` (see
+/// [`ShardedBuckets`]); [`client_network`] names the network a request is
+/// charged to. Each bucket counts requests within a fixed window. The limit,
+/// window and IPv6 prefix are read exclusively from the flow config (see
+/// [`Limits`]) — the block holds no duplicate struct-level defaults. On
+/// overflow it emits a [`WaferError`] with [`ErrorCode::ResourceExhausted`]
+/// and `Retry-After` / `X-RateLimit-*` response-header meta; on allow it
+/// forwards the message with `X-RateLimit-Remaining` set. Single-process /
+/// native-only — see crate docs.
 pub(crate) struct RateLimitBlock {
     buckets: ShardedBuckets,
     clock: Arc<dyn Clock>,
+}
+
+/// The settings one request is charged under, from the flow config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Limits {
+    /// Requests allowed per window; `0` disables the limiter.
+    max_requests: u32,
+    window: Duration,
+    /// Prefix length an IPv6 client is keyed by (`1..=128`).
+    ipv6_prefix: u8,
+}
+
+impl Limits {
+    /// Read the three flow-config keys through `get`. An unset or empty key
+    /// takes its default; a present value that does not parse is an
+    /// [`ErrorCode::InvalidArgument`] naming the key, never a silent
+    /// fallback — an operator who typed `ipv6_prefix = 6O` did not ask for
+    /// the default.
+    fn read<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Result<Self, WaferError> {
+        Ok(Self {
+            max_requests: setting(
+                get("max_requests"),
+                "max_requests",
+                DEFAULT_MAX_REQUESTS,
+                |_| true,
+                "a non-negative integer (0 disables the limiter)",
+            )?,
+            window: Duration::from_secs(setting(
+                get("window_seconds"),
+                "window_seconds",
+                DEFAULT_WINDOW_SECONDS,
+                |secs| *secs > 0,
+                "a positive integer number of seconds",
+            )?),
+            ipv6_prefix: setting(
+                get("ipv6_prefix"),
+                "ipv6_prefix",
+                DEFAULT_IPV6_PREFIX,
+                |len| (1..=128).contains(len),
+                "an integer prefix length from 1 to 128",
+            )?,
+        })
+    }
+}
+
+/// Parse one flow-config value: unset or empty is `default`; otherwise it
+/// must parse as `T` and pass `valid`.
+fn setting<T: std::str::FromStr>(
+    raw: Option<&str>,
+    key: &str,
+    default: T,
+    valid: impl Fn(&T) -> bool,
+    expected: &str,
+) -> Result<T, WaferError> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(default),
+        Some(value) => {
+            value.parse::<T>().ok().filter(|v| valid(v)).ok_or_else(|| {
+                invalid_config(&format!("`{key}` must be {expected}, got {value:?}"))
+            })
+        }
+    }
+}
+
+fn invalid_config(detail: &str) -> WaferError {
+    WaferError::new(
+        ErrorCode::InvalidArgument,
+        format!("wafer-run/ip-rate-limit: {detail}"),
+    )
+}
+
+/// The client network a remote address is charged as, in the one spelling
+/// every bucket key uses: an IPv4 address as itself (a /32), an IPv6 address
+/// as its `/ipv6_prefix` network (`2001:db8:1:2::/64`), and an IPv4-mapped
+/// IPv6 address (`::ffff:a.b.c.d`, what a dual-stack socket reports for an
+/// IPv4 peer) as the IPv4 address it carries. A `host:port` form is accepted
+/// and the port dropped. `None` when the address does not parse.
+fn client_network(remote_addr: &str, ipv6_prefix: u8) -> Option<String> {
+    let value = remote_addr.trim();
+    let ip = value
+        .parse::<IpAddr>()
+        .ok()
+        .or_else(|| value.parse::<SocketAddr>().ok().map(|addr| addr.ip()))?;
+    Some(match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let mask = u128::MAX << (128 - u32::from(ipv6_prefix));
+                let network = Ipv6Addr::from(u128::from(v6) & mask);
+                format!("{network}/{ipv6_prefix}")
+            }
+        },
+    })
+}
+
+/// What one bucket counts: a client network under one (budget, window)
+/// pair. Two flow steps through the same block instance with different
+/// limits (a tight login step, a looser page step) count separately, so a
+/// request through one never resets or inflates the other's window.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BucketKey {
+    client: String,
+    max_requests: u32,
+    window: Duration,
+}
+
+impl BucketKey {
+    fn expired(&self, bucket: &RateBucket, now: Instant) -> bool {
+        now.duration_since(bucket.window_start) > self.window
+    }
+
+    fn throttled(&self, bucket: &RateBucket) -> bool {
+        bucket.count >= self.max_requests
+    }
 }
 
 struct RateBucket {
@@ -98,74 +223,75 @@ struct RateBucket {
 
 /// Number of independent bucket shards. Power of two, sized so that at
 /// realistic server concurrency (tens of in-flight requests) two requests for
-/// *different* client IPs rarely contend on the same [`Mutex`] (PERF-05 —
-/// previously one global mutex serialized every request through the block).
+/// *different* clients rarely contend on the same [`Mutex`].
 const SHARD_COUNT: usize = 16;
 
-/// Global soft threshold above which expired buckets are swept before
-/// inserting. Enforced per shard as `EXPIRY_SWEEP_THRESHOLD / SHARD_COUNT`.
-const EXPIRY_SWEEP_THRESHOLD: usize = 1_000;
-
-/// Global hard cap on tracked client buckets. Enforced per shard as
+/// Global cap on tracked client buckets. Enforced per shard as
 /// `HARD_CAP / SHARD_COUNT`, so the aggregate cap holds exactly when keys
 /// hash uniformly and approximately otherwise (the seeded [`RandomState`]
 /// keeps an attacker from steering keys into one shard).
 const HARD_CAP: usize = 100_000;
 
-/// The client-IP bucket map, split into [`SHARD_COUNT`] independently locked
-/// shards so concurrent requests for different IPs don't serialize on one
-/// global mutex (PERF-05). A key's shard is chosen by a per-process
+/// The client bucket map, split into [`SHARD_COUNT`] independently locked
+/// shards so concurrent requests for different clients don't serialize on
+/// one global mutex. A key's shard is chosen by a per-process
 /// randomly-seeded hash ([`RandomState`]), which also prevents shard-skew
-/// attacks via chosen client IPs. Memory bounds (expiry sweep + hard cap,
-/// SEC-10 oldest-first eviction) are enforced per shard with per-shard shares
-/// of the global thresholds.
+/// attacks via chosen client addresses. The memory bound is enforced per
+/// shard by [`evict_for_new_key`].
 pub(crate) struct ShardedBuckets {
     hasher: RandomState,
-    shards: Vec<Mutex<HashMap<String, RateBucket>>>,
+    shards: Vec<Mutex<HashMap<BucketKey, RateBucket>>>,
+    /// Most buckets one shard holds.
+    shard_capacity: usize,
 }
 
 impl ShardedBuckets {
     fn new() -> Self {
+        Self::with_shard_capacity(HARD_CAP / SHARD_COUNT)
+    }
+
+    fn with_shard_capacity(shard_capacity: usize) -> Self {
         Self {
             hasher: RandomState::new(),
             shards: (0..SHARD_COUNT)
                 .map(|_| Mutex::new(HashMap::new()))
                 .collect(),
+            shard_capacity,
         }
     }
 
-    fn shard_index(&self, key: &str) -> usize {
-        (self.hasher.hash_one(key) as usize) % SHARD_COUNT
+    /// The shard a client's buckets live in: chosen by the client alone, so
+    /// all of one client's buckets share a shard.
+    fn shard_index(&self, client: &str) -> usize {
+        (self.hasher.hash_one(client) as usize) % SHARD_COUNT
     }
 
-    /// Record one request for `key` at `now` under a fixed `window`,
-    /// returning the post-increment count and the bucket's window start.
+    /// Record one request from `client` at `now` in its bucket for
+    /// `limits`, returning the post-increment count and the bucket's window
+    /// start.
     ///
-    /// Locks only `key`'s shard: eviction, window reset, and the increment
-    /// all happen under that one shard lock, and the lock is released before
-    /// the caller builds its response.
-    fn record(&self, key: String, now: Instant, window: Duration) -> (u32, Instant) {
-        let mut buckets = self.shards[self.shard_index(&key)].lock();
+    /// Locks only the client's shard: eviction, window reset, and the
+    /// increment all happen under that one shard lock, and the lock is
+    /// released before the caller builds its response. Only a bucket the
+    /// shard does not hold yet can trigger eviction.
+    fn record(&self, client: String, now: Instant, limits: Limits) -> (u32, Instant) {
+        let mut buckets = self.shards[self.shard_index(&client)].lock();
+        let key = BucketKey {
+            client,
+            max_requests: limits.max_requests,
+            window: limits.window,
+        };
 
-        // Evict expired entries proactively to prevent unbounded memory growth.
-        if buckets.len() > EXPIRY_SWEEP_THRESHOLD / SHARD_COUNT {
-            buckets.retain(|_, b| now.duration_since(b.window_start) <= window);
-        }
-        // Hard cap: if still too large after expiry eviction, drop the oldest
-        // ~10% of entries — NOT the whole map (SEC-10). A global clear would
-        // reset every active client's counter.
-        const SHARD_HARD_CAP: usize = HARD_CAP / SHARD_COUNT;
-        if buckets.len() > SHARD_HARD_CAP {
-            evict_oldest(&mut buckets, SHARD_HARD_CAP - SHARD_HARD_CAP / 10);
+        if buckets.len() >= self.shard_capacity && !buckets.contains_key(&key) {
+            evict_for_new_key(&mut buckets, self.shard_capacity, now);
         }
 
+        let expired = buckets.get(&key).is_some_and(|b| key.expired(b, now));
         let bucket = buckets.entry(key).or_insert(RateBucket {
             count: 0,
             window_start: now,
         });
-
-        // Reset window if expired
-        if now.duration_since(bucket.window_start) > window {
+        if expired {
             bucket.count = 0;
             bucket.window_start = now;
         }
@@ -181,27 +307,31 @@ impl ShardedBuckets {
     }
 }
 
-/// SEC-10: evict the oldest buckets (by `window_start`) until at most `target`
-/// remain. Replaces a global `clear()` that reset *every* active client's
-/// counter — a high-cardinality attacker (aided by IP spoofing) could
-/// otherwise trip the hard cap repeatedly and wipe all in-flight limits. Here
-/// only the least-recently-active buckets are dropped; active clients keep
-/// their counts. Work is bounded (one sort) and runs only when the cap is
-/// exceeded. Operates on one shard's map (PERF-05 sharding), so the sort cost
-/// is also per-shard.
-fn evict_oldest(buckets: &mut HashMap<String, RateBucket>, target: usize) {
-    if buckets.len() <= target {
+/// Make room for one new key in a shard holding `capacity` buckets.
+///
+/// Expired buckets go first: they hold nothing. If the shard is still above
+/// 90% of `capacity`, it drops live buckets down to that, cheapest first:
+/// buckets still under their budget before throttled ones, lower counts
+/// before higher, older windows before newer. So a flood of fresh keys (one
+/// request from each /64 of a /48) evicts its own one-request buckets, and a
+/// client that is being throttled keeps its counter; dropping the oldest
+/// windows instead would reset exactly the clients closest to their limit.
+/// Either way the shard ends with room for about a tenth of `capacity` new
+/// keys, so a steady stream of them rescans the shard once per that many.
+fn evict_for_new_key(buckets: &mut HashMap<BucketKey, RateBucket>, capacity: usize, now: Instant) {
+    buckets.retain(|key, b| !key.expired(b, now));
+    let target = capacity - capacity / 10;
+    if buckets.len() < target {
         return;
     }
-    let remove_count = buckets.len() - target;
-    let mut by_age: Vec<(Instant, String)> = buckets
+    let excess = buckets.len() + 1 - target;
+    let mut victims: Vec<(bool, u32, Instant, BucketKey)> = buckets
         .iter()
-        .map(|(k, b)| (b.window_start, k.clone()))
+        .map(|(key, b)| (key.throttled(b), b.count, b.window_start, key.clone()))
         .collect();
-    // Ascending by window_start: oldest (earliest start) first.
-    by_age.sort_unstable_by_key(|(t, _)| *t);
-    for (_, k) in by_age.into_iter().take(remove_count) {
-        buckets.remove(&k);
+    victims.sort_unstable();
+    for (_, _, _, key) in victims.into_iter().take(excess) {
+        buckets.remove(&key);
     }
 }
 
@@ -240,73 +370,55 @@ impl Block for RateLimitBlock {
         .flow_config(vec![
             ConfigVar::new(
                 "max_requests",
-                "Maximum requests per IP within the window before \
+                "Maximum requests per client within the window before \
                  returning ResourceExhausted. Set to 0 to disable.",
                 &DEFAULT_MAX_REQUESTS.to_string(),
             )
             .name("Max Requests"),
             ConfigVar::new(
                 "window_seconds",
-                "Fixed window length in seconds for the per-IP \
+                "Fixed window length in seconds for the per-client \
                  request count.",
                 &DEFAULT_WINDOW_SECONDS.to_string(),
             )
             .name("Window (seconds)"),
+            ConfigVar::new(
+                "ipv6_prefix",
+                "Prefix length, 1 to 128, that one IPv6 client is counted \
+                 under. IPv4 clients are counted per address.",
+                &DEFAULT_IPV6_PREFIX.to_string(),
+            )
+            .name("IPv6 prefix"),
         ])
-        .config_keys(vec![ConfigVar::new(
-            "WAFER_RUN__IP_RATE_LIMIT__DISABLE",
-            "When set to \"1\", the rate limiter is bypassed entirely. \
-             Intended for test fixtures; do not set in production.",
-            "",
-        )
-        .name("Disable rate limit")
-        .optional()])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
-        // Allow disabling via env var (useful for tests)
-        if std::env::var("WAFER_RUN__IP_RATE_LIMIT__DISABLE")
-            .ok()
-            .as_deref()
-            == Some("1")
-        {
+        let limits = match Limits::read(|key| ctx.config_get(key)) {
+            Ok(limits) => limits,
+            // A limit the block cannot read denies rather than guessing.
+            Err(e) => return OutputStream::error(e),
+        };
+        if limits.max_requests == 0 {
             return OutputStream::continue_with(msg);
         }
 
-        // Single read path: flow config is the sole source of truth. When a
-        // key is unset (or unparseable) we fall back to the same constant the
-        // flow_config ConfigVar advertises as its default.
-        let max = ctx
-            .config_get("max_requests")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(DEFAULT_MAX_REQUESTS);
-
-        if max == 0 {
-            return OutputStream::continue_with(msg);
-        }
-
-        let window_secs = ctx
-            .config_get("window_seconds")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_WINDOW_SECONDS);
-        let window = Duration::from_secs(window_secs);
-
-        let client_ip = msg.remote_addr().to_string();
-        if client_ip.is_empty() {
+        let Some(client) = client_network(msg.remote_addr(), limits.ipv6_prefix) else {
             return OutputStream::error(WaferError {
                 code: ErrorCode::InvalidArgument,
                 message: "Client IP could not be determined".to_string(),
                 meta: vec![],
             });
-        }
+        };
 
-        // record() locks only this IP's shard and releases it before
+        // record() locks only this client's shard and releases it before
         // returning, so the response is built lock-free below.
         let now = self.clock.now();
-        let (count, window_start) = self.buckets.record(client_ip, now, window);
+        let (count, window_start) = self.buckets.record(client, now, limits);
+        let max = limits.max_requests;
 
         if count > max {
-            let remaining = window
+            let remaining = limits
+                .window
                 .checked_sub(now.duration_since(window_start))
                 .unwrap_or(Duration::ZERO);
             let retry_after = remaining.as_secs().to_string();
@@ -342,12 +454,41 @@ impl Block for RateLimitBlock {
 
         OutputStream::continue_with(out_msg)
     }
+
+    async fn lifecycle(&self, _ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init {
+            // The request path sees this config through `parse_config_map`,
+            // which stringifies strings, numbers and booleans and drops
+            // everything else — so a null, array or object would silently
+            // take the default. Refuse those, and check the rest with the
+            // parser `handle` uses.
+            let config = BlockConfig::from_event(&event);
+            for key in ["max_requests", "window_seconds", "ipv6_prefix"] {
+                match config.get(key) {
+                    None
+                    | Some(
+                        serde_json::Value::String(_)
+                        | serde_json::Value::Number(_)
+                        | serde_json::Value::Bool(_),
+                    ) => {}
+                    Some(other) => {
+                        return Err(invalid_config(&format!(
+                            "`{key}` must be a number, got {other}"
+                        )));
+                    }
+                }
+            }
+            let flat = parse_config_map(config.as_value());
+            Limits::read(|key| flat.get(key).map(String::as_str))?;
+        }
+        Ok(())
+    }
 }
 
 wafer_block::register_static_block!("wafer-run/ip-rate-limit", RateLimitBlock);
 
 #[cfg(test)]
-mod clock_seam_tests {
+mod bucket_tests {
     use std::{
         sync::{
             atomic::{AtomicU64, Ordering},
@@ -369,40 +510,175 @@ mod clock_seam_tests {
         }
     }
 
-    // SEC-10: eviction drops the oldest buckets, not the whole map — active
-    // clients keep their counters.
-    #[test]
-    fn evict_oldest_drops_oldest_and_preserves_recent_counts() {
-        let base = Instant::now();
-        let mut buckets: std::collections::HashMap<String, RateBucket> =
-            std::collections::HashMap::new();
-        for i in 0..5u32 {
-            buckets.insert(
-                format!("ip{i}"),
-                RateBucket {
-                    count: i + 1,
-                    window_start: base + Duration::from_secs(i as u64),
-                },
-            );
+    fn limits(max_requests: u32, window_secs: u64) -> Limits {
+        Limits {
+            max_requests,
+            window: Duration::from_secs(window_secs),
+            ipv6_prefix: DEFAULT_IPV6_PREFIX,
         }
-        // Keep only the 2 newest.
-        evict_oldest(&mut buckets, 2);
-        assert_eq!(buckets.len(), 2);
-        assert!(buckets.contains_key("ip4"), "newest survives");
-        assert!(buckets.contains_key("ip3"));
-        assert!(!buckets.contains_key("ip0"), "oldest dropped");
+    }
+
+    /// `n` distinct keys that hash to `shard` in `sb`.
+    fn keys_on_shard(sb: &ShardedBuckets, shard: usize, n: usize) -> Vec<String> {
+        (0u32..)
+            .map(|i| format!("10.{}.{}.{}", i >> 16, (i >> 8) & 0xff, i & 0xff))
+            .filter(|k| sb.shard_index(k) == shard)
+            .take(n)
+            .collect()
+    }
+
+    /// Filling a shard with fresh one-request keys must not reset a client
+    /// that is being throttled: eviction takes the cheapest buckets, and a
+    /// throttled one is the most expensive to lose. The throttled victim is
+    /// also the OLDEST window, which is exactly what oldest-first eviction
+    /// dropped.
+    #[test]
+    fn filling_a_shard_keeps_a_throttled_bucket() {
+        let capacity = 10;
+        let sb = ShardedBuckets::with_shard_capacity(capacity);
+        let base = Instant::now();
+        let limit = limits(2, 60);
+        let victim = "192.0.2.1".to_string();
+        let shard = sb.shard_index(&victim);
+        for _ in 0..3 {
+            sb.record(victim.clone(), base, limit);
+        }
+
+        for (i, key) in keys_on_shard(&sb, shard, 100).into_iter().enumerate() {
+            let now = base + Duration::from_millis(i as u64 + 1);
+            assert_eq!(sb.record(key, now, limit).0, 1);
+        }
+
+        assert!(
+            sb.shards[shard].lock().len() <= capacity,
+            "shard stays bounded"
+        );
+        let (count, _) = sb.record(victim, base + Duration::from_secs(1), limit);
         assert_eq!(
-            buckets.get("ip4").unwrap().count,
-            5,
-            "a surviving client's counter is NOT reset"
+            count, 4,
+            "the throttled client kept its counter and stays refused"
         );
     }
 
-    /// PERF-05: a request must only contend on its own key's shard. With the
-    /// pre-shard single global mutex, ANY stalled request blocked EVERY other
-    /// request; here a request on a different shard completes even while
-    /// another shard's lock is held. Structured as completes-at-all under a
-    /// generous timeout — no wall-clock timing asserts.
+    /// Eviction judges expiry by each bucket's own window, not by the window
+    /// of the request that happens to trigger it: a live one-hour counter is
+    /// not dropped by a 60-second request two minutes in.
+    #[test]
+    fn eviction_judges_expiry_by_each_buckets_own_window() {
+        let capacity = 3;
+        let sb = ShardedBuckets::with_shard_capacity(capacity);
+        let base = Instant::now();
+        let hourly = limits(1, 3600);
+        let victim = "192.0.2.2".to_string();
+        let shard = sb.shard_index(&victim);
+        sb.record(victim.clone(), base, hourly);
+        sb.record(victim.clone(), base, hourly);
+
+        let later = base + Duration::from_secs(120);
+        for key in keys_on_shard(&sb, shard, 4) {
+            sb.record(key, later, limits(5, 60));
+        }
+
+        let (count, _) = sb.record(victim, later, hourly);
+        assert_eq!(count, 3, "the live hourly bucket survived");
+    }
+
+    /// Eviction always leaves room below 90% of capacity, even when expiry
+    /// alone freed a slot: otherwise every new key in a nearly full shard
+    /// would rescan the whole shard.
+    #[test]
+    fn eviction_trims_to_ninety_percent_after_expiry() {
+        let capacity = 10;
+        let sb = ShardedBuckets::with_shard_capacity(capacity);
+        let base = Instant::now();
+        let keys = keys_on_shard(&sb, sb.shard_index("10.0.0.0"), capacity + 1);
+        sb.record(keys[0].clone(), base, limits(5, 1));
+        let later = base + Duration::from_secs(5);
+        for key in &keys[1..capacity] {
+            sb.record(key.clone(), later, limits(5, 60));
+        }
+        let shard = sb.shard_index(&keys[capacity]);
+        assert_eq!(sb.shards[shard].lock().len(), capacity);
+
+        sb.record(keys[capacity].clone(), later, limits(5, 60));
+        assert_eq!(
+            sb.shards[shard].lock().len(),
+            capacity - capacity / 10,
+            "one expired bucket freed, and live ones trimmed to 90%"
+        );
+    }
+
+    /// Only a key the shard does not hold triggers eviction: a full shard of
+    /// live buckets still counts an existing client.
+    #[test]
+    fn an_existing_key_never_evicts() {
+        let sb = ShardedBuckets::with_shard_capacity(2);
+        let base = Instant::now();
+        let limit = limits(10, 60);
+        let first = "192.0.2.3".to_string();
+        let shard = sb.shard_index(&first);
+        let other = keys_on_shard(&sb, shard, 1).remove(0);
+        sb.record(first.clone(), base, limit);
+        sb.record(other.clone(), base, limit);
+        assert_eq!(sb.record(first, base, limit).0, 2);
+        assert_eq!(sb.record(other, base, limit).0, 2);
+    }
+
+    #[test]
+    fn client_network_spells_each_client_once() {
+        let net = |addr: &str| client_network(addr, 64);
+        assert_eq!(net("203.0.113.9").as_deref(), Some("203.0.113.9"));
+        assert_eq!(net("203.0.113.9:4431").as_deref(), Some("203.0.113.9"));
+        assert_eq!(net("::ffff:203.0.113.9").as_deref(), Some("203.0.113.9"));
+        assert_eq!(
+            net("2001:db8:1:2:aaaa:bbbb:cccc:dddd").as_deref(),
+            Some("2001:db8:1:2::/64")
+        );
+        assert_eq!(
+            net("[2001:db8:1:2::1]:443").as_deref(),
+            Some("2001:db8:1:2::/64")
+        );
+        assert_eq!(
+            net(" 2001:db8:1:2::1 ").as_deref(),
+            Some("2001:db8:1:2::/64")
+        );
+        assert_eq!(
+            client_network("2001:db8:1:2::1", 48).as_deref(),
+            Some("2001:db8:1::/48")
+        );
+        assert_eq!(
+            client_network("2001:db8::1", 128).as_deref(),
+            Some("2001:db8::1/128")
+        );
+        for bad in ["", "unknown", "300.1.1.1"] {
+            assert_eq!(net(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn limits_take_defaults_and_refuse_bad_values() {
+        let none = Limits::read(|_| None).expect("defaults");
+        assert_eq!(none, limits(DEFAULT_MAX_REQUESTS, DEFAULT_WINDOW_SECONDS));
+        assert_eq!(Limits::read(|_| Some("")).expect("empty is unset"), none);
+
+        for (key, bad) in [
+            ("max_requests", "-1"),
+            ("max_requests", "ten"),
+            ("window_seconds", "0"),
+            ("ipv6_prefix", "0"),
+            ("ipv6_prefix", "129"),
+            ("ipv6_prefix", "6O"),
+        ] {
+            let err = Limits::read(|k| (k == key).then_some(bad)).expect_err(bad);
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "{key}={bad}");
+            assert!(err.message.contains(key), "{}", err.message);
+        }
+    }
+
+    /// A request must only contend on its own key's shard: a request on a
+    /// different shard completes even while another shard's lock is held.
+    /// Structured as completes-at-all under a generous timeout — no
+    /// wall-clock timing asserts.
     #[test]
     fn record_on_a_different_shard_completes_while_another_shard_is_locked() {
         let sb = ShardedBuckets::new();
@@ -417,7 +693,7 @@ mod clock_seam_tests {
             .expect("no candidate key hashed to a different shard");
 
         let now = Instant::now();
-        let window = Duration::from_secs(60);
+        let limit = limits(10, 60);
         std::thread::scope(|scope| {
             // Simulate a request stalled while holding k1's shard lock.
             let stalled_guard = sb.shards[s1].lock();
@@ -425,7 +701,7 @@ mod clock_seam_tests {
             let (tx, rx) = std::sync::mpsc::channel();
             let (sb_ref, k2_clone) = (&sb, k2.clone());
             scope.spawn(move || {
-                let (count, _) = sb_ref.record(k2_clone, now, window);
+                let (count, _) = sb_ref.record(k2_clone, now, limit);
                 // The main thread only drops `rx` on timeout failure, after
                 // which this send result is irrelevant.
                 let _ = tx.send(count);
@@ -447,12 +723,12 @@ mod clock_seam_tests {
     fn concurrent_records_on_distinct_keys_all_complete_with_isolated_counts() {
         let sb = ShardedBuckets::new();
         let now = Instant::now();
-        let window = Duration::from_secs(60);
+        let limit = limits(10, 60);
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..32u16)
                 .map(|i| {
                     let sb_ref = &sb;
-                    scope.spawn(move || sb_ref.record(format!("10.1.0.{i}"), now, window))
+                    scope.spawn(move || sb_ref.record(format!("10.1.0.{i}"), now, limit))
                 })
                 .collect();
             for h in handles {
@@ -468,12 +744,12 @@ mod clock_seam_tests {
     fn same_key_accumulates_across_threads() {
         let sb = Arc::new(ShardedBuckets::new());
         let now = Instant::now();
-        let window = Duration::from_secs(60);
+        let limit = limits(10, 60);
         let mut handles = Vec::new();
         for _ in 0..8 {
             let sb = sb.clone();
             handles.push(std::thread::spawn(move || {
-                sb.record("9.9.9.9".to_string(), now, window).0
+                sb.record("9.9.9.9".to_string(), now, limit).0
             }));
         }
         let mut counts: Vec<u32> = handles
@@ -502,21 +778,18 @@ mod clock_seam_tests {
 
 #[cfg(test)]
 mod rate_limit_tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use serde_json::json;
-    use wafer_run::streams::output::TerminalNotResponse;
+    use wafer_run::{streams::output::TerminalNotResponse, InitError, StaticConfigSource, Wafer};
     use wafer_test_support::builder::WaferBuilder;
 
     use super::*;
 
-    /// Serializes all env-var-sensitive tests to prevent WAFER_RUN__IP_RATE_LIMIT__DISABLE leaking
-    /// between tests running concurrently in the same process.
-    /// Uses tokio::sync::Mutex so the lock can be held across `.await` points.
-    fn env_mutex() -> &'static tokio::sync::Mutex<()> {
-        static MUTEX: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        MUTEX.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
+    const BLOCK: &str = "wafer-run/ip-rate-limit";
 
     struct ControllableClock {
         base: Instant,
@@ -546,11 +819,8 @@ mod rate_limit_tests {
         config: serde_json::Value,
     ) -> Arc<wafer_run::Wafer> {
         WaferBuilder::new()
-            .with_block(
-                "wafer-run/ip-rate-limit",
-                Arc::new(RateLimitBlock::with_clock(clock)),
-            )
-            .with_config("wafer-run/ip-rate-limit", config)
+            .with_block(BLOCK, Arc::new(RateLimitBlock::with_clock(clock)))
+            .with_config(BLOCK, config)
             .build()
             .await
             .expect("build")
@@ -564,78 +834,53 @@ mod rate_limit_tests {
         msg
     }
 
-    #[tokio::test]
-    async fn under_limit_continues_with_remaining_meta() {
-        let _guard = env_mutex().lock().await;
-        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
-        let clock = ControllableClock::new();
-        let wafer = build_wafer_with_clock(
-            clock.clone(),
-            json!({"max_requests": "10", "window_seconds": "60"}),
-        )
-        .await;
+    async fn send(wafer: &wafer_run::Wafer, ip: &str) -> Result<Message, TerminalNotResponse> {
         match wafer
-            .run_block(
-                "wafer-run/ip-rate-limit",
-                request_from("1.1.1.1"),
-                InputStream::empty(),
-            )
+            .run_block(BLOCK, request_from(ip), InputStream::empty())
             .await
             .collect_buffered()
             .await
         {
-            Err(TerminalNotResponse::Continue(continued)) => {
-                // Block writes "resp.header.X-RateLimit-Remaining" on the continued message.
-                let remaining = continued.get_meta("resp.header.X-RateLimit-Remaining");
-                assert!(!remaining.is_empty(), "X-RateLimit-Remaining meta missing");
-            }
-            other => panic!("expected Continue, got {other:?}"),
+            Err(TerminalNotResponse::Continue(msg)) => Ok(msg),
+            other => Err(other.expect_err("a middleware never responds")),
         }
+    }
+
+    fn is_rate_limited(outcome: &Result<Message, TerminalNotResponse>) -> bool {
+        matches!(
+            outcome,
+            Err(TerminalNotResponse::Error(e)) if e.code == ErrorCode::ResourceExhausted
+        )
+    }
+
+    #[tokio::test]
+    async fn under_limit_continues_with_remaining_meta() {
+        let wafer = build_wafer_with_clock(
+            ControllableClock::new(),
+            json!({"max_requests": "10", "window_seconds": "60"}),
+        )
+        .await;
+        let continued = send(&wafer, "1.1.1.1").await.expect("under the limit");
+        assert_eq!(continued.get_meta("resp.header.X-RateLimit-Remaining"), "9");
     }
 
     #[tokio::test]
     async fn over_limit_denies_with_retry_after() {
-        let _guard = env_mutex().lock().await;
-        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
-        let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
-            clock.clone(),
+            ControllableClock::new(),
             json!({"max_requests": "2", "window_seconds": "60"}),
         )
         .await;
 
-        // Two allowed requests.
         for _ in 0..2 {
-            let _ = wafer
-                .run_block(
-                    "wafer-run/ip-rate-limit",
-                    request_from("2.2.2.2"),
-                    InputStream::empty(),
-                )
-                .await
-                .collect_buffered()
-                .await;
+            send(&wafer, "2.2.2.2").await.expect("under the limit");
         }
 
-        // Third request over the limit.
-        match wafer
-            .run_block(
-                "wafer-run/ip-rate-limit",
-                request_from("2.2.2.2"),
-                InputStream::empty(),
-            )
-            .await
-            .collect_buffered()
-            .await
-        {
+        match send(&wafer, "2.2.2.2").await {
             Err(TerminalNotResponse::Error(e)) => {
-                // Block writes "resp.header.Retry-After" into err.meta.
-                let has_retry = e.meta.iter().any(|m| {
-                    m.key.eq_ignore_ascii_case("resp.header.retry-after")
-                        || m.key.eq_ignore_ascii_case("retry-after")
-                });
+                assert_eq!(e.code, ErrorCode::ResourceExhausted);
                 assert!(
-                    has_retry,
+                    e.meta.iter().any(|m| m.key == "resp.header.Retry-After"),
                     "Retry-After meta missing from rate-limit error: {e:?}"
                 );
             }
@@ -648,11 +893,8 @@ mod rate_limit_tests {
     /// format can surface request headers, cookies or identity from it.
     #[tokio::test]
     async fn over_limit_error_carries_no_request_meta() {
-        let _guard = env_mutex().lock().await;
-        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
-        let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
-            clock.clone(),
+            ControllableClock::new(),
             json!({"max_requests": "1", "window_seconds": "60"}),
         )
         .await;
@@ -664,13 +906,13 @@ mod rate_limit_tests {
             msg
         };
         let _ = wafer
-            .run_block("wafer-run/ip-rate-limit", request(), InputStream::empty())
+            .run_block(BLOCK, request(), InputStream::empty())
             .await
             .collect_buffered()
             .await;
 
         match wafer
-            .run_block("wafer-run/ip-rate-limit", request(), InputStream::empty())
+            .run_block(BLOCK, request(), InputStream::empty())
             .await
             .collect_buffered()
             .await
@@ -694,7 +936,7 @@ mod rate_limit_tests {
         // The embedder wire format for the same 429 carries no request meta.
         let json = wafer_run::embed::output_to_json(
             wafer
-                .run_block("wafer-run/ip-rate-limit", request(), InputStream::empty())
+                .run_block(BLOCK, request(), InputStream::empty())
                 .await,
         )
         .await;
@@ -713,8 +955,6 @@ mod rate_limit_tests {
 
     #[tokio::test]
     async fn window_reset_restores_budget() {
-        let _guard = env_mutex().lock().await;
-        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
         let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
             clock.clone(),
@@ -722,105 +962,234 @@ mod rate_limit_tests {
         )
         .await;
 
-        // First request OK.
-        let _ = wafer
-            .run_block(
-                "wafer-run/ip-rate-limit",
-                request_from("3.3.3.3"),
-                InputStream::empty(),
-            )
-            .await
-            .collect_buffered()
-            .await;
-
-        // Second request blocked.
-        let blocked = wafer
-            .run_block(
-                "wafer-run/ip-rate-limit",
-                request_from("3.3.3.3"),
-                InputStream::empty(),
-            )
-            .await
-            .collect_buffered()
-            .await;
-        assert!(matches!(blocked, Err(TerminalNotResponse::Error(_))));
+        send(&wafer, "3.3.3.3").await.expect("first request");
+        assert!(is_rate_limited(&send(&wafer, "3.3.3.3").await));
 
         // Advance clock past the window (1 second = 1000 ms, advance 1500 ms).
         clock.advance(1_500);
 
-        // Third request OK again after window reset.
-        match wafer
-            .run_block(
-                "wafer-run/ip-rate-limit",
-                request_from("3.3.3.3"),
-                InputStream::empty(),
-            )
+        send(&wafer, "3.3.3.3")
             .await
-            .collect_buffered()
-            .await
-        {
-            Err(TerminalNotResponse::Continue(_)) => {}
-            other => panic!("expected Continue after window reset, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn disable_via_env_skips_entirely() {
-        let _guard = env_mutex().lock().await;
-        std::env::set_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE", "1");
-        let clock = ControllableClock::new();
-        let wafer = build_wafer_with_clock(
-            clock.clone(),
-            json!({"max_requests": "1", "window_seconds": "60"}),
-        )
-        .await;
-
-        for _ in 0..3 {
-            match wafer
-                .run_block(
-                    "wafer-run/ip-rate-limit",
-                    request_from("4.4.4.4"),
-                    InputStream::empty(),
-                )
-                .await
-                .collect_buffered()
-                .await
-            {
-                Err(TerminalNotResponse::Continue(_)) => {}
-                other => {
-                    std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
-                    panic!("expected Continue (env disabled), got {other:?}");
-                }
-            }
-        }
-        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
+            .expect("allowed again after the window resets");
     }
 
     #[tokio::test]
     async fn distinct_ips_have_separate_buckets() {
-        let _guard = env_mutex().lock().await;
-        std::env::remove_var("WAFER_RUN__IP_RATE_LIMIT__DISABLE");
-        let clock = ControllableClock::new();
         let wafer = build_wafer_with_clock(
-            clock.clone(),
+            ControllableClock::new(),
             json!({"max_requests": "1", "window_seconds": "60"}),
         )
         .await;
 
         for ip in ["5.5.5.5", "6.6.6.6"] {
-            match wafer
-                .run_block(
-                    "wafer-run/ip-rate-limit",
-                    request_from(ip),
-                    InputStream::empty(),
-                )
-                .await
-                .collect_buffered()
-                .await
-            {
-                Err(TerminalNotResponse::Continue(_)) => {}
-                other => panic!("expected Continue for {ip}, got {other:?}"),
+            send(&wafer, ip).await.expect(ip);
+        }
+    }
+
+    /// A host picks its own interface id, so rotating addresses within its
+    /// /64 must not buy a fresh budget. The neighbouring /64 is another
+    /// subscriber and keeps its own.
+    #[tokio::test]
+    async fn an_ipv6_client_is_charged_per_64() {
+        let wafer = build_wafer_with_clock(
+            ControllableClock::new(),
+            json!({"max_requests": "2", "window_seconds": "60"}),
+        )
+        .await;
+
+        send(&wafer, "2001:db8:1:2::1").await.expect("first");
+        send(&wafer, "2001:db8:1:2::2").await.expect("second");
+        assert!(
+            is_rate_limited(&send(&wafer, "2001:db8:1:2:ffff:ffff:ffff:ffff").await),
+            "a third address in the same /64 shares the spent budget"
+        );
+        send(&wafer, "2001:db8:1:3::1")
+            .await
+            .expect("the neighbouring /64 has its own budget");
+    }
+
+    /// A dual-stack socket reports an IPv4 peer as `::ffff:a.b.c.d`; that is
+    /// the same client as the plain IPv4 address.
+    #[tokio::test]
+    async fn an_ipv4_mapped_address_is_charged_as_ipv4() {
+        let wafer = build_wafer_with_clock(
+            ControllableClock::new(),
+            json!({"max_requests": "1", "window_seconds": "60"}),
+        )
+        .await;
+
+        send(&wafer, "198.51.100.7").await.expect("first");
+        assert!(is_rate_limited(&send(&wafer, "::ffff:198.51.100.7").await));
+    }
+
+    /// `ipv6_prefix` is the flow's to choose: at 128 every address is its
+    /// own client again.
+    #[tokio::test]
+    async fn ipv6_prefix_is_configurable() {
+        let wafer = build_wafer_with_clock(
+            ControllableClock::new(),
+            json!({"max_requests": "1", "window_seconds": "60", "ipv6_prefix": "128"}),
+        )
+        .await;
+
+        send(&wafer, "2001:db8:1:2::1").await.expect("first");
+        send(&wafer, "2001:db8:1:2::2")
+            .await
+            .expect("a /128 prefix gives each address its own budget");
+    }
+
+    /// A step's own config, for driving `handle` with a per-call config the
+    /// registered block config does not have.
+    #[derive(Clone)]
+    struct StepConfig(HashMap<String, String>);
+
+    #[async_trait::async_trait]
+    impl Context for StepConfig {
+        async fn call_block(
+            &self,
+            block: &str,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            panic!("the rate limiter calls no block, got {block}");
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+        fn config_get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).map(String::as_str)
+        }
+        fn clone_arc(&self) -> Arc<dyn Context> {
+            Arc::new(self.clone())
+        }
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: wafer_block::types::ResourceType,
+            _access: wafer_block::types::ResourceAccess,
+        ) -> bool {
+            false
+        }
+    }
+
+    fn step(max_requests: &str, window_seconds: &str) -> StepConfig {
+        StepConfig(HashMap::from([
+            ("max_requests".to_string(), max_requests.to_string()),
+            ("window_seconds".to_string(), window_seconds.to_string()),
+        ]))
+    }
+
+    async fn send_via(block: &RateLimitBlock, step: &StepConfig, ip: &str) -> bool {
+        match block
+            .handle(step, request_from(ip), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Continue(_)) => true,
+            Err(TerminalNotResponse::Error(e)) if e.code == ErrorCode::ResourceExhausted => false,
+            other => panic!("expected Continue or ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    /// One block instance serves every flow step that names it, each with
+    /// its own limits. A request through a short-window step must not reset
+    /// (or spend) the client's count on a long-window step: throttled on
+    /// login, a hit on a 60-second route is not a fresh login budget.
+    #[tokio::test]
+    async fn steps_with_different_limits_count_separately() {
+        let clock = ControllableClock::new();
+        let block = RateLimitBlock::with_clock(clock.clone());
+        let login = step("3", "3600");
+        let pages = step("5", "60");
+        let ip = "198.51.100.20";
+
+        for _ in 0..3 {
+            assert!(send_via(&block, &login, ip).await, "under the login budget");
+        }
+        assert!(!send_via(&block, &login, ip).await, "login budget spent");
+
+        clock.advance(90_000);
+        assert!(
+            send_via(&block, &pages, ip).await,
+            "the page step has its own budget"
+        );
+        assert!(
+            !send_via(&block, &login, ip).await,
+            "a page request did not reset the hour-long login window"
+        );
+    }
+
+    /// A step limit the block cannot read denies the request rather than
+    /// running with a default the operator did not choose.
+    #[tokio::test]
+    async fn an_unreadable_step_limit_denies() {
+        let ctx = StepConfig(HashMap::from([(
+            "ipv6_prefix".to_string(),
+            "sixty-four".to_string(),
+        )]));
+        let out = RateLimitBlock::new()
+            .handle(&ctx, request_from("2001:db8::1"), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await;
+        match out {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert_eq!(e.code, ErrorCode::InvalidArgument);
+                assert!(e.message.contains("ipv6_prefix"), "{}", e.message);
             }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    /// A malformed registered config fails Init, naming the key, instead of
+    /// the request path silently falling back to a default.
+    #[tokio::test]
+    async fn a_malformed_block_config_fails_init() {
+        for config in [
+            json!({"ipv6_prefix": "0"}),
+            json!({"window_seconds": {"secs": 60}}),
+            json!({"max_requests": "lots"}),
+        ] {
+            let mut wafer = Wafer::builder()
+                .disable_inventory()
+                .disable_lockfile()
+                .build()
+                .expect("build");
+            wafer
+                .register_block(BLOCK, Arc::new(RateLimitBlock::new()))
+                .expect("register");
+            wafer.add_block_config(BLOCK, config.clone());
+            let wafer = wafer.start().await.expect("start");
+            match wafer.init_block(BLOCK).await {
+                Err(InitError::Permanent(message)) => {
+                    assert!(message.contains("ip-rate-limit"), "{config}: {message}");
+                }
+                other => panic!("{config}: expected a permanent Init failure, got {other:?}"),
+            }
+        }
+    }
+
+    /// The block declares no process-level config: its one switch was an
+    /// env-only `DISABLE` flag that no `ConfigSource` could reach. Turning
+    /// the limiter off is `max_requests = 0`, in the flow config.
+    #[tokio::test]
+    async fn max_requests_zero_disables_and_no_env_switch_is_declared() {
+        assert!(RateLimitBlock::new().info().config_keys.is_empty());
+
+        let mut wafer = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .config_source(Arc::new(StaticConfigSource::default()))
+            .build()
+            .expect("build");
+        wafer
+            .register_block(BLOCK, Arc::new(RateLimitBlock::new()))
+            .expect("register");
+        wafer.add_block_config(BLOCK, json!({"max_requests": 0}));
+        let wafer = wafer.start().await.expect("start");
+        for _ in 0..3 {
+            send(&wafer, "4.4.4.4").await.expect("disabled limiter");
         }
     }
 }
