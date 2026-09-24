@@ -291,27 +291,25 @@ impl WasmiBlock {
     ) -> OutputStream {
         let body = input.collect_to_bytes().await;
 
-        // Sanitize inbound message meta before passing to WASM guest.
-        let msg = {
-            let mut stripped_in: Vec<String> = Vec::new();
-            let caps_guard = self.capabilities.read();
-            let sanitized_meta = sanitize_inbound_meta(msg.meta, &caps_guard, &mut stripped_in);
-            drop(caps_guard);
-            if !stripped_in.is_empty() {
-                self.warn_once_stripped_inbound(&stripped_in);
-            }
-            Message {
-                meta: sanitized_meta,
-                ..msg
-            }
-        };
-
-        // SEC-01: snapshot the host-owned identity (`auth.*`) established
-        // upstream for this frame. The guest sees it (so a block can read the
-        // authenticated user) but cannot alter it: it is restored on every
-        // guest egress — Respond, Continue, and nested `call_block` (seeded
+        // Withhold the sensitive headers the guest may not read, and capture
+        // what the host owns for this frame: the identity (`auth.*`, SEC-01)
+        // established upstream — which the guest sees but cannot alter — and
+        // the inbound sensitive headers. Both are restored on every guest
+        // egress — Respond, Error, Continue, and nested `call_block` (seeded
         // into the store below for the streaming-ABI path).
-        let inbound_protected = protected_meta_entries(&msg.meta);
+        let (msg, host_owned) = {
+            let inbound = prepare_guest_inbound(msg.meta, &self.capabilities.read());
+            if !inbound.withheld.is_empty() {
+                self.warn_once_stripped_inbound(&inbound.withheld);
+            }
+            (
+                Message {
+                    meta: inbound.meta,
+                    ..msg
+                },
+                inbound.host_owned,
+            )
+        };
 
         let codec = abi_codec_of(&self.module);
         let msg_bytes = {
@@ -332,13 +330,7 @@ impl WasmiBlock {
         };
 
         let (result_bytes, lease) = match self
-            .call_handle_guest(
-                ctx,
-                attachments,
-                inbound_protected.clone(),
-                codec,
-                &msg_bytes,
-            )
+            .call_handle_guest(ctx, attachments, host_owned.clone(), codec, &msg_bytes)
             .await
         {
             Ok(v) => v,
@@ -378,29 +370,17 @@ impl WasmiBlock {
             }
         }
 
+        // Every guest egress goes through the same header allowlist and
+        // identity restore (`sanitize_guest_egress`).
+        let egress = |meta: Vec<MetaEntry>, kind: GuestEgress| {
+            self.sanitize_egress(meta, &self.capabilities.read(), &host_owned, kind)
+        };
         match parsed {
             Ok(result) => match result.action {
                 GuestAction::Respond => {
                     let (data, meta) = result
                         .response
-                        .map(|r| {
-                            let mut stripped: Vec<String> = Vec::new();
-                            let caps_guard = self.capabilities.read();
-                            let sanitized =
-                                sanitize_outbound_meta(r.meta, &caps_guard, &mut stripped);
-                            drop(caps_guard);
-                            if !stripped.is_empty() {
-                                self.warn_once_stripped_outbound(&stripped);
-                            }
-                            // SEC-01: the host owns `auth.*` — drop any the
-                            // guest set and restore this frame's identity.
-                            let (sanitized, forged) =
-                                restore_protected_meta(sanitized, &inbound_protected);
-                            if !forged.is_empty() {
-                                self.warn_once_forged_identity(&forged);
-                            }
-                            (r.data, sanitized)
-                        })
+                        .map(|r| (r.data, egress(r.meta, GuestEgress::Respond)))
                         .unwrap_or_default();
                     if meta.is_empty() {
                         OutputStream::respond(data)
@@ -409,24 +389,19 @@ impl WasmiBlock {
                     }
                 }
                 GuestAction::Error => {
-                    let e = result.error.unwrap_or_else(|| {
+                    let mut e = result.error.unwrap_or_else(|| {
                         WaferError::new(
                             ErrorCode::Internal,
                             "WASM block returned error with no details",
                         )
                     });
+                    e.meta = egress(e.meta, GuestEgress::Error);
                     OutputStream::error(e)
                 }
                 GuestAction::Drop => OutputStream::drop_request(),
                 GuestAction::Continue => {
                     let mut msg = result.message.unwrap_or_else(|| Message::new("continue"));
-                    // SEC-01: the guest cannot forge/alter identity on the
-                    // message it hands to the next flow step.
-                    let (meta, forged) = restore_protected_meta(msg.meta, &inbound_protected);
-                    msg.meta = meta;
-                    if !forged.is_empty() {
-                        self.warn_once_forged_identity(&forged);
-                    }
+                    msg.meta = egress(msg.meta, GuestEgress::Continue);
                     OutputStream::continue_with(msg)
                 }
             },
@@ -542,7 +517,7 @@ impl WasmiBlock {
         let data = leased.store.data_mut();
         data.context = None;
         data.current_attachments = None;
-        data.inbound_protected_meta.clear();
+        data.host_owned_meta = HostOwnedMeta::default();
         data.pending_stream_finish = None;
         data.pending_stream_read = None;
         data.pending_stream_take_error = None;
@@ -569,7 +544,7 @@ impl WasmiBlock {
         &self,
         ctx: &dyn Context,
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
-        inbound_protected: Vec<MetaEntry>,
+        host_owned: HostOwnedMeta,
         codec: AbiCodec,
         msg_bytes: &[u8],
     ) -> Result<(Vec<u8>, Option<PooledInstance>), RuntimeError> {
@@ -601,7 +576,7 @@ impl WasmiBlock {
                     instance,
                     ctx,
                     attachments,
-                    inbound_protected,
+                    host_owned,
                     setup,
                 )
                 .await?;
@@ -616,14 +591,7 @@ impl WasmiBlock {
                 self.limits,
             )?;
             let bytes = self
-                .run_guest_call(
-                    &mut store,
-                    instance,
-                    ctx,
-                    attachments,
-                    inbound_protected,
-                    setup,
-                )
+                .run_guest_call(&mut store, instance, ctx, attachments, host_owned, setup)
                 .await?;
             Ok((bytes, None))
         }
@@ -653,10 +621,17 @@ impl WasmiBlock {
             &caps_snapshot,
             self.limits,
         )?;
-        // No inbound request identity for this path (e.g. `__wafer_lifecycle`):
-        // pass an empty protected-meta snapshot and no attachments.
-        self.run_guest_call(&mut store, instance, ctx, None, Vec::new(), setup)
-            .await
+        // No inbound request for this path (e.g. `__wafer_lifecycle`): no
+        // host-owned meta and no attachments.
+        self.run_guest_call(
+            &mut store,
+            instance,
+            ctx,
+            None,
+            HostOwnedMeta::default(),
+            setup,
+        )
+        .await
     }
 
     /// Drive one guest invocation on the given store + instance: install the
@@ -672,7 +647,7 @@ impl WasmiBlock {
         instance: wasmi::Instance,
         ctx: &dyn Context,
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
-        inbound_protected: Vec<MetaEntry>,
+        host_owned: HostOwnedMeta,
         setup: impl FnOnce(
             &mut Store<WasmiHostState>,
             wasmi::Instance,
@@ -685,7 +660,7 @@ impl WasmiBlock {
         // `return Err`, the unhandled-trap branch, or success — so a stale
         // context never leaks into a later invocation. From here on the
         // store is reached through `scope`.
-        let mut scope = ContextScope::new(store, ctx, attachments, inbound_protected);
+        let mut scope = ContextScope::new(store, ctx, attachments, host_owned);
 
         let (func, arg0, arg1) = setup(scope.store_mut(), instance)?;
 
@@ -726,28 +701,26 @@ impl WasmiBlock {
                 // borrowed across an await).
                 let take_result = {
                     let data = scope.store_mut().data_mut();
-                    // SEC-01: snapshot host-owned identity before the mutable
-                    // borrow of `streams`, then restore it on the guest's
-                    // nested-call message so the guest cannot forge identity
-                    // for the callee.
-                    let inbound_protected = data.inbound_protected_meta.clone();
+                    // The guest's nested-call message is a guest egress: it
+                    // gets the header allowlist, and the host-owned identity
+                    // is restored on it so the guest cannot forge identity
+                    // for the callee (SEC-01).
                     let state = data.streams.get_mut(handle);
                     state.map(|s| {
-                        let req = s.take_finish_request().map(|(target, mut msg, body)| {
-                            let (meta, forged) =
-                                restore_protected_meta(msg.meta, &inbound_protected);
-                            msg.meta = meta;
-                            (target, msg, body, forged)
-                        });
+                        let req = s.take_finish_request();
                         let atts = s.take_attachments();
                         (req, atts)
                     })
                 };
                 let resume_code: i32 = match take_result {
-                    Some((Ok((target, msg, body, forged)), attachments)) => {
-                        if !forged.is_empty() {
-                            self.warn_once_forged_identity(&forged);
-                        }
+                    Some((Ok((target, mut msg, body)), attachments)) => {
+                        let data = scope.store().data();
+                        msg.meta = self.sanitize_egress(
+                            msg.meta,
+                            &data.capabilities,
+                            &data.host_owned_meta,
+                            GuestEgress::Call,
+                        );
                         // A JSON-codec guest writes its request body as JSON;
                         // the callee's wire DTOs are MessagePack. Transcode at
                         // the boundary so both sides keep their own codec.
@@ -969,6 +942,25 @@ impl WasmiBlock {
                 }
             }
         }
+    }
+
+    /// [`sanitize_guest_egress`] plus the warn-once reports for what it
+    /// dropped.
+    fn sanitize_egress(
+        &self,
+        meta: Vec<MetaEntry>,
+        caps: &BlockCapabilities,
+        host_owned: &HostOwnedMeta,
+        egress: GuestEgress,
+    ) -> Vec<MetaEntry> {
+        let out = sanitize_guest_egress(meta, caps, host_owned, egress);
+        if !out.stripped.is_empty() {
+            self.warn_once_stripped_outbound(&out.stripped);
+        }
+        if !out.forged.is_empty() {
+            self.warn_once_forged_identity(&out.forged);
+        }
+        out.meta
     }
 
     fn warn_once_stripped_outbound(&self, names: &[String]) {
@@ -1592,7 +1584,7 @@ mod capabilities_update_tests {
                 instance,
                 &EmptyResponseContext,
                 None,
-                Vec::new(),
+                HostOwnedMeta::default(),
                 |store, instance| {
                     let f = instance
                         .get_typed_func::<(i32, i32), i64>(&*store, "__wafer_handle")

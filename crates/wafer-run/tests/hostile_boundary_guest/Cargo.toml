@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "hostile-boundary-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The public guest SDK only: this is what an ordinary third-party guest
+# links against.
+wafer-sdk = { path = "../../../../sdks/rust" }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 1
+panic = "abort"

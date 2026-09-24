@@ -99,6 +99,15 @@ build_fixture \
     crates/wafer-run/tests/hostile_db_guest/Cargo.toml \
     crates/wafer-run/tests/hostile_db_guest/target/wasm32-wasip1/release/hostile_db_guest.wasm
 
+# hostile_boundary_guest.wasm — consumed by wasm_guest_boundary_e2e.rs at
+# runtime via Path. An ordinary public-SDK guest probing what crosses the
+# WASM guest boundary: request headers in, response headers out on every
+# egress, and stream_init against the host-byte budget. Built in place.
+build_fixture \
+    crates/wafer-run/tests/hostile_boundary_guest/target/wasm32-wasip1/release/hostile_boundary_guest.wasm \
+    crates/wafer-run/tests/hostile_boundary_guest/Cargo.toml \
+    crates/wafer-run/tests/hostile_boundary_guest/target/wasm32-wasip1/release/hostile_boundary_guest.wasm
+
 # json_host_guest.wasm — consumed by json_host_codec_e2e.rs at runtime via
 # Path. The std-only, ZERO-dependency guest that negotiates the JSON host-call
 # codec (`__wafer_host_codec() -> 1`) and drives database/storage/config over

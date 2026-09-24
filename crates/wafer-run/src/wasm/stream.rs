@@ -304,8 +304,9 @@ fn precondition_err(message: &str) -> WaferError {
 /// SEC-03: the registry also enforces two per-guest-call host-memory bounds
 /// that the wasmi linear-memory cap does NOT cover, because these bytes are
 /// copied *out* of guest memory into host-owned `Vec`s/maps:
-///  - `host_bytes` — running total of request-buffer + attachment bytes
-///    charged across all streams, capped at `max_host_bytes`. Monotonic: the
+///  - `host_bytes` — running total of the bytes copied out of guest memory
+///    for streams (each `stream_init`'s target name + message, request
+///    buffers, attachments), capped at `max_host_bytes`. Monotonic: the
 ///    per-call store (and this registry) is dropped when the guest call ends,
 ///    so the budget bounds one invocation.
 ///  - live stream count, capped at `max_live_streams`, so a guest cannot grow
@@ -313,7 +314,8 @@ fn precondition_err(message: &str) -> WaferError {
 pub(crate) struct StreamRegistry {
     next_handle: AtomicU64,
     states: HashMap<u64, StreamState>,
-    /// Host bytes charged so far this call (request buffers + attachments).
+    /// Host bytes charged so far this call (stream-init name + message,
+    /// request buffers, attachments).
     host_bytes: usize,
     /// Aggregate host-byte budget for this call.
     max_host_bytes: usize,
@@ -343,8 +345,10 @@ impl StreamRegistry {
 
     /// Charge `n` host bytes against the per-call budget. Returns
     /// `ResourceExhausted` (without mutating the counter) if the charge would
-    /// exceed `max_host_bytes`.
-    fn charge_host_bytes(&mut self, n: usize) -> Result<(), WaferError> {
+    /// exceed `max_host_bytes`. Callers charge BEFORE copying out of guest
+    /// memory; `stream_init` charges its name + message here directly, since
+    /// the stream it allocates is built from that copy.
+    pub(crate) fn charge_host_bytes(&mut self, n: usize) -> Result<(), WaferError> {
         let next = self.host_bytes.saturating_add(n);
         if next > self.max_host_bytes {
             return Err(WaferError::new(
