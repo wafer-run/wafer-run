@@ -21,8 +21,8 @@ pub const DEFAULT_FUEL: u64 = 100_000_000;
 pub const DEFAULT_MAX_WASM_MEMORY_PAGES: u32 = 256;
 
 /// Default per-guest-call aggregate cap on host-owned bytes copied *out* of
-/// guest linear memory — stream request buffers plus attachment payloads
-/// (SEC-03). The wasmi linear-memory cap does not cover these host `Vec`s, so
+/// guest linear memory — each stream's target name and message, stream
+/// request buffers, and attachment payloads (SEC-03). The wasmi linear-memory cap does not cover these host `Vec`s, so
 /// without this bound a guest can copy the same small chunk repeatedly into
 /// unbounded host memory. 256 MiB is generous for legitimate single-call
 /// streaming while still bounding the amplification.
@@ -108,7 +108,8 @@ pub struct ResourceLimits {
     /// Defaults to [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB).
     pub memory_pages: u32,
     /// SEC-03: aggregate cap on host-owned bytes copied out of guest memory
-    /// (stream request buffers + attachments) per guest call. Defaults to
+    /// (stream-init name + message, stream request buffers, attachments) per
+    /// guest call. Defaults to
     /// [`DEFAULT_MAX_HOST_BYTES`] (256 MiB).
     pub max_host_bytes: usize,
     /// SEC-03: cap on concurrent live streams per guest call. Defaults to

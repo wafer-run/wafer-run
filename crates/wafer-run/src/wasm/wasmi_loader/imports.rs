@@ -123,6 +123,20 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     .and_then(|e| e.into_memory())
                     .ok_or_else(|| WasmiError::new("guest has no exported memory"))?;
 
+                // The name and message are copied out of guest memory into
+                // host-owned buffers, and the decoded message lives in the
+                // stream until it closes: each is charged against the
+                // per-call host-byte budget BEFORE it is copied (SEC-03).
+                let (Ok(name_bytes), Ok(msg_bytes)) =
+                    (usize::try_from(name_len), usize::try_from(msg_len))
+                else {
+                    return Err(WasmiError::new(format!(
+                        "invalid stream_init lengths: name {name_len}, message {msg_len}"
+                    )));
+                };
+                if let Err(e) = caller.data_mut().streams.charge_host_bytes(name_bytes) {
+                    return Ok(error_code_to_neg_i64(e.code));
+                }
                 let name_buf = read_guest_slice(&caller, memory, name_ptr, name_len)
                     .map_err(|e| WasmiError::new(format!("reading block name: {e}")))?;
                 let block_name = String::from_utf8(name_buf)
@@ -133,6 +147,9 @@ pub(super) fn build_linker(engine: &Engine) -> Result<Linker<WasmiHostState>, Ru
                     return Ok(error_code_to_neg_i64(ErrorCode::PermissionDenied));
                 }
 
+                if let Err(e) = caller.data_mut().streams.charge_host_bytes(msg_bytes) {
+                    return Ok(error_code_to_neg_i64(e.code));
+                }
                 let msg_buf = read_guest_slice(&caller, memory, msg_ptr, msg_len)
                     .map_err(|e| WasmiError::new(format!("reading stream message: {e}")))?;
 
