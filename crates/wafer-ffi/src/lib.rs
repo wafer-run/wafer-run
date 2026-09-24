@@ -765,9 +765,9 @@ pub unsafe extern "C" fn wafer_run(
         let inner = runtime.inner.clone();
         let flow_id = fid.to_owned();
         runtime.spawn_call(done, async move {
-            // The read guard is held until the body is collected: a block
-            // may still be producing it, and `wafer_stop` must not stop the
-            // blocks under it.
+            // The read guard is held until the result is encoded: the
+            // output may still be streaming from a block, which
+            // `wafer_stop` must not stop under it.
             let wafer = inner.read().await;
             let output = wafer
                 .run(&flow_id, msg, wafer_run::InputStream::empty())

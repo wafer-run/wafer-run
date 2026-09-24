@@ -209,12 +209,10 @@ fn free_from_inside_a_callback_cancels_the_rest() {
     }
 }
 
-/// `wafer_stop` waits for a run whose body is still being produced: the
-/// flow has returned its stream, but the blocks' Stop must not run (nor a
-/// following `wafer_free` cancel the run) while the body is still coming.
-/// A run after stop is refused.
+/// `wafer_stop` waits for a run whose block is still producing its body
+/// before it runs the blocks' Stop, and refuses every run after it.
 #[test]
-fn stop_waits_for_a_run_still_collecting_its_body() {
+fn stop_waits_for_a_running_flow_and_refuses_later_runs() {
     unsafe {
         let fx = Fixture::new(false);
         let run = fx.run_until_entered();
