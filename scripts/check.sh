@@ -27,6 +27,11 @@
 # warned to match. PR #287 made the CI job blocking but left this script
 # warning, so `check.sh` printed "All checks passed." while CI went red.
 # Both paths now propagate cargo-audit's exit code.
+#
+# Every cargo command that resolves dependencies passes `--locked`, here and
+# in scripts/build-fixtures.sh: a Cargo.lock (the workspace's or a
+# fixture's) that no longer matches its manifests fails the step instead of
+# being silently re-resolved, so what CI tests is what the lockfile pins.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -44,32 +49,50 @@ run_fmt() {
     # `cargo build --workspace` does not pick them up — which also puts them
     # outside `fmt --all` above. They are ordinary hand-written Rust that
     # run_wasm builds, so format them by the same rule, named explicitly.
-    for fixture in wasm_static_blocks wasm_local_input_stream; do
-        cargo +nightly fmt --all \
-            --manifest-path "crates/wafer-block/tests/$fixture/Cargo.toml" -- --check
+    for fixture in \
+        crates/wafer-block/tests/wasm_static_blocks \
+        crates/wafer-block/tests/wasm_local_input_stream \
+        crates/wafer-block-crypto/tests/wasm32_consumer; do
+        cargo +nightly fmt --all --manifest-path "$fixture/Cargo.toml" -- --check
     done
 }
 
 run_clippy() {
     echo "==> Clippy"
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
+
+    # Opt-in features no workspace member enables, so the workspace run above
+    # never compiles the code behind them. Downstream embedders ship both:
+    # `json-schema` gates the schemars derives on wafer-block's wire types,
+    # `vectors` gates wafer-block-sqlite's sqlite-vec VectorService.
+    echo "==> Clippy: wafer-block --features json-schema"
+    cargo clippy --locked -p wafer-block --features json-schema --all-targets -- -D warnings
+    echo "==> Clippy: wafer-block-sqlite --features vectors"
+    cargo clippy --locked -p wafer-block-sqlite --features vectors --all-targets -- -D warnings
 }
 
 run_test() {
     echo "==> Tests"
-    cargo test --workspace
+    cargo test --locked --workspace
+
+    # The sqlite-vec VectorService and its tests (unit tests in
+    # src/vector.rs, tests/vector_sql_roundtrip.rs,
+    # tests/vector_integration.rs) are all behind the `vectors` feature,
+    # which the workspace run above does not enable.
+    echo "==> wafer-block-sqlite vector service (vectors)"
+    cargo test --locked -p wafer-block-sqlite --features vectors
 
     # SEC-09: the registry-download SSRF e2e has an allow-private-network
     # half (a local wiremock registry served end-to-end) that only compiles
     # under the escape-hatch feature — no other job enables it.
     echo "==> Registry SSRF escape-hatch e2e (allow-private-network)"
-    cargo test -p wafer-run --features allow-private-network --test registry_ssrf
+    cargo test --locked -p wafer-run --features allow-private-network --test registry_ssrf
 
     # SEC-019: the outbound-network redirect-follow e2e is likewise only
     # reachable under the escape-hatch feature (a local wiremock server on
     # loopback that the SSRF gate otherwise blocks).
     echo "==> Network redirect SSRF escape-hatch e2e (allow-private-network)"
-    cargo test -p wafer-block-network --features allow-private-network --test redirect_ssrf
+    cargo test --locked -p wafer-block-network --features allow-private-network --test redirect_ssrf
 }
 
 run_postgres() {
@@ -78,25 +101,25 @@ run_postgres() {
         echo "error: WAFER_CONFORMANCE_POSTGRES_URL is not set; the postgres step needs a live server (see the header of this script)" >&2
         exit 1
     fi
-    cargo test -p wafer-block-postgres --test conformance
+    cargo test --locked -p wafer-block-postgres --test conformance
 }
 
 run_wasm() {
     echo "==> Guest SDK builds to wasm32-wasip1"
-    cargo build -p wafer-block -p wafer-sdk --target wasm32-wasip1
+    cargo build --locked -p wafer-block -p wafer-sdk --target wasm32-wasip1
 
     echo "==> Runtime builds with --no-default-features (wasmi off)"
-    cargo check -p wafer-run --no-default-features
+    cargo check --locked -p wafer-run --no-default-features
 
     echo "==> Guest service-client path (wafer-core wasm-component → wasm32)"
-    cargo check -p wafer-core --features wasm-component --target wasm32-wasip1
+    cargo check --locked -p wafer-core --features wasm-component --target wasm32-wasip1
 
     # Guards the gizza consumer combo (default-features=false, features=["wasmi"]
     # on wasm32-unknown-unknown), which no other job covers — run_wasm's
     # --no-default-features check has wasmi OFF. This is the combo that
     # regressed silently in #234 (embed::register_path reading from disk).
     echo "==> Runtime builds on wasm32-unknown-unknown with --features wasmi (gizza combo)"
-    cargo build -p wafer-run --target wasm32-unknown-unknown --no-default-features --features wasmi
+    cargo build --locked -p wafer-run --target wasm32-unknown-unknown --no-default-features --features wasmi
 
     # `register_static_block!` and `use_static_blocks!` each have a wasm32
     # arm that exists precisely because `linkme` has no link section there.
@@ -107,7 +130,7 @@ run_wasm() {
     # downstream Worker build. The fixture asserts its own list length at
     # compile time.
     echo "==> Static block registration on wasm32 (macro arms)"
-    cargo build --target wasm32-unknown-unknown \
+    cargo build --locked --target wasm32-unknown-unknown \
         --manifest-path crates/wafer-block/tests/wasm_static_blocks/Cargo.toml
 
     # `InputStream` boxes a `LocalBoxStream` on wasm32 so a JS-backed request
@@ -118,8 +141,18 @@ run_wasm() {
     # wrapping a `!Send` body, collecting it, and handing it to the streaming
     # storage client; nothing here runs, so it proves the bounds, not bytes.
     echo "==> Local (!Send) request bodies on wasm32 (InputStream inner type)"
-    cargo build --target wasm32-unknown-unknown \
+    cargo build --locked --target wasm32-unknown-unknown \
         --manifest-path crates/wafer-block/tests/wasm_local_input_stream/Cargo.toml
+
+    # wafer-block-crypto is linked by Worker and browser embedders on
+    # wasm32-unknown-unknown, and nothing above builds it for that target
+    # (the static-blocks fixture lists middleware blocks only). The fixture
+    # is the embedding binary's stand-in: it picks the JS randomness source
+    # and names the primitives and the service, so they are code-generated
+    # for wasm32, not only typechecked.
+    echo "==> wafer-block-crypto on wasm32-unknown-unknown"
+    cargo build --locked --target wasm32-unknown-unknown \
+        --manifest-path crates/wafer-block-crypto/tests/wasm32_consumer/Cargo.toml
 }
 
 run_audit() {

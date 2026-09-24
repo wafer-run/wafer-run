@@ -53,7 +53,7 @@ build_fixture() {
     # (artifact == dest) build LAST so the artifact ends up being it.
 
     echo "building $dest"
-    cargo build --release --target wasm32-wasip1 --manifest-path "$manifest" "$@" >&2
+    cargo build --locked --release --target wasm32-wasip1 --manifest-path "$manifest" "$@" >&2
 
     if [ "$artifact" != "$dest" ]; then
         mkdir -p "$(dirname "$dest")"
