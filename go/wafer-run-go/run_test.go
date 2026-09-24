@@ -112,8 +112,8 @@ func TestRegisterBlockTakesACapabilityBound(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), "invalid capabilities JSON:") {
 		t.Fatalf("invalid capabilities JSON must be refused, got %v", err)
 	}
-	if w.HasBlock("example/echo") {
-		t.Fatal("a refused registration must register nothing")
+	if has, err := w.HasBlock("example/echo"); err != nil || has {
+		t.Fatalf("a refused registration must register nothing: HasBlock = %v, %v", has, err)
 	}
 
 	if err := w.RegisterBlock("example/echo", echoWasm, `{"crypto":true}`); err != nil {
@@ -158,5 +158,7 @@ func TestARefusedCallReturnsAnErrorInsteadOfWaiting(t *testing.T) {
 	if err := w.Resolve(); err != nil {
 		t.Fatalf("the refused call must leave the runtime resolvable: %v", err)
 	}
-	w.Stop()
+	if err := w.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
 }

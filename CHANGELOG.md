@@ -64,6 +64,15 @@
   `WAFER_RUN__FASTEMBED__CACHE_DIR` from the process environment (the old
   default was `data/models`).
 
+- Go SDK (`go/wafer-run-go`): `HasBlock` returns `(bool, error)` and
+  `FlowsInfo` returns `([]FlowInfo, error)` — a crashed FFI call (the -1 of
+  `wafer_has_block`, the `{"error": ...}` of `wafer_flows_info`) is an error,
+  where it read as "registered" and as "no flows". `Stop` and `Close` return
+  `error`. `Close` now stops the runtime before freeing it, waits for calls
+  using the runtime, and is safe to call concurrently with any other method;
+  calls after it return `ErrClosed`. `wafer-ffi`: after `wafer_stop`,
+  `wafer_run` is refused with an `Unavailable` error result instead of
+  dispatching to stopped blocks.
 - `wafer-ffi`: `wafer_resolve`, `wafer_start`, `wafer_stop` and `wafer_run`
   take their callback as `Option<WaferDoneCb>` (the C `wafer_done_cb`, NULL
   allowed by the type) and return `int`: `WAFER_ACCEPTED` (0) when they took
@@ -1699,6 +1708,17 @@
   It used to return an empty packet, so the host reported only an EOF while
   decoding the guest's result. Guests pick this up when rebuilt.
 
+- `wafer-ffi`: every accepted async call invokes its callback exactly once.
+  A call still pending at `wafer_free` gets a `Cancelled` error before
+  `wafer_free` returns (dropping the tokio runtime used to discard it, so the
+  Go SDK's `Run` blocked forever; the docs claimed the drop waited for it). A
+  panic inside spawned work (e.g. a block panicking in `lifecycle(Stop)`)
+  gets an `Internal` error naming it; tokio used to swallow it with the
+  callback. `wafer_stop` waits for every `wafer_run` accepted before it,
+  including one accepted but not yet running, which could otherwise run
+  after the blocks' Stop; a second `wafer_stop` no longer runs the blocks'
+  Stop again. `wafer_free` called from inside a callback no longer
+  panics shutting down the runtime it runs on.
 - `wafer-run/network` starts when `WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS`
   is unset. The key was declared with an empty default and without
   `.optional()`, which the config resolver reads as required, so every

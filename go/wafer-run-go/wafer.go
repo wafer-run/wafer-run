@@ -47,12 +47,44 @@ import (
 	"errors"
 	"fmt"
 	"runtime/cgo"
+	"sync"
 	"unsafe"
 )
 
-// Wafer is the Go host runtime backed by the Rust wafer-run core.
+// Wafer is the Go host runtime backed by the Rust wafer-run core. Its
+// methods are safe for concurrent use, including Close.
 type Wafer struct {
+	// mu guards ptr: every FFI call holds it for reading while it uses ptr,
+	// and Close takes it for writing to retire ptr, so Close never frees the
+	// runtime under a call that is still using it.
+	mu  sync.RWMutex
 	ptr *C.WaferRuntime
+}
+
+// ErrClosed is returned by a call made on a Wafer after Close.
+var ErrClosed = errors.New("wafer: runtime is closed")
+
+// testHookFFICall, when set, runs while a call holds the runtime, just
+// before it calls into the FFI.
+var testHookFFICall func()
+
+// testHookDoneCallback, when set, runs inside waferDoneCallback, on the
+// FFI's thread, before the result is delivered.
+var testHookDoneCallback func()
+
+// with runs f on the runtime pointer, holding it so Close waits for f; it
+// returns ErrClosed after Close.
+func (w *Wafer) with(f func(p *C.WaferRuntime)) error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if w.ptr == nil {
+		return ErrClosed
+	}
+	if testHookFFICall != nil {
+		testHookFFICall()
+	}
+	f(w.ptr)
+	return nil
 }
 
 // New creates a new WAFER runtime instance.
@@ -64,14 +96,26 @@ func New() *Wafer {
 	return &Wafer{ptr: ptr}
 }
 
-// Close frees the underlying runtime. The Wafer must not be used after Close.
-// Call Stop first so that block lifecycle(Stop) handlers can run; otherwise
-// they are skipped.
-func (w *Wafer) Close() {
-	if w.ptr != nil {
-		C.wafer_free(w.ptr)
-		w.ptr = nil
+// Close stops the runtime (see Stop) and frees it. It waits for calls that
+// are using the runtime and for accepted Runs, which complete; calls made
+// after Close return ErrClosed (Run an error Result naming it). Closing a
+// closed Wafer does nothing and returns nil. The error is Stop's.
+func (w *Wafer) Close() error {
+	w.mu.Lock()
+	p := w.ptr
+	w.ptr = nil
+	w.mu.Unlock()
+	if p == nil {
+		return nil
 	}
+	ch, h, err := startAsync(p, C.wafer_done_cb(C.waferDoneCallback), stopCall)
+	if err == nil {
+		r := <-ch
+		h.Delete()
+		err = parseLifecycleResult(r.body, nil)
+	}
+	C.wafer_free(p)
+	return err
 }
 
 // Register registers a block or flow definition from a file path.
@@ -87,7 +131,10 @@ func (w *Wafer) Register(name, path string) error {
 	defer C.free(unsafe.Pointer(cName))
 	defer C.free(unsafe.Pointer(cPath))
 
-	cResult := C.wafer_register(w.ptr, cName, cPath)
+	var cResult *C.char
+	if err := w.with(func(p *C.WaferRuntime) { cResult = C.wafer_register(p, cName, cPath) }); err != nil {
+		return err
+	}
 	return parseFFIError(cResult)
 }
 
@@ -110,7 +157,10 @@ func (w *Wafer) RegisterBlock(name, path, capabilitiesJSON string) error {
 	defer C.free(unsafe.Pointer(cPath))
 	defer C.free(unsafe.Pointer(cCaps))
 
-	cResult := C.wafer_register_block(w.ptr, cName, cPath, cCaps)
+	var cResult *C.char
+	if err := w.with(func(p *C.WaferRuntime) { cResult = C.wafer_register_block(p, cName, cPath, cCaps) }); err != nil {
+		return err
+	}
 	return parseFFIError(cResult)
 }
 
@@ -124,8 +174,8 @@ func (w *Wafer) Resolve() error {
 
 // resolveWith is Resolve with the completion callback it hands the FFI.
 func (w *Wafer) resolveWith(done C.wafer_done_cb) error {
-	return parseFFIErrorWith(done, func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
-		return C.cgo_wafer_resolve(w.ptr, cb, ud)
+	return w.lifecycle(done, func(p *C.WaferRuntime, cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_resolve(p, cb, ud)
 	})
 }
 
@@ -135,19 +185,24 @@ func (w *Wafer) resolveWith(done C.wafer_done_cb) error {
 // Async in the FFI layer; this wrapper blocks the calling goroutine until the
 // FFI callback fires.
 func (w *Wafer) Start() error {
-	return parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
-		return C.cgo_wafer_start(w.ptr, cb, ud)
+	return w.lifecycle(C.wafer_done_cb(C.waferDoneCallback), func(p *C.WaferRuntime, cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_start(p, cb, ud)
 	})
 }
 
-// Stop shuts down all resolved block instances.
+// Stop refuses Runs from now on, waits for the Runs already accepted, then
+// runs the blocks' lifecycle(Stop) handlers. It returns an error if shutdown
+// panicked. A second Stop waits for the first and does not stop the blocks
+// again.
 //
 // Async in the FFI layer; this wrapper blocks the calling goroutine until the
 // FFI callback fires.
-func (w *Wafer) Stop() {
-	_ = parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
-		return C.cgo_wafer_stop(w.ptr, cb, ud)
-	})
+func (w *Wafer) Stop() error {
+	return w.lifecycle(C.wafer_done_cb(C.waferDoneCallback), stopCall)
+}
+
+func stopCall(p *C.WaferRuntime, cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+	return C.cgo_wafer_stop(p, cb, ud)
 }
 
 // Run runs a flow by ID with the given message.
@@ -165,8 +220,8 @@ func (w *Wafer) Run(flowID string, msg *Message) *Result {
 	defer C.free(unsafe.Pointer(cFlowID))
 	defer C.free(unsafe.Pointer(cMsg))
 
-	resultStr, err := runAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
-		return C.cgo_wafer_run(w.ptr, cFlowID, cMsg, cb, ud)
+	resultStr, err := w.runAsync(C.wafer_done_cb(C.waferDoneCallback), func(p *C.WaferRuntime, cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_run(p, cFlowID, cMsg, cb, ud)
 	})
 	if err != nil {
 		return ErrorResult("Internal", err.Error())
@@ -179,29 +234,49 @@ func (w *Wafer) Run(flowID string, msg *Message) *Result {
 	return &result
 }
 
-// FlowsInfo returns info about all registered flows.
+// FlowsInfo returns info about all registered flows. It returns an error
+// when the FFI reports one instead of the list.
 //
 // Synchronous in the FFI layer (read-only introspection).
-func (w *Wafer) FlowsInfo() []FlowInfo {
-	cResult := C.wafer_flows_info(w.ptr)
+func (w *Wafer) FlowsInfo() ([]FlowInfo, error) {
+	var cResult *C.char
+	if err := w.with(func(p *C.WaferRuntime) { cResult = C.wafer_flows_info(p) }); err != nil {
+		return nil, err
+	}
 	defer C.wafer_free_string(cResult)
 
 	resultStr := C.GoString(cResult)
 
 	var info []FlowInfo
 	if err := json.Unmarshal([]byte(resultStr), &info); err != nil {
-		return nil
+		var ffiErr ffiError
+		if json.Unmarshal([]byte(resultStr), &ffiErr) == nil && ffiErr.Error != "" {
+			return nil, fmt.Errorf("wafer: flows info: %s", ffiErr.Error)
+		}
+		return nil, fmt.Errorf("wafer: flows info is not a JSON array: %q", resultStr)
 	}
-	return info
+	return info, nil
 }
 
-// HasBlock returns true if a block type is registered.
+// HasBlock reports whether a block type is registered. It returns an error
+// when the FFI call failed rather than answering.
 //
 // Synchronous in the FFI layer.
-func (w *Wafer) HasBlock(typeName string) bool {
+func (w *Wafer) HasBlock(typeName string) (bool, error) {
 	cTypeName := C.CString(typeName)
 	defer C.free(unsafe.Pointer(cTypeName))
-	return C.wafer_has_block(w.ptr, cTypeName) != 0
+	var status C.int
+	if err := w.with(func(p *C.WaferRuntime) { status = C.wafer_has_block(p, cTypeName) }); err != nil {
+		return false, err
+	}
+	switch status {
+	case 1:
+		return true, nil
+	case 0:
+		return false, nil
+	default:
+		return false, fmt.Errorf("wafer: has block %q: the FFI call failed (status %d)", typeName, int(status))
+	}
 }
 
 // --- Async callback plumbing ---------------------------------------------
@@ -214,43 +289,55 @@ type asyncResult struct {
 	body string
 }
 
-// runAsync invokes an async FFI function via the supplied closure, blocks
-// until waferDoneCallback fires, and returns the JSON result string. For
-// lifecycle ops the returned string is empty on success.
-//
-// The closure receives the callback fn ptr and a `uintptr_t` carrying a
-// cgo.Handle that resolves back to the result channel inside
-// waferDoneCallback. Using `uintptr_t` (rather than `void*`) avoids
-// unsafe.Pointer conversion at the cgo boundary. It returns the FFI's
-// status; anything but WAFER_ACCEPTED means no callback will fire, so
-// runAsync returns an error instead of waiting.
-func runAsync(invoke func(C.wafer_done_cb, C.uintptr_t) C.int) (string, error) {
-	return runAsyncWith(C.wafer_done_cb(C.waferDoneCallback), invoke)
-}
+// asyncCall is an async FFI function: it takes the runtime pointer, the
+// callback fn ptr and a `uintptr_t` carrying a cgo.Handle that resolves back
+// to the result channel inside waferDoneCallback (a `uintptr_t` rather than
+// a `void*` avoids unsafe.Pointer conversion at the cgo boundary), and
+// returns the FFI's status.
+type asyncCall func(*C.WaferRuntime, C.wafer_done_cb, C.uintptr_t) C.int
 
-// runAsyncWith is runAsync with the callback it hands the FFI supplied.
-func runAsyncWith(cb C.wafer_done_cb, invoke func(C.wafer_done_cb, C.uintptr_t) C.int) (string, error) {
+// startAsync makes one async FFI call on p. Anything but WAFER_ACCEPTED
+// means no callback will fire, so it returns an error instead of a channel
+// to wait on. An accepted call always calls back — wafer_free cancels one
+// still pending with an error — so a wait on the channel ends. The caller
+// deletes the handle once the result is in.
+func startAsync(p *C.WaferRuntime, cb C.wafer_done_cb, invoke asyncCall) (chan asyncResult, cgo.Handle, error) {
 	ch := make(chan asyncResult, 1)
 	h := cgo.NewHandle(ch)
-	defer h.Delete()
-
-	if status := invoke(cb, C.uintptr_t(h)); status != C.WAFER_ACCEPTED {
-		return "", fmt.Errorf("wafer: the FFI refused the call (status %d)", int(status))
+	if status := invoke(p, cb, C.uintptr_t(h)); status != C.WAFER_ACCEPTED {
+		h.Delete()
+		return nil, 0, fmt.Errorf("wafer: the FFI refused the call (status %d)", int(status))
 	}
+	return ch, h, nil
+}
 
+// runAsync makes an async FFI call holding the runtime (see with), then
+// waits — no longer holding it — for the callback, and returns its JSON
+// result string. For lifecycle ops the string is empty on success.
+func (w *Wafer) runAsync(cb C.wafer_done_cb, invoke asyncCall) (string, error) {
+	var ch chan asyncResult
+	var h cgo.Handle
+	var callErr error
+	if err := w.with(func(p *C.WaferRuntime) { ch, h, callErr = startAsync(p, cb, invoke) }); err != nil {
+		return "", err
+	}
+	if callErr != nil {
+		return "", callErr
+	}
+	defer h.Delete()
 	r := <-ch
 	return r.body, nil
 }
 
-// parseFFIErrorAsync wraps runAsync for the lifecycle ops whose callback
+// lifecycle runs a lifecycle op (resolve, start, stop), whose callback
 // result is either NULL (success) or a JSON error string.
-func parseFFIErrorAsync(invoke func(C.wafer_done_cb, C.uintptr_t) C.int) error {
-	return parseFFIErrorWith(C.wafer_done_cb(C.waferDoneCallback), invoke)
+func (w *Wafer) lifecycle(cb C.wafer_done_cb, invoke asyncCall) error {
+	return parseLifecycleResult(w.runAsync(cb, invoke))
 }
 
-// parseFFIErrorWith is parseFFIErrorAsync with the callback supplied.
-func parseFFIErrorWith(done C.wafer_done_cb, invoke func(C.wafer_done_cb, C.uintptr_t) C.int) error {
-	body, err := runAsyncWith(done, invoke)
+// parseLifecycleResult turns a lifecycle op's callback result into an error:
+// "" (a NULL result) is success, anything else a JSON error string.
+func parseLifecycleResult(body string, err error) error {
 	if err != nil {
 		return err
 	}
@@ -272,6 +359,9 @@ func waferDoneCallback(result *C.char, userData unsafe.Pointer) {
 	// through the static C wrappers above.
 	h := cgo.Handle(uintptr(userData)) //nolint:govet
 	ch := h.Value().(chan asyncResult)
+	if testHookDoneCallback != nil {
+		testHookDoneCallback()
+	}
 	if result == nil {
 		ch <- asyncResult{}
 	} else {
@@ -287,7 +377,7 @@ func waferDoneCallback(result *C.char, userData unsafe.Pointer) {
 // success (returns nil). Non-NULL is a JSON error string that must be freed.
 //
 // Only for synchronous FFI ops (e.g. wafer_register). Async ops route through
-// waferDoneCallback + parseFFIErrorAsync instead.
+// waferDoneCallback + parseLifecycleResult instead.
 func parseFFIError(cResult *C.char) error {
 	if cResult == nil {
 		return nil
