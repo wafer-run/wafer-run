@@ -502,3 +502,6 @@ pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
         }));
     }
 }
+
+#[cfg(test)]
+mod smoke_tests;
