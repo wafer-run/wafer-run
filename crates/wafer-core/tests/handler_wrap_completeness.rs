@@ -5,15 +5,16 @@
 //! either via `decode_and_authorize` or, for `config.get`'s dual decode path,
 //! directly). Those changes were verified op-by-op in
 //! `handler_{database,storage,config,network,crypto}_wrap_authorization.rs`.
+//! The vector and auth handlers authorize the same way.
 //!
 //! This file adds the mechanical guarantee that makes the property durable:
 //! it iterates the canonical op-family slices —
-//! `ServiceOp::{DATABASE,STORAGE,CONFIG,NETWORK,CRYPTO}_OPS` — and, for every
-//! op in each slice, dispatches a message with **no WRAP meta** (the exploit
-//! shape) through the real handler under a `Context` whose
-//! `check_resource_access` always denies. It asserts every one of them comes
-//! back `PermissionDenied` *and* that the underlying service method never
-//! ran (via a recording fake service per family).
+//! `ServiceOp::{DATABASE,VECTOR,STORAGE,CONFIG,NETWORK,CRYPTO,AUTH}_OPS` —
+//! and, for every op in each slice, dispatches a message with **no WRAP
+//! meta** (the exploit shape) through the real handler under a `Context`
+//! whose `check_resource_access` always denies. It asserts every one of them
+//! comes back `PermissionDenied` *and* that the underlying service method
+//! never ran (via a recording fake service per family).
 //!
 //! The mechanism that makes this "every op" instead of "every op we
 //! remembered to write a test for": each family has a `*_op_body` function
@@ -31,6 +32,11 @@
 //! including `STORAGE_LIST_FOLDERS`, which is now admin-only via the
 //! `STORAGE_LIST_ALL_RESOURCE` sentinel (`wafer-block/src/wrap.rs`) — is
 //! covered by the deny loop.
+//!
+//! The logger authorizes nothing (any block may log), so its guarantee is
+//! attribution instead: every op in `ServiceOp::LOGGER_OPS` hands the
+//! service the caller's `ctx.caller_id()` and a message with its control
+//! characters escaped.
 
 use std::{
     collections::HashMap,
@@ -501,6 +507,98 @@ mod crypto_fakes {
     }
 }
 
+mod auth_fakes {
+    use wafer_block::Message;
+    use wafer_core::interfaces::auth::service::{
+        AuthError, AuthService, Role, TokenScope, UserId, UserProfile,
+    };
+
+    use super::Calls;
+
+    pub struct RecordingAuth {
+        pub calls: Calls,
+    }
+
+    impl RecordingAuth {
+        pub fn new(calls: Calls) -> Self {
+            Self { calls }
+        }
+
+        fn record(&self, op: &'static str) {
+            self.calls.lock().unwrap().push(op);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthService for RecordingAuth {
+        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+            self.record("require_user");
+            Ok(UserId("u".into()))
+        }
+        async fn require_token(
+            &self,
+            _msg: &Message,
+            _scope: TokenScope,
+        ) -> Result<UserId, AuthError> {
+            self.record("require_token");
+            Ok(UserId("u".into()))
+        }
+        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+            self.record("require_role");
+            Ok(UserId("u".into()))
+        }
+        async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError> {
+            self.record("user_profile");
+            Ok(UserProfile {
+                id: user,
+                email: "victim@example.com".into(),
+                display_name: "Victim".into(),
+                avatar_url: None,
+                role: Role::Admin,
+                orgs: Vec::new(),
+            })
+        }
+    }
+}
+
+mod logger_fakes {
+    use std::sync::{Arc, Mutex};
+
+    use wafer_core::interfaces::logger::service::{Field, LoggerService};
+
+    /// One record as the service received it: level, caller, message.
+    pub type Record = (&'static str, Option<String>, String);
+
+    #[derive(Default)]
+    pub struct RecordingLogger {
+        pub records: Arc<Mutex<Vec<Record>>>,
+    }
+
+    impl RecordingLogger {
+        fn record(&self, level: &'static str, caller: Option<&str>, msg: &str) {
+            self.records
+                .lock()
+                .unwrap()
+                .push((level, caller.map(str::to_string), msg.to_string()));
+        }
+    }
+
+    impl LoggerService for RecordingLogger {
+        fn debug(&self, caller: Option<&str>, msg: &str, _fields: &[Field]) {
+            self.record("debug", caller, msg);
+        }
+        fn info(&self, caller: Option<&str>, msg: &str, _fields: &[Field]) {
+            self.record("info", caller, msg);
+        }
+        fn warn(&self, caller: Option<&str>, msg: &str, _fields: &[Field]) {
+            self.record("warn", caller, msg);
+        }
+        fn error(&self, caller: Option<&str>, msg: &str, _fields: &[Field]) {
+            self.record("error", caller, msg);
+        }
+    }
+}
+
 mod vector_fakes {
     use wafer_block::wire::vector::{
         DescribeIndexResponse, MetadataFilter, SearchMode, VectorEntry, VectorIndexConfig,
@@ -957,6 +1055,27 @@ fn crypto_op_body(op: &str) -> Vec<u8> {
     encoded.expect("encode must succeed")
 }
 
+fn auth_op_body(op: &str) -> Vec<u8> {
+    use wafer_block::wire::auth as wire;
+
+    match op {
+        // The credential ops carry no body: they read the forwarded
+        // message's credential headers.
+        ServiceOp::AUTH_REQUIRE_USER
+        | ServiceOp::AUTH_REQUIRE_TOKEN
+        | ServiceOp::AUTH_REQUIRE_ROLE => Vec::new(),
+        ServiceOp::AUTH_USER_PROFILE => codec::encode(&wire::UserProfileRequest {
+            user_id: "u1".into(),
+        })
+        .expect("encode must succeed"),
+        other => panic!(
+            "completeness test has no minimal-body case for auth op `{other}` — \
+             add a `match` arm to `auth_op_body` so this op stays covered \
+             by the completeness guarantee"
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The completeness loop, one test per family.
 // ---------------------------------------------------------------------------
@@ -1177,6 +1296,71 @@ async fn crypto_ops_all_deny_under_deny_ctx() {
             calls.lock().unwrap().is_empty(),
             "crypto op `{op}` must not reach the service on a denied request; calls = {:?}",
             calls.lock().unwrap()
+        );
+    }
+}
+
+#[tokio::test]
+async fn auth_ops_all_deny_under_deny_ctx() {
+    assert!(
+        !ServiceOp::AUTH_OPS.is_empty(),
+        "sanity: AUTH_OPS must not be empty"
+    );
+    for op in ServiceOp::AUTH_OPS {
+        let calls = new_calls();
+        let svc = auth_fakes::RecordingAuth::new(calls.clone());
+        let body = auth_op_body(op);
+        let mut msg = msg_without_wrap_meta(op);
+        // `require_role` rejects a missing role header before the service
+        // runs; give it one so only authorization can stop it.
+        msg.set_meta("http.header.x-auth-role", "user");
+
+        let out =
+            wafer_core::interfaces::auth::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+                .await;
+        expect_permission_denied(out, op).await;
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "auth op `{op}` must not reach the service on a denied request; calls = {:?}",
+            calls.lock().unwrap()
+        );
+    }
+}
+
+/// Every logger op hands the service the caller the runtime names — not a
+/// name the block could write — and the message on one line.
+#[tokio::test]
+async fn logger_ops_all_attribute_the_caller_and_escape_the_message() {
+    assert!(
+        !ServiceOp::LOGGER_OPS.is_empty(),
+        "sanity: LOGGER_OPS must not be empty"
+    );
+    for op in ServiceOp::LOGGER_OPS {
+        let svc = logger_fakes::RecordingLogger::default();
+        let body = codec::encode(&wafer_block::wire::logger::LogRequest {
+            message: "ok\nERROR forged record".into(),
+            fields: HashMap::new(),
+        })
+        .expect("encode must succeed");
+
+        let out = wafer_core::interfaces::logger::handler::handle_message(
+            &svc,
+            &DenyCtx,
+            &msg_without_wrap_meta(op),
+            &body,
+        );
+        out.collect_buffered()
+            .await
+            .unwrap_or_else(|e| panic!("logger op `{op}` failed: {e:?}"));
+
+        let records = svc.records.lock().unwrap().clone();
+        assert_eq!(records.len(), 1, "logger op `{op}`: {records:?}");
+        let (_, caller, message) = &records[0];
+        assert_eq!(caller.as_deref(), Some("test/caller"), "logger op `{op}`");
+        assert_eq!(
+            message, "ok\\nERROR forged record",
+            "logger op `{op}`: the newline must reach the service escaped"
         );
     }
 }

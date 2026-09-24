@@ -1,8 +1,10 @@
 //! Shared message handler logic for the auth block.
 //!
 //! Mirrors `crypto/handler.rs` shape. Dispatches `auth.require_user`,
-//! `auth.require_token`, `auth.require_role` to the `AuthService` trait
-//! supplied by consumers (the consuming application's `blocks::auth::block::register`).
+//! `auth.require_token`, `auth.require_role` and `auth.user_profile` to the
+//! `AuthService` trait supplied by consumers (the consuming application's
+//! `blocks::auth::block::register`), after authorizing the caller for the
+//! op (see [`handle_message`]).
 //!
 //! The handler reads scope/role hints from request meta keys
 //! `http.header.x-auth-scope` and `http.header.x-auth-role` (the same
@@ -11,12 +13,24 @@
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    types::ResourceType,
     wire::auth as wire,
+    wrap::{
+        AUTH_REQUIRE_ROLE_RESOURCE, AUTH_REQUIRE_TOKEN_RESOURCE, AUTH_REQUIRE_USER_RESOURCE,
+        AUTH_USER_PROFILE_RESOURCE,
+    },
     *,
 };
 
 use super::service::{self, AuthError, AuthService, Role, TokenScope, UserId};
-use crate::interfaces::handler_util::{decode_or_err, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize, to_output};
+
+/// Authorize the caller for an auth op whose request carries no body to
+/// decode (the credential ops read the forwarded message's headers).
+fn authorize(ctx: &dyn Context, resource: &str) -> Result<(), OutputStream> {
+    ctx.check_resource_access(resource, ResourceType::Auth, ResourceAccess::Read)
+        .map_err(OutputStream::error)
+}
 
 fn err_to_wafer(e: AuthError) -> WaferError {
     match e {
@@ -76,13 +90,33 @@ fn service_profile_to_wire(p: service::UserProfile) -> wire::UserProfileResponse
 }
 
 /// Handle an auth message by delegating to the given service.
-pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8]) -> OutputStream {
+///
+/// `ctx` is the auth block's own context for this call: every op arm
+/// authorizes `ctx.caller_id()` through `ctx.check_resource_access` against
+/// the op's [`ResourceType::Auth`] resource before the service is touched.
+/// The credential ops (`require_*`) are open to any attributable caller;
+/// `user_profile` needs the auth block's grant or the admin block (see
+/// [`wafer_block::wrap::check_access`]).
+pub async fn handle_message(
+    service: &dyn AuthService,
+    ctx: &dyn Context,
+    msg: &Message,
+    body: &[u8],
+) -> OutputStream {
     match msg.kind.as_str() {
-        ServiceOp::AUTH_REQUIRE_USER => match service.require_user(msg).await {
-            Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
-            Err(e) => OutputStream::error(err_to_wafer(e)),
-        },
+        ServiceOp::AUTH_REQUIRE_USER => {
+            if let Err(out) = authorize(ctx, AUTH_REQUIRE_USER_RESOURCE) {
+                return out;
+            }
+            match service.require_user(msg).await {
+                Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
+                Err(e) => OutputStream::error(err_to_wafer(e)),
+            }
+        }
         ServiceOp::AUTH_REQUIRE_TOKEN => {
+            if let Err(out) = authorize(ctx, AUTH_REQUIRE_TOKEN_RESOURCE) {
+                return out;
+            }
             // Scope is carried via `x-auth-scope` header by convention; Plan
             // A2's server-side handlers set this explicitly before dispatch.
             let scope = match msg.header("x-auth-scope") {
@@ -100,6 +134,9 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
             }
         }
         ServiceOp::AUTH_REQUIRE_ROLE => {
+            if let Err(out) = authorize(ctx, AUTH_REQUIRE_ROLE_RESOURCE) {
+                return out;
+            }
             let role = match parse_required_role(msg.header("x-auth-role")) {
                 Ok(r) => r,
                 Err(e) => return OutputStream::error(e),
@@ -110,7 +147,21 @@ pub async fn handle_message(service: &dyn AuthService, msg: &Message, body: &[u8
             }
         }
         ServiceOp::AUTH_USER_PROFILE => {
-            let req = decode_or_err!(body, wire::UserProfileRequest, "auth.user_profile");
+            let req = match decode_and_authorize::<wire::UserProfileRequest>(
+                ctx,
+                body,
+                "auth.user_profile",
+                |_r| {
+                    (
+                        AUTH_USER_PROFILE_RESOURCE.to_string(),
+                        ResourceType::Auth,
+                        ResourceAccess::Read,
+                    )
+                },
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.user_profile(UserId(req.user_id)).await {
                 Ok(p) => to_output(service_profile_to_wire(p)),
                 Err(e) => OutputStream::error(err_to_wafer(e)),

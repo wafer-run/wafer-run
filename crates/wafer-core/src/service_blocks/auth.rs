@@ -19,8 +19,8 @@ crate::service_block! {
     category: Service,
     fields: { service: Arc<dyn AuthService> },
     info_extras: |this, info| info.grants(this.service.grants()),
-    handle: |this, _ctx, msg, body| {
-        handler::handle_message(this.service.as_ref(), &msg, &body).await
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
     lifecycle: |this, ctx, event| {
         use crate::interfaces::auth::service::AuthError;

@@ -518,6 +518,37 @@
   `i` at `u32::MAX` pinned a thread for hours, and `m` at `u32::MAX` asked
   for terabytes. `pbkdf2_hash` refuses the same ceiling (`HashError`), so a
   `PasswordScheme::Pbkdf2Sha256` above it fails at hash time.
+- The auth service authorizes its caller per operation. Its handler never
+  checked who was asking, so any block that could reach `wafer-run/auth`
+  could read any user's email, role and orgs through `auth.user_profile`.
+  `interfaces::auth::handler::handle_message` now takes the block's `ctx`
+  (`handle_message(service, ctx, msg, body)`) and checks every op with
+  `ctx.check_resource_access` against a new `ResourceType::Auth` resource in
+  the auth block's own namespace: `wafer_block::wrap::AUTH_USER_PROFILE_RESOURCE`
+  (`wafer_run__auth__user_profile`) admits the auth block, the admin block,
+  or a caller holding a grant on it — and, the resource being namespaced,
+  only the auth block can declare that grant (return it from
+  `AuthService::grants`, e.g.
+  `ResourceGrant::read("acme/directory", AUTH_USER_PROFILE_RESOURCE).typed(ResourceType::Auth)`;
+  an untyped grant on `wafer_run__auth__*` covers it too). The credential
+  ops `auth.require_user` / `require_token` / `require_role` resolve the
+  credential the caller forwards, so any attributable caller may use them
+  without a grant (`wrap::is_auth_credential_resource`); a call with no
+  calling block is refused. `ServiceOp::AUTH_OPS` lists the auth ops.
+- The logger attributes every record to its caller and keeps it on one
+  line. It recorded no caller and wrote a block's message verbatim, so any
+  block could write lines that read as another component's, including whole
+  forged records after a newline. `LoggerService`'s four methods take the
+  caller first (`fn info(&self, caller: Option<&str>, msg: &str, fields:
+  &[Field])`): the handler passes `ctx.caller_id()`, the runtime's
+  registered name for the calling block, and escapes control characters and
+  U+2028/U+2029 in the message and in every field key and text value
+  (`interfaces::logger::service::escape_log_text`; `\` is escaped too, so
+  the result is unambiguous), handing the fields over in key order.
+  `interfaces::logger::handler::handle_message` takes the block's `ctx`. `TracingLogger` emits `caller` (`-` for no
+  caller), the message, and the fields as one `fields` value. Every
+  `LoggerService` implementation must add the parameter and record the
+  caller.
 
 ### Added
 
