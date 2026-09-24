@@ -370,3 +370,78 @@ async fn pool_cap_bounds_retained_instances() {
         "checkin must retain at most the pool cap (4) and drop the surplus"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PerFlow: one instance set per flow
+// ---------------------------------------------------------------------------
+
+/// Run flow `flow_id` (one step: the pool guest's `pool.count`) and return
+/// the counter the guest reported.
+async fn flow_call(wafer: &Wafer, flow_id: &str) -> String {
+    let out = wafer
+        .run(flow_id, Message::new("pool.count"), InputStream::empty())
+        .await;
+    let buf = out
+        .collect_buffered()
+        .await
+        .unwrap_or_else(|t| panic!("flow {flow_id} should Respond, got: {t:?}"));
+    String::from_utf8(buf.body).expect("utf8 counter")
+}
+
+/// A `PerFlow` guest reuses an instance only within one flow: flow B never
+/// sees the state flow A's calls left in the guest, and each flow keeps its
+/// own count. A call outside every flow draws from neither.
+#[tokio::test]
+async fn perflow_guest_state_does_not_cross_flows() {
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .build()
+        .expect("Wafer::build");
+    let guest = Arc::new(
+        WasmiBlock::load_approving_declaration(
+            &pool_guest_wasm("perflow"),
+            ResourceLimits::default(),
+        )
+        .expect("load guest"),
+    );
+    w.register_block("test/pool-guest", guest.clone())
+        .expect("register pool guest");
+    for id in ["flow-a", "flow-b"] {
+        w.add_flow_json(
+            &serde_json::json!({
+                "id": id,
+                "name": id,
+                "version": "0.1.0",
+                "steps": [{ "id": "count", "block": "test/pool-guest" }],
+            })
+            .to_string(),
+        )
+        .expect("add flow");
+    }
+    let wafer = w.start().await.expect("start runtime");
+
+    assert_eq!(flow_call(&wafer, "flow-a").await, "1");
+    assert_eq!(
+        flow_call(&wafer, "flow-a").await,
+        "2",
+        "a second call in the same flow reuses its instance"
+    );
+    assert_eq!(
+        flow_call(&wafer, "flow-b").await,
+        "1",
+        "flow B must not see the state flow A left in the guest"
+    );
+    assert_eq!(flow_call(&wafer, "flow-a").await, "3");
+    assert_eq!(flow_call(&wafer, "flow-b").await, "2");
+    assert_eq!(
+        runtime_call(&wafer, "pool.count").await,
+        "1",
+        "a call outside every flow must not reuse a flow's instance"
+    );
+    assert_eq!(
+        guest.pooled_instance_count(),
+        3,
+        "one idle instance per set"
+    );
+}

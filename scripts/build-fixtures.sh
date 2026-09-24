@@ -118,11 +118,12 @@ build_fixture \
     crates/wafer-run/tests/json_host_guest/Cargo.toml \
     crates/wafer-run/tests/json_host_guest/target/wasm32-wasip1/release/json_host_guest.wasm
 
-# pool_guest_{singleton,percall}.wasm — consumed by wasm_instance_pooling.rs
-# at runtime via Path. Two variant builds of one crate (PERF-01 Part B): the
-# default build declares InstanceMode::Singleton (pool-eligible); the
-# `percall` feature build declares PerExecution (the cold control). Both
-# share the crate's artifact path, so each build is copied to its
+# pool_guest_{singleton,percall,perflow}.wasm — consumed by
+# wasm_instance_pooling.rs at runtime via Path. Three variant builds of one
+# crate (PERF-01 Part B): the default build declares InstanceMode::Singleton
+# (pool-eligible); the `percall` feature build declares PerExecution (the
+# cold control); the `perflow` feature build declares PerFlow (pooled per
+# flow). All the crate's artifact path, so each build is copied to its
 # variant-named destination before the next build overwrites the artifact.
 build_fixture \
     crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest_singleton.wasm \
@@ -134,6 +135,12 @@ build_fixture \
     crates/wafer-run/tests/pool_guest/Cargo.toml \
     crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest.wasm \
     --features percall
+
+build_fixture \
+    crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest_perflow.wasm \
+    crates/wafer-run/tests/pool_guest/Cargo.toml \
+    crates/wafer-run/tests/pool_guest/target/wasm32-wasip1/release/pool_guest.wasm \
+    --features perflow
 
 # bench_guest_singleton.wasm — the pooled-dispatch bench arm variant
 # (PERF-01 Part B): identical guest code, but declares

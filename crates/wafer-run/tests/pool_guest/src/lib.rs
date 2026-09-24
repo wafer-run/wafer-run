@@ -8,9 +8,11 @@
 //! calls IS the observable "was this instance reused?" signal every test
 //! keys off.
 //!
-//! Two build variants from this one crate (see `scripts/build-fixtures.sh`):
+//! Three build variants from this one crate (see `scripts/build-fixtures.sh`):
 //! the default declares `InstanceMode::Singleton` (pool-eligible), the
-//! `percall` feature declares `InstanceMode::PerExecution` (must stay cold).
+//! `percall` feature declares `InstanceMode::PerExecution` (must stay cold),
+//! and the `perflow` feature declares `InstanceMode::PerFlow` (pooled per
+//! flow).
 //!
 //! Operations, selected by `msg.kind` (every arm increments the counter
 //! first, so the response — or the state the host observes afterwards —
@@ -59,7 +61,9 @@ extern "C" {
 pub extern "C" fn __wafer_info() -> i64 {
     #[cfg(feature = "percall")]
     let mode = InstanceMode::PerExecution;
-    #[cfg(not(feature = "percall"))]
+    #[cfg(feature = "perflow")]
+    let mode = InstanceMode::PerFlow;
+    #[cfg(not(any(feature = "percall", feature = "perflow")))]
     let mode = InstanceMode::Singleton;
 
     let info = BlockInfo::new(

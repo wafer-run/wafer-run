@@ -17,6 +17,28 @@
   `npm run build` (or `build-debug`) in `crates/wafer-run-node` writes it,
   and `package.json` `main` now names it (it named an `index.js` that did not
   exist, so `require('wafer-run')` failed). `*.node` is gitignored.
+- `WasmiBlock::load(path)` is `WasmiBlock::load(path, limits)`: the path
+  loader takes its per-call `ResourceLimits` explicitly (pass
+  `Wafer::resource_limits()` to match the runtime) instead of silently
+  applying the loader defaults.
+- `seal()` keys every block config by the block it configures: a config
+  registered with `add_block_config` under an alias moves to the alias's
+  target, so the target's `lifecycle(Init)` payload, its dispatch config and
+  its `capabilities` subkey all see it. Before, Init and the `capabilities`
+  subkey read only the target's own name and missed it. A block with a
+  config under two of its names (its own and an alias, or two aliases) now
+  refuses `seal()` with `RuntimeError::Config` naming both.
+- A `PerFlow` WASM block reuses warm instances only within one flow; each
+  flow has its own set, and calls outside every flow share one more.
+  Before, every call of the block shared one set, so guest state crossed
+  flows. `Context` gains `flow_id() -> Option<&str>` (default `None`), and
+  a block's lifecycle context (Init, Start, Stop) and the calls made under
+  it carry an empty flow id — observability hooks see `""` there instead
+  of the labels `init` / `startup` / `shutdown`.
+- `runtime::validation::check_action_interface` takes the interface specs
+  as a `HashMap` keyed by interface name. `call_block` reads the callee's
+  interface and `requires` allowlist from the plan compiled at `seal()`
+  instead of building the callee's `BlockInfo` on every call.
 
 - The windowed-counter upsert (`OnConflict::WindowedCounter`) stamps its
   `created_fields`/`updated_fields` with the server's current instant as
@@ -853,10 +875,11 @@
   no longer prevent boot; they surface as a 5xx on first dispatch of the
   affected block. Use `Wafer::validate_all_block_configs()` for an explicit
   health check (intended for `/_health` routes).
-- `add_block_config()` JSON no longer flows into a block's `lifecycle(Init)`
-  payload. It still participates in composite/uses expansion and is
-  surfaced via `RuntimeContext::block_configs()`. Block init config comes
-  from the registered `ConfigSource`.
+- A block's `lifecycle(Init)` payload is its `add_block_config()` JSON with
+  the values the registered `ConfigSource` resolves for its declared config
+  keys laid over it (those win). The JSON also participates in
+  composite/uses expansion and is surfaced via
+  `RuntimeContext::block_configs()`.
 - `RuntimeContext::make_context` gains an `init_breadcrumbs: InitStack`
   parameter. Update non-test in-tree callers if any exist (all in-tree
   callers were updated in this PR).

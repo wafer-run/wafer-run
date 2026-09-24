@@ -37,9 +37,11 @@ let cfg_source: Arc<dyn wafer_run::ConfigSource> =
 // 2. Construct the runtime with the source.
 let mut wafer = Wafer::new(cfg_source)?;
 wafer.register_block("my-org/auth", Arc::new(AuthBlock::new()))?;
-// add_block_config still works for composite/uses config, but it
-// no longer feeds the block's lifecycle(Init) payload — init config
-// comes from the ConfigSource on first dispatch.
+// add_block_config JSON is the base of the block's lifecycle(Init)
+// payload (and feeds composite/uses expansion); the values the
+// ConfigSource resolves for the block's declared config keys are laid
+// over it on first dispatch, and win. A config registered under an
+// alias configures the alias's target.
 wafer.add_block_config("my-org/auth", auth_composite_json);
 
 // 3. Finalize: composite/uses expansion + capability resolution

@@ -27,7 +27,9 @@ use crate::platform::Instant;
 /// that points at the same shared snapshots; used by [`Context::clone_arc`].
 #[derive(Clone)]
 pub struct RuntimeContext {
-    /// Identifier of the flow currently executing (matches `WaferFlow::id`).
+    /// Identifier of the flow currently executing (matches `WaferFlow::id`);
+    /// empty outside every flow — a top-level dispatch, and a block's
+    /// lifecycle (Init, Start, Stop) with every call made under it.
     pub flow_id: String,
     /// Identifier of the node within the flow that triggered this context.
     pub node_id: String,
@@ -107,6 +109,11 @@ pub struct RuntimeContext {
     /// calls fire the same `block_start`/`block_end` hooks as the top-level
     /// dispatch paths.
     pub(crate) hooks: Arc<crate::observability::ObservabilityBus>,
+    /// What `dispatch_call` needs about a callee — its interface and
+    /// `requires` allowlist, and the interface specs — compiled at seal and
+    /// `Arc`-shared with the [`Wafer`](crate::Wafer). Empty before seal;
+    /// a callee missing from it is read from its `BlockInfo`.
+    pub(crate) dispatch: Arc<crate::runtime::exec_plan::DispatchTable>,
 }
 
 // --- Output helpers (used by RuntimeContext impl) ---
@@ -137,7 +144,8 @@ impl RuntimeContext {
     ) -> Self {
         let allowlist = block.info().call_allowlist();
         Self {
-            flow_id: "init".to_string(),
+            // Init is the block's own operation, not a step of any flow.
+            flow_id: String::new(),
             node_id: block_name.to_string(),
             config: Arc::default(),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -253,6 +261,20 @@ impl RuntimeContext {
             }
         };
 
+        // The callee's interface and its own `call_block` allowlist
+        // (`None`: unrestricted), compiled at seal; a block the table misses
+        // (a context built before seal, or a block registered after it) is
+        // read from its `BlockInfo`.
+        let (interface, called_requires): (std::borrow::Cow<'_, str>, _) =
+            match self.dispatch.blocks.get(resolved_block_name) {
+                Some(facts) => (facts.interface.as_str().into(), facts.requires.clone()),
+                None => {
+                    let info = block.info();
+                    let requires = info.call_allowlist().map(Arc::new);
+                    (info.interface.into(), requires)
+                }
+            };
+
         // Interface action validation: verify the message action is part of the
         // target block's declared interface. Skipped for action-agnostic
         // interfaces (empty action map) and for interfaces the runtime does
@@ -267,7 +289,6 @@ impl RuntimeContext {
         // `kind` (the SDK op name). This keeps a single validation lookup that
         // works for both call-paths without forcing the SDK to duplicate kind
         // into meta on every call.
-        let info = block.info();
         {
             let action_meta = msg.action();
             let action = if !action_meta.is_empty() {
@@ -276,10 +297,10 @@ impl RuntimeContext {
                 msg.kind.as_str()
             };
             match crate::runtime::validation::check_action_interface(
-                &info.name,
-                &info.interface,
+                resolved_block_name,
+                &interface,
                 action,
-                &self.snapshot.interface_specs,
+                &self.dispatch.interface_specs,
             ) {
                 crate::runtime::validation::ActionCheck::Valid => {}
                 crate::runtime::validation::ActionCheck::Invalid { message } => {
@@ -288,16 +309,12 @@ impl RuntimeContext {
                 crate::runtime::validation::ActionCheck::UnknownInterface => {
                     crate::runtime::validation::warn_once_unknown_interface(
                         &self.warned_unknown_interfaces,
-                        &info.name,
-                        &info.interface,
+                        resolved_block_name,
+                        &interface,
                     );
                 }
             }
         }
-
-        // The called block's own `call_block` allowlist for its sub-context
-        // (`None`: unrestricted).
-        let called_requires = info.call_allowlist().map(Arc::new);
 
         // Wrap attachments in an Arc once, consuming the BTreeMap — no deep clone.
         let att_arc: Option<Arc<BTreeMap<String, Attachment>>> = attachments.map(Arc::new);
@@ -502,6 +519,10 @@ impl Context for RuntimeContext {
 
     fn caller_id(&self) -> Option<&str> {
         self.caller_id.as_deref()
+    }
+
+    fn flow_id(&self) -> Option<&str> {
+        (!self.flow_id.is_empty()).then_some(self.flow_id.as_str())
     }
 
     /// Authorize `self.caller_id()` to `access` `resource` of

@@ -1,6 +1,7 @@
 //! Config-expansion passes run during [`Wafer::seal`]: composite block
-//! configs, declarative flow `config_map` / `config_defaults`, and `"uses"`
-//! contributions between block configs.
+//! configs, declarative flow `config_map` / `config_defaults`, `"uses"`
+//! contributions between block configs, and keying every config by the
+//! block it configures.
 
 use std::collections::HashMap;
 
@@ -119,6 +120,50 @@ impl Wafer {
                 obj.remove("uses");
             }
         }
+    }
+
+    /// Key every block config by the block it configures: a config
+    /// registered under an alias moves to the alias's target, so dispatch,
+    /// `lifecycle(Init)` and the `capabilities` subkey all find it under the
+    /// one name the block is registered as. Refuses (`RuntimeError::Config`)
+    /// when two names for one block — the target and an alias, or two
+    /// aliases — each carry a config: which one configures the block would
+    /// otherwise depend on the name a caller happened to use.
+    pub(crate) fn key_block_configs_by_target(
+        &mut self,
+    ) -> Result<(), wafer_block::error::RuntimeError> {
+        // Every name a config is registered under, grouped by the block it
+        // configures. BTreeMap + sorted names: a refused boot names the same
+        // collision, spelled the same way, every time.
+        let mut by_target: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for name in self.registration.block_configs.keys() {
+            by_target
+                .entry(self.canonicalize(name).to_string())
+                .or_default()
+                .push(name.clone());
+        }
+        for (target, mut names) in by_target {
+            if names.len() > 1 {
+                names.sort();
+                return Err(wafer_block::error::RuntimeError::Config(format!(
+                    "block `{target}` has a config registered under each of {}; \
+                     register it once, under one name",
+                    names
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            let name = names.remove(0);
+            if name != target {
+                if let Some(config) = self.registration.block_configs.remove(&name) {
+                    self.registration.block_configs.insert(target, config);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

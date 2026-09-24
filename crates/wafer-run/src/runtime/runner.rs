@@ -276,11 +276,9 @@ impl Wafer {
         let cancelled = Arc::new(AtomicBool::new(false));
         // Seal-compiled block config (PERF-03): the flattened
         // `HashMap<String, String>` is parsed once at `seal()` and shared by
-        // `Arc` — previously re-parsed from the JSON snapshot on every call.
-        // The alias-resolved-then-raw key order matches `lookup_with_alias`:
-        // `add_block_config` is keyed by registration name, which may be
-        // either the alias or the target.
-        let block_config = self.plan.config_for(resolved, block_name);
+        // `Arc`. It is keyed by the registered name: `seal()` moves config
+        // registered under an alias to the alias's target.
+        let block_config = self.plan.config_for(resolved);
 
         // `node_id` is what the runtime uses to attribute WRAP access on
         // anything this block does on its own behalf (config/db/etc reads).

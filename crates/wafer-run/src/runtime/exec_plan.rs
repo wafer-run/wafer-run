@@ -5,8 +5,10 @@
 //!
 //! - per-block flattened config maps (`parse_config_map` of the startup
 //!   snapshot's `block_configs`, previously re-parsed on every `run_block`),
-//! - per-block declared `requires` allowlists (previously a linear scan of
-//!   `snapshot.blocks` plus a `Vec<String>` clone per dispatch),
+//! - per-block declared `requires` allowlists and interfaces, plus the
+//!   interface specs keyed by name — what `call_block` needs about a callee
+//!   ([`DispatchTable`], shared with every context), so a call neither
+//!   builds the callee's `BlockInfo` nor scans a spec list,
 //! - compiled flows (see [`crate::waferflow::plan`]).
 //!
 //! Lookups fall back to the pre-plan code paths for anything not present —
@@ -15,20 +17,42 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use wafer_block::config::parse_config_map;
+use wafer_block::{config::parse_config_map, InterfaceSpec};
 
 use super::Wafer;
 use crate::waferflow::plan::{compile_flow, CompiledFlow};
+
+/// What dispatch needs about one registered block, read from its
+/// `BlockInfo` once at `seal()`.
+pub(crate) struct BlockDispatch {
+    /// The block's declared interface (`BlockInfo::interface`), which
+    /// `call_block` checks the requested action against.
+    pub(crate) interface: String,
+    /// The block's [`call_allowlist`](wafer_block::BlockInfo::call_allowlist)
+    /// (`requires` plus `optional_requires`); `None` when it declared
+    /// neither (unrestricted `call_block`).
+    pub(crate) requires: Option<Arc<Vec<String>>>,
+}
+
+/// The per-call facts about callees, compiled at `seal()` and `Arc`-shared
+/// with every [`RuntimeContext`](crate::context::RuntimeContext).
+#[derive(Default)]
+pub(crate) struct DispatchTable {
+    /// Keyed by registration name.
+    pub(crate) blocks: HashMap<String, BlockDispatch>,
+    /// Every registered interface spec, keyed by interface name.
+    pub(crate) interface_specs: HashMap<String, InterfaceSpec>,
+}
 
 /// Immutable dispatch data compiled once at `seal()`.
 pub(crate) struct SealedPlan {
     /// Parsed block configs, keyed exactly as
     /// [`StartupSnapshot::block_configs`](crate::snapshot::StartupSnapshot::block_configs)
-    /// is (the registration name, which may be an alias or a target).
+    /// is: by the registered block's name, since `seal()` moves config
+    /// registered under an alias to the alias's target.
     pub(crate) block_configs: HashMap<String, Arc<HashMap<String, String>>>,
-    /// Declared non-empty `requires` allowlist per registered block name;
-    /// `None` when the block declared none (unrestricted `call_block`).
-    pub(crate) block_requires: HashMap<String, Option<Arc<Vec<String>>>>,
+    /// What dispatch needs about each registered block.
+    pub(crate) dispatch: Arc<DispatchTable>,
     /// Compiled flows keyed by flow id.
     pub(crate) flows: HashMap<String, Arc<CompiledFlow>>,
     /// Shared empty config map handed to contexts with no per-call config
@@ -41,20 +65,17 @@ impl SealedPlan {
     pub(crate) fn empty() -> Self {
         Self {
             block_configs: HashMap::new(),
-            block_requires: HashMap::new(),
+            dispatch: Arc::default(),
             flows: HashMap::new(),
             empty_config: Arc::new(HashMap::new()),
         }
     }
 
-    /// Parsed config for a dispatch target: alias-resolved name first, then
-    /// the raw name (the same two-key lookup `run_block` always performed —
-    /// `add_block_config` is keyed by registration name, which may be either
-    /// the alias or the target). Misses share one empty map.
-    pub(crate) fn config_for(&self, resolved: &str, raw: &str) -> Arc<HashMap<String, String>> {
+    /// Parsed config for the block registered as `resolved` (an alias
+    /// resolved to its target). Misses share one empty map.
+    pub(crate) fn config_for(&self, resolved: &str) -> Arc<HashMap<String, String>> {
         self.block_configs
             .get(resolved)
-            .or_else(|| self.block_configs.get(raw))
             .cloned()
             .unwrap_or_else(|| self.empty_config.clone())
     }
@@ -73,12 +94,22 @@ impl Wafer {
                 .iter()
                 .map(|(name, cfg)| (name.clone(), Arc::new(parse_config_map(cfg))))
                 .collect(),
-            block_requires: self
-                .registration
-                .blocks
-                .keys()
-                .map(|name| (name.clone(), self.resolve_block_requires_uncached(name)))
-                .collect(),
+            dispatch: Arc::new(DispatchTable {
+                blocks: self
+                    .registration
+                    .blocks
+                    .iter()
+                    .map(|(name, block)| {
+                        let info = block.info();
+                        let dispatch = BlockDispatch {
+                            requires: info.call_allowlist().map(Arc::new),
+                            interface: info.interface,
+                        };
+                        (name.clone(), dispatch)
+                    })
+                    .collect(),
+                interface_specs: self.registration.interface_specs.clone(),
+            }),
             flows: self
                 .flows
                 .values()

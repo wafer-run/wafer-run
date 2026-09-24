@@ -111,10 +111,10 @@ pub struct BlockInfo {
     pub interface: String,
     /// One-line human-readable summary of what the block does.
     pub summary: String,
-    /// Declared instance lifecycle (default: `PerNode`). **Advisory —
-    /// not enforced.** Actual behavior is fixed by runtime type: native
-    /// blocks are one shared instance per runtime process, WASM blocks
-    /// are a fresh instance per call. See [`crate::InstanceMode`].
+    /// Declared instance lifecycle (default: `PerNode`). Native blocks are
+    /// one shared instance per runtime process whatever they declare; a
+    /// WASM block's declaration decides which calls reuse a warm instance.
+    /// See [`crate::InstanceMode`].
     #[serde(default = "default_instance_mode")]
     pub instance_mode: crate::InstanceMode,
     /// Names of other blocks this block cannot run without. `seal()` refuses

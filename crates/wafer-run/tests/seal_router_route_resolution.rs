@@ -151,8 +151,10 @@ async fn seal_router_route_walks_aliased_router() {
             assert_eq!(errs.len(), 1, "got: {errs:?}");
             assert_eq!(errs[0].name, "example/missing");
             match &errs[0].sources[0] {
+                // The config registered under the alias configures the
+                // router, so the router is the block the reference is from.
                 BlockReferenceSource::BlockConfig { from_block, .. } => {
-                    assert_eq!(from_block, "my-router");
+                    assert_eq!(from_block, "wafer-run/router");
                 }
                 other => panic!("expected BlockConfig source, got {other:?}"),
             }

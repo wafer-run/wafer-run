@@ -339,6 +339,101 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test 6c: `embed::register_path` loads a WASM block under the runtime's
+    // configured limits, not the loader's defaults.
+    // -----------------------------------------------------------------------
+
+    /// A heavy-loop guest (as [`heavy_loop_module`]) that also reports a real
+    /// `BlockInfo` named `name` from `__wafer_info` (ABI v1: JSON), so it can
+    /// be registered.
+    fn registrable_heavy_loop_module(name: &str, iters: u32) -> Vec<u8> {
+        const RESP_JSON: &str = r#"{"action":"Respond","response":{"data":[]}}"#;
+        const RESP_PTR: u32 = 4096;
+        const INFO_PTR: u32 = 8192;
+        let info = serde_json::to_vec(&wafer_run::BlockInfo::new(
+            name,
+            "0.0.1",
+            "handler@v1",
+            "spins, then responds",
+        ))
+        .expect("BlockInfo serializes");
+        let pack = |ptr: u32, len: usize| ((ptr as i64) << 32) | len as i64;
+        let wat_bytes =
+            |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("\\{b:02x}")).collect() };
+        let wat = format!(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (data (i32.const {RESP_PTR}) "{resp}")
+              (data (i32.const {INFO_PTR}) "{info_bytes}")
+              (func (export "__wafer_alloc") (param i32) (result i32) i32.const 0)
+              (func (export "__wafer_info") (result i64) (i64.const {info_packed}))
+              (func (export "__wafer_handle") (param i32 i32) (result i64)
+                (local $i i32)
+                (local.set $i (i32.const {iters}))
+                (block $done
+                  (loop $spin
+                    (br_if $done (i32.eqz (local.get $i)))
+                    (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+                    (br $spin)))
+                (i64.const {resp_packed})
+              )
+              (func (export "__wafer_lifecycle") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+            resp = wat_bytes(RESP_JSON.as_bytes()),
+            info_bytes = wat_bytes(&info),
+            info_packed = pack(INFO_PTR, info.len()),
+            resp_packed = pack(RESP_PTR, RESP_JSON.len()),
+        );
+        wat::parse_str(&wat).expect("registrable heavy-loop WAT should parse")
+    }
+
+    #[tokio::test]
+    async fn register_path_runs_the_block_under_the_runtimes_fuel_budget() {
+        // ~5 fuel per iteration: ~50k fuel, far under the 100M default and
+        // far over the runtime's 1000.
+        let wasm = registrable_heavy_loop_module("test/spin", 10_000);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("spin.wasm");
+        std::fs::write(&path, &wasm).expect("write wasm");
+
+        // The control: under the loader's default budget the loop finishes.
+        let default_limits = WasmiBlock::load(path.to_str().unwrap(), ResourceLimits::default())
+            .expect("load under default limits");
+        default_limits
+            .handle(&MockContext, Message::new("spin"), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+            .expect("the loop fits the default budget");
+
+        let mut wafer = wafer_run::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .fuel_per_call(FuelLimit::Metered(1000))
+            .build()
+            .expect("Wafer::build");
+        wafer_run::embed::register_path(&mut wafer, "test/spin", path.to_str().unwrap())
+            .expect("register_path");
+        wafer.seal().await.expect("seal");
+        let (_, block) = wafer.lookup_block("test/spin").expect("registered");
+
+        match block
+            .handle(&MockContext, Message::new("spin"), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(err)) => assert!(
+                format!("{err:?}").contains("fuel"),
+                "the runtime's 1000-fuel budget must trap the loop: {err:?}"
+            ),
+            other => panic!("the block ignored the runtime's fuel budget: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Tests 7 / 7b removed: they exercised the legacy `__wafer_host_call_block`
     // host import directly via WAT. That import no longer exists — its six
     // streaming replacements (`__wafer_host_stream_*`) are the new ABI surface.
