@@ -76,6 +76,96 @@ async fn two_postgres_services_on_one_database_see_each_others_tables() {
     run_two_instance_conformance(&a, &b).await;
 }
 
+/// A service whose sessions resolve names through a `search_path` without
+/// `public` is conformant: the statements are unqualified, so they reach the
+/// tables in the session's schema, and the introspection behind every
+/// existence, column and key check must reach the same ones. Runs the whole
+/// suite, and the two-instance suite, in a fresh schema. Skipped unless
+/// `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_search_path_without_public_is_conformant() {
+    use std::str::FromStr as _;
+
+    use sqlx::postgres::{PgConnectOptions, PgPool};
+    use wafer_sql_utils::{
+        introspect::{build_list_tables, build_list_tables_like, build_table_info},
+        Backend,
+    };
+
+    const SCHEMA: &str = "conf_search_path";
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres search_path conformance: set {URL_ENV} to run");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect as admin");
+    for stmt in [
+        format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"),
+        format!("CREATE SCHEMA {SCHEMA}"),
+    ] {
+        sqlx::query(&stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let in_schema = || async {
+        let options = PgConnectOptions::from_str(&url)
+            .expect("parse the conformance URL")
+            .options([("search_path", SCHEMA)]);
+        PostgresDatabaseService::from_pool(
+            PgPool::connect_with(options)
+                .await
+                .expect("connect with the search_path"),
+        )
+        .expect("service")
+    };
+    let svc = in_schema().await;
+    run_conformance(&svc).await;
+    run_two_instance_conformance(&svc, &in_schema().await).await;
+
+    // The admin listings resolve names the same way.
+    let options = PgConnectOptions::from_str(&url)
+        .expect("parse the conformance URL")
+        .options([("search_path", SCHEMA)]);
+    let session = PgPool::connect_with(options).await.expect("connect");
+    sqlx::query("CREATE TABLE conf_sp_probe (id TEXT PRIMARY KEY, n INTEGER NOT NULL)")
+        .execute(&session)
+        .await
+        .expect("create the probe table");
+    let tables: Vec<String> = sqlx::query_scalar(&build_list_tables(Backend::Postgres))
+        .fetch_all(&session)
+        .await
+        .expect("list tables");
+    assert!(tables.contains(&"conf_sp_probe".to_string()), "{tables:?}");
+    let (sql, params) = build_list_tables_like("conf_sp_", Backend::Postgres);
+    let like: Vec<String> = sqlx::query_scalar(&sql)
+        .bind(params[0].as_str().expect("pattern"))
+        .fetch_all(&session)
+        .await
+        .expect("list tables like");
+    assert_eq!(like, ["conf_sp_probe"]);
+    let (sql, params) = build_table_info("conf_sp_probe", Backend::Postgres).expect("valid name");
+    let info: Vec<(String, String, String)> = sqlx::query_as(&format!(
+        "SELECT column_name, data_type, is_nullable FROM ({sql}) AS info"
+    ))
+    .bind(params[0].as_str().expect("table name"))
+    .fetch_all(&session)
+    .await
+    .expect("table info");
+    assert_eq!(
+        info,
+        [
+            ("id".into(), "text".into(), "NO".into()),
+            ("n".into(), "integer".into(), "NO".into()),
+        ]
+    );
+    session.close().await;
+
+    sqlx::query(&format!("DROP SCHEMA {SCHEMA} CASCADE"))
+        .execute(&admin)
+        .await
+        .expect("drop the schema");
+}
+
 /// A role granted only `SELECT` still gets the primary-key tiebreak.
 ///
 /// `information_schema.table_constraints` hides a table's constraints from a

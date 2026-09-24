@@ -122,7 +122,7 @@ pub enum Backend {
     /// `PRAGMA table_info` for introspection.
     Sqlite,
     /// PostgreSQL dialect — quoted identifiers, `$N` numbered parameter
-    /// placeholders, `information_schema` for introspection.
+    /// placeholders, `pg_catalog` for introspection.
     Postgres,
 }
 

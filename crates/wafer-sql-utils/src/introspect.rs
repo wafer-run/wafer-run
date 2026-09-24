@@ -1,23 +1,48 @@
+//! Schema introspection queries.
+//!
+//! # Which table a name means on Postgres
+//!
+//! The statement builders spell every table unqualified (`"users"`), so
+//! Postgres resolves it through the session's `search_path`. Introspection
+//! must resolve the name the same way, or it describes a different table
+//! than the statements touch — or none, and the executor then treats a
+//! present table as missing. Every Postgres query here therefore identifies a
+//! table by `to_regclass(quote_ident($1))`, which is exactly that lookup (a
+//! `NULL` for a name that resolves to nothing), and lists tables with
+//! `pg_table_is_visible`, which is true for the tables an unqualified name
+//! reaches. None of them names a schema.
+
 use crate::{ident::validate_ident, Backend, SqlBuildError};
+
+/// The Postgres relation kinds an unqualified table name in a statement can
+/// read from: ordinary, partitioned and foreign tables, and views — the set
+/// `information_schema.tables` lists.
+const PG_TABLE_KINDS: &str = "('r','p','f','v')";
 
 /// Build query to list all user tables (excludes system tables).
 ///
 /// SQLite: `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
-/// Postgres: `SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name`
+/// Postgres: the tables an unqualified name reaches through the session's
+/// `search_path` (see the module docs), outside the system schemas.
 pub fn build_list_tables(backend: Backend) -> String {
     match backend {
         Backend::Sqlite => {
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
         }
-        Backend::Postgres => {
-            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name".to_string()
-        }
+        Backend::Postgres => format!(
+            "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
+             AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY c.relname"
+        ),
     }
 }
 
 /// Build query to list tables matching a name prefix.
 ///
-/// Returns (sql, params) with one parameter for the LIKE pattern.
+/// Returns (sql, params) with one parameter for the LIKE pattern. On
+/// Postgres the candidates are the ones [`build_list_tables`] lists.
 pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
     let pattern = format!("{prefix}%");
     match backend {
@@ -27,8 +52,13 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
             vec![serde_json::Value::String(pattern)],
         ),
         Backend::Postgres => (
-            "SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE $1 ORDER BY table_name"
-                .to_string(),
+            format!(
+                "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
+                 AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+                 AND c.relname LIKE $1 ORDER BY c.relname"
+            ),
             vec![serde_json::Value::String(pattern)],
         ),
     }
@@ -41,7 +71,8 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
 /// decode it as a scalar in either dialect.
 ///
 /// SQLite: `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present`
-/// Postgres: `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS present`
+/// Postgres: whether the name resolves, through the session's `search_path`,
+/// to a table a statement can read (see the module docs).
 ///
 /// The table name is parameter-bound in both dialects, so this builder is
 /// infallible — no identifier validation needed.
@@ -54,8 +85,11 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
             params,
         ),
         Backend::Postgres => (
-            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS present"
-                .to_string(),
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                 WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN {PG_TABLE_KINDS}) \
+                 AS present"
+            ),
             params,
         ),
     }
@@ -73,9 +107,9 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
 /// SQLite: `SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY
 /// cid` (the table-valued pragma function, available since SQLite 3.16, which —
 /// unlike `PRAGMA table_info(...)` — accepts a bound parameter).
-/// Postgres: `SELECT column_name AS name, data_type AS decl_type FROM
-/// information_schema.columns WHERE table_schema='public' AND table_name=$1
-/// ORDER BY ordinal_position`.
+/// Postgres: the live columns of the table the name resolves to (see the
+/// module docs) from `pg_catalog.pg_attribute`, in `attnum` order, with the
+/// type name `format_type` gives (`jsonb`, `text`, `integer`, ...).
 ///
 /// The table name is parameter-bound in both dialects, so this builder is
 /// infallible — no identifier validation needed.
@@ -87,7 +121,10 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
             params,
         ),
         Backend::Postgres => (
-            "SELECT column_name AS name, data_type AS decl_type FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position"
+            "SELECT a.attname::text AS name, pg_catalog.format_type(a.atttypid, NULL) AS decl_type \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 \
+             AND NOT a.attisdropped ORDER BY a.attnum"
                 .to_string(),
             params,
         ),
@@ -122,10 +159,10 @@ pub fn is_json_decl_type(decl_type: &str) -> bool {
 /// SQLite: `SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk`
 /// (`pk` is the column's 1-based position in the key, `0` off it).
 /// Postgres: the key columns of the table's `indisprimary` index in
-/// `pg_catalog.pg_index`, in `indkey` order, for the table
-/// `to_regclass('public.<table>')` names — the `public` schema
-/// [`build_list_columns`] reads. `to_regclass` is `NULL` for a missing
-/// table, so that case is zero rows rather than an error. `indkey` also lists
+/// `pg_catalog.pg_index`, in `indkey` order, for the table the name resolves
+/// to (see the module docs), as [`build_list_columns`] reads it.
+/// `to_regclass` is `NULL` for a missing table, so that case is zero rows
+/// rather than an error. `indkey` also lists
 /// a `PRIMARY KEY (...) INCLUDE (...)` index's non-key columns after its
 /// `indnkeyatts` key columns; those are cut off, since they do not identify
 /// a row.
@@ -153,7 +190,7 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
              JOIN pg_catalog.pg_attribute a \
              ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
              WHERE i.indisprimary AND k.ord <= i.indnkeyatts \
-             AND i.indrelid = to_regclass(format('public.%I', $1::text)) \
+             AND i.indrelid = to_regclass(quote_ident($1)) \
              ORDER BY k.ord"
                 .to_string(),
             params,
@@ -164,7 +201,9 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
 /// Build query to get column information for a table.
 ///
 /// SQLite: `PRAGMA table_info("{table}")`
-/// Postgres: `SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1`
+/// Postgres: `column_name`, `data_type`, `is_nullable` (`YES`/`NO`) and
+/// `column_default` of each live column of the table the name resolves to
+/// (see the module docs), in `attnum` order.
 ///
 /// Note: column names in the result differ between backends. SQLite returns `name`, `type`, `notnull`, `dflt_value`, `pk`.
 /// Postgres returns `column_name`, `data_type`, `is_nullable`, `column_default`.
@@ -181,7 +220,14 @@ pub fn build_table_info(
     Ok(match backend {
         Backend::Sqlite => (format!("PRAGMA table_info(\"{safe}\")"), vec![]),
         Backend::Postgres => (
-            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position"
+            "SELECT a.attname::text AS column_name, \
+             pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, \
+             CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, \
+             pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default \
+             FROM pg_catalog.pg_attribute a \
+             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 \
+             AND NOT a.attisdropped ORDER BY a.attnum"
                 .to_string(),
             vec![serde_json::Value::String(safe.to_string())],
         ),
@@ -210,7 +256,8 @@ mod tests {
     #[test]
     fn test_list_tables_postgres() {
         let sql = build_list_tables(Backend::Postgres);
-        assert!(sql.contains("information_schema"));
+        assert!(sql.contains("pg_table_is_visible"), "{sql}");
+        assert!(!sql.contains("public"), "no schema is named: {sql}");
     }
 
     #[test]
@@ -230,7 +277,7 @@ mod tests {
     #[test]
     fn test_table_info_postgres() {
         let (sql, params) = build_table_info("users", Backend::Postgres).expect("valid identifier");
-        assert!(sql.contains("information_schema.columns"));
+        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
         assert_eq!(params.len(), 1);
     }
 
@@ -270,7 +317,7 @@ mod tests {
     #[test]
     fn test_table_exists_postgres() {
         let (sql, params) = build_table_exists("users", Backend::Postgres);
-        assert!(sql.contains("information_schema.tables"), "{sql}");
+        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
         assert!(sql.contains("AS present"), "{sql}");
         assert!(sql.contains("$1"), "table name must be bound: {sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
@@ -314,10 +361,10 @@ mod tests {
     #[test]
     fn test_list_columns_postgres() {
         let (sql, params) = build_list_columns("users", Backend::Postgres);
-        assert!(sql.contains("information_schema.columns"), "{sql}");
+        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
         assert!(sql.contains("AS name"), "{sql}");
-        assert!(sql.contains("data_type AS decl_type"), "{sql}");
-        assert!(sql.contains("ORDER BY ordinal_position"), "{sql}");
+        assert!(sql.contains("AS decl_type"), "{sql}");
+        assert!(sql.contains("ORDER BY a.attnum"), "{sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
     }
 
