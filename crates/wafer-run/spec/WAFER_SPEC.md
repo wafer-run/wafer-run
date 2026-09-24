@@ -153,7 +153,7 @@ Error {
 | Code | Description |
 |------|-------------|
 | `invalid_argument` | Invalid input data or validation failure |
-| `not_found` | Requested resource does not exist |
+| `not_found` | Requested resource does not exist (only ever from a block; never from the runtime) |
 | `already_exists` | Resource already exists (conflict) |
 | `permission_denied` | No permission for this action |
 | `unauthenticated` | Authentication required or invalid |
@@ -161,6 +161,7 @@ Error {
 | `deadline_exceeded` | Operation timed out |
 | `resource_exhausted` | Rate limit or quota exceeded |
 | `failed_precondition` | Operation rejected due to current state |
+| `unimplemented` | Nothing handles the request: the block does not have the operation, or the runtime has no such block or flow |
 | `internal` | Internal error (unexpected) |
 
 Custom codes are allowed but should use namespacing: `myapp.custom_error`
@@ -183,7 +184,8 @@ BlockInfo {
     summary:       string          // Brief description of this implementation
     instance_mode: InstanceMode    // Declared instance lifecycle (default: PerNode; advisory)
     runtime:       BlockRuntime    // Native or Wasm (default: Native)
-    requires:      []string        // Block names this block may call via call_block()
+    requires:      []string        // Blocks this block calls and cannot run without
+    optional_requires: []string    // Blocks this block may call but runs without
 }
 ```
 
@@ -193,7 +195,7 @@ The `instance_mode` field declares the block's intended instance lifecycle. It i
 
 The `runtime` field indicates whether a block requires native OS access (`Native`) or can run sandboxed as WebAssembly (`Wasm`). Blocks that make external calls (database drivers, filesystem, network sockets) are typically `Native`; blocks containing pure logic or that access services only via `call_block()` are typically `Wasm`.
 
-The `requires` field lists the block names that this block is allowed to call via `call_block()`. If non-empty, the runtime enforces this at call time — any `call_block()` to a block not in the list returns `PERMISSION_DENIED`. If empty, the block may call any registered block.
+The `requires` and `optional_requires` fields together list the block names this block is allowed to call via `call_block()`. If either is non-empty, the runtime enforces the combined list at call time — any `call_block()` to a block not in it returns `PERMISSION_DENIED`. If both are empty, the block may call any registered block. The runtime refuses to start while a block named in any registered block's `requires` is not registered; `optional_requires` names blocks the block can run without, and a call to one that is not registered returns `UNIMPLEMENTED` like any call to an unregistered block.
 
 ### InterfaceDefinition
 
@@ -537,7 +539,7 @@ Aliases can also be registered programmatically via `wafer.add_alias(alias, targ
 
 ### Requires enforcement
 
-When a block declares a `requires` list, both the alias name and the resolved target name are checked. A block that requires `"db"` can call either `db` or the underlying `wafer-run/database`.
+When a block declares a `requires` or `optional_requires` list, both the alias name and the resolved target name are checked. A block that requires `"db"` can call either `db` or the underlying `wafer-run/database`.
 
 ---
 
