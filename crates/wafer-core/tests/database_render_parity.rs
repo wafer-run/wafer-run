@@ -38,6 +38,7 @@ use wafer_block::{
     wire::database as wire,
 };
 use wafer_core::interfaces::database::{
+    exec::windowed_counter_row,
     handler::{convert_filter_tree, flatten_leaves, to_aggregate_spec, to_upsert_spec},
     service::UpsertConflict,
 };
@@ -337,6 +338,8 @@ fn upsert_windowed_counter_parity(backend: Backend) {
     // paths must render that split identically.
     let now = 1_700_000_000i64;
     let window_cutoff = 1_699_999_940i64;
+    // The executor stamps the current instant; both halves take the same one.
+    let stamped_at = "2026-09-24T10:00:00+00:00";
 
     // (a) DIRECT — the raw windowed-counter builder call a rate-limit site makes.
     let direct = upsert::build_windowed_counter_upsert(
@@ -348,6 +351,7 @@ fn upsert_windowed_counter_parity(backend: Backend) {
         "window_start",
         &["created_at"],
         &["updated_at", "seen_at"],
+        stamped_at,
         now,
         window_cutoff,
         backend,
@@ -387,31 +391,20 @@ fn upsert_windowed_counter_parity(backend: Backend) {
     else {
         panic!("expected WindowedCounter conflict resolution");
     };
-    // `id`/`key` are read from the insert data (matches `extract_windowed_id_key`).
-    let id = spec
-        .data
-        .iter()
-        .find(|(k, _)| k == "id")
-        .and_then(|(_, v)| v.as_str())
-        .expect("id string in data");
-    let key = spec
-        .data
-        .iter()
-        .find(|(k, _)| k == "key")
-        .and_then(|(_, v)| v.as_str())
-        .expect("key string in data");
-    let conflict_col = spec.conflict_columns.first().map_or("key", String::as_str);
+    // The executor reads the insert values with the same function.
+    let row = windowed_counter_row(&spec.data, &spec.conflict_columns).expect("row values");
     let created: Vec<&str> = created_fields.iter().map(String::as_str).collect();
     let updated: Vec<&str> = updated_fields.iter().map(String::as_str).collect();
     let via = upsert::build_windowed_counter_upsert(
         &collection,
-        conflict_col,
-        id,
-        key,
+        row.conflict_column,
+        row.id,
+        row.conflict_value,
         count_field,
         window_field,
         &created,
         &updated,
+        stamped_at,
         *spec_now,
         *spec_cutoff,
         backend,

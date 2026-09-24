@@ -58,11 +58,11 @@ pub fn build_upsert(
 ///
 /// ```sql
 /// INSERT INTO {table} (id, {conflict_column}, {count_field}, {window_field}, {created_fields...}, {updated_fields...})
-/// VALUES (?, ?, 1, ?, CURRENT_TIMESTAMP, ..., CURRENT_TIMESTAMP, ...)
+/// VALUES (?, ?, 1, ?, ?, ..., ?, ...)
 /// ON CONFLICT({conflict_column}) DO UPDATE SET
 ///   {count_field}       = CASE WHEN {window_field} < ? THEN 1 ELSE {count_field} + 1 END,
 ///   {window_field}      = CASE WHEN {window_field} < ? THEN ? ELSE {window_field} END,
-///   {updated_fields...} = CURRENT_TIMESTAMP
+///   {updated_fields...} = ?
 /// ```
 ///
 /// Semantics:
@@ -87,19 +87,23 @@ pub fn build_upsert(
 /// - `conflict_column` — name of the UNIQUE column used as the conflict
 ///   target (e.g. `"key"`).
 /// - `id` — fresh per-call row identifier; only used when no existing row
-///   matching `key` is present.
-/// - `key` — the value stored in `conflict_column` for this row (e.g.
-///   `"user:<id>:login"`).
+///   matching `conflict_value` is present.
+/// - `conflict_value` — the value stored in `conflict_column` for this row
+///   (e.g. `"user:<id>:login"`).
 /// - `count_field` — name of the counter column (e.g. `"count"`).
 /// - `window_field` — name of the window-start column (e.g.
 ///   `"window_start"`).
 /// - `created_fields` — creation-timestamp columns (e.g. `["created_at"]`).
-///   Stamped `CURRENT_TIMESTAMP` on **INSERT only**; they are *never* written
-///   in the `ON CONFLICT ... DO UPDATE SET` clause, so a row's creation time
-///   stays immutable across every subsequent counter update.
+///   Stamped `stamped_at` on **INSERT only**; they are *never* written in the
+///   `ON CONFLICT ... DO UPDATE SET` clause, so a row's creation time stays
+///   immutable across every subsequent counter update.
 /// - `updated_fields` — modification-timestamp columns (e.g.
-///   `["updated_at"]`). Stamped `CURRENT_TIMESTAMP` on **both** the initial
-///   INSERT and every conflicting update.
+///   `["updated_at"]`). Stamped `stamped_at` on **both** the initial INSERT
+///   and every conflicting update.
+/// - `stamped_at` — the instant written to every timestamp column, bound as
+///   a parameter. Pass the stack's canonical RFC 3339 text (what the shared
+///   executor stamps `created_at`/`updated_at` with everywhere else), so a
+///   counter row's timestamps compare against any other RFC 3339 value.
 /// - `now` — current epoch-seconds; recorded as `{window_field}` on insert
 ///   or on window-reset.
 /// - `window_cutoff` — `now - window_secs`; rows whose `{window_field}` is
@@ -107,22 +111,26 @@ pub fn build_upsert(
 ///
 /// Returns [`SqlBuildError::InvalidIdentifier`] if `conflict_column`,
 /// `count_field`, `window_field`, or any `created_fields`/`updated_fields`
-/// entry is not a plain identifier (`[A-Za-z0-9_]`). These names are
+/// entry is not a plain identifier (`[a-z0-9_]`). These names are
 /// interpolated into the `CASE`/`SET` expression text rather than
 /// parameter-bound, so this is a fail-closed guard, not a passthrough.
+/// Returns [`SqlBuildError::DuplicateColumn`] if any two of `id`,
+/// `conflict_column`, `count_field`, `window_field` and the timestamp
+/// columns name the same column: the statement writes each of them once.
 #[expect(
     clippy::too_many_arguments,
-    reason = "windowed-counter upsert is a low-level SQL builder with independent column/value parameters (table + 4 column identifiers + created/updated timestamp column lists + id/key values + 2 time bounds + backend); bundling them into a config struct would just move the same fields into a builder callers still have to fill in one at a time, without improving clarity"
+    reason = "windowed-counter upsert is a low-level SQL builder with independent column/value parameters (table + 4 column identifiers + created/updated timestamp column lists + id/conflict values + the timestamp stamp + 2 time bounds + backend); bundling them into a config struct would just move the same fields into a builder callers still have to fill in one at a time, without improving clarity"
 )]
 pub fn build_windowed_counter_upsert(
     table: &str,
     conflict_column: &str,
     id: &str,
-    key: &str,
+    conflict_value: &str,
     count_field: &str,
     window_field: &str,
     created_fields: &[&str],
     updated_fields: &[&str],
+    stamped_at: &str,
     now: i64,
     window_cutoff: i64,
     backend: Backend,
@@ -141,31 +149,37 @@ pub fn build_windowed_counter_upsert(
         .map(|f| validate_ident(f))
         .collect::<Result<_, _>>()?;
 
-    let mut query = Query::insert();
-    query.into_table(DynCol(table.into()));
-
     // Column order: id, conflict target, counter, window, then the
     // created-timestamp columns, then the updated-timestamp columns. Both
-    // timestamp groups get an initial CURRENT_TIMESTAMP stamp on INSERT.
-    let mut columns: Vec<DynCol> = vec![
-        DynCol("id".into()),
-        DynCol(conflict_column.into()),
-        DynCol(count_field.into()),
-        DynCol(window_field.into()),
-    ];
-    columns.extend(created_fields.iter().map(|f| DynCol((*f).into())));
-    columns.extend(updated_fields.iter().map(|f| DynCol((*f).into())));
-    query.columns(columns);
+    // timestamp groups get the `stamped_at` value on INSERT.
+    let column_names: Vec<&str> = ["id", conflict_column, count_field, window_field]
+        .into_iter()
+        .chain(created_fields.iter().copied())
+        .chain(updated_fields.iter().copied())
+        .collect();
+    for (index, name) in column_names.iter().enumerate() {
+        if column_names[..index].contains(name) {
+            return Err(SqlBuildError::DuplicateColumn {
+                column: (*name).to_string(),
+            });
+        }
+    }
 
-    let now_expr: SimpleExpr = sea_query::Expr::current_timestamp().into();
+    let mut query = Query::insert();
+    query.into_table(DynCol(table.into()));
+    query.columns(column_names.iter().map(|name| DynCol((*name).into())));
+
+    let stamp = || -> SimpleExpr {
+        json_to_sea_value(&serde_json::Value::String(stamped_at.to_string())).into()
+    };
     let mut values: Vec<SimpleExpr> = vec![
         json_to_sea_value(&serde_json::Value::String(id.to_string())).into(),
-        json_to_sea_value(&serde_json::Value::String(key.to_string())).into(),
+        json_to_sea_value(&serde_json::Value::String(conflict_value.to_string())).into(),
         json_to_sea_value(&serde_json::json!(1i64)).into(),
         json_to_sea_value(&serde_json::json!(now)).into(),
     ];
-    values.extend(created_fields.iter().map(|_| now_expr.clone()));
-    values.extend(updated_fields.iter().map(|_| now_expr.clone()));
+    values.extend(created_fields.iter().map(|_| stamp()));
+    values.extend(updated_fields.iter().map(|_| stamp()));
     query.values_panic(values);
 
     // Column references inside the `ON CONFLICT ... DO UPDATE SET` clause must
@@ -204,7 +218,7 @@ pub fn build_windowed_counter_upsert(
     // created-timestamp columns are deliberately absent from the SET clause so
     // a row's creation time is immutable after the first INSERT.
     for field in &updated_fields {
-        on_conflict.value(DynCol((*field).into()), now_expr.clone());
+        on_conflict.value(DynCol((*field).into()), stamp());
     }
     query.on_conflict(on_conflict);
 
@@ -215,6 +229,8 @@ pub fn build_windowed_counter_upsert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const STAMP: &str = "2026-09-24T10:00:00.123456789+00:00";
 
     #[test]
     fn test_build_upsert_sqlite() {
@@ -331,6 +347,7 @@ mod tests {
             "window_start",
             &["created_at"],
             &["updated_at"],
+            STAMP,
             1_700_000_000,
             1_699_999_940, // 60s window
             Backend::Sqlite,
@@ -364,10 +381,10 @@ mod tests {
             2,
             "expected two CASE WHEN expressions, got: {sql}"
         );
-        // CURRENT_TIMESTAMP used for created_at/updated_at — dialect-portable
+        // The timestamp columns take the bound stamp, not a SQL clock.
         assert!(
-            sql.contains("CURRENT_TIMESTAMP"),
-            "missing CURRENT_TIMESTAMP: {sql}"
+            !sql.contains("CURRENT_TIMESTAMP"),
+            "timestamps must be the bound stamp: {sql}"
         );
 
         // Bound values: id, key, count(1), window_start, then the two
@@ -392,6 +409,7 @@ mod tests {
             "window_start",
             &["created_at"],
             &["updated_at"],
+            STAMP,
             1_700_000_000,
             1_699_999_700,
             Backend::Postgres,
@@ -400,7 +418,7 @@ mod tests {
         let sql = stmt.sql;
         assert!(sql.contains("$1"), "postgres should use $-params: {sql}");
         assert!(sql.contains("CASE WHEN"));
-        assert!(sql.contains("CURRENT_TIMESTAMP"));
+        assert!(!sql.contains("CURRENT_TIMESTAMP"), "{sql}");
         // sanity: postgres quote style
         assert!(sql.contains("\"rate_limits\""));
         assert_eq!(stmt.collection, "rate_limits");
@@ -417,6 +435,7 @@ mod tests {
             "window_start",
             &["created_at"],
             &["updated_at"],
+            STAMP,
             1_700_000_000,
             1_699_999_940,
             Backend::Sqlite,
@@ -441,6 +460,7 @@ mod tests {
             "window_start",
             &["created_at"],
             &["updated_at"],
+            STAMP,
             1000,
             940,
             Backend::Sqlite,
@@ -471,6 +491,7 @@ mod tests {
                 "window_start",
                 &["created_at"],
                 &["updated_at"],
+                STAMP,
                 1_700_000_000,
                 1_699_999_940,
                 backend,
@@ -497,6 +518,110 @@ mod tests {
             assert!(
                 update_part.contains("updated_at"),
                 "updated_at should be re-stamped in DO UPDATE SET ({backend:?}): {update_part}"
+            );
+        }
+    }
+
+    /// Run a built statement on a real SQLite connection, binding its values.
+    fn run_on_sqlite(conn: &rusqlite::Connection, stmt: crate::Statement) {
+        let params: Vec<rusqlite::types::Value> = crate::value::sea_values_to_json(stmt.values)
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => rusqlite::types::Value::Text(s),
+                serde_json::Value::Number(n) => {
+                    rusqlite::types::Value::Integer(n.as_i64().expect("integer"))
+                }
+                other => panic!("unexpected bound value {other:?}"),
+            })
+            .collect();
+        conn.execute(&stmt.sql, rusqlite::params_from_iter(params))
+            .unwrap_or_else(|e| panic!("sqlite rejected {}: {e}", stmt.sql));
+    }
+
+    fn stamped_counter(stamped_at: &str, now: i64) -> crate::Statement {
+        build_windowed_counter_upsert(
+            "rl",
+            "ip",
+            "row-1",
+            "10.0.0.1",
+            "count",
+            "window_start",
+            &["created_at"],
+            &["updated_at"],
+            stamped_at,
+            now,
+            now - 60,
+            Backend::Sqlite,
+        )
+        .unwrap()
+    }
+
+    // Every timestamp column holds the stamp the caller passed, byte for
+    // byte: on INSERT both groups, on conflict only the updated group. A SQL
+    // clock would store SQLite's `YYYY-MM-DD HH:MM:SS`, which sorts before
+    // any same-day RFC 3339 cutoff (`' '` < `'T'`).
+    #[test]
+    fn windowed_counter_upsert_stores_the_stamp_in_every_timestamp_column() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE rl (id TEXT PRIMARY KEY, ip TEXT UNIQUE, count INTEGER, \
+             window_start INTEGER, created_at TEXT, updated_at TEXT)",
+            [],
+        )
+        .unwrap();
+        let later = "2026-09-24T10:00:05.5+00:00";
+        run_on_sqlite(&conn, stamped_counter(STAMP, 1_700_000_000));
+        run_on_sqlite(&conn, stamped_counter(later, 1_700_000_005));
+
+        let (ip, count, created, updated): (String, i64, String, String) = conn
+            .query_row(
+                "SELECT ip, count, created_at, updated_at FROM rl",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(ip, "10.0.0.1");
+        assert_eq!(count, 2, "the second call incremented in window");
+        assert_eq!(created, STAMP, "created_at keeps the INSERT stamp");
+        assert_eq!(updated, later, "updated_at takes the conflict stamp");
+    }
+
+    #[test]
+    fn windowed_counter_upsert_rejects_a_column_named_for_two_roles() {
+        let build = |conflict: &str, count: &str, created: &[&str], updated: &[&str]| {
+            build_windowed_counter_upsert(
+                "rl",
+                conflict,
+                "row-1",
+                "v",
+                count,
+                "window_start",
+                created,
+                updated,
+                STAMP,
+                1000,
+                940,
+                Backend::Sqlite,
+            )
+        };
+        for (conflict, count, created, updated, repeated) in [
+            (
+                "id",
+                "count",
+                &["created_at"][..],
+                &["updated_at"][..],
+                "id",
+            ),
+            ("count", "count", &["created_at"], &["updated_at"], "count"),
+            ("key", "count", &["stamp"], &["stamp"], "stamp"),
+            ("key", "count", &[], &["window_start"], "window_start"),
+        ] {
+            assert_eq!(
+                build(conflict, count, created, updated).unwrap_err(),
+                SqlBuildError::DuplicateColumn {
+                    column: repeated.to_string()
+                },
+                "{conflict}/{count}/{created:?}/{updated:?}"
             );
         }
     }

@@ -1350,7 +1350,7 @@ mod tests {
         // Seed an existing counter row with SENTINEL timestamps so we can prove
         // created_at is immutable across conflict-updates (Task-5 fix): if the
         // builder wrongly re-stamped created_at in DO UPDATE SET, the sentinel
-        // would be overwritten with CURRENT_TIMESTAMP. `key` is UNIQUE — the
+        // would be overwritten with the current stamp. `key` is UNIQUE — the
         // conflict target.
         exec_batch_for_tests(
             &svc,

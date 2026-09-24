@@ -223,7 +223,8 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// concurrent inserts under a cap of three leaving exactly three);
 /// `increment_field_where` (atomic CAS bump + decrement);
 /// `upsert` (`SetColumns` insert-then-update and the rate-limiter
-/// `WindowedCounter`); `aggregate` (grouped `Count`/`Sum`/`Avg`/`Max`,
+/// `WindowedCounter`, its RFC 3339 stamps and the columns it honours);
+/// `aggregate` (grouped `Count`/`Sum`/`Avg`/`Max`,
 /// `CaseWhenSum`, and `DateBucket`, then — over `BIGINT` money columns — the
 /// `cast_as` output cast, `SumWhere`, and column-to-column predicates in both
 /// an aggregate `when` and a `list` filter); `query_raw`/`exec_raw`; and the
@@ -255,6 +256,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_increment(svc).await;
     check_upsert_set_columns(svc).await;
     check_upsert_windowed_counter(svc).await;
+    check_upsert_windowed_counter_honours_its_columns(svc).await;
     check_aggregate(svc).await;
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
@@ -2572,6 +2574,153 @@ async fn check_upsert_windowed_counter(svc: &dyn DatabaseService) {
         svc.count("conf_rl", &[]).await.unwrap(),
         1,
         "conflicting upserts never inserted a duplicate row"
+    );
+
+    // A fresh counter row carries one RFC 3339 instant in both timestamp
+    // columns, the form `create` stamps, so a retention sweep's
+    // `updated_at < <RFC 3339 cutoff>` never takes a row written after the
+    // cutoff. SQL `CURRENT_TIMESTAMP` text (`YYYY-MM-DD HH:MM:SS…`) sorts
+    // before every same-day RFC 3339 value (`' '` < `'T'`).
+    let before = chrono::Utc::now().to_rfc3339();
+    let mut fresh = make_spec();
+    fresh.data = vec![
+        ("id".into(), serde_json::json!("fresh-2")),
+        ("key".into(), serde_json::json!("user:2")),
+    ];
+    svc.upsert("conf_rl", fresh)
+        .await
+        .expect("windowed upsert inserting a fresh row");
+    let inserted = svc.get("conf_rl", "fresh-2").await.expect("get fresh row");
+    assert_eq!(field_i64(&inserted, "count"), 1);
+    let created = inserted.data["created_at"]
+        .as_str()
+        .expect("created_at is text");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(created).is_ok(),
+        "created_at is RFC 3339: {created:?}"
+    );
+    assert_eq!(
+        inserted.data["updated_at"], inserted.data["created_at"],
+        "one instant stamps both timestamp columns"
+    );
+    assert_eq!(
+        svc.count(
+            "conf_rl",
+            &[
+                eq("key", serde_json::json!("user:2")),
+                filt("updated_at", FilterOp::LessThan, serde_json::json!(before)),
+            ],
+        )
+        .await
+        .unwrap(),
+        0,
+        "a row stamped after {before} compares as later than it (stored {created:?})"
+    );
+}
+
+/// The windowed counter is keyed by whichever column `conflict_columns`
+/// names, takes that column's value from `data`, and refuses any request
+/// part it would not write: a second conflict column, or a data field other
+/// than `id` and the conflict column.
+async fn check_upsert_windowed_counter_honours_its_columns(svc: &dyn DatabaseService) {
+    let mut ip_col = Column::new("ip", DataType::Text);
+    ip_col.nullable = true;
+    ip_col.unique = true;
+    let table = Table {
+        name: "conf_rl_ip".to_string(),
+        columns: vec![
+            pk("id"),
+            ip_col,
+            Column::new("key", DataType::Text).null(),
+            Column::new("count", DataType::Int).null(),
+            Column::new("window_start", DataType::Int64).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+
+    let now: i64 = 1_700_000_000;
+    let spec = |data: &[(&str, serde_json::Value)], conflict: &[&str]| UpsertSpec {
+        data: data
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect(),
+        conflict_columns: conflict.iter().map(|c| (*c).to_string()).collect(),
+        on_conflict: UpsertConflict::WindowedCounter {
+            count_field: "count".into(),
+            window_field: "window_start".into(),
+            now,
+            window_cutoff: now - 60,
+            created_fields: vec!["created_at".into()],
+            updated_fields: vec!["updated_at".into()],
+        },
+    };
+
+    svc.upsert(
+        "conf_rl_ip",
+        spec(
+            &[
+                ("id", serde_json::json!("r1")),
+                ("ip", serde_json::json!("10.0.0.1")),
+            ],
+            &["ip"],
+        ),
+    )
+    .await
+    .expect("a counter keyed by `ip` takes its value from data[\"ip\"]");
+    let stored = svc.get("conf_rl_ip", "r1").await.expect("get r1");
+    assert_eq!(stored.data["ip"], serde_json::json!("10.0.0.1"));
+    assert_eq!(field_i64(&stored, "count"), 1);
+
+    assert_invalid_argument(
+        svc.upsert(
+            "conf_rl_ip",
+            spec(
+                &[
+                    ("id", serde_json::json!("r2")),
+                    ("key", serde_json::json!("a")),
+                    ("ip", serde_json::json!("b")),
+                ],
+                &["ip"],
+            ),
+        )
+        .await,
+        "a data field the counter would not write",
+    );
+    assert_invalid_argument(
+        svc.upsert(
+            "conf_rl_ip",
+            spec(
+                &[
+                    ("id", serde_json::json!("r3")),
+                    ("ip", serde_json::json!("c")),
+                    ("key", serde_json::json!("d")),
+                ],
+                &["ip", "key"],
+            ),
+        )
+        .await,
+        "a second conflict column",
+    );
+    assert_invalid_argument(
+        svc.upsert(
+            "conf_rl_ip",
+            spec(
+                &[("id", serde_json::json!(4)), ("ip", serde_json::json!("e"))],
+                &["ip"],
+            ),
+        )
+        .await,
+        "a non-string id",
+    );
+    assert_eq!(
+        svc.count("conf_rl_ip", &[]).await.unwrap(),
+        1,
+        "no refused request wrote a row"
     );
 }
 

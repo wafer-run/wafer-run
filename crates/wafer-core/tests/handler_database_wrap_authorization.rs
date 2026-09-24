@@ -375,8 +375,7 @@ async fn upsert_bad_identifier_in_windowed_counter_is_invalid_argument() {
 
 /// A `WindowedCounter` upsert missing the required string `id` data field is
 /// rejected as `InvalidArgument` by `to_upsert_spec` — before the service
-/// runs — rather than surfacing later as an opaque `Internal` error out of
-/// `extract_windowed_id_key`.
+/// runs.
 #[tokio::test]
 async fn upsert_windowed_counter_missing_id_is_invalid_argument() {
     let calls = new_calls();
@@ -420,8 +419,8 @@ async fn upsert_windowed_counter_missing_id_is_invalid_argument() {
     );
 }
 
-/// A `WindowedCounter` upsert missing the required string `key` data field is
-/// rejected as `InvalidArgument` by `to_upsert_spec`.
+/// A `WindowedCounter` upsert missing the conflict column's value (here
+/// `key`) in its data is rejected as `InvalidArgument` by `to_upsert_spec`.
 #[tokio::test]
 async fn upsert_windowed_counter_missing_key_is_invalid_argument() {
     let calls = new_calls();
@@ -466,8 +465,8 @@ async fn upsert_windowed_counter_missing_key_is_invalid_argument() {
 }
 
 /// A `WindowedCounter` upsert with empty `conflict_columns` is rejected as
-/// `InvalidArgument` by `to_upsert_spec`, rather than the executor silently
-/// defaulting the conflict target to the literal `"key"`.
+/// `InvalidArgument` by `to_upsert_spec`: the counter has no key to conflict
+/// on.
 #[tokio::test]
 async fn upsert_windowed_counter_empty_conflict_columns_is_invalid_argument() {
     let calls = new_calls();
@@ -512,6 +511,96 @@ async fn upsert_windowed_counter_empty_conflict_columns_is_invalid_argument() {
         "an empty-conflict-columns upsert must be rejected before reaching the service; calls = {:?}",
         calls.lock().unwrap()
     );
+}
+
+/// Send a `WindowedCounter` upsert with `data` and `conflict_columns` through
+/// the handler under a granting context; return the error code (if any) and
+/// the service calls it made.
+async fn windowed_counter_through_handler(
+    data: Vec<(String, serde_json::Value)>,
+    conflict_columns: Vec<String>,
+) -> (Option<ErrorCode>, Vec<&'static str>) {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    let req = wire::database::UpsertRequest {
+        collection: "my_org__auth__users".into(),
+        data,
+        conflict_columns,
+        on_conflict: wire::database::OnConflict::WindowedCounter {
+            count_field: "count".into(),
+            window_field: "window_start".into(),
+            now: 1000,
+            window_cutoff: 940,
+            created_fields: vec!["created_at".into()],
+            updated_fields: vec!["updated_at".into()],
+        },
+    };
+    let body = codec::encode(&req).unwrap();
+    let out = wafer_core::interfaces::database::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        &msg_without_wrap_meta(ServiceOp::DATABASE_UPSERT),
+        &body,
+    )
+    .await;
+    let code = match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => Some(e.code),
+        _ => None,
+    };
+    let recorded = calls.lock().unwrap().clone();
+    (code, recorded)
+}
+
+/// The counter is keyed by the column `conflict_columns` names, not by a
+/// data field literally called `key`: a counter keyed by `ip` whose data is
+/// `{id, ip}` reaches the service.
+#[tokio::test]
+async fn upsert_windowed_counter_keyed_by_another_column_reaches_the_service() {
+    let (code, calls) = windowed_counter_through_handler(
+        vec![
+            ("id".into(), serde_json::json!("rl-1")),
+            ("ip".into(), serde_json::json!("10.0.0.1")),
+        ],
+        vec!["ip".into()],
+    )
+    .await;
+    assert_eq!(code, None, "a counter keyed by `ip` is a valid request");
+    assert_eq!(calls, vec!["upsert"]);
+}
+
+/// Every part of a `WindowedCounter` request the statement would not write is
+/// `InvalidArgument` before the service runs: a data field other than `id`
+/// and the conflict column, a second conflict column, or `id` as the
+/// counter's key.
+#[tokio::test]
+async fn upsert_windowed_counter_parts_it_would_not_write_are_invalid_argument() {
+    let pair = |k: &str, v: &str| (k.to_string(), serde_json::json!(v));
+    for (what, data, conflict) in [
+        (
+            "an extra data field",
+            vec![pair("id", "rl-1"), pair("key", "a"), pair("ip", "b")],
+            vec!["ip".to_string()],
+        ),
+        (
+            "a second conflict column",
+            vec![pair("id", "rl-1"), pair("ip", "b"), pair("key", "a")],
+            vec!["ip".to_string(), "key".to_string()],
+        ),
+        (
+            "`id` as the conflict column",
+            vec![pair("id", "rl-1")],
+            vec!["id".to_string()],
+        ),
+        (
+            "the conflict value named twice",
+            vec![pair("id", "rl-1"), pair("key", "a"), pair("key", "b")],
+            vec!["key".to_string()],
+        ),
+    ] {
+        let (code, calls) = windowed_counter_through_handler(data, conflict).await;
+        assert_eq!(code, Some(ErrorCode::InvalidArgument), "{what}");
+        assert!(calls.is_empty(), "{what} reached the service: {calls:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
