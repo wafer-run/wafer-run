@@ -7,8 +7,11 @@ use super::Wafer;
 /// Collect the `BlockInfo` of every registered block into a Vec sorted by
 /// registration name, so consumers (admin pages, snapshot consumers) see
 /// deterministic order regardless of the underlying HashMap's SipHash
-/// randomisation. Registration refused any block whose `info().name` differs
-/// from its registration name, so each entry's `name` is that key.
+/// randomisation. `register_block` refuses any block whose `info().name`
+/// differs from its registration name, so each such entry's `name` is that
+/// key. A block `seal()` downloaded from the registry is the exception:
+/// `register_remote_block` skips that check, so its entry carries whatever
+/// name it reports.
 pub(crate) fn sorted_snapshot<'a>(
     blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn Block>)>,
 ) -> Vec<BlockInfo> {
@@ -114,7 +117,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     resource = %grant.resource,
                     resource_type = ?grant.resource_type,
                     admin = %admin_block,
-                    "WRAP: rejecting Network/Storage grant from non-admin block — only the admin block may declare typed Network/Storage grants",
+                    "WRAP: rejecting Network/Crypto grant from non-admin block — only the admin block may declare typed Network/Crypto grants",
                 );
                 rejected.push(wafer_block::error::GrantValidationError {
                     block: block_name.to_string(),

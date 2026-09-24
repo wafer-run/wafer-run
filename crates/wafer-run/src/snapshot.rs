@@ -17,7 +17,10 @@ use wafer_block::{BlockInfo, InterfaceSpec};
 #[derive(Default, Clone)]
 pub struct StartupSnapshot {
     /// Public metadata for every registered block, sorted by registration
-    /// name. Each entry's `name` is the name the block is registered under.
+    /// name. Each entry's `name` is the name the block is registered under,
+    /// except for a block `seal()` downloaded from the registry:
+    /// `register_remote_block` does not compare the reported name with the
+    /// registration name, so that entry carries whatever name it reports.
     pub blocks: Vec<BlockInfo>,
     /// Metadata for every loaded flow (id, description, declared interfaces).
     pub flow_infos: Vec<wafer_flow::FlowInfo>,

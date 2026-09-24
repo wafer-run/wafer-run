@@ -267,7 +267,7 @@ impl Wafer {
     /// Must be set before `start()` / `seal()`.
     ///
     /// Re-scans every already-registered block's typed WRAP grants
-    /// (Network/Storage/Crypto) so admin-declared typed grants registered
+    /// (Network/Crypto) so admin-declared typed grants registered
     /// before this call are collected. This is the recommended path for
     /// embedders that auto-register blocks via `linkme` during
     /// `WaferBuilder::build()` and only know the admin block id after
@@ -316,9 +316,12 @@ impl Wafer {
     ///
     /// Sorted by registration name for deterministic order across processes
     /// (independent of HashMap's SipHash randomisation). Each entry's `name`
-    /// is the block's registration name: registration refuses a block whose
-    /// `info().name` differs ([`RuntimeError::BlockNameMismatch`]). The
-    /// returned list is a snapshot — later registrations are not reflected.
+    /// is the block's registration name: `register_block` refuses a block
+    /// whose `info().name` differs ([`RuntimeError::BlockNameMismatch`]). A
+    /// block `seal()` downloaded from the registry is the exception —
+    /// `register_remote_block` skips that check, so its entry carries whatever
+    /// name it reports. The returned list is a snapshot — later registrations
+    /// are not reflected.
     pub fn block_infos(&self) -> Vec<wafer_block::BlockInfo> {
         lifecycle::sorted_snapshot(&self.registration.blocks)
     }
