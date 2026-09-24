@@ -1,127 +1,244 @@
-//! Guest meta (HTTP header) sanitisation shared by the host-import linker
-//! and the [`super::WasmiBlock`] dispatch. WASM blocks may only read/write
-//! header-derived meta keys they have been granted via `HeaderPolicy`.
+//! Guest meta sanitisation at the WASM guest boundary, shared by the
+//! host-import linker and the [`super::WasmiBlock`] dispatch.
+//!
+//! Every meta entry that carries an HTTP header — a request header as the
+//! HTTP codec writes it ([`META_HTTP_HEADER_PREFIX`]), a response header
+//! ([`META_RESP_HEADER_PREFIX`]) or a `Set-Cookie` directive
+//! ([`META_RESP_COOKIE_PREFIX`]) — is subject to the block's `HeaderPolicy`:
+//!
+//! A header is sensitive when it is in [`DEFAULT_SENSITIVE_HEADERS`] or in
+//! `HeaderPolicy.masked`.
+//!
+//! - **Into the guest** ([`prepare_guest_inbound`]): a sensitive header
+//!   reaches the guest only if its name is in `HeaderPolicy.readable`.
+//! - **Out of the guest** ([`sanitize_guest_egress`]): a sensitive header
+//!   leaves the guest only if its name is in `HeaderPolicy.writable`. This
+//!   holds for every guest egress — a `Respond` result's meta, an `Error`
+//!   result's meta, a `Continue` message handed to the next flow step, and
+//!   the message of a nested `call_block`.
+//!
+//! The host also owns two things the guest can neither forge nor remove: the
+//! authenticated identity in the `auth.*` namespace, and — on a `Continue`
+//! message — the inbound value of every sensitive header the guest may not
+//! write. Both are captured in [`HostOwnedMeta`] before the guest runs.
 
-use wafer_block::core_types::*;
+use wafer_block::{
+    capabilities::DEFAULT_SENSITIVE_HEADERS,
+    core_types::*,
+    http_codec::META_HTTP_HEADER_PREFIX,
+    meta::{META_RESP_COOKIE_PREFIX, META_RESP_HEADER_PREFIX},
+};
 
 use crate::wasm::capabilities::BlockCapabilities;
 
 // ---------------------------------------------------------------------------
-// Guest meta sanitisation
+// Header-derived meta keys
 // ---------------------------------------------------------------------------
 
-/// Default set of HTTP header names that are considered security-sensitive.
-/// WASM blocks cannot read or write these unless they declare them in their
-/// `HeaderPolicy.readable` / `HeaderPolicy.writable` (and are granted the
-/// cap after config intersection).
-pub(crate) fn default_sensitive_headers() -> &'static [&'static str] {
-    &[
-        "authorization",
-        "cookie",
-        "set-cookie",
-        "location",
-        "access-control-allow-origin",
-        "access-control-allow-credentials",
-        "access-control-allow-methods",
-        "access-control-allow-headers",
-        "access-control-expose-headers",
-        "access-control-max-age",
-        "strict-transport-security",
-        "x-frame-options",
-        "content-security-policy",
-        "content-security-policy-report-only",
-    ]
+fn is_sensitive_header(name: &str, policy_masked: &[String]) -> bool {
+    DEFAULT_SENSITIVE_HEADERS.contains(&name)
+        || policy_masked.iter().any(|m| m.eq_ignore_ascii_case(name))
 }
 
-fn is_sensitive_header(name: &str, policy_masked: &[String]) -> bool {
-    let n = name.to_lowercase();
-    default_sensitive_headers().contains(&n.as_str())
-        || policy_masked.iter().any(|m| m.eq_ignore_ascii_case(&n))
+fn is_listed(list: &[String], name: &str) -> bool {
+    list.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
 /// Extract the canonical (lowercase) HTTP header name from a wafer meta key,
 /// or `None` if the key is not a header.
 ///
-/// Matches three forms:
-/// - `req.header.{name}` — inbound request header
-/// - `resp.header.{name}` — outbound response header
-/// - `resp.set_cookie` / `resp.set_cookie.*` — legacy cookie keys, mapped to `set-cookie`
+/// Matches the three header-carrying key families, case-insensitively:
+/// - [`META_HTTP_HEADER_PREFIX`]`{name}` — inbound request header, as
+///   [`wafer_block::http_codec::build_http_message`] writes it
+/// - [`META_RESP_HEADER_PREFIX`]`{name}` — outbound response header
+/// - [`META_RESP_COOKIE_PREFIX`]`*` — one `Set-Cookie` directive, mapped to
+///   `set-cookie`
 pub(crate) fn header_name_from_meta_key(key: &str) -> Option<String> {
-    let lower = key.to_lowercase();
-    if let Some(rest) = lower.strip_prefix("req.header.") {
+    let lower = key.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix(META_HTTP_HEADER_PREFIX) {
         return Some(rest.to_string());
     }
-    if let Some(rest) = lower.strip_prefix("resp.header.") {
+    if let Some(rest) = lower.strip_prefix(META_RESP_HEADER_PREFIX) {
         return Some(rest.to_string());
     }
-    if lower == "resp.set_cookie" || lower.starts_with("resp.set_cookie.") {
+    if lower.starts_with(META_RESP_COOKIE_PREFIX) {
         return Some("set-cookie".to_string());
     }
     None
 }
 
-/// Strip outbound meta entries whose header name is in the default sensitive
-/// set plus `HeaderPolicy.masked`, unless explicitly in `HeaderPolicy.writable`.
-/// Non-header meta entries pass through.
-///
-/// Stripped header names (deduped, lowercased) are appended to `stripped_names`.
-pub(crate) fn sanitize_outbound_meta(
-    meta: Vec<MetaEntry>,
-    caps: &BlockCapabilities,
-    stripped_names: &mut Vec<String>,
-) -> Vec<MetaEntry> {
-    meta.into_iter()
-        .filter(|e| {
-            let Some(name) = header_name_from_meta_key(&e.key) else {
-                return true;
-            };
-            if !is_sensitive_header(&name, &caps.headers.masked) {
-                return true;
-            }
-            let allowed = caps
-                .headers
-                .writable
-                .iter()
-                .any(|w| w.eq_ignore_ascii_case(&name));
-            if !allowed {
-                if !stripped_names.iter().any(|n| n == &name) {
-                    stripped_names.push(name);
-                }
-                return false;
-            }
-            true
-        })
-        .collect()
+/// The sensitive header `key` carries under `caps` (default set plus
+/// `HeaderPolicy.masked`), or `None` for a non-header or non-sensitive key.
+fn sensitive_header_name(key: &str, caps: &BlockCapabilities) -> Option<String> {
+    header_name_from_meta_key(key).filter(|name| is_sensitive_header(name, &caps.headers.masked))
 }
 
-/// Symmetric inbound sanitizer. Uses `HeaderPolicy.readable` as the allowlist.
-pub(crate) fn sanitize_inbound_meta(
+fn push_distinct(names: &mut Vec<String>, name: String) {
+    if !names.contains(&name) {
+        names.push(name);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Into the guest
+// ---------------------------------------------------------------------------
+
+/// Meta the host owns for one guest invocation, captured from the inbound
+/// message before the guest sees it. See [`sanitize_guest_egress`] for how
+/// each part is restored.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HostOwnedMeta {
+    /// The protected `auth.*` entries (SEC-01): the identity established
+    /// upstream by the trusted host / auth middleware.
+    identity: Vec<MetaEntry>,
+    /// Every inbound entry carrying a sensitive header, whether or not the
+    /// guest may read it.
+    sensitive_headers: Vec<MetaEntry>,
+}
+
+/// The inbound message meta split for a guest invocation.
+pub(crate) struct GuestInbound {
+    /// What the guest is handed: the inbound meta minus every sensitive
+    /// header outside `HeaderPolicy.readable`.
+    pub(crate) meta: Vec<MetaEntry>,
+    /// Distinct names of the sensitive headers withheld from the guest.
+    pub(crate) withheld: Vec<String>,
+    /// What the host restores on the guest's egress.
+    pub(crate) host_owned: HostOwnedMeta,
+}
+
+/// Split inbound `meta` into what the guest may see and what the host keeps.
+/// A sensitive header (the default set plus `HeaderPolicy.masked`) reaches
+/// the guest only if its name is in `HeaderPolicy.readable`; every other
+/// entry passes through.
+pub(crate) fn prepare_guest_inbound(
     meta: Vec<MetaEntry>,
     caps: &BlockCapabilities,
-    stripped_names: &mut Vec<String>,
-) -> Vec<MetaEntry> {
-    meta.into_iter()
-        .filter(|e| {
-            let Some(name) = header_name_from_meta_key(&e.key) else {
-                return true;
-            };
-            if !is_sensitive_header(&name, &caps.headers.masked) {
-                return true;
+) -> GuestInbound {
+    let host_owned = HostOwnedMeta {
+        identity: meta
+            .iter()
+            .filter(|e| is_protected_meta_key(&e.key))
+            .cloned()
+            .collect(),
+        sensitive_headers: meta
+            .iter()
+            .filter(|e| sensitive_header_name(&e.key, caps).is_some())
+            .cloned()
+            .collect(),
+    };
+    let mut withheld = Vec::new();
+    let meta = meta
+        .into_iter()
+        .filter(|e| match sensitive_header_name(&e.key, caps) {
+            Some(name) if !is_listed(&caps.headers.readable, &name) => {
+                push_distinct(&mut withheld, name);
+                false
             }
-            let allowed = caps
-                .headers
-                .readable
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(&name));
-            if !allowed {
-                if !stripped_names.iter().any(|n| n == &name) {
-                    stripped_names.push(name);
-                }
+            _ => true,
+        })
+        .collect();
+    GuestInbound {
+        meta,
+        withheld,
+        host_owned,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Out of the guest
+// ---------------------------------------------------------------------------
+
+/// Where a guest-produced meta set is going. Every egress gets the same
+/// header allowlist and identity restore; they differ only in whether the
+/// host's inbound sensitive headers are put back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuestEgress {
+    /// The meta of a `Respond` result.
+    Respond,
+    /// The meta of an `Error` result.
+    Error,
+    /// The message a `Continue` result hands to the next flow step. It
+    /// REPLACES the flow's message, so the host restores the inbound value of
+    /// every sensitive header the guest may not write — a guest that could
+    /// not see a request's `Cookie` must not be able to drop it, or change
+    /// it, for the steps after it.
+    Continue,
+    /// The message of a nested `call_block` the guest initiates. A fresh
+    /// request the guest composed: nothing of the inbound request's headers
+    /// is added to it.
+    Call,
+}
+
+/// A guest egress after [`sanitize_guest_egress`].
+pub(crate) struct SanitizedEgress {
+    /// The meta the host forwards.
+    pub(crate) meta: Vec<MetaEntry>,
+    /// Distinct names of the sensitive headers the guest emitted without
+    /// holding them in `HeaderPolicy.writable` (dropped).
+    pub(crate) stripped: Vec<String>,
+    /// Distinct protected (`auth.*`) keys the guest tried to set (dropped).
+    pub(crate) forged: Vec<String>,
+}
+
+/// Apply the guest-egress policy to meta a guest produced:
+///
+/// 1. drop every sensitive header (default set plus `HeaderPolicy.masked`)
+///    whose name is not in `HeaderPolicy.writable`;
+/// 2. drop every protected `auth.*` key the guest set and re-insert the
+///    host-provided identity, so a guest can neither forge identity nor
+///    alter or strip the identity established upstream (SEC-01);
+/// 3. on [`GuestEgress::Continue`] only, re-insert the inbound entries for
+///    every sensitive header the guest may not write.
+pub(crate) fn sanitize_guest_egress(
+    meta: Vec<MetaEntry>,
+    caps: &BlockCapabilities,
+    host_owned: &HostOwnedMeta,
+    egress: GuestEgress,
+) -> SanitizedEgress {
+    let writable = &caps.headers.writable;
+    let mut stripped = Vec::new();
+    let mut forged = Vec::new();
+    let mut out: Vec<MetaEntry> = meta
+        .into_iter()
+        .filter(|e| {
+            if is_protected_meta_key(&e.key) {
+                push_distinct(&mut forged, e.key.clone());
                 return false;
             }
-            true
+            match sensitive_header_name(&e.key, caps) {
+                Some(name) if !is_listed(writable, &name) => {
+                    // An inbound entry handed back unchanged (a readable
+                    // header the guest passed through) is dropped too, but
+                    // it is not an attempt to write the header.
+                    if !host_owned.sensitive_headers.contains(e) {
+                        push_distinct(&mut stripped, name);
+                    }
+                    false
+                }
+                _ => true,
+            }
         })
-        .collect()
+        .collect();
+    out.extend(host_owned.identity.iter().cloned());
+    match egress {
+        GuestEgress::Continue => out.extend(
+            host_owned
+                .sensitive_headers
+                .iter()
+                .filter(|e| {
+                    sensitive_header_name(&e.key, caps)
+                        .is_some_and(|name| !is_listed(writable, &name))
+                })
+                .cloned(),
+        ),
+        GuestEgress::Respond | GuestEgress::Error | GuestEgress::Call => {}
+    }
+    SanitizedEgress {
+        meta: out,
+        stripped,
+        forged,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,61 +258,27 @@ pub(crate) fn is_protected_meta_key(key: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("auth."))
 }
 
-/// Snapshot the protected-namespace entries from `meta` (cloned) — the
-/// host-provided identity for a request frame, captured before a guest runs
-/// so it can be restored on the guest's outputs.
-pub(crate) fn protected_meta_entries(meta: &[MetaEntry]) -> Vec<MetaEntry> {
-    meta.iter()
-        .filter(|e| is_protected_meta_key(&e.key))
-        .cloned()
-        .collect()
-}
-
-/// Enforce host ownership of the protected namespace on a value a guest
-/// produced. Drops every protected key the guest set, then re-inserts the
-/// inbound host-provided entries — so a guest can neither forge new identity
-/// nor alter or strip the identity established upstream. Returns the
-/// reconciled meta plus the distinct protected keys the guest attempted to set
-/// (for warn-once logging).
-pub(crate) fn restore_protected_meta(
-    guest_meta: Vec<MetaEntry>,
-    inbound_protected: &[MetaEntry],
-) -> (Vec<MetaEntry>, Vec<String>) {
-    let mut forged: Vec<String> = Vec::new();
-    let mut out: Vec<MetaEntry> = guest_meta
-        .into_iter()
-        .filter(|e| {
-            if is_protected_meta_key(&e.key) {
-                if !forged.iter().any(|k| k == &e.key) {
-                    forged.push(e.key.clone());
-                }
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-    out.extend(inbound_protected.iter().cloned());
-    (out, forged)
-}
-
 #[cfg(test)]
 mod header_name_tests {
     use super::header_name_from_meta_key;
 
     #[test]
-    fn req_header_prefix() {
+    fn http_header_prefix_is_a_request_header() {
         assert_eq!(
-            header_name_from_meta_key("req.header.authorization"),
+            header_name_from_meta_key("http.header.authorization"),
             Some("authorization".to_string())
         );
     }
 
     #[test]
-    fn req_header_uppercase_lowercased() {
+    fn key_prefix_and_name_are_matched_case_insensitively() {
         assert_eq!(
-            header_name_from_meta_key("req.header.Authorization"),
+            header_name_from_meta_key("HTTP.Header.Authorization"),
             Some("authorization".to_string())
+        );
+        assert_eq!(
+            header_name_from_meta_key("resp.header.Set-Cookie"),
+            Some("set-cookie".to_string())
         );
     }
 
@@ -208,15 +291,7 @@ mod header_name_tests {
     }
 
     #[test]
-    fn legacy_resp_set_cookie_bare() {
-        assert_eq!(
-            header_name_from_meta_key("resp.set_cookie"),
-            Some("set-cookie".to_string())
-        );
-    }
-
-    #[test]
-    fn legacy_resp_set_cookie_nested() {
+    fn resp_set_cookie_prefix_is_set_cookie() {
         assert_eq!(
             header_name_from_meta_key("resp.set_cookie.session"),
             Some("set-cookie".to_string())
@@ -227,13 +302,17 @@ mod header_name_tests {
     fn internal_meta_key_is_none() {
         assert_eq!(header_name_from_meta_key("auth.user_id"), None);
         assert_eq!(header_name_from_meta_key("trace_id"), None);
+        assert_eq!(header_name_from_meta_key("http.path"), None);
         assert_eq!(header_name_from_meta_key(""), None);
     }
 }
 
 #[cfg(test)]
 mod sanitize_tests {
-    use wafer_block::capabilities::{BlockCapabilities, HeaderPolicy};
+    use wafer_block::{
+        capabilities::{BlockCapabilities, HeaderPolicy},
+        http_codec::build_http_message,
+    };
 
     use super::*;
 
@@ -244,116 +323,228 @@ mod sanitize_tests {
         }
     }
 
-    #[test]
-    fn outbound_strips_default_sensitive_when_empty_policy() {
-        let caps = BlockCapabilities::default();
-        let input = vec![
-            meta("resp.header.content-type", "text/plain"),
-            meta("resp.header.set-cookie", "s=1"),
-            meta("resp.set_cookie", "legacy"),
-            meta("resp.header.x-frame-options", "DENY"),
-            meta("resp.header.x-safe", "ok"),
-        ];
-        let mut stripped = Vec::new();
-        let out = sanitize_outbound_meta(input, &caps, &mut stripped);
-        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"resp.header.content-type"));
-        assert!(keys.contains(&"resp.header.x-safe"));
-        assert!(!keys
-            .iter()
-            .any(|k| k.contains("set-cookie") || k.contains("set_cookie")));
-        assert!(!keys.iter().any(|k| k.contains("x-frame-options")));
-        assert!(stripped.contains(&"set-cookie".to_string()));
+    fn keys(meta: &[MetaEntry]) -> Vec<&str> {
+        meta.iter().map(|e| e.key.as_str()).collect()
+    }
+
+    fn get<'a>(meta: &'a [MetaEntry], key: &str) -> Option<&'a str> {
+        meta.iter().find(|e| e.key == key).map(|e| e.value.as_str())
+    }
+
+    fn with_headers(policy: HeaderPolicy) -> BlockCapabilities {
+        BlockCapabilities {
+            headers: policy,
+            ..BlockCapabilities::none()
+        }
+    }
+
+    /// The request meta exactly as the HTTP codec produces it for a request
+    /// carrying a session cookie and a bearer token.
+    fn codec_request_meta() -> Vec<MetaEntry> {
+        build_http_message(
+            "GET",
+            "/b/guest/",
+            "",
+            "127.0.0.1",
+            [
+                ("Cookie", "s=1"),
+                ("Authorization", "Bearer x"),
+                ("Accept", "text/html"),
+            ],
+        )
+        .meta
     }
 
     #[test]
-    fn outbound_writable_allows_named_header() {
-        let caps = BlockCapabilities {
-            headers: HeaderPolicy {
-                writable: vec!["set-cookie".into()],
-                ..Default::default()
-            },
+    fn inbound_withholds_codec_cookie_and_authorization_by_default() {
+        let inbound = prepare_guest_inbound(codec_request_meta(), &BlockCapabilities::none());
+        assert_eq!(get(&inbound.meta, "http.header.cookie"), None);
+        assert_eq!(get(&inbound.meta, "http.header.authorization"), None);
+        assert_eq!(get(&inbound.meta, "http.header.accept"), Some("text/html"));
+        assert_eq!(get(&inbound.meta, "http.path"), Some("/b/guest/"));
+        assert_eq!(inbound.withheld, vec!["cookie", "authorization"]);
+    }
+
+    #[test]
+    fn inbound_readable_declaration_admits_only_the_named_header() {
+        let caps = with_headers(HeaderPolicy {
+            readable: vec!["Authorization".into()],
             ..Default::default()
-        };
-        let input = vec![
-            meta("resp.header.set-cookie", "s=1"),
-            meta("resp.set_cookie", "legacy"),
-            meta("resp.header.x-frame-options", "DENY"),
-        ];
-        let mut stripped = Vec::new();
-        let out = sanitize_outbound_meta(input, &caps, &mut stripped);
-        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"resp.header.set-cookie"));
-        assert!(keys.contains(&"resp.set_cookie"));
-        assert!(!keys.iter().any(|k| k.contains("x-frame-options")));
-    }
-
-    #[test]
-    fn inbound_strips_default_sensitive_when_empty_policy() {
-        let caps = BlockCapabilities::default();
-        let input = vec![
-            meta("req.header.accept", "text/plain"),
-            meta("req.header.authorization", "Bearer abc"),
-            meta("req.header.cookie", "a=1"),
-        ];
-        let mut stripped = Vec::new();
-        let out = sanitize_inbound_meta(input, &caps, &mut stripped);
-        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"req.header.accept"));
-        assert!(!keys.iter().any(|k| k.contains("authorization")));
-        assert!(!keys.iter().any(|k| k.contains("cookie")));
-    }
-
-    #[test]
-    fn inbound_readable_allows_named_header() {
-        let caps = BlockCapabilities {
-            headers: HeaderPolicy {
-                readable: vec!["authorization".into()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let input = vec![
-            meta("req.header.authorization", "Bearer abc"),
-            meta("req.header.cookie", "a=1"),
-        ];
-        let mut stripped = Vec::new();
-        let out = sanitize_inbound_meta(input, &caps, &mut stripped);
-        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"req.header.authorization"));
-        assert!(!keys.iter().any(|k| k.contains("cookie")));
+        });
+        let inbound = prepare_guest_inbound(codec_request_meta(), &caps);
+        assert_eq!(
+            get(&inbound.meta, "http.header.authorization"),
+            Some("Bearer x")
+        );
+        assert_eq!(get(&inbound.meta, "http.header.cookie"), None);
+        assert_eq!(inbound.withheld, vec!["cookie"]);
     }
 
     #[test]
     fn masked_extends_default_sensitive_both_directions() {
-        let caps = BlockCapabilities {
-            headers: HeaderPolicy {
-                masked: vec!["x-internal".into()],
-                ..Default::default()
-            },
+        let caps = with_headers(HeaderPolicy {
+            masked: vec!["x-internal".into()],
             ..Default::default()
-        };
-        let inbound = vec![meta("req.header.x-internal", "secret")];
-        let outbound = vec![meta("resp.header.x-internal", "secret")];
-        let mut s1 = Vec::new();
-        let mut s2 = Vec::new();
-        assert!(sanitize_inbound_meta(inbound, &caps, &mut s1).is_empty());
-        assert!(sanitize_outbound_meta(outbound, &caps, &mut s2).is_empty());
+        });
+        let inbound = prepare_guest_inbound(vec![meta("http.header.x-internal", "secret")], &caps);
+        assert!(inbound.meta.is_empty());
+        let out = sanitize_guest_egress(
+            vec![meta("resp.header.x-internal", "secret")],
+            &caps,
+            &HostOwnedMeta::default(),
+            GuestEgress::Respond,
+        );
+        assert!(out.meta.is_empty());
+        assert_eq!(out.stripped, vec!["x-internal"]);
+    }
+
+    /// Guest-produced response meta that sets a cookie, redirects, widens
+    /// CORS and forges a request header for the next step.
+    fn hostile_egress_meta() -> Vec<MetaEntry> {
+        vec![
+            meta("resp.header.content-type", "text/plain"),
+            meta("resp.header.x-safe", "ok"),
+            meta("resp.set_cookie.s", "s=evil"),
+            meta("resp.header.Set-Cookie", "t=evil"),
+            meta("resp.header.location", "https://evil.example/"),
+            meta("resp.header.access-control-allow-origin", "*"),
+            meta("http.header.authorization", "Bearer forged"),
+            meta("trace_id", "t1"),
+        ]
+    }
+
+    #[test]
+    fn every_egress_strips_sensitive_headers_outside_writable() {
+        for egress in [
+            GuestEgress::Respond,
+            GuestEgress::Error,
+            GuestEgress::Continue,
+            GuestEgress::Call,
+        ] {
+            let out = sanitize_guest_egress(
+                hostile_egress_meta(),
+                &BlockCapabilities::none(),
+                &HostOwnedMeta::default(),
+                egress,
+            );
+            assert_eq!(
+                keys(&out.meta),
+                vec!["resp.header.content-type", "resp.header.x-safe", "trace_id"],
+                "{egress:?}"
+            );
+            assert_eq!(
+                out.stripped,
+                vec![
+                    "set-cookie",
+                    "location",
+                    "access-control-allow-origin",
+                    "authorization"
+                ],
+                "{egress:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn writable_declaration_admits_only_the_named_header() {
+        let caps = with_headers(HeaderPolicy {
+            writable: vec!["set-cookie".into()],
+            ..Default::default()
+        });
+        let out = sanitize_guest_egress(
+            hostile_egress_meta(),
+            &caps,
+            &HostOwnedMeta::default(),
+            GuestEgress::Error,
+        );
+        assert_eq!(get(&out.meta, "resp.set_cookie.s"), Some("s=evil"));
+        assert_eq!(get(&out.meta, "resp.header.Set-Cookie"), Some("t=evil"));
+        assert_eq!(get(&out.meta, "resp.header.location"), None);
+    }
+
+    #[test]
+    fn continue_restores_the_inbound_headers_the_guest_may_not_write() {
+        let caps = with_headers(HeaderPolicy {
+            readable: vec!["authorization".into()],
+            ..Default::default()
+        });
+        let inbound = prepare_guest_inbound(codec_request_meta(), &caps);
+        // The guest passes its (sanitized) message on after forging a cookie
+        // and rewriting the authorization it was allowed to read.
+        let mut guest_meta = inbound.meta.clone();
+        guest_meta.retain(|e| e.key != "http.header.authorization");
+        guest_meta.push(meta("http.header.cookie", "s=forged"));
+        guest_meta.push(meta("http.header.authorization", "Bearer forged"));
+
+        let out = sanitize_guest_egress(
+            guest_meta,
+            &caps,
+            &inbound.host_owned,
+            GuestEgress::Continue,
+        );
+        assert_eq!(get(&out.meta, "http.header.cookie"), Some("s=1"));
+        assert_eq!(
+            get(&out.meta, "http.header.authorization"),
+            Some("Bearer x")
+        );
+        assert_eq!(
+            out.meta
+                .iter()
+                .filter(|e| e.key.starts_with("http.header."))
+                .count(),
+            3,
+            "each header exactly once: {:?}",
+            out.meta
+        );
+        assert_eq!(out.stripped, vec!["cookie", "authorization"]);
+    }
+
+    #[test]
+    fn a_readable_header_passed_through_is_not_reported_as_stripped() {
+        let caps = with_headers(HeaderPolicy {
+            readable: vec!["authorization".into()],
+            ..Default::default()
+        });
+        let inbound = prepare_guest_inbound(codec_request_meta(), &caps);
+        let out = sanitize_guest_egress(
+            inbound.meta.clone(),
+            &caps,
+            &inbound.host_owned,
+            GuestEgress::Continue,
+        );
+        assert!(out.stripped.is_empty(), "{:?}", out.stripped);
+        assert_eq!(
+            get(&out.meta, "http.header.authorization"),
+            Some("Bearer x")
+        );
+    }
+
+    #[test]
+    fn only_continue_restores_inbound_headers() {
+        let inbound = prepare_guest_inbound(codec_request_meta(), &BlockCapabilities::none());
+        for egress in [GuestEgress::Respond, GuestEgress::Error, GuestEgress::Call] {
+            let out = sanitize_guest_egress(
+                Vec::new(),
+                &BlockCapabilities::none(),
+                &inbound.host_owned,
+                egress,
+            );
+            assert!(out.meta.is_empty(), "{egress:?}: {:?}", out.meta);
+        }
     }
 
     #[test]
     fn non_header_keys_pass_through() {
-        let caps = BlockCapabilities::default();
-        let input = vec![meta("auth.user_id", "u1"), meta("trace_id", "abc")];
-        let mut s = Vec::new();
-        let out = sanitize_outbound_meta(input, &caps, &mut s);
-        let keys: Vec<&str> = out.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"auth.user_id"));
-        assert!(keys.contains(&"trace_id"));
+        let out = sanitize_guest_egress(
+            vec![meta("trace_id", "abc"), meta("http.path", "/x")],
+            &BlockCapabilities::none(),
+            &HostOwnedMeta::default(),
+            GuestEgress::Respond,
+        );
+        assert_eq!(keys(&out.meta), vec!["trace_id", "http.path"]);
     }
 
     // SEC-01: the host owns the `auth.*` namespace.
-    use super::{is_protected_meta_key, restore_protected_meta};
 
     #[test]
     fn protected_key_matches_auth_prefix_case_insensitively() {
@@ -366,45 +557,52 @@ mod sanitize_tests {
     }
 
     #[test]
-    fn restore_strips_guest_auth_and_restores_inbound_identity() {
-        let inbound = vec![
-            meta("auth.user_id", "alice"),
-            meta("auth.user_roles", "user"),
-        ];
-        let guest = vec![
-            meta("auth.user_id", "admin"),    // forged
-            meta("auth.user_roles", "admin"), // forged
-            meta("trace_id", "t1"),           // legitimate non-protected
-        ];
-        let (out, forged) = restore_protected_meta(guest, &inbound);
-        let get = |k: &str| out.iter().find(|e| e.key == k).map(|e| e.value.as_str());
-        assert_eq!(
-            get("auth.user_id"),
-            Some("alice"),
-            "forged id replaced by inbound"
+    fn egress_strips_guest_auth_and_restores_inbound_identity() {
+        let inbound = prepare_guest_inbound(
+            vec![
+                meta("auth.user_id", "alice"),
+                meta("auth.user_roles", "user"),
+            ],
+            &BlockCapabilities::none(),
         );
-        assert_eq!(
-            get("auth.user_roles"),
-            Some("user"),
-            "forged roles replaced"
-        );
-        assert_eq!(get("trace_id"), Some("t1"), "non-protected meta preserved");
-        assert_eq!(forged.len(), 2, "both forged keys reported");
+        for egress in [
+            GuestEgress::Respond,
+            GuestEgress::Error,
+            GuestEgress::Continue,
+            GuestEgress::Call,
+        ] {
+            let guest = vec![
+                meta("auth.user_id", "admin"),    // forged
+                meta("auth.user_roles", "admin"), // forged
+                meta("trace_id", "t1"),           // legitimate non-protected
+            ];
+            let out = sanitize_guest_egress(
+                guest,
+                &BlockCapabilities::none(),
+                &inbound.host_owned,
+                egress,
+            );
+            assert_eq!(get(&out.meta, "auth.user_id"), Some("alice"), "{egress:?}");
+            assert_eq!(
+                get(&out.meta, "auth.user_roles"),
+                Some("user"),
+                "{egress:?}"
+            );
+            assert_eq!(get(&out.meta, "trace_id"), Some("t1"), "{egress:?}");
+            assert_eq!(out.forged.len(), 2, "{egress:?}");
+        }
     }
 
     #[test]
-    fn restore_drops_guest_auth_when_no_inbound_identity() {
+    fn egress_drops_guest_auth_when_no_inbound_identity() {
         // With no upstream identity, a guest cannot establish one.
-        let guest = vec![meta("auth.user_roles", "admin"), meta("x", "y")];
-        let (out, forged) = restore_protected_meta(guest, &[]);
-        assert!(
-            out.iter().all(|e| !is_protected_meta_key(&e.key)),
-            "no auth.* survives from the guest"
+        let out = sanitize_guest_egress(
+            vec![meta("auth.user_roles", "admin"), meta("x", "y")],
+            &BlockCapabilities::none(),
+            &HostOwnedMeta::default(),
+            GuestEgress::Respond,
         );
-        assert!(
-            out.iter().any(|e| e.key == "x"),
-            "non-protected meta survives"
-        );
-        assert_eq!(forged, vec!["auth.user_roles".to_string()]);
+        assert_eq!(keys(&out.meta), vec!["x"]);
+        assert_eq!(out.forged, vec!["auth.user_roles".to_string()]);
     }
 }

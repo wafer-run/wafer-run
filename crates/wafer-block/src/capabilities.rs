@@ -144,16 +144,41 @@ fn path_prefix_covers(entry: &str, resource: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// The HTTP headers (lowercase) a WASM guest may neither read nor write
+/// unless its [`HeaderPolicy`] names them: credentials, and the response
+/// headers that steer the browser's security model.
+pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "location",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "access-control-expose-headers",
+    "access-control-max-age",
+    "strict-transport-security",
+    "x-frame-options",
+    "content-security-policy",
+    "content-security-policy-report-only",
+];
+
 /// Policy for which headers a block may read, write, or which should be masked.
 ///
 /// Applied by the runtime only to WASM blocks. For native blocks, this is
 /// documentation / inspector metadata only — enforcement is WASM-specific.
 ///
-/// Default-denied sensitive header set (see
-/// `wafer_run::wasm::wasmi_loader::default_sensitive_headers`) is masked
-/// unless explicitly listed in `readable` (for inbound) or `writable`
-/// (for outbound). `masked` adds extra headers to the deny set in both
-/// directions.
+/// A WASM guest never sees or emits a header in
+/// [`DEFAULT_SENSITIVE_HEADERS`] or in `masked`, unless it names the header in
+/// `readable` (inbound) or `writable` (outbound). The policy
+/// covers every meta key that carries a header — request headers
+/// (`http.header.*`), response headers (`resp.header.*`) and cookies
+/// (`resp.set_cookie.*`) — on every guest egress (`Respond`, `Error`,
+/// `Continue`, nested `call_block`). A guest that needs a sensitive header
+/// declares it here, in its `BlockInfo::capabilities`, so the need is visible
+/// wherever the block's `BlockInfo` is shown and operators can narrow it
+/// through the `capabilities` block-config subkey.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HeaderPolicy {
     /// Sensitive inbound headers the block may READ.
@@ -161,7 +186,8 @@ pub struct HeaderPolicy {
     #[serde(default)]
     pub readable: Vec<String>,
 
-    /// Sensitive outbound headers the block may WRITE.
+    /// Sensitive headers the block may WRITE: response headers it sets, and
+    /// request headers it changes on a message it hands on.
     /// Example: `["set-cookie"]`.
     #[serde(default)]
     pub writable: Vec<String>,

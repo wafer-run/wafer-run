@@ -6,13 +6,14 @@
 //! - [`ContextScope`] is the RAII guard that installs the borrowed
 //!   [`Context`](crate::context::Context) into the store for one invocation.
 
-use wafer_block::{core_types::MetaEntry, error::RuntimeError};
+use wafer_block::error::RuntimeError;
 use wasmi::{Engine, Linker, Module, Store};
 
 use super::{
     super::{capabilities::BlockCapabilities, stream::StreamRegistry},
     abi::{ProcExitTrap, WasmiHostState},
     codec::{negotiate_host_codec, HostCodec},
+    meta::HostOwnedMeta,
 };
 use crate::{
     context::Context,
@@ -62,7 +63,7 @@ pub(super) fn instantiate(
         max_memory_pages: limits.memory_pages,
         max_table_elements: limits.max_table_elements,
         capabilities: caps.clone(),
-        inbound_protected_meta: Vec::new(),
+        host_owned_meta: HostOwnedMeta::default(),
         streams: StreamRegistry::with_limits(limits.max_host_bytes, limits.max_live_streams),
         pending_stream_finish: None,
         pending_stream_read: None,
@@ -148,13 +149,13 @@ impl<'s> ContextScope<'s> {
         store: &'s mut Store<WasmiHostState>,
         ctx: &dyn Context,
         attachments: Option<std::collections::BTreeMap<String, wafer_block::Attachment>>,
-        inbound_protected: Vec<MetaEntry>,
+        host_owned: HostOwnedMeta,
     ) -> Self {
         store.data_mut().context = Some(ctx.clone_arc());
         store.data_mut().current_attachments = attachments;
-        // SEC-01: seed the host-owned identity for this frame so nested
-        // `call_block`s the guest makes inherit it and cannot forge their own.
-        store.data_mut().inbound_protected_meta = inbound_protected;
+        // Seed the host-owned meta for this frame so nested `call_block`s the
+        // guest makes inherit its identity and cannot forge their own (SEC-01).
+        store.data_mut().host_owned_meta = host_owned;
         Self { store }
     }
 
