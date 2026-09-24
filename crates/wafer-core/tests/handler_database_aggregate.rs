@@ -256,6 +256,25 @@ mod db_fakes {
         async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
             Err(DatabaseError::Internal("fixture: upsert not needed".into()))
         }
+        async fn take_where(
+            &self,
+            _collection: &str,
+            _filters: &[Filter],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "fixture: take_where not needed".into(),
+            ))
+        }
+        async fn update_where(
+            &self,
+            _collection: &str,
+            _filters: &[Filter],
+            _data: std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(), DatabaseError> {
+            Err(DatabaseError::Internal(
+                "fixture: update_where not needed".into(),
+            ))
+        }
         async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
             Ok(())
         }

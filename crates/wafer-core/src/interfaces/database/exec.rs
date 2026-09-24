@@ -1608,7 +1608,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.require_columns(table, &columns).await?;
         let stmt = {
             let cfg = spec.into_grouped_config(table.to_string());
-            wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)
+            wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)?
         };
         // An aggregate row holds computed values and group keys, not stored
         // rows, so its text decodes as text.

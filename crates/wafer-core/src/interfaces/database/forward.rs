@@ -5,15 +5,13 @@
 //!
 //! # The problem
 //!
-//! Eight of the trait's operations carry defaults, and none of them is a
+//! Six of the trait's operations carry defaults, and none of them is a
 //! pass-through:
 //!
 //! | operation | default |
 //! |---|---|
-//! | `delete_where` | `list` then `delete` per row, in a loop |
+//! | `delete_where` | `list` then `delete` per row, in a loop until nothing matches |
 //! | `delete_where_count` | `count` then `delete_where` (a TOCTOU window) |
-//! | `take_where` | `list` then `delete` per id — not atomic |
-//! | `update_where` | `list` then `update` per row |
 //! | `update_where_count` | `count` then `update_where` |
 //! | `increment_field_where` | a hard `Internal` error |
 //! | `ensure_schema_tables` | loop over `ensure_schema_table` |
@@ -22,11 +20,10 @@
 //! Those defaults exist for backends that genuinely cannot express the bulk
 //! statement. They are the wrong answer for a **decorator** — a cache, an
 //! auditor, a guard — wrapping a backend that *can*: the decorator that omits
-//! `take_where` does not pass the call through, it quietly substitutes a
-//! list-then-delete against its own possibly-stale view and drops the wrapped
-//! backend's atomic `DELETE … RETURNING *`. This has already happened once in a
-//! consumer of this crate, and it is invisible in review because the bug is the
-//! *absence* of code.
+//! `delete_where` does not pass the call through, it quietly substitutes a
+//! list-then-delete loop against its own possibly-stale view and drops the
+//! wrapped backend's single `DELETE … WHERE`. That is invisible in review
+//! because the bug is the *absence* of code.
 //!
 //! # The shape of the fix
 //!
@@ -35,9 +32,11 @@
 //!
 //! - `forward` — delegate to the forward target (below).
 //! - `custom` — this impl writes the method itself, inside the same invocation.
-//! - `inherit` — deliberately take the `DatabaseService` trait default.
+//! - `inherit` — deliberately take the `DatabaseService` trait default. An
+//!   operation without one (`take_where`, `update_where` and every operation
+//!   not in the table above) cannot be inherited: the impl does not compile.
 //!
-//! An incomplete ledger does not expand, so "I forgot `take_where`" stops being
+//! An incomplete ledger does not expand, so "I forgot `delete_where`" stops being
 //! representable; `inherit` still gets you the default, but only by writing the
 //! word.
 //!
@@ -184,6 +183,60 @@
 //!         ops {
 //!             get: forward,
 //!             list: forward,
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! Nor can a ledger `inherit` an operation that has no default. `take_where`
+//! and `update_where` have none, because a list-then-write fallback can
+//! neither be atomic nor reach every matching row in one read:
+//!
+//! ```compile_fail
+//! # use std::sync::Arc;
+//! # use wafer_core::interfaces::database::service::DatabaseService;
+//! struct Decorator {
+//!     inner: Arc<dyn DatabaseService>,
+//! }
+//!
+//! impl Decorator {
+//!     fn inner_service(&self) -> &dyn DatabaseService {
+//!         self.inner.as_ref()
+//!     }
+//! }
+//!
+//! wafer_core::forward_database_service! {
+//!     impl DatabaseService for Decorator {
+//!         forward_to inner_service();
+//!         ops {
+//!             get: forward,
+//!             list: forward,
+//!             create: forward,
+//!             create_many: forward,
+//!             update: forward,
+//!             delete: forward,
+//!             count: forward,
+//!             sum: forward,
+//!             query_raw: forward,
+//!             exec_raw: forward,
+//!             delete_where: forward,
+//!             delete_where_count: forward,
+//!             take_where: inherit,
+//!             update_where: forward,
+//!             update_where_count: forward,
+//!             increment_field_where: forward,
+//!             upsert: forward,
+//!             aggregate: forward,
+//!             batch: forward,
+//!             insert_guarded: forward,
+//!             update_guarded: forward,
+//!             ensure_schema_table: forward,
+//!             ensure_schema_tables: forward,
+//!             schema_table_exists: forward,
+//!             schema_columns: forward,
+//!             schema_drop_table: forward,
+//!             schema_add_column: forward,
+//!             set_strict_schema: forward,
 //!         }
 //!     }
 //! }

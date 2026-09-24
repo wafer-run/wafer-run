@@ -96,16 +96,16 @@ pub fn build_sum(
 /// ([`GroupedQueryConfig::date_buckets`]).
 ///
 /// `field` is interpolated into raw expression text (ANSI double-quoted, valid
-/// for both dialects), so it MUST be a validated plain identifier — callers
-/// validate upstream (`build_daily_count` via [`validate_ident`]; the
-/// aggregate handler via `validate_ident` in its `to_aggregate_spec`). Passing
-/// an unvalidated field would let it break out of the surrounding expression.
-fn date_bucket_expr(field: &str, backend: Backend) -> SimpleExpr {
+/// for both dialects), so this validates it with [`validate_ident`] and
+/// returns [`SqlBuildError::InvalidIdentifier`] rather than splice a value
+/// that could break out of the surrounding expression.
+fn date_bucket_expr(field: &str, backend: Backend) -> Result<SimpleExpr, SqlBuildError> {
+    let field = validate_ident(field)?;
     let sql = match backend {
         Backend::Sqlite => format!("date(\"{field}\")"),
         Backend::Postgres => format!("to_char(CAST(\"{field}\" AS DATE), 'YYYY-MM-DD')"),
     };
-    Expr::cust(&sql)
+    Ok(Expr::cust(&sql))
 }
 
 /// Build a per-day count over a date window.
@@ -126,7 +126,7 @@ fn date_bucket_expr(field: &str, backend: Backend) -> SimpleExpr {
 /// without re-implementing it.
 ///
 /// Returns [`SqlBuildError::InvalidIdentifier`] if `date_field` is not a plain
-/// identifier (`[A-Za-z0-9_]`). It is interpolated into the raw `date(...)` /
+/// identifier ([`validate_ident`]). It is interpolated into the raw `date(...)` /
 /// `to_char(...)` expression text rather than parameter-bound, so this is a
 /// fail-closed guard, not a passthrough: we reject rather than splice an
 /// identifier that could break out of the expression.
@@ -136,12 +136,7 @@ pub fn build_daily_count(
     filters: &[Filter],
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
-    // The column reference is interpolated into the raw expression text via
-    // ANSI double-quoting (works for both SQLite and Postgres), so it cannot be
-    // parameter-bound. Reject anything that isn't a plain identifier rather
-    // than risk it escaping the surrounding expression.
-    let date_field = validate_ident(date_field)?;
-    let date_expr = date_bucket_expr(date_field, backend);
+    let date_expr = date_bucket_expr(date_field, backend)?;
 
     let mut query = Query::select();
     query
@@ -355,9 +350,9 @@ impl AggregateColumn {
 /// bucketed value under `alias`. Shares its per-dialect date expression with
 /// [`build_daily_count`] (see [`date_bucket_expr`]).
 ///
-/// `field` and `alias` reach raw expression text (not parameter-bound), so
-/// callers MUST supply validated identifiers — the aggregate handler validates
-/// every `DateBucket.field` with `validate_ident` before constructing this.
+/// `field` reaches raw expression text (not parameter-bound), so
+/// [`build_grouped_query`] refuses one that is not a plain identifier
+/// ([`validate_ident`]). `alias` is emitted as a quoted alias.
 #[derive(Debug, Clone)]
 pub struct DateBucketGroup {
     /// Timestamp column to bucket by day.
@@ -405,11 +400,17 @@ pub struct GroupedQueryConfig {
 /// before the next `.await`. A by-reference signature would keep the config
 /// alive across the await point and make the caller's future `!Send`. The
 /// `needless_pass_by_value` lint can't see that ownership transfer is the point.
+///
+/// Returns [`SqlBuildError::InvalidIdentifier`] if a
+/// [`DateBucketGroup::field`] is not a plain identifier ([`validate_ident`]).
 #[expect(
     clippy::needless_pass_by_value,
     reason = "by-value lets async callers drop the !Send GroupedQueryConfig (Rc<dyn Iden>) before awaiting; a &ref signature would poison their futures' Send-ness"
 )]
-pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::Statement {
+pub fn build_grouped_query(
+    cfg: GroupedQueryConfig,
+    backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
     let mut query = Query::select();
     query.from(DynCol(cfg.table.clone()));
 
@@ -462,9 +463,9 @@ pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::
     }
 
     // GROUP BY — date buckets: select the bucketed value under its alias and
-    // group by the same `date(field)` expression (fields validated upstream).
+    // group by the same `date(field)` expression.
     for bucket in &cfg.date_buckets {
-        let expr = date_bucket_expr(&bucket.field, backend);
+        let expr = date_bucket_expr(&bucket.field, backend)?;
         query.expr_as(expr.clone(), Alias::new(&bucket.alias));
         query.add_group_by(vec![expr]);
     }
@@ -481,7 +482,7 @@ pub fn build_grouped_query(cfg: GroupedQueryConfig, backend: Backend) -> crate::
 
     let table = cfg.table.clone();
     let (sql, values) = crate::render_select(query, backend);
-    crate::Statement::new(sql, values, table)
+    Ok(crate::Statement::new(sql, values, table))
 }
 
 #[cfg(test)]
@@ -582,7 +583,7 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("GROUP BY"));
@@ -609,7 +610,7 @@ mod tests {
             order_by: vec![],
             limit: None,
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         eprintln!("SQL: {sql}");
         assert!(
@@ -653,7 +654,7 @@ mod tests {
             }],
             limit: Some(50),
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite);
+        let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         // Both plain aggregate and CASE-WHEN aggregate render.
         assert!(sql.contains("COUNT(*)"), "missing COUNT in: {sql}");
@@ -692,7 +693,8 @@ mod tests {
                 limit: None,
             },
             Backend::Sqlite,
-        );
+        )
+        .expect("renders");
         assert!(
             sqlite.sql.contains("date("),
             "sqlite date bucket: {}",
@@ -728,10 +730,43 @@ mod tests {
                 limit: None,
             },
             Backend::Postgres,
-        );
+        )
+        .expect("renders");
         assert!(pg.sql.contains("to_char"), "pg date bucket: {}", pg.sql);
         assert!(pg.sql.contains("CAST"), "{}", pg.sql);
         assert!(pg.sql.contains("GROUP BY"), "{}", pg.sql);
+    }
+
+    #[test]
+    fn grouped_query_rejects_a_non_identifier_date_bucket_field() {
+        // The bucket field is spliced into `date("…")` / `to_char(CAST("…" …))`
+        // text, so a quote in it would close the identifier and inject SQL.
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let err = build_grouped_query(
+                GroupedQueryConfig {
+                    table: "events".into(),
+                    select_columns: vec![],
+                    aggregates: vec![],
+                    filters: vec![],
+                    group_by: vec![],
+                    date_buckets: vec![DateBucketGroup {
+                        field: "x\"), (SELECT 1".into(),
+                        alias: "day".into(),
+                    }],
+                    order_by: vec![],
+                    limit: None,
+                },
+                backend,
+            )
+            .expect_err("a quote in the bucket field must be refused");
+            assert_eq!(
+                err,
+                SqlBuildError::InvalidIdentifier {
+                    value: "x\"), (SELECT 1".into()
+                },
+                "{backend:?}"
+            );
+        }
     }
 
     fn single_aggregate(agg: AggregateColumn, backend: Backend) -> String {
@@ -748,6 +783,7 @@ mod tests {
             },
             backend,
         )
+        .expect("renders")
         .sql
     }
 
@@ -857,7 +893,8 @@ mod tests {
                     limit: None,
                 },
                 Backend::Sqlite,
-            );
+            )
+            .expect("renders");
             let params: Vec<String> = stmt
                 .values
                 .iter()

@@ -40,6 +40,11 @@ pub use crate::interfaces::database::service::{
 
 const BLOCK: &str = "wafer-run/database";
 
+/// Most rows [`list_all`] and [`list_sorted`] return. A read that matches more
+/// fails with [`ErrorCode::OutOfRange`] instead of returning the first
+/// `LIST_ALL_MAX_ROWS`.
+pub const LIST_ALL_MAX_ROWS: u32 = 10_000;
+
 // --- Helpers ---
 
 fn filter_op_str(op: &FilterOp) -> &'static str {
@@ -570,32 +575,39 @@ dual_api! {
     /// List all records matching the given filters.
     ///
     /// Intended for small, bounded collections (roles, permissions, legal docs).
-    /// Hard-capped at 10,000 records — use paginated `list()` for larger collections.
+    /// Returns every matching row, or [`ErrorCode::OutOfRange`] when more than
+    /// [`LIST_ALL_MAX_ROWS`] match — never a silent prefix. Use
+    /// [`paginated_list`] for a collection that can grow past that.
     ///
     /// Sets `skip_count: true` on the underlying `ListOptions` so the
     /// backend avoids the `SELECT COUNT(*)` round-trip.
     pub fn list_all(ctx, collection: &str, filters: Vec<Filter>) -> Result<Vec<Record>, WaferError> {
-        let result = svc_fn!(ctx, list(
-            collection,
-            &ListOptions {
-                filters,
-                limit: Some(10_000),
-                skip_count: true,
-                ..Default::default()
-            }
-        ))?;
-        Ok(result.records)
+        svc_fn!(ctx, list_within_cap(collection, filters, Vec::new()))
     }
 
     /// List records matching `filters` in the order specified by `sort`.
     ///
-    /// Hard-capped at 10,000 records. Skips the backend `COUNT` query — use
-    /// `paginated_list` if you need `total_count` for pagination UI.
+    /// Returns every matching row, or [`ErrorCode::OutOfRange`] when more than
+    /// [`LIST_ALL_MAX_ROWS`] match, as [`list_all`] does. Skips the backend
+    /// `COUNT` query — use `paginated_list` if you need `total_count` for
+    /// pagination UI.
     ///
     /// Use this when the caller needs `ORDER BY` semantics but does not need
-    /// pagination — most "show the N most recent X" or "list all X by name"
-    /// queries fit. For unsorted bulk reads, prefer `list_all`.
+    /// pagination — most "list all X by name" queries fit. For unsorted bulk
+    /// reads, prefer `list_all`.
     pub fn list_sorted(
+        ctx,
+        collection: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortField>,
+    ) -> Result<Vec<Record>, WaferError> {
+        svc_fn!(ctx, list_within_cap(collection, filters, sort))
+    }
+
+    // Shared body of `list_all` / `list_sorted`: asks for one row past the
+    // cap, so a result that reaches it is known to be complete and one past
+    // it is refused rather than truncated.
+    fn list_within_cap(
         ctx,
         collection: &str,
         filters: Vec<Filter>,
@@ -606,11 +618,20 @@ dual_api! {
             &ListOptions {
                 filters,
                 sort,
-                limit: Some(10_000),
+                limit: Some(LIST_ALL_MAX_ROWS + 1),
                 skip_count: true,
                 ..Default::default()
             }
         ))?;
+        if result.records.len() > LIST_ALL_MAX_ROWS as usize {
+            return Err(WaferError::new(
+                ErrorCode::OutOfRange,
+                format!(
+                    "more than {LIST_ALL_MAX_ROWS} rows of {collection} match; \
+                     read them with paginated_list"
+                ),
+            ));
+        }
         Ok(result.records)
     }
 
