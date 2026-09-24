@@ -55,10 +55,11 @@ const CONFIG: &str = "wafer-run/config";
 /// out exactly what this guest uses and nothing else (an omitted `Allowlist`
 /// deserializes as `None` = deny).
 ///
-/// `storage_folders` names the FOLDER this guest owns: the host authorizes a
-/// storage op on `"{folder}/{key}"` and an entry admits that resource when it
-/// is equal to it or is a `/`-terminated prefix of it, so one folder entry
-/// covers every key the guest writes beneath it. A key with a `..` segment is
+/// `storage_folders` names the namespace this guest owns: the storage handler
+/// resolves the guest's plain folder `notes` to `test/json-host-guest/notes`
+/// and authorizes the op on `"{resolved folder}/{key}"`, and an entry admits
+/// that resource when it is equal to it or is a `/`-terminated prefix of it,
+/// so one entry covers every key the guest writes beneath it. A key with a `..` segment is
 /// refused by the handler regardless — see the `test.storage_escape` arm.
 ///
 /// `schema: true, ddl: false` is the sandbox shape: the guest creates its own
@@ -230,15 +231,16 @@ pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
     // Checked BEFORE `test.storage`: the kinds are substrings of one another
     // and this guest dispatches by substring match.
     if text.contains("test.storage_escape") {
-        // The C1 shape: the guest holds the folder `test/json-host-guest` and
-        // asks for a key that climbs out of it. `{folder}/{key}` would be
-        // `test/json-host-guest/../../other` — textually beneath the grant, so
+        // The C1 shape: the guest reads its own folder `notes` with a key that
+        // climbs out of it. The resource would be
+        // `test/json-host-guest/notes/../../other` — textually beneath the
+        // guest's own namespace and its capability entry, so
         // the refusal has to come from the handler's path validation, not from
         // the capability set.
         let (_, _, err) = call(
             STORAGE,
             "storage.get",
-            r#"{"folder":"test/json-host-guest","key":"../../other"}"#,
+            r#"{"folder":"notes","key":"../../other"}"#,
         );
         return respond(&err, JSON);
     }
@@ -247,7 +249,7 @@ pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
         let (_, _, e1) = call(
             STORAGE,
             "storage.put",
-            r#"{"folder":"test/json-host-guest","key":"a.txt","data":[104,105],"content_type":"text/plain"}"#,
+            r#"{"folder":"notes","key":"a.txt","data":[104,105],"content_type":"text/plain"}"#,
         );
         if !e1.is_empty() {
             return respond(&e1, JSON);
@@ -261,7 +263,7 @@ pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
         let (_, frames, err) = call_frames(
             STORAGE,
             "storage.get",
-            r#"{"folder":"test/json-host-guest","key":"a.txt"}"#,
+            r#"{"folder":"notes","key":"a.txt"}"#,
         );
         if !err.is_empty() {
             return respond(&err, JSON);

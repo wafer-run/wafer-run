@@ -90,8 +90,11 @@ pub fn resource_prefix(block_id: &str) -> String {
 }
 
 /// Extract the owning block id from a storage path of the form
-/// `{org}/{block}/{rest}` (with optional leading `@` used by an app storage block
-/// to mark cross-block access in source code).
+/// `{org}/{block}/{rest}`.
+///
+/// The path is the resolved backend path the storage handler authorizes and
+/// touches — never the `@`-prefixed form a caller may write in a request,
+/// which the handler strips before a path reaches WRAP.
 ///
 /// Returns `None` if the path doesn't have at least two slash-separated
 /// segments.
@@ -99,12 +102,9 @@ pub fn resource_prefix(block_id: &str) -> String {
 /// ```ignore
 /// assert_eq!(storage_resource_owner("my-org/files/photos/a.png"),
 ///            Some("my-org/files".to_string()));
-/// assert_eq!(storage_resource_owner("@wafer-run/web/public/index.html"),
-///            Some("wafer-run/web".to_string()));
 /// assert_eq!(storage_resource_owner("just-one-segment"), None);
 /// ```
 pub fn storage_resource_owner(path: &str) -> Option<String> {
-    let path = path.strip_prefix('@').unwrap_or(path);
     let mut parts = path.splitn(3, '/');
     let org = parts.next()?;
     let block = parts.next()?;
@@ -116,7 +116,13 @@ pub fn storage_resource_owner(path: &str) -> Option<String> {
 
 /// Whether every `/`-separated segment of `path` is a plain name — i.e. the
 /// path has no EMPTY segment (a leading or trailing `/`, a `//` run, or the
-/// empty string itself) and no RELATIVE segment (`.` or `..`).
+/// empty string itself), no RELATIVE segment (`.` or `..`), and no `\`.
+///
+/// `/` is the only separator in a storage path. A backend that maps the path
+/// onto a filesystem (`wafer-block-local-storage` joins it with `Path::join`)
+/// reads `\` as a separator too on Windows, so `a\..\..\b` — one plain
+/// segment here — would climb there. Refusing `\` keeps the path WRAP
+/// authorizes the path every backend touches.
 ///
 /// Storage authorization is textual and prefix-based: the handler authorizes
 /// on `"{folder}/{key}"` and
@@ -130,9 +136,9 @@ pub fn storage_resource_owner(path: &str) -> Option<String> {
 /// rejects such a `folder`/`key` with `InvalidArgument` before authorizing,
 /// and the capability check refuses it as a second, independent layer.
 pub fn is_traversal_safe_path(path: &str) -> bool {
-    !path
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    !path.split('/').any(|segment| {
+        segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\')
+    })
 }
 
 /// Dispatch to the right resource-owner parser for the given resource type.
@@ -170,18 +176,13 @@ pub fn typed_resource_owner(
 /// 7. Unnamespaced (`resource_owner()` returns `None`) → Err
 /// 8. Otherwise → Err
 ///
-/// For Storage (slash-separated paths; storage-block-style intercept
-/// enforces per-block isolation):
-/// 1. Own-namespace self-admit — any non-`@` resource for an attributable
-///    caller is treated as caller's own namespace (either the path is
-///    already prefixed `{caller}/...`, or the storage block will rewrite
-///    a raw / single-segment path to `{caller}/...` before reaching the
-///    backend).
-/// 2. `@`-prefixed cross-block resources where the post-`@` owner matches
-///    the caller (degenerate `@self/...`) → Ok.
-/// 3. Admin → Ok
-/// 4. Grant match (for `@`-prefixed cross-block access) → Ok
-/// 5. Otherwise → Err (default deny)
+/// For Storage (slash-separated `{org}/{block}/...` paths — the resolved
+/// backend path, which the storage handler derives from the caller's request
+/// and then touches unchanged):
+/// 1. Own resource (`storage_resource_owner(resource) == caller_id`) → Ok
+/// 2. Admin → Ok
+/// 3. Grant match → Ok
+/// 4. Otherwise → Err (default deny)
 ///
 /// The Storage list-all sentinel ([`STORAGE_LIST_ALL_RESOURCE`], used by
 /// `storage.list_folders`) is a special case checked before the Storage
@@ -318,29 +319,13 @@ pub fn check_access(
     }
 
     // --- Non-namespace resources (Network, Storage, Crypto) ---
-    // Storage gets Rule 3 self-admit on non-`@` resources; cross-block
-    // (`@`-prefixed) Storage access plus all Network / Crypto access
-    // fall through to admin + grant matching.
-
-    // Normalize the Storage resource by stripping the cross-block `@`
-    // marker. Internal checks (Rule 3 ownership, Rule 5 grant matching)
-    // operate on the canonical path so grants can be written without
-    // `@`. The original `resource` is preserved for the error message.
-    let canonical_resource: &str =
-        if matches!(resource_type, Some(crate::types::ResourceType::Storage)) {
-            resource.strip_prefix('@').unwrap_or(resource)
-        } else {
-            resource
-        };
-    let is_cross_block_storage = matches!(resource_type, Some(crate::types::ResourceType::Storage))
-        && resource.starts_with('@');
+    // Storage admits its owner; everything else falls through to admin +
+    // grant matching.
+    let is_storage = matches!(resource_type, Some(crate::types::ResourceType::Storage));
 
     // Storage list-all sentinel: a global folder enumeration is admin-only,
-    // like raw SQL. Checked before the Rule-3 self-admit (which would
-    // otherwise pass any plain resource) with no grant fallthrough.
-    if matches!(resource_type, Some(crate::types::ResourceType::Storage))
-        && resource == STORAGE_LIST_ALL_RESOURCE
-    {
+    // like raw SQL, with no grant fallthrough.
+    if is_storage && resource == STORAGE_LIST_ALL_RESOURCE {
         return match caller_id {
             Some(c) if c == admin_block => Ok(()),
             _ => Err(WaferError::new(
@@ -353,51 +338,47 @@ pub fn check_access(
         };
     }
 
-    // Rule 3 (Storage only): own-namespace self-admit. Two shapes count
-    // as own-namespace under the convention storage-block-style
-    // intercepts enforce:
-    //
-    //   (a) Non-`@` resource — the storage block will rewrite to
-    //       `{caller}/...` before any backend write, so the effective
-    //       path lands in the caller's namespace. Auto-allow for any
-    //       attributable caller.
-    //   (b) `@`-prefixed resource whose post-`@` owner matches the
-    //       caller (degenerate `@self/...` case). Same effective
-    //       namespace; auto-allow.
-    //
-    // All other `@`-prefixed accesses are cross-block and fall through
-    // to grant matching (Rule 5) against the canonicalized resource.
-    if matches!(resource_type, Some(crate::types::ResourceType::Storage)) {
+    // Storage paths are matched by owner and prefix and never normalized, so
+    // `acme/app/../other/x` would read as `acme/app`'s own resource. The
+    // storage handler refuses that shape before it authorizes; refusing it
+    // here too keeps every other caller of this check from admitting it.
+    if is_storage && !is_traversal_safe_path(resource) {
+        return Err(WaferError::new(
+            ErrorCode::PermissionDenied,
+            format!(
+                "WRAP: storage path '{resource}' has an empty, `.` or `..` segment or a `\\` \
+                 (caller: {caller_id:?})"
+            ),
+        ));
+    }
+
+    // Storage own resource: the path's `{org}/{block}` owner is the caller.
+    // A path owned by another block — or by no block — needs admin or a
+    // grant.
+    if is_storage {
         if let Some(caller) = caller_id {
-            if !is_cross_block_storage {
+            if storage_resource_owner(resource).as_deref() == Some(caller) {
                 return Ok(());
-            }
-            if let Some(owner) = storage_resource_owner(canonical_resource) {
-                if owner == caller {
-                    return Ok(());
-                }
             }
         }
     }
 
-    // Rule 4: admin block has full access
+    // Admin block has full access
     if caller_id == Some(admin_block) {
         return Ok(());
     }
 
-    // Rule 5: grant match — uses the canonicalized resource so grants
-    // declared without `@` match cross-block requests with `@`.
+    // Grant match
     if let Some(caller) = caller_id {
         if grants
             .iter()
-            .any(|g| grant_allows(g, caller, canonical_resource, access, resource_type))
+            .any(|g| grant_allows(g, caller, resource, access, resource_type))
         {
             return Ok(());
         }
     }
 
-    // Default deny — surface the original (possibly `@`-prefixed) resource
-    // so error messages match what callers passed in.
+    // Default deny
     Err(WaferError::new(
         ErrorCode::PermissionDenied,
         format!(
@@ -933,6 +914,10 @@ mod tests {
         assert!(!is_traversal_safe_path("/site"));
         assert!(!is_traversal_safe_path("site/"));
         assert!(!is_traversal_safe_path("site//jhg"));
+        // `\` is a separator to a Windows filesystem backend, so a segment
+        // carrying it is not a plain name.
+        assert!(!is_traversal_safe_path("site/jhg/..\\..\\other"));
+        assert!(!is_traversal_safe_path("a\\b"));
     }
 
     #[test]
@@ -1470,119 +1455,134 @@ mod tests {
     fn test_storage_resource_type() {
         let admin = "my-org/admin";
         let storage = Some(&ResourceType::Storage);
+        let check = |caller: Option<&str>, resource: &str, access, grants: &[ResourceGrant]| {
+            check_access(caller, resource, access, storage, grants, admin)
+        };
 
-        // Cross-block access with `@` prefix + no grants → denied
-        assert!(check_access(
+        // Another block's path, no grant → denied, for reads and writes.
+        assert!(check(
             Some("my-org/files"),
-            "@wafer-run/web/public",
+            "wafer-run/web/public",
             ResourceAccess::Read,
-            storage,
-            &[],
-            admin
+            &[]
+        )
+        .is_err());
+        assert!(check(
+            Some("my-org/files"),
+            "wafer-run/web/public/a",
+            ResourceAccess::Write,
+            &[]
         )
         .is_err());
 
-        // Grant for specific path covers `@`-prefixed cross-block reads
+        // A grant on the path admits exactly the access it names.
         let grants = vec![
             ResourceGrant::read("my-org/files", "wafer-run/web/*").typed(ResourceType::Storage)
         ];
-        assert!(check_access(
+        assert!(check(
             Some("my-org/files"),
-            "@wafer-run/web/public",
+            "wafer-run/web/public",
             ResourceAccess::Read,
-            storage,
-            &grants,
-            admin
+            &grants
         )
         .is_ok());
-        // Write denied via cross-block read-only grant
-        assert!(check_access(
+        assert!(check(
             Some("my-org/files"),
-            "@wafer-run/web/public",
+            "wafer-run/web/public",
             ResourceAccess::Write,
-            storage,
-            &grants,
-            admin
+            &grants
         )
         .is_err());
 
-        // Own-namespace storage access via Rule 3 (Wave 26 / c18):
-        // caller `{org}/{block}` reaching `{org}/{block}/...` is auto-allowed
-        // without any explicit grant.
-        assert!(check_access(
+        // The owner reaches its own `{org}/{block}/...` paths, reads and
+        // writes, without a grant.
+        assert!(check(
             Some("wafer-run/web"),
             "wafer-run/web/public",
             ResourceAccess::Read,
-            storage,
-            &[],
-            admin
+            &[]
         )
         .is_ok());
-        // Including writes
-        assert!(check_access(
+        assert!(check(
             Some("wafer-run/web"),
             "wafer-run/web/public/index.html",
             ResourceAccess::Write,
-            storage,
-            &[],
-            admin
+            &[]
         )
         .is_ok());
-        // Raw or single-segment paths are auto-allowed for any attributable
-        // caller — they reach the storage block raw and the block rewrites
-        // them to `{caller}/...` before any backend write. The previous
-        // `wrap.resource` was set by the client wrapper BEFORE the rewrite,
-        // so check_access has to trust the convention.
-        assert!(check_access(
+        assert!(check(
             Some("wafer-run/web"),
-            "photos",
+            "wafer-run/web",
             ResourceAccess::Write,
-            storage,
-            &[],
-            admin
+            &[]
         )
         .is_ok());
-        assert!(check_access(
-            Some("my-org/files"),
-            "photos/a.png",
-            ResourceAccess::Write,
-            storage,
-            &[],
-            admin
-        )
-        .is_ok());
-        // Cross-block storage (explicit `@` prefix) still requires a grant
-        assert!(check_access(
-            Some("wafer-run/web"),
-            "@my-org/files/photos/a.png",
-            ResourceAccess::Read,
-            storage,
-            &[],
-            admin
-        )
-        .is_err());
-        // Even when the resource string happens to look like another
-        // block's namespace, if it's non-`@` it counts as own-namespace
-        // (the storage block will re-prefix to `{caller}/...`).
-        assert!(check_access(
+
+        // A path is owned by its first two segments and nothing else: a
+        // resource that is not under the caller's namespace is not the
+        // caller's, however it is spelled.
+        assert!(check(
             Some("wafer-run/web"),
             "my-org/files/photos/a.png",
             ResourceAccess::Read,
-            storage,
-            &[],
-            admin
-        )
-        .is_ok());
-        // Anonymous caller is still denied without a grant.
-        assert!(check_access(
-            None,
-            "photos/a.png",
-            ResourceAccess::Read,
-            storage,
-            &[],
-            admin
+            &[]
         )
         .is_err());
+        assert!(check(
+            Some("wafer-run/web"),
+            "wafer-run/webx/a",
+            ResourceAccess::Read,
+            &[]
+        )
+        .is_err());
+        assert!(check(
+            Some("wafer-run/web"),
+            "wafer-run",
+            ResourceAccess::Read,
+            &[]
+        )
+        .is_err());
+        assert!(check(Some("wafer-run/web"), "photos", ResourceAccess::Write, &[]).is_err());
+
+        // `@` is request syntax the storage handler strips; a resource that
+        // still carries it names no block, so it is nobody's own.
+        assert!(check(
+            Some("wafer-run/web"),
+            "@wafer-run/web/public",
+            ResourceAccess::Read,
+            &[]
+        )
+        .is_err());
+
+        // A traversal shape is refused even when its text starts inside the
+        // caller's own namespace, and even for the admin.
+        assert!(check(
+            Some("wafer-run/web"),
+            "wafer-run/web/../../my-org/files/a",
+            ResourceAccess::Read,
+            &[]
+        )
+        .is_err());
+        assert!(check(
+            Some("wafer-run/web"),
+            "wafer-run/web//a",
+            ResourceAccess::Read,
+            &[]
+        )
+        .is_err());
+        assert!(check(Some(admin), "my-org/files/./a", ResourceAccess::Read, &[]).is_err());
+
+        // The admin reaches any well-formed path.
+        assert!(check(
+            Some(admin),
+            "my-org/files/photos/a.png",
+            ResourceAccess::Write,
+            &[]
+        )
+        .is_ok());
+
+        // Anonymous caller is denied without a grant.
+        assert!(check(None, "my-org/files/photos/a.png", ResourceAccess::Read, &[]).is_err());
     }
 
     #[test]
@@ -1591,9 +1591,10 @@ mod tests {
             storage_resource_owner("my-org/files/photos/a.png"),
             Some("my-org/files".to_string())
         );
+        // `@` is not path syntax: it stays part of the first segment.
         assert_eq!(
             storage_resource_owner("@wafer-run/web/public/index.html"),
-            Some("wafer-run/web".to_string())
+            Some("@wafer-run/web".to_string())
         );
         // Exactly two segments — owner is the whole thing
         assert_eq!(

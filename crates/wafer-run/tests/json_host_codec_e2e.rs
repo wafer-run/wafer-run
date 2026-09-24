@@ -205,8 +205,10 @@ async fn json_guest_creates_its_table_and_reads_back_a_record() {
 ///
 /// The guest returns them joined by a newline. Together they prove the whole
 /// path: the JSON `PutRequest` the guest wrote was transcoded, authorized
-/// against a FOLDER-level `storage_folders` grant, and stored; then read back
-/// with the header transcoded and the body left alone.
+/// against a namespace-level `storage_folders` entry once the handler scoped
+/// the guest's plain folder `notes` into `test/json-host-guest/notes`, and
+/// stored; then read back with the header transcoded and the body left
+/// alone.
 #[tokio::test]
 async fn json_guest_storage_round_trip() {
     let out = run("test.storage").await;
@@ -235,10 +237,10 @@ async fn json_guest_storage_round_trip() {
     );
 }
 
-/// C1 regression, end to end: the guest holds the FOLDER
-/// `test/json-host-guest` and asks `storage.get` for key `../../other`. The
-/// composed resource (`test/json-host-guest/../../other`) sits textually
-/// beneath the grant, so nothing in the capability match would stop it — the
+/// C1 regression, end to end: the guest reads its own folder `notes` with key
+/// `../../other`. The composed resource
+/// (`test/json-host-guest/notes/../../other`) sits textually beneath the
+/// guest's namespace, so nothing in the capability match would stop it — the
 /// storage handler refuses the unnormalized path outright, before
 /// authorization, and the JSON guest sees `InvalidArgument`.
 #[tokio::test]

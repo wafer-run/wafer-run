@@ -51,7 +51,9 @@ enum CacheMode {
 /// with caching, clean-URL resolution, and optional SPA fallback.
 ///
 /// Configure via `add_block_config("wafer-run/web", json!({...}))`:
-///   - `web_root`: storage folder name (default: "public")
+///   - `web_root`: storage folder, relative to this block's own
+///     `wafer-run/web/` storage namespace (default: "public", i.e.
+///     `wafer-run/web/public`)
 ///   - `web_prefix`: URL prefix to strip (default: "")
 ///   - `web_spa`: serve index.html for missing paths (default: false)
 ///   - `web_index`: index file name (default: "index.html")

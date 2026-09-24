@@ -187,31 +187,40 @@ pub fn decode_and_authorize<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    decode_and_authorize_checked(ctx, body, op_name, |req| Ok(resource(req)))
+    decode_and_authorize_checked(ctx, body, op_name, |req| {
+        let (res, rt, access) = resource(req);
+        Ok(((), res, rt, access))
+    })
+    .map(|(req, ())| req)
 }
 
-/// [`decode_and_authorize`] for ops whose resource name has to be VALIDATED
-/// before it can be authorized against.
+/// [`decode_and_authorize`] for ops whose resource has to be RESOLVED from
+/// the request before it can be authorized against — and whose arm must then
+/// use exactly the resource that was authorized.
 ///
 /// Same guarantee — an arm cannot obtain its typed request without the
-/// resource-access check — with one addition: `resource` may reject the
-/// request instead of naming a resource, and the rejection is returned
-/// BEFORE `ctx.check_resource_access` runs and before the service is
-/// touched.
+/// resource-access check — with two additions:
+/// - `resolve` may reject the request instead of naming a resource; the
+///   rejection is returned BEFORE `ctx.check_resource_access` runs and before
+///   the service is touched.
+/// - `resolve` returns a value alongside the resource name (for storage, the
+///   resolved folder), and the arm receives it with the request. The arm
+///   hands THAT to the service rather than re-deriving it from the request,
+///   so the string the service touches is the string that was authorized.
 ///
-/// Storage is the case that needs it. Its resources are `/`-separated paths
-/// composed from caller-supplied `folder` / `key`, matched by prefix and
-/// never normalized, so a `..` segment has to be refused as a malformed
-/// request (`InvalidArgument`) rather than silently authorized against a
-/// path that escapes the grant it appears to sit under. Rejecting before the
-/// WRAP check also keeps the error honest: the request is malformed whether
-/// or not the caller holds a grant.
-pub fn decode_and_authorize_checked<T>(
+/// Storage is the case that needs it. A caller names a folder relative to
+/// its own namespace (or `@`-explicit), so the backend path exists only once
+/// the handler has resolved it against the caller, and a path with an empty,
+/// `.` or `..` segment (or a `\`) has to be refused as malformed (`InvalidArgument`)
+/// rather than authorized: resources are matched by prefix and never
+/// normalized. Rejecting before the WRAP check also keeps the error honest:
+/// the request is malformed whether or not the caller holds a grant.
+pub fn decode_and_authorize_checked<T, P>(
     ctx: &dyn Context,
     body: &[u8],
     op_name: &str,
-    resource: impl FnOnce(&T) -> Result<(String, ResourceType, ResourceAccess), WaferError>,
-) -> Result<T, OutputStream>
+    resolve: impl FnOnce(&T) -> Result<(P, String, ResourceType, ResourceAccess), WaferError>,
+) -> Result<(T, P), OutputStream>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -224,10 +233,10 @@ where
             )))
         }
     };
-    let (res, rt, access) = resource(&req).map_err(OutputStream::error)?;
+    let (resolved, res, rt, access) = resolve(&req).map_err(OutputStream::error)?;
     ctx.check_resource_access(&res, rt, access)
         .map_err(OutputStream::error)?;
-    Ok(req)
+    Ok((req, resolved))
 }
 
 /// [`decode_and_authorize`] for an op that names SEVERAL resources (a

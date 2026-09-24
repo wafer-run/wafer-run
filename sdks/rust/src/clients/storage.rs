@@ -7,6 +7,12 @@
 //! [`get_stream`] returns a [`StorageGetStream`] wrapper exposing the
 //! decoded header alongside chunked body access.
 //!
+//! Folders are addressed from the calling block's side: a plain folder lives
+//! in the caller's own namespace (`uploads` from `acme/app` is stored under
+//! `acme/app/uploads`; the empty folder is `acme/app` itself), and
+//! `@{org}/{block}/…` names a namespace explicitly — admitted for its owner,
+//! the admin block, or a Storage grant.
+//!
 //! No `put_stream` helper is provided in this revision — request streaming
 //! for uploads is not yet plumbed host-side.
 

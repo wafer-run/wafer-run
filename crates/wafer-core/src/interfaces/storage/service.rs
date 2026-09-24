@@ -19,6 +19,11 @@ pub enum StorageError {
 }
 
 /// Service provides file/object storage operations organized by folders.
+///
+/// Every `folder` / `name` a service receives is a resolved backend path
+/// (`{org}/{block}/…`): the storage handler has already scoped the caller's
+/// request into a namespace and authorized exactly that path, so a service
+/// stores under it as given.
 #[wafer_async_trait]
 pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Put stores an object in a folder.
