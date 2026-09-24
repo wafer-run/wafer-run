@@ -4,6 +4,14 @@
 
 ### Breaking changes
 
+- The public `wafer_run::runtime::init_stack` module (`InitStack`,
+  `InitGuard`) is gone. Init cycles are refused by a runtime-wide wait-for
+  graph of in-flight inits instead (see Fixed: "A failed Init is retried when
+  the failure was transient"); nothing outside the runtime used the per-dispatch
+  stack. `BlockSlot` keeps its API; a `Transient` outcome now starts a retry
+  backoff (`slot::TRANSIENT_RETRY_BASE`, doubling to `slot::TRANSIENT_RETRY_MAX`)
+  during which `get_or_init` and `try_cached` return it without re-running init.
+
 - A block's storage is its own. WRAP admitted every Storage path without a
   leading `@` for any attributable caller, assuming the storage block would
   rewrite it into the caller's namespace, and wafer-core's storage handler
@@ -900,6 +908,29 @@
   read-only.
 
 ### Fixed
+
+- A failed Init is retried when the failure was transient. Every
+  `lifecycle(Init)` error used to be cached as permanent for the life of the
+  process, so one bad moment at boot (a backend `Unavailable`, a spent
+  deadline) disabled a block until restart under a tolerant boot. An Init
+  error coded `Unavailable`, `DeadlineExceeded`, `Cancelled`,
+  `ResourceExhausted` or `Aborted` is now `InitError::Transient`
+  (`InitError::from_lifecycle_error`): not cached, retried by the first
+  dispatch after a backoff of 100 ms that doubles per consecutive failure up
+  to 30 s; every other code stays permanent. Init also runs on a context of
+  its own (`RuntimeContext::for_init`) on every path — eager `init_block`,
+  `run_block`, flow steps and `call_block` — with a fresh cancellation flag,
+  no deadline, call depth 0, no caller and the block's own `requires`: a
+  block first reached at depth 16 or late in a flow's timeout no longer fails
+  its Init on the caller's budget, and Init reached through `run_block` or a
+  flow step is gated by `requires` as eager init was. A panic in
+  `lifecycle(Init)` is caught on native targets and cached as a permanent
+  failure instead of unwinding into the request task. Two blocks whose Inits
+  call each other, first reached by two concurrent requests, used to
+  deadlock both blocks for the life of the process; the wait that would
+  close an init cycle — within one dispatch or across concurrent ones — is
+  now refused with `InitError::Cycle`. Concurrent calls from one frame into
+  one uninitialized block are no longer mistaken for a cycle.
 
 - `__wafer_host_stream_init` charges the target name and the message it
   copies out of guest memory against the per-call host-byte budget

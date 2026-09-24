@@ -649,8 +649,6 @@ async fn run_invocation(
     };
 
     // --- Build RuntimeContext with the step's seal-parsed config ---
-    // Each flow step gets its own init stack frame for cycle detection.
-    let step_init_stack = crate::runtime::init_stack::InitStack::new();
     // SEC-04: build the step context through `make_block_context` so the
     // step block's declared `requires` allowlist is enforced on `call_block`,
     // identically to top-level dispatch. `make_context` alone would leave the
@@ -661,7 +659,6 @@ async fn run_invocation(
         step.config.clone(),
         env.cancelled.clone(),
         env.deadline,
-        step_init_stack.clone(),
     );
 
     // --- Execute block (lazy init + observability via the shared
@@ -687,9 +684,9 @@ async fn run_invocation(
             resolved: &target.name,
             slot: &target.slot,
         },
-        || {
-            env.wafer
-                .dispatch_init(&target.name, &target.block, &step_init_stack)
+        crate::runtime::runner::DispatchInit {
+            block: &target.block,
+            template: &ctx,
         },
         state.msg.clone(),
         step_input,

@@ -370,10 +370,10 @@ async fn aliased_callee_node_id_is_resolved_canonical_name() {
 /// `InitError::Cycle` (mapped to `FAILED_PRECONDITION`) on the top-level
 /// output stream — without ever running `handle` on either block.
 ///
-/// The shared `init_breadcrumbs` Arc inside `RuntimeContext` propagates
-/// the init stack across `call_block` boundaries; this test verifies that
-/// propagation end-to-end. Without it, B's init would not see A on the
-/// stack and we'd recurse forever (or deadlock on A's slot lock).
+/// A's Init context carries its init attempt across `call_block`, so B's
+/// Init reaching A again is a wait of B's attempt that the runtime-wide
+/// wait-for graph refuses; without it B's init would deadlock on A's slot
+/// lock, held by A's init further up this same dispatch.
 #[tokio::test]
 async fn transitive_init_cycle_surfaces_failed_precondition() {
     use wafer_block::{core_types::ErrorCode, streams::output::TerminalNotResponse};

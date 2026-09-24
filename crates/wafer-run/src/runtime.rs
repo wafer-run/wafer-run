@@ -16,8 +16,9 @@ pub mod config_source;
 pub(crate) mod exec_plan;
 /// Flow-level execution policy (timeout resolution) for the dispatch path.
 pub(crate) mod flow_policy;
-/// Init-time call stack used to detect cycles when blocks `Init`-call each other.
-pub mod init_stack;
+/// Runtime-wide wait-for graph of in-flight inits, used to refuse the wait
+/// that would close a cycle when blocks' `Init`s call each other.
+pub(crate) mod init_waits;
 /// Lifecycle orchestrator: drives `setup` → `validate_config` → `start` across all blocks.
 pub mod lifecycle;
 /// Block-registration core (registry maps + WRAP state), grouped out of `Wafer`.
@@ -152,6 +153,9 @@ pub struct Wafer {
     /// Where [`Wafer::seal`] stands: not run, succeeded, or failed (with the
     /// failure it reported). A second call is refused either way.
     pub(crate) seal_state: SealState,
+    /// Wait-for graph of the inits in flight, `Arc`-shared with every
+    /// [`RuntimeContext`] so every dispatch path checks one graph.
+    pub(crate) init_waits: Arc<crate::runtime::init_waits::InitWaits>,
 }
 
 /// The outcome of [`Wafer::seal`], which runs once per runtime.
@@ -212,6 +216,7 @@ impl Wafer {
             config: crate::runtime::config_source::ConfigState::default_static(),
             plan: crate::runtime::exec_plan::SealedPlan::empty(),
             seal_state: SealState::Unsealed,
+            init_waits: Arc::default(),
         }
     }
 
@@ -411,13 +416,8 @@ impl Wafer {
         self.registration.register_interface(spec);
     }
 
-    /// Build a RuntimeContext with shared fields pre-filled.
-    ///
-    /// `init_breadcrumbs` is the per-dispatch init cycle-detection stack.
-    /// Top-level callers (HTTP listener, lifecycle, flow executor) pass
-    /// `InitStack::new()`. Nested callers (the `init_block_with_stack`
-    /// pipeline) pass the inherited stack so transitive `init_block`
-    /// calls participate in the same frame.
+    /// Build a top-level RuntimeContext (depth 0, no caller, outside every
+    /// Init) with shared fields pre-filled.
     pub(crate) fn make_context(
         &self,
         flow_id: impl Into<String>,
@@ -425,7 +425,6 @@ impl Wafer {
         config: Arc<HashMap<String, String>>,
         cancelled: Arc<AtomicBool>,
         deadline: Option<Instant>,
-        init_breadcrumbs: crate::runtime::init_stack::InitStack,
     ) -> RuntimeContext {
         RuntimeContext {
             flow_id: flow_id.into(),
@@ -445,7 +444,8 @@ impl Wafer {
             wrap_grants: self.registration.wrap.grants.clone(),
             wrap_admin_block: self.registration.wrap.admin_block.clone(),
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
-            init_breadcrumbs,
+            init_waits: self.init_waits.clone(),
+            init_attempt: None,
             slots: self.registration.slots.clone(),
             config_source: self.config.source.clone(),
             hooks: self.hooks.clone(),
@@ -470,16 +470,8 @@ impl Wafer {
         config: Arc<HashMap<String, String>>,
         cancelled: Arc<AtomicBool>,
         deadline: Option<Instant>,
-        init_breadcrumbs: crate::runtime::init_stack::InitStack,
     ) -> RuntimeContext {
-        let mut ctx = self.make_context(
-            flow_id,
-            block_name,
-            config,
-            cancelled,
-            deadline,
-            init_breadcrumbs,
-        );
+        let mut ctx = self.make_context(flow_id, block_name, config, cancelled, deadline);
         ctx.caller_requires = self.resolve_block_requires(block_name);
         ctx
     }
@@ -521,31 +513,16 @@ impl Wafer {
     /// On the first call:
     /// 1. Loads the block's declared env-config via [`ConfigSource::load_for_block`].
     /// 2. Serializes the resulting `HashMap<String,String>` to JSON bytes.
-    /// 3. Invokes `block.lifecycle(Init { data })` with a fresh init-stack
-    ///    `RuntimeContext` so any nested `init_block` call participates in
-    ///    cycle detection.
+    /// 3. Invokes `block.lifecycle(Init { data })` on the block's own Init
+    ///    context ([`RuntimeContext::for_init`]).
     ///
     /// Outcome caching follows [`BlockSlot::get_or_init`]: `Ok` and
     /// [`InitError::Permanent`] are cached for the slot's lifetime;
-    /// [`InitError::Transient`] and [`InitError::Cycle`] are not.
+    /// [`InitError::Transient`] is retried after a backoff and
+    /// [`InitError::Cycle`] is not cached.
     pub async fn init_block(
         &self,
         name: &str,
-    ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
-        self.init_block_with_stack(name, &crate::runtime::init_stack::InitStack::new())
-            .await
-    }
-
-    /// Same as [`Wafer::init_block`] but uses the caller's init-stack for
-    /// cycle detection. Called from the top-level dispatch paths
-    /// (`Wafer::run_block`, the flow executor) and from
-    /// [`RuntimeContext::dispatch_call`] (block-to-block `call_block`) so
-    /// init runs at most once per block per slot, with cycle detection
-    /// across nested init.
-    pub(crate) async fn init_block_with_stack(
-        &self,
-        name: &str,
-        stack: &crate::runtime::init_stack::InitStack,
     ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
         use crate::runtime::slot::InitError;
 
@@ -553,46 +530,19 @@ impl Wafer {
             .registration
             .blocks
             .get(name)
-            .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?
-            .clone();
-        // Every registered block — including remote ones downloaded by
-        // `seal()` — pairs registration with a slot via `register_block_inner`
-        // or `register_remote_block`. If `self.registration.blocks` contains `name` but
-        // `self.registration.slots` does not, that is a runtime invariant violation; the
-        // panic message points at the bug rather than masking it with a
-        // fresh slot (which would let concurrent first-callers each run
-        // `lifecycle(Init)` independently).
-        let slot = self
-            .registration
-            .slots
-            .get(name)
-            .cloned()
-            .expect("slot must exist for any registered block");
-
-        // Build the lifecycle(Init) context. The stack we were just handed is
-        // inherited into the context so any `init_block` call made transitively
-        // by this block participates in the same cycle-detection frame.
-        // SEC-04: `make_block_context` installs the block's `requires` so any
-        // `call_block` made during Init is gated by the same allowlist as its
-        // request-time calls.
-        let init_ctx = self.make_block_context(
+            .ok_or_else(|| InitError::Permanent(format!("block not registered: {name}")))?;
+        let slot = self.slot_for(name);
+        // The template contributes only runtime-wide state; `for_init` sets
+        // every per-call field. It is outside every Init, so this init waits
+        // on behalf of no other.
+        let template = self.make_context(
             "init",
             name,
             self.plan.empty_config.clone(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             None,
-            stack.clone(),
         );
-
-        run_init_pipeline(
-            name,
-            block,
-            slot,
-            self.config.source.clone(),
-            init_ctx,
-            stack,
-        )
-        .await
+        run_init_pipeline(name, block, &slot, &template).await
     }
 
     /// Walk every registered block's [`BlockInfo::config_keys`] and ask the
@@ -651,43 +601,55 @@ pub(crate) fn init_error_to_wafer_error(
     }
 }
 
-/// Shared body of the lazy-init pipeline. Used by both
-/// [`Wafer::init_block_with_stack`] (top-level + transitive init from inside
-/// `lifecycle(Init)`) and [`RuntimeContext::dispatch_call`] (init the callee
-/// before block-to-block dispatch).
+/// Shared body of the lazy-init pipeline. Used by [`Wafer::init_block`]
+/// (eager boot init) and by [`runner::run_resolved`], the scaffold of every
+/// dispatch path (`Wafer::run_block`, flow steps and `call_block`).
 ///
-/// Pushes `name` onto the dispatch-scoped init stack, then delegates to the
-/// slot's `get_or_init`. The push happens before locking the slot so a parent
-/// frame already holding this block on the stack short-circuits with
-/// `InitError::Cycle` before re-entering init. The guard pops on drop and
-/// must outlive `get_or_init` so transitive `init_block` calls made from
-/// inside `lifecycle(Init)` see this name on the stack.
+/// `template` is the context of the frame that needs `name` initialized.
+/// When that frame runs on behalf of another block's Init (its
+/// `init_attempt`), reaching `name`'s init is a wait of that Init: the wait
+/// is recorded in the runtime-wide wait-for graph before the slot is locked,
+/// and refused with [`InitError::Cycle`] if it would close an init cycle —
+/// otherwise the slot lock would deadlock. The wait lasts until `name`'s
+/// init outcome is known.
+///
+/// Init itself runs on [`RuntimeContext::for_init`], owned by a fresh
+/// attempt, with a panic caught (native) and reported as
+/// [`InitError::Permanent`]; a lifecycle error is classified by
+/// [`InitError::from_lifecycle_error`].
 pub(crate) async fn run_init_pipeline(
     name: &str,
-    block: Arc<dyn Block>,
-    slot: Arc<crate::runtime::slot::BlockSlot>,
-    config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
-    init_ctx: RuntimeContext,
-    stack: &crate::runtime::init_stack::InitStack,
+    block: &Arc<dyn Block>,
+    slot: &crate::runtime::slot::BlockSlot,
+    template: &RuntimeContext,
 ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
     use crate::runtime::{config_source::ConfigError, slot::InitError};
 
-    let _guard = stack.push(name).map_err(|path| InitError::Cycle { path })?;
+    let _wait = template
+        .init_attempt
+        .as_ref()
+        .map(|waiter| template.init_waits.wait_for(waiter, name))
+        .transpose()
+        .map_err(|path| InitError::Cycle { path })?;
 
-    let block_name = name.to_string();
-    let block_for_init = block.clone();
-    let cfg_src = config_source;
+    let attempt = template.init_waits.attempt(name);
+    let init_ctx = template.for_init(name, block.as_ref(), attempt.clone());
+    let init_waits = template.init_waits.clone();
+    let config_source = template.config_source.clone();
     // Snapshot of caller-registered JSON config (via `Wafer::add_block_config`).
     // Threaded into the init payload alongside env-resolved keys so blocks like
     // `wafer-run/router` (which read `"routes"` from `event.data`) still see
     // their config after lazy init. See the regression test
     // `init_merges_block_config`.
-    let block_configs_snapshot = init_ctx.snapshot.block_configs.clone();
+    let block_configs_snapshot = template.snapshot.block_configs.clone();
 
     slot.get_or_init(|| async move {
-        let info = block_for_init.info();
-        let env_cfg = cfg_src
-            .load_for_block(&block_name, &info.config_keys)
+        // Owner of `name` for as long as its init runs, which is while the
+        // slot lock is held.
+        let _owner = init_waits.own(&attempt);
+        let info = block.info();
+        let env_cfg = config_source
+            .load_for_block(name, &info.config_keys)
             .await
             .map_err(|e| match e {
                 ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
@@ -709,7 +671,7 @@ pub(crate) async fn run_init_pipeline(
         // `wafer-run/router`'s `"routes"` array). This merge restores the
         // pre-#98 contract.
         let mut merged: serde_json::Map<String, serde_json::Value> = block_configs_snapshot
-            .get(&block_name)
+            .get(name)
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
         for (k, v) in env_cfg.into_inner() {
@@ -718,20 +680,48 @@ pub(crate) async fn run_init_pipeline(
         let data = serde_json::to_vec(&serde_json::Value::Object(merged))
             .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
 
-        block_for_init
-            .lifecycle(
-                &init_ctx,
-                wafer_block::core_types::LifecycleEvent {
-                    event_type: wafer_block::core_types::LifecycleType::Init,
-                    data,
-                },
-            )
-            .await
-            .map_err(|e| InitError::Permanent(format!("lifecycle init failed: {e}")))?;
-
+        run_init_lifecycle(block.as_ref(), &init_ctx, data).await?;
         Ok(crate::runtime::slot::InitializedState::new())
     })
     .await
+}
+
+/// Dispatch `lifecycle(Init)` and classify its failure. On native targets a
+/// panic is caught (the same recovery `run_block_with_recovery` gives
+/// `handle`) and reported as [`InitError::Permanent`] — cached like any other
+/// permanent failure, and surfaced by whoever asked for the init — instead
+/// of unwinding into the dispatching task. On wasm32 a panic aborts the
+/// instance.
+async fn run_init_lifecycle(
+    block: &dyn Block,
+    ctx: &RuntimeContext,
+    data: Vec<u8>,
+) -> Result<(), crate::runtime::slot::InitError> {
+    use crate::runtime::slot::InitError;
+
+    let event = LifecycleEvent {
+        event_type: LifecycleType::Init,
+        data,
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let outcome = {
+        use futures::FutureExt;
+        match std::panic::AssertUnwindSafe(block.lifecycle(ctx, event))
+            .catch_unwind()
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(payload) => {
+                return Err(InitError::Permanent(format!(
+                    "lifecycle init panicked: {}",
+                    runner::panic_message(&*payload)
+                )));
+            }
+        }
+    };
+    #[cfg(target_arch = "wasm32")]
+    let outcome = block.lifecycle(ctx, event).await;
+    outcome.map_err(|e| InitError::from_lifecycle_error(&e))
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,7 +1061,6 @@ mod tests {
             Arc::new(overrides),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
-            crate::runtime::init_stack::InitStack::new(),
         )
     }
 

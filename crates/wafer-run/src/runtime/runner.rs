@@ -35,29 +35,26 @@ pub(crate) struct DispatchTarget<'a> {
     pub(crate) slot: &'a Arc<super::slot::BlockSlot>,
 }
 
-/// Lazy-init inputs for [`run_resolved`] — the resolved block plus the
-/// config source, context and cycle-detection stack the init pipeline needs.
-/// Built on demand (via the `make_init` closure) only when the block's init
-/// outcome is not already cached, so the steady state pays none of it.
+/// Lazy-init inputs for [`run_resolved`]: the resolved block and the context
+/// its init is built from. Borrowed, so the steady state (init outcome
+/// settled) pays nothing for them.
 pub(crate) struct DispatchInit<'a> {
     /// The resolved target block.
-    pub(crate) block: Arc<dyn Block>,
-    /// Per-block env-var config source consulted on first init.
-    pub(crate) config_source: Arc<dyn super::config_source::ConfigSource>,
-    /// Context passed to `lifecycle(Init)`.
-    pub(crate) init_ctx: RuntimeContext,
-    /// Init cycle-detection stack for this dispatch.
-    pub(crate) stack: &'a super::init_stack::InitStack,
+    pub(crate) block: &'a Arc<dyn Block>,
+    /// The dispatching frame's context: the template
+    /// [`RuntimeContext::for_init`] builds the Init context from, and, through
+    /// its `init_attempt`, the Init (if any) this dispatch waits on behalf of.
+    pub(crate) template: &'a RuntimeContext,
 }
 
 /// Shared scaffolding for all three dispatch paths ([`Wafer::run_block`],
 /// the flow executor's per-step dispatch, and
 /// [`RuntimeContext::dispatch_call`]):
 ///
-/// 1. Lazy init — fast path on `slot`'s cached outcome; on the first
-///    dispatch (or while init is in flight) build the init inputs via
-///    `make_init` and run the init pipeline, returning a failure as the
-///    typed error (`Err`) the caller turns into its terminal.
+/// 1. Lazy init — fast path on `slot`'s settled outcome; on the first
+///    dispatch (or while init is in flight or may be retried) run the init
+///    pipeline, returning a failure as the typed error (`Err`) the caller
+///    turns into its terminal.
 /// 2. Observability — bracket the dispatch in the opt-in
 ///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
 ///
@@ -69,7 +66,7 @@ pub(crate) async fn run_resolved<'a, T, Fut>(
     hooks: &ObservabilityBus,
     obs: DispatchObs<'a>,
     target: DispatchTarget<'a>,
-    make_init: impl FnOnce() -> DispatchInit<'a>,
+    init: DispatchInit<'a>,
     msg: Message,
     input: InputStream,
     invoke: impl FnOnce(Message, InputStream) -> Fut,
@@ -77,28 +74,20 @@ pub(crate) async fn run_resolved<'a, T, Fut>(
 where
     Fut: std::future::Future<Output = T>,
 {
-    // PERF-03: once a block's init outcome is cached, skip constructing the
-    // dedicated init context and init-stack frame per dispatch. `try_cached`
-    // returns `None` both for "never initialized" and "init in flight"
-    // (mutex held) — the slow path re-checks under the slot's lock, and its
-    // stack push still detects init cycles (a block mid-init always holds
-    // the slot mutex, so a cyclic dispatch can never take the fast path).
+    // PERF-03: once a block's init outcome is settled, skip constructing the
+    // dedicated init context per dispatch. `try_cached` returns `None` both
+    // for "init may run now" and "init in flight" (mutex held) — the slow
+    // path re-checks under the slot's lock, and the pipeline refuses a wait
+    // that would close an init cycle before taking that lock.
     match target.slot.try_cached() {
         Some(Ok(_)) => {}
         Some(Err(e)) => {
             return Err(super::init_error_to_wafer_error(target.resolved, e));
         }
         None => {
-            let init = make_init();
-            if let Err(e) = super::run_init_pipeline(
-                target.resolved,
-                init.block,
-                target.slot.clone(),
-                init.config_source,
-                init.init_ctx,
-                init.stack,
-            )
-            .await
+            if let Err(e) =
+                super::run_init_pipeline(target.resolved, init.block, target.slot, init.template)
+                    .await
             {
                 return Err(super::init_error_to_wafer_error(target.resolved, e));
             }
@@ -279,20 +268,10 @@ impl Wafer {
         // Use the resolved block name instead. `flow_id` is empty (no flow
         // in scope at the top level).
         //
-        // Top-level dispatch starts a fresh init-stack; any transitive
-        // `init_block` calls inherit it through `RuntimeContext`.
-        let init_stack = crate::runtime::init_stack::InitStack::new();
         // SEC-04: `make_block_context` installs the target's declared
         // `requires` allowlist so `call_block` is gated the same on every
         // invocation path (direct, flow step, nested, lifecycle).
-        let ctx = self.make_block_context(
-            "",
-            resolved,
-            block_config,
-            cancelled,
-            None,
-            init_stack.clone(),
-        );
+        let ctx = self.make_block_context("", resolved, block_config, cancelled, None);
 
         // Lazy init + observability bracket via the shared dispatch scaffold.
         let slot = self.slot_for(resolved);
@@ -307,7 +286,10 @@ impl Wafer {
                 resolved,
                 slot: &slot,
             },
-            || self.dispatch_init(resolved, &block, &init_stack),
+            DispatchInit {
+                block: &block,
+                template: &ctx,
+            },
             msg,
             input,
             |msg, input| block.handle(&ctx, msg, input),
@@ -330,32 +312,6 @@ impl Wafer {
             .expect("slot must exist for any registered block")
     }
 
-    /// Build the lazy-init inputs for [`run_resolved`] from runtime state:
-    /// the config source and a dedicated `lifecycle(Init)` context that
-    /// inherits `stack` so transitive `init_block` calls participate in the
-    /// same cycle-detection frame. Only called (via the `make_init` closure)
-    /// when the block's init outcome is not already cached.
-    pub(crate) fn dispatch_init<'a>(
-        &self,
-        resolved: &str,
-        block: &Arc<dyn Block>,
-        stack: &'a super::init_stack::InitStack,
-    ) -> DispatchInit<'a> {
-        DispatchInit {
-            block: block.clone(),
-            config_source: self.config.source.clone(),
-            init_ctx: self.make_context(
-                "init",
-                resolved,
-                self.plan.empty_config.clone(),
-                Arc::new(AtomicBool::new(false)),
-                None,
-                stack.clone(),
-            ),
-            stack,
-        }
-    }
-
     /// Flows returns info about all loaded flows.
     pub fn flows_info(&self) -> Vec<wafer_flow::FlowInfo> {
         self.flows
@@ -371,6 +327,19 @@ impl Wafer {
     /// Return all WaferFlow definitions.
     pub fn flow_defs(&self) -> Vec<wafer_flow::WaferFlow> {
         self.flows.values().cloned().collect()
+    }
+}
+
+/// The message a caught panic carried: its `&str` or `String` payload, else
+/// `"unknown panic"`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -391,19 +360,10 @@ pub async fn run_block_with_recovery(
             .await;
         match result {
             Ok(out) => out,
-            Err(panic_info) => {
-                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                OutputStream::error(WaferError::new(
-                    ErrorCode::Internal,
-                    format!("block panicked: {panic_msg}"),
-                ))
-            }
+            Err(panic_info) => OutputStream::error(WaferError::new(
+                ErrorCode::Internal,
+                format!("block panicked: {}", panic_message(&*panic_info)),
+            )),
         }
     }
 

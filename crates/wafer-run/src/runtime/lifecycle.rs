@@ -260,8 +260,7 @@ impl Wafer {
     pub async fn init_all_blocks(&self) {
         let block_names: Vec<String> = self.registration.blocks.keys().cloned().collect();
         for name in &block_names {
-            let stack = crate::runtime::init_stack::InitStack::new();
-            if let Err(e) = self.init_block_with_stack(name, &stack).await {
+            if let Err(e) = self.init_block(name).await {
                 tracing::error!(
                     block = %name,
                     error = %e,
@@ -375,7 +374,6 @@ impl Wafer {
                 self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),
                 None,
-                crate::runtime::init_stack::InitStack::new(),
             );
             if let Err(e) = block
                 .lifecycle(
@@ -430,7 +428,6 @@ impl Wafer {
                 self.plan.empty_config.clone(),
                 Arc::new(AtomicBool::new(false)),
                 None,
-                crate::runtime::init_stack::InitStack::new(),
             );
             if let Err(e) = block
                 .lifecycle(
