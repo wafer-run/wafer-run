@@ -180,8 +180,10 @@ async fn unnamespaced_grant_rejected_via_seal() {
                 "expected rejection from example/foo, got: {errors:?}",
             );
             assert!(
-                errors.iter().any(|e| e.reason.contains("unnamespaced")
-                    && e.reason.contains("legacy_table_no_prefix")),
+                errors
+                    .iter()
+                    .any(|e| e.reason.contains("not namespaced to a single block")
+                        && e.reason.contains("legacy_table_no_prefix")),
                 "reason should flag the unnamespaced resource by name: {errors:?}",
             );
         }

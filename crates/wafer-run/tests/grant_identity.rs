@@ -5,6 +5,11 @@
 //! same name. A block whose `info()` names it something else — for a WASM
 //! guest, bytes the guest wrote — is refused at registration, and grant
 //! validation never consults the reported name.
+//!
+//! The wildcard half: a namespace grant's pattern must stay inside the
+//! declaring block's namespace, so `acme/files*` (which also matches
+//! `acme/filesx/...`) and `acme/*` (all of `acme`) have no owner and are
+//! refused.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -191,4 +196,110 @@ async fn grant_rescan_judges_grants_by_registration_name() {
         }
         other => panic!("expected GrantsRejected, got {:?}", other.map(|_| "Ok(_)")),
     }
+}
+
+async fn seal_with_grant(block: &str, grant: ResourceGrant) -> Result<(), RuntimeError> {
+    let mut w = wafer();
+    w.register_block(block, Arc::new(Reports(info(block, vec![grant]))))
+        .expect("register");
+    w.seal().await
+}
+
+fn assert_rejected(result: Result<(), RuntimeError>, block: &str, resource: &str) {
+    match result {
+        Err(RuntimeError::GrantsRejected(errors)) => assert!(
+            errors
+                .iter()
+                .any(|e| e.block == block && e.grant.resource == resource),
+            "expected {block}'s `{resource}` grant rejected: {errors:?}"
+        ),
+        other => panic!(
+            "expected GrantsRejected for {block}'s `{resource}`, got {:?}",
+            other.map(|_| "Ok(_)")
+        ),
+    }
+}
+
+/// `acme/files*` matches `acme/files/...` AND `acme/filesx/...`, so it is not
+/// owned by `acme/filesx` (nor by `acme/files`) and cannot be declared by it.
+#[tokio::test]
+async fn storage_wildcard_reaching_a_sibling_block_is_rejected() {
+    assert_rejected(
+        seal_with_grant(
+            "acme/filesx",
+            ResourceGrant::read_write("*", "acme/files*").typed(ResourceType::Storage),
+        )
+        .await,
+        "acme/filesx",
+        "acme/files*",
+    );
+}
+
+/// `acme/*` covers every block in the `acme` org.
+#[tokio::test]
+async fn storage_wildcard_covering_the_org_is_rejected() {
+    assert_rejected(
+        seal_with_grant(
+            "acme/x",
+            ResourceGrant::read_write("*", "acme/*").typed(ResourceType::Storage),
+        )
+        .await,
+        "acme/x",
+        "acme/*",
+    );
+}
+
+/// Guard (passes before and after the fix): a `*` inside the block segment
+/// matches other blocks too, so the pattern has no owner.
+#[tokio::test]
+async fn storage_wildcard_inside_the_block_segment_is_rejected() {
+    assert_rejected(
+        seal_with_grant(
+            "acme/files",
+            ResourceGrant::read_write("*", "acme/fi*/public/*").typed(ResourceType::Storage),
+        )
+        .await,
+        "acme/files",
+        "acme/fi*/public/*",
+    );
+}
+
+/// Guard (passes before and after the fix): wildcards that stay inside the
+/// declaring block's own namespace are accepted, for Storage and for Db.
+#[tokio::test]
+async fn wildcards_inside_the_own_namespace_are_accepted() {
+    seal_with_grant(
+        "acme/files",
+        ResourceGrant::read_write("*", "acme/files/*").typed(ResourceType::Storage),
+    )
+    .await
+    .expect("acme/files/* is acme/files's");
+    seal_with_grant(
+        "acme/files",
+        ResourceGrant::read("*", "acme/files/public/*").typed(ResourceType::Storage),
+    )
+    .await
+    .expect("acme/files/public/* is acme/files's");
+    seal_with_grant(
+        "acme/files",
+        ResourceGrant::read_write("*", "acme__files__*"),
+    )
+    .await
+    .expect("acme__files__* is acme/files's");
+}
+
+/// Guard (passes before and after the fix): the Db form of the sibling
+/// wildcard was already refused, because `acme__files*` never reaches the
+/// `__` that ends the block segment.
+#[tokio::test]
+async fn db_wildcard_reaching_a_sibling_block_is_rejected() {
+    assert_rejected(
+        seal_with_grant(
+            "acme/filesx",
+            ResourceGrant::read_write("*", "acme__files*"),
+        )
+        .await,
+        "acme/filesx",
+        "acme__files*",
+    );
 }

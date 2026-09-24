@@ -20,7 +20,12 @@
   registered a block under a different name must register it under the name it
   reports (for a WASM guest, the `name` its `__wafer_info` returns). A WASM
   module whose `__wafer_info` fails reports the placeholder `unknown` and is
-  therefore refused too, where it used to register and never route.
+  therefore refused too, where it used to register and never route. Namespace
+  grant wildcards are also held to the declaring block's own namespace: the
+  owner is read from the pattern's literal text before the first `*`, which
+  must include the whole owner and its terminator (`acme/files/*`,
+  `acme__files__*`). `acme/files*` (which also matched `acme/filesx/...`) and
+  `acme/*` (all of `acme`) are rejected at `seal()` with `GrantsRejected`.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`

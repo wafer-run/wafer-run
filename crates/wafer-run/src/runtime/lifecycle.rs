@@ -54,7 +54,7 @@ pub(crate) struct GrantValidationOutcome {
 ///   `WaferBuilder::build`) and only then calling `set_admin_block`.
 /// - Storage grants and Db / untyped grants are namespace-based: every
 ///   resource a grant can match must be owned by the declaring block, per
-///   [`wafer_block::wrap::typed_resource_owner`]. Unnamespaced or owned-by-other grants are
+///   [`grant_resource_owner`]. Unnamespaced or owned-by-other grants are
 ///   pushed into `rejected` so `seal()` surfaces them via
 ///   `RuntimeError::GrantsRejected`.
 /// - Every grant must pass [`wafer_block::types::ResourceGrant::check_shape`]
@@ -130,18 +130,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
 
         // SECURITY: namespace-based grants — blocks can only grant
         // access to resources they own.
-        // Dispatches to the right parser based on resource type (Storage uses
-        // `{org}/{block}/...`, Db / untyped use `{org}__{block}__...`).
-        let grant_owner = if grant.resource.ends_with('*') {
-            let base = grant.resource.trim_end_matches('*');
-            wafer_block::wrap::typed_resource_owner(
-                &format!("{base}x"),
-                grant.resource_type.as_ref(),
-            )
-        } else {
-            wafer_block::wrap::typed_resource_owner(&grant.resource, grant.resource_type.as_ref())
-        };
-        match grant_owner {
+        match grant_resource_owner(&grant.resource, grant.resource_type.as_ref()) {
             Some(owner) if owner == block_name => accepted.push(grant.clone()),
             Some(owner) => {
                 tracing::error!(
@@ -160,7 +149,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
             None => {
                 tracing::error!(
                     block = %block_name, resource = %grant.resource,
-                    "WRAP: rejecting grant with unnamespaced resource"
+                    "WRAP: rejecting grant whose resource is not namespaced to a single block"
                 );
                 // Shape the hint to the resource type. Storage grants
                 // expect `{org}/{block}/...`; Db / untyped expect
@@ -175,7 +164,7 @@ pub(crate) fn validate_and_collect_grants_for_block(
                     block: block_name.to_string(),
                     grant: grant.clone(),
                     reason: format!(
-                        "resource `{}` is unnamespaced — namespace-based grants must target {expected_shape}",
+                        "resource `{}` is not namespaced to a single block — namespace-based grants must target {expected_shape}",
                         grant.resource,
                     ),
                 });
@@ -183,6 +172,40 @@ pub(crate) fn validate_and_collect_grants_for_block(
         }
     }
     GrantValidationOutcome { accepted, rejected }
+}
+
+/// The block that owns every resource a namespace grant on `resource` can
+/// match, or `None` when no single block does.
+///
+/// A resource without `*` is one resource, owned per
+/// [`wafer_block::wrap::typed_resource_owner`] (Storage parses
+/// `{org}/{block}/...`, Db / untyped parse `{org}__{block}__...`). A pattern
+/// matches every resource that starts with its literal text up to the first
+/// `*`, so the owner is read from that literal prefix alone, and the prefix
+/// must spell out the whole owner segment AND its terminator:
+/// `acme/files/*` and `acme__files__*` belong to `acme/files`, while
+/// `acme/files*` also matches `acme/filesx/...` and `acme/*` matches all of
+/// `acme`, so neither has an owner. Requiring the terminator inside the
+/// literal prefix also keeps `*` out of the owner segments.
+fn grant_resource_owner(resource: &str, resource_type: Option<&ResourceType>) -> Option<String> {
+    let Some(star) = resource.find('*') else {
+        return wafer_block::wrap::typed_resource_owner(resource, resource_type);
+    };
+    let literal = &resource[..star];
+    match resource_type {
+        Some(ResourceType::Storage) => {
+            // `{org}/{block}/` — the owner's two segments and the `/` that
+            // ends the second one.
+            let path = literal.strip_prefix('@').unwrap_or(literal);
+            if path.matches('/').count() < 2 {
+                return None;
+            }
+            wafer_block::wrap::storage_resource_owner(path)
+        }
+        // `resource_owner` already requires the `__` that ends the block
+        // segment (`acme__files__`), so the literal prefix is enough.
+        _ => wafer_block::wrap::resource_owner(literal),
+    }
 }
 
 impl Wafer {
