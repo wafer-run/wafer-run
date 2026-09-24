@@ -201,8 +201,8 @@ impl Block for CachedAsset {
     }
 }
 
-/// Middleware that refreshes the `sid` cookie under a positional key, as a
-/// `ResponseBuilder`-style producer would.
+/// Middleware that refreshes the `sid` cookie under a hand-written
+/// positional key.
 struct SessionMiddleware;
 
 #[async_trait::async_trait]

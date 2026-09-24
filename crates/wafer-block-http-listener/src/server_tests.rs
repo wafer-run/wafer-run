@@ -14,7 +14,7 @@ use tokio::{
 };
 use wafer_block::{
     http_codec::META_HTTP_PATH, meta::META_REQ_CLIENT_IP, Block, InputStream, LifecycleEvent,
-    LifecycleType, Message, OutputStream,
+    LifecycleType, Message, MetaEntry, OutputStream,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -29,8 +29,11 @@ const BIG_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Runtime behind the test listener. By path: `/big` answers with
 /// [`BIG_RESPONSE_BYTES`], `/slow` answers after 500 ms, `/hang` after a
-/// minute; anything else answers with the client IP the listener put on the
-/// message.
+/// minute, `/bad-headers` with a `Content-Security-Policy` no transport can
+/// send beside a valid header, `/owned-headers` with transport-owned headers
+/// and a lower-case `content-type`, `/xff` with the request's
+/// `X-Forwarded-For` header as the message carries it; anything else answers
+/// with the client IP the listener put on the message.
 struct TestRuntime;
 
 #[wafer_async_trait]
@@ -43,6 +46,37 @@ impl wafer_block::Runtime for TestRuntime {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 OutputStream::respond(b"slow done".to_vec())
             }
+            "/bad-headers" => OutputStream::respond_with_meta(
+                b"body".to_vec(),
+                vec![
+                    MetaEntry {
+                        key: "resp.header.Content-Security-Policy".into(),
+                        value: "script-src \u{2019}self\u{2019}".into(),
+                    },
+                    MetaEntry {
+                        key: "resp.header.X-Good".into(),
+                        value: "ok".into(),
+                    },
+                ],
+            ),
+            "/owned-headers" => OutputStream::respond_with_meta(
+                b"body".to_vec(),
+                vec![
+                    MetaEntry {
+                        key: "resp.header.Content-Length".into(),
+                        value: "999".into(),
+                    },
+                    MetaEntry {
+                        key: "resp.header.content-type".into(),
+                        value: "text/plain".into(),
+                    },
+                    MetaEntry {
+                        key: "resp.header.X-Good".into(),
+                        value: "ok".into(),
+                    },
+                ],
+            ),
+            "/xff" => OutputStream::respond(msg.header("x-forwarded-for").as_bytes().to_vec()),
             "/hang" => {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 OutputStream::respond(b"hang done".to_vec())
@@ -160,6 +194,110 @@ async fn multi_line_xff_from_trusted_proxy_resolves_the_real_client() {
         response.ends_with("\r\n\r\n198.51.100.7"),
         "client IP must come from the proxy-appended line: {response}"
     );
+}
+
+/// Every `X-Forwarded-For` line reaches the message's header, joined in
+/// wire order — not only the last one.
+#[tokio::test]
+async fn repeated_request_header_lines_reach_the_message_joined() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(
+            b"GET /xff HTTP/1.1\r\nHost: t\r\n\
+              X-Forwarded-For: 203.0.113.99\r\n\
+              X-Forwarded-For: 198.51.100.7\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.ends_with("\r\n\r\n203.0.113.99, 198.51.100.7"),
+        "{response}"
+    );
+}
+
+/// A header no transport can send fails the response closed: a uniform 500
+/// with none of the response's headers, never the page without its CSP.
+#[tokio::test]
+async fn an_unsendable_response_header_fails_closed_as_a_500() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /bad-headers HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    let lower = response.to_ascii_lowercase();
+    assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+    assert!(!lower.contains("x-good"), "{response}");
+    assert!(!lower.contains("content-security-policy"), "{response}");
+    assert!(
+        response.ends_with(r#"{"error":"Internal","message":"internal server error"}"#),
+        "{response}"
+    );
+}
+
+/// Transport-owned headers are dropped and the response stands; a
+/// lower-case `content-type` header is the one Content-Type, and the body is
+/// framed by the transport, not by the block's `Content-Length`.
+#[tokio::test]
+async fn transport_owned_response_headers_are_dropped() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /owned-headers HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    let lower = response.to_ascii_lowercase();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(lower.contains("\r\nx-good: ok\r\n"), "{response}");
+    assert!(lower.contains("\r\ncontent-length: 4\r\n"), "{response}");
+    assert!(!lower.contains("999"), "{response}");
+    assert_eq!(lower.matches("\r\ncontent-type:").count(), 1, "{response}");
+    assert!(
+        lower.contains("\r\ncontent-type: text/plain\r\n"),
+        "{response}"
+    );
+    assert!(response.ends_with("\r\n\r\nbody"), "{response}");
+}
+
+/// A request repeating a single-valued header is refused with 400, not
+/// joined into one ambiguous value (RFC 9110 §5.3, RFC 9112 §6.3). hyper
+/// itself refuses differing `Content-Length` lines and folds identical ones
+/// into one, which RFC 9112 §6.3 permits; `Host`, `Authorization` and
+/// `Content-Type` reach the listener, which refuses them.
+#[tokio::test]
+async fn a_repeated_single_valued_request_header_is_a_400() {
+    let server = Server::start(serde_json::json!({})).await;
+    for repeated in [
+        "Host: t\r\nHost: u\r\n",
+        "Host: t\r\nAuthorization: Bearer a\r\nauthorization: Bearer b\r\n",
+        "Host: t\r\nContent-Type: text/plain\r\nContent-Type: application/json\r\n",
+        "Host: t\r\nContent-Length: 0\r\nContent-Length: 5\r\n",
+    ] {
+        let mut stream = server.connect().await;
+        stream
+            .write_all(format!("GET / HTTP/1.1\r\n{repeated}Connection: close\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let response = read_until_closed(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("response arrives");
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "{repeated:?} must be refused: {response}"
+        );
+    }
 }
 
 /// Slowloris: a client that starts a request head and never finishes it is

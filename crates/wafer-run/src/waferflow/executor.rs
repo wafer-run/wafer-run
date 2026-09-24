@@ -55,8 +55,8 @@
 //! [`super::response_meta`]: a header replaces the message's header of the
 //! same name (case-insensitively), `Vary` values are unioned, and a cookie
 //! replaces the message's cookie of the same name, `Path` and `Domain` —
-//! never an unrelated cookie that happens to share its positional
-//! `resp.set_cookie.N` key.
+//! never an unrelated cookie that happens to share its `resp.set_cookie.*`
+//! key.
 //!
 //! # Short-circuit terminals keep the middleware's response headers
 //!
@@ -86,6 +86,14 @@
 //!   message is never applied;
 //! - a parallel branch's message changes, discarded at the join (see step
 //!   semantics).
+//!
+//! A step whose output carries response meta no transport can send (an
+//! invalid status, header name, or a header, cookie or content-type value
+//! with a control or non-ASCII character — see
+//! `wafer_block::http_codec::classify_response_meta`) fails with `Internal`,
+//! whatever `on_error` says, before any of its meta is applied: the flow
+//! stops with the middleware's headers carried as above, so a malformed
+//! value never displaces a valid one.
 //!
 //! The terminal's own entries are laid over the carried ones with the same
 //! rules as a responding step's, so the terminal wins and `Vary` is unioned.
@@ -702,6 +710,31 @@ async fn run_invocation(
         Ok(buf) => buf,
         Err(init_failure) => return Err(ShortCircuit::Error(init_failure)),
     };
+
+    // --- Refuse response meta no transport can send, before any of it is
+    //     laid over the flow message (see the module docs). A middleware's
+    //     `Continue` is checked only for the entries it changed. ---
+    let produced: Vec<&MetaEntry> = match &buf {
+        Ok(response) => response.meta.iter().collect(),
+        Err(TerminalNotResponse::Error(e)) => e.meta.iter().collect(),
+        Err(TerminalNotResponse::Drop { meta }) => meta.iter().collect(),
+        Err(TerminalNotResponse::Halt(halt)) => halt.meta.iter().collect(),
+        Err(TerminalNotResponse::Continue(next)) => next
+            .meta
+            .iter()
+            .filter(|e| !state.msg.meta.contains(e))
+            .collect(),
+        Err(TerminalNotResponse::Malformed) => Vec::new(),
+    };
+    if let Some(invalid) = response_meta::first_unsendable(produced) {
+        return Err(ShortCircuit::Error(WaferError::new(
+            ErrorCode::Internal,
+            format!(
+                "block '{}' in step '{}' produced unsendable response meta: {}",
+                step.block_label, step.id, invalid
+            ),
+        )));
+    }
 
     // --- Process result ---
     match buf {

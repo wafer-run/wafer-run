@@ -135,10 +135,19 @@ pub fn action_for_http_method(method: &str) -> &'static str {
 ///   [`META_HTTP_QUERY_PREFIX`]`{key}` and [`META_REQ_QUERY_PREFIX`]`{key}`.
 ///
 /// `raw_query` is the query string without the leading `?` (empty when the
-/// URL has none). For `http.content_type`/`http.host` the **first**
-/// occurrence of the header wins (matching map-style `get` semantics);
-/// repeated headers otherwise follow [`Message::set_meta`] replace-by-key
-/// semantics.
+/// URL has none).
+///
+/// A header the request repeats — any case of its name — becomes **one**
+/// entry, its field lines joined in wire order: `Cookie` lines with `"; "`
+/// (RFC 6265 §5.4), every other header with `", "` (RFC 9110 §5.3). The
+/// mirrors ([`META_HTTP_CONTENT_TYPE`], [`META_HTTP_HOST`],
+/// [`META_REQ_CONTENT_TYPE`]) carry the same joined value as their
+/// `http.header.*` entry, so no reader sees a different line than another.
+///
+/// A header that may appear only once ([`SINGLETON_REQUEST_HEADERS`]) is not
+/// a list to join: an adapter that sees individual field lines answers a
+/// request repeating one with `400` before building the message (see
+/// [`repeated_singleton_header`]; the native listener does).
 pub fn build_http_message<I, N, V>(
     method: &str,
     path: &str,
@@ -154,22 +163,28 @@ where
     let method = method.to_ascii_uppercase();
     let mut msg = Message::new(format!("{method}:{path}"));
 
-    // Single pass over the caller's headers: lowercase names, capture
-    // content-type/host (first occurrence wins, like a map lookup).
+    // One entry per lowercased name, in first-occurrence order, repeated
+    // field lines joined in wire order.
     let mut header_meta: Vec<(String, String)> = Vec::new();
-    let mut content_type = String::new();
-    let mut host = String::new();
     for (name, value) in headers {
         let name = name.as_ref().to_lowercase();
         let value = value.as_ref();
-        if content_type.is_empty() && name == "content-type" {
-            content_type = value.to_string();
+        match header_meta.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, joined)) => {
+                joined.push_str(if name == "cookie" { "; " } else { ", " });
+                joined.push_str(value);
+            }
+            None => header_meta.push((name, value.to_string())),
         }
-        if host.is_empty() && name == "host" {
-            host = value.to_string();
-        }
-        header_meta.push((name, value.to_string()));
     }
+    let joined = |wanted: &str| {
+        header_meta
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map_or_else(String::new, |(_, value)| value.clone())
+    };
+    let content_type = joined("content-type");
+    let host = joined("host");
 
     // HTTP-specific meta.
     msg.set_meta(META_HTTP_METHOD, &method);
@@ -200,6 +215,37 @@ where
     msg
 }
 
+/// Request headers whose value is a single item, not a list (RFC 9110
+/// §5.3): two field lines of one of them make the request ambiguous — which
+/// `Host` is routed, which `Content-Length` frames the body (RFC 9112 §6.3),
+/// which credentials apply — so the request is refused, never joined.
+pub const SINGLETON_REQUEST_HEADERS: &[&str] =
+    &["authorization", "content-length", "content-type", "host"];
+
+/// The first [`SINGLETON_REQUEST_HEADERS`] name that `names` (a request's
+/// field-line names, one per line, any case) holds more than once, or `None`.
+/// An adapter that finds one answers `400 Bad Request`.
+pub fn repeated_singleton_header<I, N>(names: I) -> Option<&'static str>
+where
+    I: IntoIterator<Item = N>,
+    N: AsRef<str>,
+{
+    let mut seen = [false; SINGLETON_REQUEST_HEADERS.len()];
+    for name in names {
+        let name = name.as_ref();
+        if let Some(i) = SINGLETON_REQUEST_HEADERS
+            .iter()
+            .position(|s| s.eq_ignore_ascii_case(name))
+        {
+            if seen[i] {
+                return Some(SINGLETON_REQUEST_HEADERS[i]);
+            }
+            seen[i] = true;
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Response meta classification
 // ---------------------------------------------------------------------------
@@ -211,66 +257,241 @@ where
 pub enum ResponseMetaPart<'a> {
     /// [`META_RESP_STATUS`] with a valid HTTP status code (`100..=999`).
     Status(u16),
-    /// [`META_RESP_HEADER_PREFIX`]`{name}` — a response header.
+    /// [`META_RESP_HEADER_PREFIX`]`{name}` — a response header. `name` is a
+    /// valid field name and `value` a valid field value (see
+    /// [`classify_response_meta`]).
     Header {
-        /// Header name as written after the prefix (case preserved).
+        /// Header name as written after the prefix (case preserved). Never
+        /// `Content-Type` or `Set-Cookie` in any case: those classify as
+        /// [`Self::ContentType`] and [`Self::SetCookie`].
         name: &'a str,
         /// Header value.
         value: &'a str,
     },
-    /// [`META_RESP_COOKIE_PREFIX`]`*` — one `Set-Cookie` directive.
-    /// `Set-Cookie` is the one header that must not be joined/replaced, so
-    /// it is distinguished from [`Self::Header`]; adapters append it.
+    /// One `Set-Cookie` directive: a [`META_RESP_COOKIE_PREFIX`]`*` entry,
+    /// or a [`META_RESP_HEADER_PREFIX`]`{name}` entry whose name is any case
+    /// of `set-cookie`. `Set-Cookie` is the one header that must not be
+    /// joined/replaced, so it is distinguished from [`Self::Header`];
+    /// adapters append it.
     SetCookie(&'a str),
-    /// [`META_RESP_CONTENT_TYPE`] — the response `Content-Type`.
+    /// The response `Content-Type`: [`META_RESP_CONTENT_TYPE`], or a
+    /// [`META_RESP_HEADER_PREFIX`]`{name}` entry whose name is any case of
+    /// `content-type`.
     ContentType(&'a str),
 }
 
-/// Classify a single meta entry as a response part, or `None` if the key is
-/// not response-relevant (including all legacy alias keys — see the module
-/// docs) or carries an unusable value (non-numeric / out-of-range
-/// [`META_RESP_STATUS`]).
+/// Response headers the transport owns: connection management
+/// (RFC 9110 §7.6.1) and message framing (`Content-Length`,
+/// `Transfer-Encoding`). A block's value would contradict the connection or
+/// body the adapter actually produces, so these never classify as a
+/// [`ResponseMetaPart`]: they are refused as
+/// [`InvalidResponseMetaKind::TransportOwned`] and dropped, the response
+/// standing without them.
+pub const TRANSPORT_OWNED_RESPONSE_HEADERS: &[&str] = &[
+    "connection",
+    "content-length",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// A response meta entry [`classify_response_meta`] refuses: the key is
+/// response-relevant but the entry cannot go on the wire. The value is
+/// deliberately not carried — it may be a cookie or a token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidResponseMeta {
+    /// The refused meta key.
+    pub key: String,
+    /// Why it was refused.
+    pub reason: &'static str,
+    /// What the boundary does about it.
+    pub kind: InvalidResponseMetaKind,
+}
+
+/// How a refused response meta entry affects the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidResponseMetaKind {
+    /// A [`TRANSPORT_OWNED_RESPONSE_HEADERS`] header: dropped (logged), the
+    /// response stands — the transport sets its own.
+    TransportOwned,
+    /// A status, header name or value no transport can send. The response
+    /// fails closed as [`unsendable_response`]: serving it without the
+    /// entry could drop a security header (a `Content-Security-Policy`, a
+    /// `Cache-Control: no-store`, a logout's cookie clear) and fail open.
+    Unsendable,
+}
+
+impl std::fmt::Display for InvalidResponseMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "response meta {:?} refused: {}", self.key, self.reason)
+    }
+}
+
+impl std::error::Error for InvalidResponseMeta {}
+
+/// An RFC 9110 §5.6.2 token — the grammar of a field name.
+fn is_field_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// A field value every transport accepts: visible ASCII, space and
+/// horizontal tab. CR, LF, NUL and other controls would split or corrupt the
+/// header block; non-ASCII has no portable encoding (a Workers `Headers`
+/// refuses code points above U+00FF, hyper sends UTF-8 bytes as opaque
+/// `obs-text`), so a producer percent-encodes it (RFC 8187) instead.
+fn is_field_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|b| b == b'\t' || (b' '..=b'~').contains(&b))
+}
+
+/// Classify a single meta entry as a response part.
+///
+/// - `Ok(None)`: the key is not response-relevant (including all legacy
+///   alias keys — see the module docs).
+/// - `Ok(Some(part))`: a part every transport can emit.
+/// - `Err`: a response key whose entry cannot go on the wire:
+///   [`InvalidResponseMetaKind::Unsendable`] for a [`META_RESP_STATUS`] that
+///   is not an integer in `100..=999`, a header name that is not an RFC 9110
+///   token, or a header, cookie or content-type value holding anything but
+///   visible ASCII, space and tab; [`InvalidResponseMetaKind::TransportOwned`]
+///   for a [`TRANSPORT_OWNED_RESPONSE_HEADERS`] name.
+///
+/// Header names compare case-insensitively: any case of `content-type`
+/// classifies as [`ResponseMetaPart::ContentType`], any case of
+/// `set-cookie` as [`ResponseMetaPart::SetCookie`].
 ///
 /// Per-entry so streaming consumers can classify `Meta` events as they
 /// arrive and apply headers before the body finishes — no collection
 /// required.
-pub fn classify_response_meta(entry: &MetaEntry) -> Option<ResponseMetaPart<'_>> {
+pub fn classify_response_meta(
+    entry: &MetaEntry,
+) -> Result<Option<ResponseMetaPart<'_>>, InvalidResponseMeta> {
     let k = entry.key.as_str();
     let v = entry.value.as_str();
+    let invalid = |reason| InvalidResponseMeta {
+        key: entry.key.clone(),
+        reason,
+        kind: InvalidResponseMetaKind::Unsendable,
+    };
     if k == META_RESP_STATUS {
         return v
             .parse::<u16>()
             .ok()
             .filter(|code| (100..=999).contains(code))
-            .map(ResponseMetaPart::Status);
+            .map(|code| Some(ResponseMetaPart::Status(code)))
+            .ok_or_else(|| invalid("status is not an integer in 100..=999"));
     }
-    if k.starts_with(META_RESP_COOKIE_PREFIX) {
-        // The key suffix names the cookie (for replace-by-key meta
-        // semantics); the directive itself is the value.
-        return Some(ResponseMetaPart::SetCookie(v));
+    let part = if k.starts_with(META_RESP_COOKIE_PREFIX) {
+        // The key suffix identifies the cookie (see `cookie_meta_key`);
+        // the directive itself is the value.
+        ResponseMetaPart::SetCookie(v)
+    } else if let Some(name) = k.strip_prefix(META_RESP_HEADER_PREFIX) {
+        if !is_field_name(name) {
+            return Err(invalid("header name is not an RFC 9110 token"));
+        }
+        if is_listed(TRANSPORT_OWNED_RESPONSE_HEADERS, name) {
+            return Err(InvalidResponseMeta {
+                kind: InvalidResponseMetaKind::TransportOwned,
+                ..invalid("header is owned by the transport")
+            });
+        }
+        if name.eq_ignore_ascii_case("content-type") {
+            ResponseMetaPart::ContentType(v)
+        } else if name.eq_ignore_ascii_case("set-cookie") {
+            ResponseMetaPart::SetCookie(v)
+        } else {
+            ResponseMetaPart::Header { name, value: v }
+        }
+    } else if k == META_RESP_CONTENT_TYPE {
+        ResponseMetaPart::ContentType(v)
+    } else {
+        return Ok(None);
+    };
+    if !is_field_value(v) {
+        return Err(invalid("value holds a control or non-ASCII character"));
     }
-    if let Some(name) = k.strip_prefix(META_RESP_HEADER_PREFIX) {
-        return Some(ResponseMetaPart::Header { name, value: v });
-    }
-    if k == META_RESP_CONTENT_TYPE {
-        return Some(ResponseMetaPart::ContentType(v));
-    }
-    None
+    Ok(Some(part))
 }
 
-/// Iterate the response parts of a meta slice (entries that don't classify
-/// are skipped). Buffered-consumer convenience over
-/// [`classify_response_meta`].
-pub fn response_meta_parts(meta: &[MetaEntry]) -> impl Iterator<Item = ResponseMetaPart<'_>> {
-    meta.iter().filter_map(classify_response_meta)
+fn is_listed(list: &[&str], name: &str) -> bool {
+    list.iter().any(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// The classified response entries of `meta`, in order. A transport-owned
+/// entry is logged at `warn` and skipped; the first unsendable one is the
+/// `Err`.
+fn classified(
+    meta: &[MetaEntry],
+) -> Result<Vec<(&MetaEntry, ResponseMetaPart<'_>)>, InvalidResponseMeta> {
+    let mut parts = Vec::new();
+    for entry in meta {
+        match classify_response_meta(entry) {
+            Ok(Some(part)) => parts.push((entry, part)),
+            Ok(None) => {}
+            Err(invalid) if invalid.kind == InvalidResponseMetaKind::TransportOwned => {
+                tracing::warn!(
+                    key = %invalid.key,
+                    reason = invalid.reason,
+                    "transport-owned response header dropped at the HTTP boundary"
+                );
+            }
+            Err(invalid) => return Err(invalid),
+        }
+    }
+    Ok(parts)
+}
+
+/// The response parts of a meta slice, in meta order: entries that are not
+/// response-relevant are skipped, transport-owned ones logged and skipped.
+/// `Err` is the first unsendable entry: the adapter answers
+/// [`unsendable_response`] instead of this response.
+///
+/// The parts may name one header more than once (two cases of a name, a
+/// [`META_RESP_CONTENT_TYPE`] beside a `resp.header.content-type`). An
+/// adapter keeps one header per case-insensitive name, the later part
+/// winning, and appends every [`ResponseMetaPart::SetCookie`] — what
+/// [`collect_http_response`] does.
+pub fn response_meta_parts(
+    meta: &[MetaEntry],
+) -> Result<Vec<ResponseMetaPart<'_>>, InvalidResponseMeta> {
+    Ok(classified(meta)?
+        .into_iter()
+        .map(|(_, part)| part)
+        .collect())
+}
+
+/// The uniform response for a terminal whose meta holds an unsendable entry
+/// (see [`InvalidResponseMetaKind::Unsendable`]): `500` with the
+/// [`error_to_http_response`] body of an [`ErrorCode::Internal`] error and
+/// none of the terminal's headers. Logs the refused key and reason at
+/// `error`.
+pub fn unsendable_response(invalid: &InvalidResponseMeta) -> HttpResponseParts {
+    tracing::error!(
+        key = %invalid.key,
+        reason = invalid.reason,
+        "HTTP boundary: response meta cannot be sent; answering 500"
+    );
+    error_to_http_response(&WaferError::new(
+        ErrorCode::Internal,
+        "internal server error",
+    ))
 }
 
 /// The response-meta **projection**: the entries of a terminal's meta that
 /// may cross a transport boundary, in order, keys and values unchanged.
 ///
-/// Exactly the entries [`classify_response_meta`] recognises — the canonical
+/// Exactly the entries [`classify_response_meta`] accepts — the canonical
 /// [`META_RESP_STATUS`], [`META_RESP_HEADER_PREFIX`]`*`,
-/// [`META_RESP_COOKIE_PREFIX`]`*` and [`META_RESP_CONTENT_TYPE`] keys.
+/// [`META_RESP_COOKIE_PREFIX`]`*` and [`META_RESP_CONTENT_TYPE`] keys, minus
+/// transport-owned ones (logged); `Err` for an unsendable entry, as from
+/// [`response_meta_parts`].
 /// Everything else on a terminal is request or in-flight state
 /// (`http.header.authorization`, `http.header.cookie`, `auth.user_email`,
 /// `req.client.ip`, `req.query.*`, …): blocks legitimately carry it — a
@@ -284,8 +505,81 @@ pub fn response_meta_parts(meta: &[MetaEntry]) -> impl Iterator<Item = ResponseM
 /// format (`wafer_run::embed::output_to_json`) hands its host a `meta`
 /// object. Both projections admit the same key set, so no transport sees
 /// more than another.
-pub fn response_meta_entries(meta: &[MetaEntry]) -> impl Iterator<Item = &MetaEntry> {
-    meta.iter().filter(|e| classify_response_meta(e).is_some())
+pub fn response_meta_entries(meta: &[MetaEntry]) -> Result<Vec<&MetaEntry>, InvalidResponseMeta> {
+    Ok(classified(meta)?
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Cookie identity
+// ---------------------------------------------------------------------------
+
+/// A `Set-Cookie` directive's identity: two directives with equal ids set
+/// the same browser cookie (RFC 6265 §5.3 step 11), so the later one
+/// replaces the earlier.
+///
+/// `name` and `path` compare exactly (both are case-sensitive, RFC 6265
+/// §5.1.4), `domain` case-insensitively and without a leading dot (stored
+/// lowercased, dot stripped). A directive without `Path` is NOT the same
+/// cookie as one with `Path=/`: the browser gives it the request URI's
+/// default path (§5.1.4), which the codec cannot know, so the two are kept
+/// apart rather than guessed equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CookieId {
+    /// The cookie name (text before the first `=`, trimmed).
+    pub name: String,
+    /// The `Path` attribute's value, `""` when absent.
+    pub path: String,
+    /// The `Domain` attribute's value, lowercased without a leading dot,
+    /// `""` when absent.
+    pub domain: String,
+}
+
+/// The [`CookieId`] of a `Set-Cookie` directive.
+pub fn cookie_id(directive: &str) -> CookieId {
+    let mut parts = directive.split(';');
+    let name = parts
+        .next()
+        .and_then(|pair| pair.split('=').next())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut path = String::new();
+    let mut domain = String::new();
+    for attr in parts {
+        let (key, value) = attr.split_once('=').unwrap_or((attr, ""));
+        let value = value.trim();
+        if key.trim().eq_ignore_ascii_case("path") {
+            path = value.to_string();
+        } else if key.trim().eq_ignore_ascii_case("domain") {
+            domain = value.trim_start_matches('.').to_ascii_lowercase();
+        }
+    }
+    CookieId { name, path, domain }
+}
+
+/// The meta key a `Set-Cookie` directive is stored under: the
+/// [`META_RESP_COOKIE_PREFIX`] followed by its [`CookieId`] —
+/// `resp.set_cookie.{name}`, then `;Domain={domain}` and `;Path={path}` for
+/// the attributes the directive sets (`resp.set_cookie.sid;Path=/api`).
+///
+/// One key per cookie, whoever writes it: replace-by-key meta semantics
+/// ([`Message::set_meta`], the flow executor's merge) then replace a cookie
+/// with a later directive for the same cookie, and never a different one.
+pub fn cookie_meta_key(directive: &str) -> String {
+    let CookieId { name, path, domain } = cookie_id(directive);
+    let mut key = format!("{META_RESP_COOKIE_PREFIX}{name}");
+    if !domain.is_empty() {
+        key.push_str(";Domain=");
+        key.push_str(&domain);
+    }
+    if !path.is_empty() {
+        key.push_str(";Path=");
+        key.push_str(&path);
+    }
+    key
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +607,8 @@ pub fn error_code_to_http_status(code: &ErrorCode) -> u16 {
 
 /// Resolve the response status from meta: an explicit, valid
 /// [`META_RESP_STATUS`] override wins, otherwise `default`. Non-numeric or
-/// out-of-range (`< 100`, `> 999`) overrides are ignored.
+/// out-of-range (`< 100`, `> 999`) overrides are ignored here; rendering the
+/// response ([`response_meta_parts`]) refuses them as unsendable.
 pub fn resolve_status(meta: &[MetaEntry], default: u16) -> u16 {
     MetaGet::get(meta, META_RESP_STATUS)
         .and_then(|code| code.parse::<u16>().ok())
@@ -350,16 +645,21 @@ pub struct HttpResponseParts {
 
 /// Map a successful (or halted) [`BufferedResponse`] to response parts:
 /// status from [`resolve_status`] (default `200`), headers from
-/// [`response_meta_parts`], defaulting `Content-Type` to
-/// [`DEFAULT_RESPONSE_CONTENT_TYPE`] when meta carries none.
+/// [`response_meta_parts`] (one per case-insensitive name, the later part
+/// winning; every `Set-Cookie`), defaulting `Content-Type` to
+/// [`DEFAULT_RESPONSE_CONTENT_TYPE`] when meta carries none. Meta holding an
+/// unsendable entry yields [`unsendable_response`] instead.
 ///
 /// This is the **single** Ok/Halt code path: at the HTTP boundary a `Halt`
 /// terminal serves its body+meta exactly like `Complete` (the halt signal
 /// was for the flow executor, not the HTTP layer).
 pub fn buffered_to_http_response(buf: BufferedResponse) -> HttpResponseParts {
+    let mut headers = match headers_from_meta(&buf.meta) {
+        Ok(headers) => headers,
+        Err(invalid) => return unsendable_response(&invalid),
+    };
     let status = resolve_status(&buf.meta, 200);
-    let mut headers = headers_from_meta(&buf.meta);
-    if !MetaGet::contains_key(buf.meta.as_slice(), META_RESP_CONTENT_TYPE) {
+    if !headers.iter().any(|(name, _)| name == "Content-Type") {
         headers.push((
             "Content-Type".to_string(),
             DEFAULT_RESPONSE_CONTENT_TYPE.to_string(),
@@ -380,12 +680,16 @@ pub fn buffered_to_http_response(buf: BufferedResponse) -> HttpResponseParts {
 /// `Content-Type: application/json` (the body **is** JSON, so any
 /// `resp.content_type` on the error meta is superseded). `code` is the
 /// application-level code set via [`WaferError::with_detail_code`] and is
-/// omitted when none was attached. Adapters that cannot hand the codec an
+/// omitted when none was attached. Meta holding an unsendable entry yields
+/// [`unsendable_response`] instead. Adapters that cannot hand the codec an
 /// [`OutputStream`] call this directly so every transport emits the same
 /// error body.
 pub fn error_to_http_response(err: &WaferError) -> HttpResponseParts {
+    let mut headers = match non_content_type_headers_from_meta(&err.meta) {
+        Ok(headers) => headers,
+        Err(invalid) => return unsendable_response(&invalid),
+    };
     let status = resolve_error_status(err);
-    let mut headers = non_content_type_headers_from_meta(&err.meta);
     headers.push((
         "Content-Type".to_string(),
         DEFAULT_RESPONSE_CONTENT_TYPE.to_string(),
@@ -421,6 +725,8 @@ pub fn error_to_http_response(err: &WaferError) -> HttpResponseParts {
 /// - `Continue` → empty-body `200` with the message's response meta applied
 ///   and `Content-Type: application/json` (the HTTP boundary has nowhere
 ///   further to forward).
+/// - Any arm whose meta holds an unsendable entry →
+///   [`unsendable_response`].
 /// - `Malformed` → `500` with a plain `internal server error` body; logged
 ///   at `tracing::error` (stream ended without a terminal event — protocol
 ///   violation).
@@ -430,14 +736,22 @@ pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
 
         Err(TerminalNotResponse::Error(err)) => error_to_http_response(&err),
 
-        Err(TerminalNotResponse::Drop { meta }) => HttpResponseParts {
-            status: 204,
-            headers: non_content_type_headers_from_meta(&meta),
-            body: Vec::new(),
-        },
+        Err(TerminalNotResponse::Drop { meta }) => {
+            match non_content_type_headers_from_meta(&meta) {
+                Ok(headers) => HttpResponseParts {
+                    status: 204,
+                    headers,
+                    body: Vec::new(),
+                },
+                Err(invalid) => unsendable_response(&invalid),
+            }
+        }
 
         Err(TerminalNotResponse::Continue(msg)) => {
-            let mut headers = non_content_type_headers_from_meta(&msg.meta);
+            let mut headers = match non_content_type_headers_from_meta(&msg.meta) {
+                Ok(headers) => headers,
+                Err(invalid) => return unsendable_response(&invalid),
+            };
             headers.push((
                 "Content-Type".to_string(),
                 DEFAULT_RESPONSE_CONTENT_TYPE.to_string(),
@@ -461,33 +775,43 @@ pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
 }
 
 /// Render classified response meta into header pairs (`Status` parts are
-/// resolved separately and skipped here).
-fn headers_from_meta(meta: &[MetaEntry]) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    for part in response_meta_parts(meta) {
-        match part {
-            ResponseMetaPart::Status(_) => {}
-            ResponseMetaPart::Header { name, value } => {
-                headers.push((name.to_string(), value.to_string()));
-            }
+/// resolved separately and skipped here). One pair per case-insensitive
+/// name, at its first part's position with its last part's value — the
+/// later write wins, as it does across a flow's steps — except
+/// `Set-Cookie`, one pair per directive. A content type renders as
+/// `Content-Type` whichever key carried it. `Err` for an unsendable entry.
+fn headers_from_meta(meta: &[MetaEntry]) -> Result<Vec<(String, String)>, InvalidResponseMeta> {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for part in response_meta_parts(meta)? {
+        let (name, value) = match part {
+            ResponseMetaPart::Status(_) => continue,
             ResponseMetaPart::SetCookie(v) => {
                 headers.push(("Set-Cookie".to_string(), v.to_string()));
+                continue;
             }
-            ResponseMetaPart::ContentType(v) => {
-                headers.push(("Content-Type".to_string(), v.to_string()));
-            }
+            ResponseMetaPart::ContentType(v) => ("Content-Type", v),
+            ResponseMetaPart::Header { name, value } => (name, value),
+        };
+        match headers
+            .iter_mut()
+            .find(|(seen, _)| seen.eq_ignore_ascii_case(name))
+        {
+            Some(pair) => *pair = (name.to_string(), value.to_string()),
+            None => headers.push((name.to_string(), value.to_string())),
         }
     }
-    headers
+    Ok(headers)
 }
 
 /// Like [`headers_from_meta`] but drops `ContentType` parts — for the
 /// Error/Continue arms whose `Content-Type` is fixed to
 /// [`DEFAULT_RESPONSE_CONTENT_TYPE`], and the bodiless Drop arm.
-fn non_content_type_headers_from_meta(meta: &[MetaEntry]) -> Vec<(String, String)> {
-    let mut headers = headers_from_meta(meta);
+fn non_content_type_headers_from_meta(
+    meta: &[MetaEntry],
+) -> Result<Vec<(String, String)>, InvalidResponseMeta> {
+    let mut headers = headers_from_meta(meta)?;
     headers.retain(|(name, _)| name != "Content-Type");
-    headers
+    Ok(headers)
 }
 
 #[cfg(test)]
@@ -607,6 +931,40 @@ mod tests {
         assert_eq!(msg.get_meta(META_HTTP_RAW_QUERY), "");
     }
 
+    /// A header the request repeats — in any case — is one entry, its lines
+    /// joined in wire order, and every mirror carries that same value.
+    #[test]
+    fn repeated_request_headers_join_and_mirrors_agree() {
+        let headers = [
+            ("Content-Type", "text/plain"),
+            ("Cookie", "a=1"),
+            ("X-Forwarded-For", "203.0.113.99"),
+            ("content-type", "application/json"),
+            ("cookie", "b=2"),
+            ("x-forwarded-for", "198.51.100.7"),
+            ("Host", "a.example"),
+        ];
+        let msg = build_http_message("POST", "/", "", "127.0.0.1", headers);
+
+        let joined_ct = "text/plain, application/json";
+        assert_eq!(msg.header("content-type"), joined_ct);
+        assert_eq!(msg.get_meta(META_REQ_CONTENT_TYPE), joined_ct);
+        assert_eq!(msg.get_meta(META_HTTP_CONTENT_TYPE), joined_ct);
+        assert_eq!(msg.header("cookie"), "a=1; b=2");
+        assert_eq!(msg.cookie("a"), "1");
+        assert_eq!(msg.cookie("b"), "2");
+        assert_eq!(msg.header("x-forwarded-for"), "203.0.113.99, 198.51.100.7");
+        assert_eq!(msg.get_meta(META_HTTP_HOST), "a.example");
+        for name in ["content-type", "cookie", "x-forwarded-for", "host"] {
+            let key = format!("{META_HTTP_HEADER_PREFIX}{name}");
+            assert_eq!(
+                msg.meta.iter().filter(|e| e.key == key).count(),
+                1,
+                "{key} must be one entry"
+            );
+        }
+    }
+
     // -- query decoding (pins url::form_urlencoded semantics) ----------------
 
     #[test]
@@ -661,29 +1019,29 @@ mod tests {
     fn canonical_response_keys_classify() {
         assert_eq!(
             classify_response_meta(&entry(META_RESP_STATUS, "201")),
-            Some(ResponseMetaPart::Status(201))
+            Ok(Some(ResponseMetaPart::Status(201)))
         );
         assert_eq!(
             classify_response_meta(&entry("resp.header.X-Frame-Options", "DENY")),
-            Some(ResponseMetaPart::Header {
+            Ok(Some(ResponseMetaPart::Header {
                 name: "X-Frame-Options",
                 value: "DENY"
-            })
+            }))
         );
         assert_eq!(
             classify_response_meta(&entry("resp.set_cookie.session", "session=abc; HttpOnly")),
-            Some(ResponseMetaPart::SetCookie("session=abc; HttpOnly"))
+            Ok(Some(ResponseMetaPart::SetCookie("session=abc; HttpOnly")))
         );
         assert_eq!(
             classify_response_meta(&entry(META_RESP_CONTENT_TYPE, "text/html")),
-            Some(ResponseMetaPart::ContentType("text/html"))
+            Ok(Some(ResponseMetaPart::ContentType("text/html")))
         );
         // Non-response keys are not classified.
         assert_eq!(
             classify_response_meta(&entry("req.action", "retrieve")),
-            None
+            Ok(None)
         );
-        assert_eq!(classify_response_meta(&entry("trace_id", "t-1")), None);
+        assert_eq!(classify_response_meta(&entry("trace_id", "t-1")), Ok(None));
     }
 
     /// DRIFT TABLE: the canonical codec honors ONLY the canonical response
@@ -708,7 +1066,7 @@ mod tests {
         for (key, value) in legacy {
             assert_eq!(
                 classify_response_meta(&entry(key, value)),
-                None,
+                Ok(None),
                 "legacy key {key:?} must NOT be honored by the canonical codec"
             );
         }
@@ -719,16 +1077,100 @@ mod tests {
     #[test]
     fn invalid_status_values_are_ignored() {
         for bad in ["", "abc", "42", "1000", "-1", "200.0"] {
-            assert_eq!(
-                classify_response_meta(&entry(META_RESP_STATUS, bad)),
-                None,
-                "status value {bad:?} must not classify"
+            assert!(
+                classify_response_meta(&entry(META_RESP_STATUS, bad)).is_err(),
+                "status value {bad:?} must be refused"
             );
             assert_eq!(
                 resolve_status(&[entry(META_RESP_STATUS, bad)], 200),
                 200,
                 "status value {bad:?} must fall back to the default"
             );
+        }
+    }
+
+    /// Any case of `content-type` is the content type and any case of
+    /// `set-cookie` a cookie, never a plain header.
+    #[test]
+    fn content_type_and_set_cookie_header_names_classify_case_insensitively() {
+        for name in ["content-type", "Content-Type", "CONTENT-TYPE"] {
+            assert_eq!(
+                classify_response_meta(&entry(&format!("resp.header.{name}"), "text/html")),
+                Ok(Some(ResponseMetaPart::ContentType("text/html"))),
+                "{name}"
+            );
+        }
+        for name in ["set-cookie", "Set-Cookie"] {
+            assert_eq!(
+                classify_response_meta(&entry(&format!("resp.header.{name}"), "a=1")),
+                Ok(Some(ResponseMetaPart::SetCookie("a=1"))),
+                "{name}"
+            );
+        }
+    }
+
+    /// An entry that cannot go on the wire is refused, never passed to an
+    /// adapter to fail the whole response.
+    #[test]
+    fn unsendable_response_entries_are_refused() {
+        let refused: &[(&str, &str)] = &[
+            // Header / cookie / content-type values that would split or
+            // corrupt the header block, or have no portable encoding.
+            ("resp.header.X-Bad", "a\r\nSet-Cookie: evil=1"),
+            ("resp.header.X-Bad", "a\nb"),
+            ("resp.header.X-Bad", "a\0b"),
+            ("resp.header.X-Bad", "caf\u{e9}"),
+            ("resp.set_cookie.sid", "sid=1\r\nX-Evil: 1"),
+            (META_RESP_CONTENT_TYPE, "text/html\r\nX-Evil: 1"),
+            // Names that are not RFC 9110 tokens.
+            ("resp.header.", "v"),
+            ("resp.header.X Bad", "v"),
+            ("resp.header.X:Bad", "v"),
+            ("resp.header.X\r\nBad", "v"),
+            // Transport-owned framing and connection headers, any case.
+            ("resp.header.Content-Length", "5"),
+            ("resp.header.transfer-encoding", "chunked"),
+            ("resp.header.Connection", "close"),
+            ("resp.header.Upgrade", "websocket"),
+        ];
+        for (key, value) in refused {
+            let entry = entry(key, value);
+            let result = classify_response_meta(&entry);
+            assert!(
+                result.is_err(),
+                "{key:?}={value:?} must be refused: {result:?}"
+            );
+        }
+        let kind =
+            |key: &str, value: &str| classify_response_meta(&entry(key, value)).unwrap_err().kind;
+        assert_eq!(
+            kind("resp.header.Content-Length", "5"),
+            InvalidResponseMetaKind::TransportOwned
+        );
+        assert_eq!(
+            kind("resp.header.X-Bad", "a\nb"),
+            InvalidResponseMetaKind::Unsendable
+        );
+        // The refusal names the key, never the value (it may be a secret).
+        let err =
+            classify_response_meta(&entry("resp.set_cookie.sid", "sid=s3cret\n")).unwrap_err();
+        assert_eq!(err.key, "resp.set_cookie.sid");
+        assert!(!err.to_string().contains("s3cret"), "{err}");
+    }
+
+    #[test]
+    fn cookie_meta_key_is_the_cookie_identity() {
+        for (directive, key) in [
+            ("sid=1", "resp.set_cookie.sid"),
+            ("sid=1; HttpOnly; Secure", "resp.set_cookie.sid"),
+            ("sid=1; Path=/api", "resp.set_cookie.sid;Path=/api"),
+            (
+                "sid=1; path=/; DOMAIN=.A.Example; Max-Age=0",
+                "resp.set_cookie.sid;Domain=a.example;Path=/",
+            ),
+            (" theme = dark", "resp.set_cookie.theme"),
+        ] {
+            assert_eq!(cookie_meta_key(directive), key, "{directive:?}");
         }
     }
 
@@ -829,6 +1271,154 @@ mod tests {
             "no default when meta sets one"
         );
         assert_eq!(parts.body, b"<p>hi</p>");
+    }
+
+    /// A block that sets the content type as a header gets exactly that
+    /// content type — not a second, default one beside it.
+    #[test]
+    fn header_content_type_replaces_the_default() {
+        let parts = buffered_to_http_response(BufferedResponse {
+            body: b"<p>hi</p>".to_vec(),
+            meta: vec![entry("resp.header.content-type", "text/html")],
+        });
+        assert_eq!(ct(&parts), vec!["text/html"]);
+    }
+
+    /// One header per case-insensitive name: the later write wins, at the
+    /// earlier one's position; every cookie is kept.
+    #[test]
+    fn a_header_named_twice_is_one_header_the_later_winning() {
+        let parts = buffered_to_http_response(BufferedResponse {
+            body: Vec::new(),
+            meta: vec![
+                entry("resp.header.X-Foo", "first"),
+                entry(META_RESP_CONTENT_TYPE, "text/plain"),
+                entry("resp.set_cookie.a", "a=1"),
+                entry("resp.header.x-foo", "second"),
+                entry("resp.header.Content-Type", "text/html"),
+                entry("resp.header.Set-Cookie", "b=2"),
+            ],
+        });
+        assert_eq!(
+            parts.headers,
+            vec![
+                ("x-foo".to_string(), "second".to_string()),
+                ("Content-Type".to_string(), "text/html".to_string()),
+                ("Set-Cookie".to_string(), "a=1".to_string()),
+                ("Set-Cookie".to_string(), "b=2".to_string()),
+            ]
+        );
+    }
+
+    /// A transport-owned header is dropped; the rest of the response stands.
+    #[test]
+    fn a_transport_owned_header_is_dropped_and_the_response_stands() {
+        let parts = buffered_to_http_response(BufferedResponse {
+            body: b"ok".to_vec(),
+            meta: vec![
+                entry(META_RESP_STATUS, "201"),
+                entry("resp.header.Content-Length", "999"),
+                entry("resp.header.Connection", "close"),
+                entry("resp.header.X-Good", "ok"),
+            ],
+        });
+        assert_eq!(parts.status, 201);
+        assert_eq!(
+            parts.headers,
+            vec![
+                ("X-Good".to_string(), "ok".to_string()),
+                (
+                    "Content-Type".to_string(),
+                    DEFAULT_RESPONSE_CONTENT_TYPE.to_string()
+                ),
+            ]
+        );
+        assert_eq!(parts.body, b"ok");
+    }
+
+    fn assert_uniform_500(parts: &HttpResponseParts) {
+        assert_eq!(parts.status, 500, "{parts:?}");
+        assert_eq!(
+            parts.headers,
+            vec![(
+                "Content-Type".to_string(),
+                DEFAULT_RESPONSE_CONTENT_TYPE.to_string()
+            )],
+            "none of the terminal's headers: {parts:?}"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "Internal", "message": "internal server error" })
+        );
+    }
+
+    /// An unsendable entry fails the response closed: a CSP with one smart
+    /// quote must not ship the page with no CSP at all.
+    #[tokio::test]
+    async fn an_unsendable_entry_fails_every_terminal_closed() {
+        let csp = || {
+            vec![
+                entry("resp.header.X-Frame-Options", "DENY"),
+                entry(
+                    "resp.header.Content-Security-Policy",
+                    "default-src 'self'; script-src \u{2019}self\u{2019}",
+                ),
+            ]
+        };
+        let ok = collect_http_response(OutputStream::respond_with_meta(b"<p>".to_vec(), csp()));
+        assert_uniform_500(&ok.await);
+        let halt = collect_http_response(OutputStream::halt(b"<p>".to_vec(), csp()));
+        assert_uniform_500(&halt.await);
+        let mut err = WaferError::new(ErrorCode::Unauthenticated, "sign in");
+        err.meta = csp();
+        assert_uniform_500(&collect_http_response(OutputStream::error(err)).await);
+        let drop = collect_http_response(OutputStream::drop_request_with_meta(csp()));
+        assert_uniform_500(&drop.await);
+        let mut msg = Message::new("next");
+        msg.meta = csp();
+        assert_uniform_500(&collect_http_response(OutputStream::continue_with(msg)).await);
+        // An invalid status and an invalid header name fail it the same way.
+        for bad in [
+            entry(META_RESP_STATUS, "abc"),
+            entry("resp.header.X Bad", "v"),
+        ] {
+            let parts = buffered_to_http_response(BufferedResponse {
+                body: Vec::new(),
+                meta: vec![bad],
+            });
+            assert_uniform_500(&parts);
+        }
+    }
+
+    #[test]
+    fn repeated_singleton_request_headers_are_found() {
+        assert_eq!(
+            repeated_singleton_header(["Host", "Accept", "host"]),
+            Some("host")
+        );
+        assert_eq!(
+            repeated_singleton_header(["authorization", "Authorization"]),
+            Some("authorization")
+        );
+        assert_eq!(
+            repeated_singleton_header(["Content-Length", "content-length"]),
+            Some("content-length")
+        );
+        assert_eq!(
+            repeated_singleton_header(["Content-Type", "CONTENT-TYPE"]),
+            Some("content-type")
+        );
+        assert_eq!(
+            repeated_singleton_header([
+                "Cookie",
+                "cookie",
+                "X-Forwarded-For",
+                "x-forwarded-for",
+                "Host"
+            ]),
+            None
+        );
     }
 
     #[tokio::test]

@@ -9,9 +9,8 @@ use serde::Serialize;
 
 use crate::{
     core_types::{ErrorCode, MetaEntry, WaferError},
-    meta::{
-        META_RESP_CONTENT_TYPE, META_RESP_COOKIE_PREFIX, META_RESP_HEADER_PREFIX, META_RESP_STATUS,
-    },
+    http_codec::cookie_meta_key,
+    meta::{META_RESP_CONTENT_TYPE, META_RESP_HEADER_PREFIX, META_RESP_STATUS},
     streams::output::OutputStream,
 };
 
@@ -119,11 +118,21 @@ fn correlation_id() -> String {
     crate::hash::hex_encode(&buf)
 }
 
+/// The meta entry carrying one `Set-Cookie` directive, keyed by the cookie
+/// it sets ([`cookie_meta_key`]). For a producer that builds meta itself —
+/// a [`WaferError`]'s meta, a middleware's message — rather than through
+/// [`ResponseBuilder::set_cookie`].
+pub fn cookie_meta(directive: &str) -> MetaEntry {
+    MetaEntry {
+        key: cookie_meta_key(directive),
+        value: directive.to_string(),
+    }
+}
+
 /// Build a response `OutputStream` with custom status, headers, and cookies.
 #[derive(Default)]
 pub struct ResponseBuilder {
     meta: Vec<MetaEntry>,
-    cookie_count: usize,
 }
 
 impl ResponseBuilder {
@@ -152,14 +161,16 @@ impl ResponseBuilder {
         self
     }
 
-    /// Append a `Set-Cookie` header.
+    /// Add a `Set-Cookie` directive, keyed by the cookie it sets
+    /// ([`cookie_meta`]). A second directive for the same cookie (name,
+    /// `Path` and `Domain`) replaces the first, as it would in the browser.
     #[must_use]
     pub fn set_cookie(mut self, cookie: &str) -> Self {
-        self.meta.push(MetaEntry {
-            key: format!("{}{}", META_RESP_COOKIE_PREFIX, self.cookie_count),
-            value: cookie.to_string(),
-        });
-        self.cookie_count += 1;
+        let entry = cookie_meta(cookie);
+        match self.meta.iter_mut().find(|e| e.key == entry.key) {
+            Some(existing) => *existing = entry,
+            None => self.meta.push(entry),
+        }
         self
     }
 
@@ -340,18 +351,53 @@ mod tests {
             MetaGet::get(&buf.meta, "resp.header.x-request-id"),
             Some("abc")
         );
-        // Cookies are numbered in insertion order.
+        // Cookies are keyed by the cookie they set.
         assert_eq!(
-            MetaGet::get(&buf.meta, "resp.set_cookie.0"),
+            MetaGet::get(&buf.meta, "resp.set_cookie.session"),
             Some("session=1; HttpOnly")
         );
         assert_eq!(
-            MetaGet::get(&buf.meta, "resp.set_cookie.1"),
+            MetaGet::get(&buf.meta, "resp.set_cookie.theme"),
             Some("theme=dark")
         );
         assert_eq!(
             MetaGet::get(&buf.meta, META_RESP_CONTENT_TYPE),
             Some("application/json")
+        );
+    }
+
+    /// A cookie's key is its identity, so a directive for the same cookie
+    /// replaces the earlier one and a same-named cookie on another `Path`
+    /// or `Domain` stays beside it.
+    #[tokio::test]
+    async fn builder_keys_cookies_by_identity() {
+        let buf = ResponseBuilder::new()
+            .set_cookie("sid=old; Path=/")
+            .set_cookie("sid=legacy; Path=/api; Max-Age=0")
+            .set_cookie("sid=wide; Domain=.Example.com")
+            .set_cookie("sid=new; Path=/; HttpOnly")
+            .empty()
+            .collect_buffered()
+            .await
+            .expect("respond");
+        let cookies: Vec<(&str, &str)> = buf
+            .meta
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(
+            cookies,
+            vec![
+                ("resp.set_cookie.sid;Path=/", "sid=new; Path=/; HttpOnly"),
+                (
+                    "resp.set_cookie.sid;Path=/api",
+                    "sid=legacy; Path=/api; Max-Age=0"
+                ),
+                (
+                    "resp.set_cookie.sid;Domain=example.com",
+                    "sid=wide; Domain=.Example.com"
+                ),
+            ]
         );
     }
 

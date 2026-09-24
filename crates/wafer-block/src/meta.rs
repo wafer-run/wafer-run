@@ -68,5 +68,6 @@ pub const META_RESP_STATUS: &str = "resp.status";
 pub const META_RESP_CONTENT_TYPE: &str = "resp.content_type";
 /// Prefix for response headers (`resp.header.{name}`).
 pub const META_RESP_HEADER_PREFIX: &str = "resp.header.";
-/// Prefix for response `Set-Cookie` directives (`resp.set_cookie.{name}`).
+/// Prefix for response `Set-Cookie` directives. The suffix identifies the
+/// cookie: see [`crate::http_codec::cookie_meta_key`].
 pub const META_RESP_COOKIE_PREFIX: &str = "resp.set_cookie.";

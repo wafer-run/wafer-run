@@ -10,28 +10,34 @@
 //!   list-valued [`UNION_HEADERS`], whose values are unioned (so a `Vary:
 //!   Origin` a CORS middleware set survives a terminal's own `Vary`);
 //! - a cookie is identified by its name plus its `Path` and `Domain`
-//!   attributes (RFC 6265 §5.3 step 11; see [`cookie_id`]), not by its
-//!   `resp.set_cookie.*` key:
-//!   [`wafer_block::response::ResponseBuilder`] keys cookies by position
-//!   (`resp.set_cookie.0`, `.1`, …), so two producers' keys collide for
-//!   unrelated cookies;
-//! - any other key is identified by the key itself.
+//!   attributes ([`CookieId`]), not by its `resp.set_cookie.*` key.
+//!   [`wafer_block::response::ResponseBuilder`] and
+//!   [`wafer_block::response::cookie_meta`] derive the key from that
+//!   identity ([`wafer_block::http_codec::cookie_meta_key`]), but a producer
+//!   that writes meta by hand picks any key (`resp.set_cookie.0`), so two
+//!   producers' keys can still collide for unrelated cookies;
+//! - any other key is identified by the key itself (a content type too,
+//!   under either of its keys: the HTTP codec renders the later one).
 
 use std::collections::HashMap;
 
 use wafer_block::{
     core_types::MetaEntry,
-    http_codec::{classify_response_meta, ResponseMetaPart},
+    http_codec::{
+        classify_response_meta, cookie_id, CookieId, InvalidResponseMeta, InvalidResponseMetaKind,
+        ResponseMetaPart,
+    },
     meta::META_RESP_COOKIE_PREFIX,
 };
 
 /// Headers that describe a body (or a redirect to one), never carried from
 /// the flow message onto a short-circuit terminal: the terminal has its own
-/// body.
+/// body. A content type (any case, either key) and `Content-Length` are not
+/// listed because they never classify as a header — the codec reads the
+/// first as its content type and refuses the second — so [`carried`] drops
+/// them as it drops every non-header entry.
 const BODY_HEADERS: &[&str] = &[
-    "content-type",
     "content-encoding",
-    "content-length",
     "content-disposition",
     "content-language",
     "content-location",
@@ -49,39 +55,21 @@ fn is_listed(list: &[&str], name: &str) -> bool {
     list.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
-/// A `Set-Cookie` directive's identity: name and `Path` compared exactly
-/// (both are case-sensitive, RFC 6265 §5.1.4), `Domain` case-insensitively
-/// and without a leading dot. A directive without `Path` is NOT the same
-/// cookie as one with `Path=/`: the browser gives it the request URI's
-/// default path (§5.1.4), which this layer cannot know, so the two are kept
-/// apart rather than guessed equal.
-#[derive(PartialEq, Eq)]
-struct CookieId {
-    name: String,
-    path: String,
-    domain: String,
-}
-
-fn cookie_id(directive: &str) -> CookieId {
-    let mut parts = directive.split(';');
-    let name = parts
-        .next()
-        .and_then(|pair| pair.split('=').next())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let mut path = String::new();
-    let mut domain = String::new();
-    for attr in parts {
-        let (key, value) = attr.split_once('=').unwrap_or((attr, ""));
-        let value = value.trim();
-        if key.trim().eq_ignore_ascii_case("path") {
-            path = value.to_string();
-        } else if key.trim().eq_ignore_ascii_case("domain") {
-            domain = value.trim_start_matches('.').to_ascii_lowercase();
-        }
-    }
-    CookieId { name, path, domain }
+/// The first entry of `entries` no transport can send
+/// ([`InvalidResponseMetaKind::Unsendable`]). The executor fails a step that
+/// produced one before its meta is laid over anything, so an unsendable
+/// value never displaces a valid one — a responder's malformed
+/// `Content-Security-Policy` must not replace the security-headers
+/// middleware's.
+pub(super) fn first_unsendable<'a>(
+    entries: impl IntoIterator<Item = &'a MetaEntry>,
+) -> Option<InvalidResponseMeta> {
+    entries
+        .into_iter()
+        .find_map(|e| match classify_response_meta(e) {
+            Err(invalid) if invalid.kind == InvalidResponseMetaKind::Unsendable => Some(invalid),
+            _ => None,
+        })
 }
 
 /// What a meta entry is, for overlay purposes.
@@ -92,12 +80,16 @@ enum Kind {
 }
 
 fn kind(entry: &MetaEntry) -> Kind {
+    // A step's unsendable entry never gets here (the executor fails the step,
+    // see `first_unsendable`); a transport-owned one merges by key and is
+    // dropped at the boundary.
     match classify_response_meta(entry) {
-        Some(ResponseMetaPart::SetCookie(_)) => Kind::Cookie,
-        Some(ResponseMetaPart::Header { name, .. }) => Kind::Header {
+        Ok(Some(ResponseMetaPart::SetCookie(_))) => Kind::Cookie,
+        Ok(Some(ResponseMetaPart::Header { name, .. })) => Kind::Header {
             name: name.to_ascii_lowercase(),
         },
-        Some(ResponseMetaPart::Status(_) | ResponseMetaPart::ContentType(_)) | None => Kind::Other,
+        Ok(Some(ResponseMetaPart::Status(_) | ResponseMetaPart::ContentType(_)) | None)
+        | Err(_) => Kind::Other,
     }
 }
 
