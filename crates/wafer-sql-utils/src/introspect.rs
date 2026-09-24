@@ -198,6 +198,54 @@ pub fn build_list_primary_key(table: &str, backend: Backend) -> (String, Vec<ser
     }
 }
 
+/// Build query asking whether a table fills its `id` column itself when an
+/// insert leaves it out.
+///
+/// Returns `(sql, params)`. The result is a single row with one integer
+/// column `generated`, `1` or `0` in both dialects, so callers can read it as
+/// an `i64` scalar. A missing table answers `0`.
+///
+/// SQLite: `id` is the table's rowid alias — the sole primary-key column of
+/// a rowid table, declared exactly `INTEGER` — whose value SQLite assigns.
+/// Of the tables whose sole key column is `id`, the rowid alias is the one
+/// for which SQLite builds no primary-key index (`pragma_index_list` origin
+/// `pk`): `INT`, `BIGINT` or `TEXT` keys, a column-level `INTEGER PRIMARY
+/// KEY DESC`, a composite key and a `WITHOUT ROWID` table all get one. Any
+/// other `id` key is an ordinary column, which a rowid table even lets hold
+/// `NULL`.
+///
+/// Postgres: the `id` column of the table the name resolves to (see the
+/// module docs) is an identity column, or its default draws from a sequence
+/// (`nextval(...)`, what `SERIAL` and `BIGSERIAL` declare).
+///
+/// The table name is parameter-bound in both dialects, so this builder is
+/// infallible.
+pub fn build_id_is_generated(table: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
+    let params = vec![serde_json::Value::String(table.to_string())];
+    match backend {
+        Backend::Sqlite => (
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) \
+             WHERE pk = 1 AND name = 'id' COLLATE NOCASE) \
+             AND NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk > 1) \
+             AND NOT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE origin = 'pk') \
+             AS generated"
+                .to_string(),
+            params,
+        ),
+        Backend::Postgres => (
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a \
+             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' \
+             AND NOT a.attisdropped \
+             AND (a.attidentity <> '' \
+             OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%')) \
+             THEN 1::int8 ELSE 0::int8 END AS generated"
+                .to_string(),
+            params,
+        ),
+    }
+}
+
 /// Build query to get column information for a table.
 ///
 /// SQLite: `PRAGMA table_info("{table}")`
@@ -423,6 +471,65 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert!(cols.is_empty());
+    }
+
+    // Which `id` keys SQLite fills itself, on a real SQLite engine: only the
+    // rowid alias. Each "no" is proven by inserting without an id and reading
+    // back NULL (or a NOT NULL refusal for WITHOUT ROWID).
+    #[test]
+    fn test_id_is_generated_executes_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE alias (id INTEGER PRIMARY KEY, n TEXT);
+             CREATE TABLE alias_lower (id integer, n TEXT, PRIMARY KEY (id));
+             CREATE TABLE alias_autoinc (id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT);
+             CREATE TABLE alias_table_desc (id INTEGER, n TEXT, PRIMARY KEY (id DESC));
+             CREATE TABLE int_key (id INT PRIMARY KEY, n TEXT);
+             CREATE TABLE bigint_key (id BIGINT PRIMARY KEY, n TEXT);
+             CREATE TABLE column_desc (id INTEGER PRIMARY KEY DESC, n TEXT);
+             CREATE TABLE composite (id INTEGER, n TEXT, PRIMARY KEY (id, n));
+             CREATE TABLE no_rowid (id INTEGER PRIMARY KEY, n TEXT) WITHOUT ROWID;
+             CREATE TABLE text_key (id TEXT PRIMARY KEY, n TEXT);
+             CREATE TABLE other_alias (n INTEGER PRIMARY KEY, id TEXT);
+             CREATE TABLE keyless (id INTEGER, n TEXT);",
+        )
+        .unwrap();
+        let generated = |table: &str| -> bool {
+            let (sql, params) = build_id_is_generated(table, Backend::Sqlite);
+            conn.query_row(&sql, [params[0].as_str().unwrap()], |r| r.get::<_, i64>(0))
+                .unwrap()
+                == 1
+        };
+        for table in ["alias", "alias_lower", "alias_autoinc", "alias_table_desc"] {
+            assert!(generated(table), "{table} fills id");
+            conn.execute(&format!("INSERT INTO {table} DEFAULT VALUES"), [])
+                .unwrap();
+            let id: Option<i64> = conn
+                .query_row(&format!("SELECT id FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(id, Some(1), "{table}");
+        }
+        for table in [
+            "int_key",
+            "bigint_key",
+            "column_desc",
+            "composite",
+            "text_key",
+            "other_alias",
+            "keyless",
+        ] {
+            assert!(!generated(table), "{table} does not fill id");
+            conn.execute(&format!("INSERT INTO {table} DEFAULT VALUES"), [])
+                .unwrap();
+            let id: Option<i64> = conn
+                .query_row(&format!("SELECT id FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(id, None, "{table} leaves id NULL");
+        }
+        assert!(!generated("no_rowid"));
+        conn.execute("INSERT INTO no_rowid DEFAULT VALUES", [])
+            .expect_err("a WITHOUT ROWID key is NOT NULL and never filled");
+        assert!(!generated("no_such_table"));
     }
 
     #[test]

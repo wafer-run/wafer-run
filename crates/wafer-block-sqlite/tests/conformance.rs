@@ -73,3 +73,75 @@ async fn two_sqlite_services_on_one_file_see_each_others_tables() {
     drop((a, b));
     let _ = std::fs::remove_file(&path);
 }
+
+/// An `id` key that is not SQLite's rowid alias is an ordinary column, which
+/// a rowid table lets hold `NULL`: `create` without an id must mint one, not
+/// leave the row keyed `NULL` and report SQLite's internal rowid as its id.
+/// Covers the declarations whose type merely contains `INT` (`INT`,
+/// `BIGINT`), a composite key and a `WITHOUT ROWID` table, against the one
+/// that is the alias (`INTEGER PRIMARY KEY`, numbered by SQLite).
+#[tokio::test]
+async fn only_the_rowid_alias_numbers_its_own_rows() {
+    use std::collections::HashMap;
+
+    use wafer_core::interfaces::database::service::DatabaseService;
+
+    let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
+    let tables = [
+        (
+            "t_int",
+            "CREATE TABLE t_int (id INT PRIMARY KEY, name TEXT)",
+        ),
+        (
+            "t_bigint",
+            "CREATE TABLE t_bigint (id BIGINT PRIMARY KEY, name TEXT)",
+        ),
+        (
+            "t_composite",
+            "CREATE TABLE t_composite (id INTEGER, name TEXT, PRIMARY KEY (id, name))",
+        ),
+        (
+            "t_no_rowid",
+            "CREATE TABLE t_no_rowid (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID",
+        ),
+        (
+            "t_alias",
+            "CREATE TABLE t_alias (id INTEGER PRIMARY KEY, name TEXT)",
+        ),
+    ];
+    for (_, ddl) in tables {
+        svc.exec_raw(ddl, &[]).await.expect(ddl);
+    }
+    for (table, _) in tables {
+        let created = svc
+            .create(
+                table,
+                HashMap::from([("name".to_string(), serde_json::json!(table))]),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("create in {table}: {e}"));
+        let got = svc
+            .get(table, &created.id)
+            .await
+            .unwrap_or_else(|e| panic!("{table}: get({:?}): {e}", created.id));
+        assert_eq!(got.data["name"], serde_json::json!(table));
+        let null_ids = svc
+            .query_raw(&format!("SELECT name FROM {table} WHERE id IS NULL"), &[])
+            .await
+            .expect("query");
+        assert!(null_ids.is_empty(), "{table} holds a NULL id: {null_ids:?}");
+        if table == "t_alias" {
+            assert_eq!(
+                created.data["id"],
+                serde_json::json!(1),
+                "SQLite numbers the alias"
+            );
+        } else {
+            assert!(
+                created.data["id"].is_string(),
+                "{table}: a minted id, not a rowid: {:?}",
+                created.data
+            );
+        }
+    }
+}

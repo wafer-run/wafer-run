@@ -99,7 +99,7 @@ use wafer_block::db::{
 use wafer_sql_utils::aggregate::CastType;
 
 use super::service::{
-    pk, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
+    pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
     DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, Record, Table, UpsertConflict,
     UpsertSpec, WriteOp, WriteOutcome,
 };
@@ -207,7 +207,8 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// Covers, in order: schema management (`ensure_schema_table[s]`,
 /// `schema_table_exists`, `schema_add_column`, `schema_drop_table`,
 /// `set_strict_schema`); `create`/`get` (a taken id refused, the row
-/// untouched) and `schema_columns`; `count`/`sum` across the full
+/// untouched) and `schema_columns`; a table that numbers its own rows
+/// ([`pk_int`]) filling the id of every create path; `count`/`sum` across the full
 /// [`FilterOp`] surface; `list` (filter, sort, limit, offset, projection,
 /// OR-group `filter_tree`, `total_count`, and pages over a tied sort key
 /// ordered by the primary key — single-column, composite, or none);
@@ -241,6 +242,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 
     check_schema_management(svc).await;
     check_create_get(svc).await;
+    check_generated_ids(svc).await;
     check_count_and_sum(svc).await;
     check_list(svc).await;
     check_list_tiebreak(svc).await;
@@ -345,6 +347,126 @@ async fn check_table_created_by_another_instance_is_seen(
     b.schema_drop_table(&table.name)
         .await
         .expect("drop the shared table");
+}
+
+// ---------------------------------------------------------------------------
+// Tables that number their own rows
+// ---------------------------------------------------------------------------
+
+/// A table whose `id` the database fills ([`pk_int`]: `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` on SQLite, `SERIAL` on Postgres) gets the id the database
+/// assigned from every create path, and no path mints a string id for it —
+/// Postgres would refuse the string, and a minted id would bypass the
+/// sequence.
+async fn check_generated_ids(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_serial".to_string(),
+        columns: vec![
+            pk_int("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+
+    let first = svc
+        .create("conf_serial", row([("name", serde_json::json!("first"))]))
+        .await
+        .expect("create without an id in a table that numbers its rows");
+    let second = svc
+        .create("conf_serial", row([("name", serde_json::json!("second"))]))
+        .await
+        .expect("second create");
+    for (created, name) in [(&first, "first"), (&second, "second")] {
+        let id = created.data["id"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("the returned id is the integer assigned: {created:?}"));
+        assert_eq!(created.id, id.to_string(), "{created:?}");
+        let got = svc
+            .get("conf_serial", &created.id)
+            .await
+            .expect("get by the returned id");
+        assert_eq!(got.data["name"], serde_json::json!(name));
+        assert_eq!(got.data["id"], serde_json::json!(id));
+    }
+    assert_ne!(first.id, second.id, "each row gets its own id");
+    // The id string reaches the row on every by-id op.
+    let renamed = svc
+        .update(
+            "conf_serial",
+            &first.id,
+            row([("name", serde_json::json!("renamed"))]),
+        )
+        .await
+        .expect("update by the returned id");
+    assert_eq!(renamed.data["name"], serde_json::json!("renamed"));
+    svc.delete("conf_serial", &second.id)
+        .await
+        .expect("delete by the returned id");
+
+    assert_eq!(
+        svc.create_many(
+            "conf_serial",
+            vec![
+                row([("name", serde_json::json!("many-1"))]),
+                row([("name", serde_json::json!("many-2"))]),
+            ],
+        )
+        .await
+        .expect("create_many without ids"),
+        2
+    );
+    let outcomes = svc
+        .batch(vec![WriteOp::Create {
+            collection: "conf_serial".into(),
+            data: row([("name", serde_json::json!("batched"))]),
+        }])
+        .await
+        .expect("batch create without an id");
+    match outcomes.as_slice() {
+        [WriteOutcome::Created(r)] => {
+            assert!(r.data["id"].is_i64(), "the stored row's id: {r:?}");
+        }
+        other => panic!("expected one Created, got {other:?}"),
+    }
+    match svc
+        .insert_guarded(
+            "conf_serial",
+            row([("name", serde_json::json!("guarded"))]),
+            &[],
+        )
+        .await
+        .expect("guarded insert without an id")
+    {
+        GuardedInsert::Inserted(r) => assert!(r.data["id"].is_i64(), "{r:?}"),
+        other => panic!("expected Inserted, got {other:?}"),
+    }
+
+    let all = svc
+        .list("conf_serial", &ListOptions::default())
+        .await
+        .expect("list");
+    let mut ids: Vec<i64> = all
+        .records
+        .iter()
+        .map(|r| {
+            r.data["id"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("an integer id: {r:?}"))
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(
+        ids.len(),
+        5,
+        "five rows, five distinct ids: {:?}",
+        all.records
+    );
 }
 
 // ---------------------------------------------------------------------------

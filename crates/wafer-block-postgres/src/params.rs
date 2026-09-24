@@ -110,7 +110,8 @@ fn mismatch(value: &serde_json::Value, expected: &str) -> BindError {
 ///
 /// SQL `NULL` binds to a parameter of any type. Otherwise the value must fit:
 /// an integral number (or a boolean, as `1`/`0`, how the SQLite family stores
-/// one) for an integer type, a number for a floating-point or `NUMERIC` type,
+/// one, or a string spelling a decimal integer, the form a record id of an
+/// integer-keyed table takes) for an integer type, a number for a floating-point or `NUMERIC` type,
 /// a boolean for `BOOLEAN`, and for a text type anything, as the text it
 /// spells (a number or boolean as its JSON text, an object or array as its
 /// JSON). A `json`/`jsonb` parameter takes a string as JSON text — the form
@@ -213,8 +214,12 @@ fn out_of_range() -> BindError {
     BindError::Mismatch("integer out of range".to_string())
 }
 
-/// The integer a JSON value names: an integral number, or a boolean as
-/// `1`/`0`. A fractional number is refused rather than rounded.
+/// The integer a JSON value names: an integral number, a boolean as `1`/`0`,
+/// or a string spelling a decimal integer. Record ids travel as strings (the
+/// `DatabaseService` id arguments are `&str`), so `get`, `update` and
+/// `delete` on a table keyed by an integer column bind `"42"` here. A
+/// fractional number is refused rather than rounded, and any other string is
+/// refused.
 fn integer(value: &serde_json::Value) -> Result<i64, BindError> {
     match value {
         serde_json::Value::Number(n) => {
@@ -234,6 +239,9 @@ fn integer(value: &serde_json::Value) -> Result<i64, BindError> {
             }
         }
         serde_json::Value::Bool(b) => Ok(i64::from(*b)),
+        serde_json::Value::String(s) => s
+            .parse()
+            .map_err(|_| BindError::Mismatch(format!("expected an integer, got the string {s:?}"))),
         other => Err(mismatch(other, "an integer")),
     }
 }

@@ -22,7 +22,7 @@ use wafer_sql_utils::{
 };
 
 use super::{
-    codec::{encode_json_value, JsonColumns},
+    codec::{self, encode_json_value, JsonColumns},
     schema_cache::{SchemaCache, TableColumns},
     service::{
         AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordList,
@@ -521,32 +521,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Whether `table` exists (already-sanitized or raw name, per call site).
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError>;
 
-    /// Run an INSERT, returning the backend-generated integer row id, if any.
-    ///
-    /// The default delegates to [`run_execute`](Self::run_execute) and reports
-    /// no generated id — correct for backends where `create` synthesizes the
-    /// id before inserting (Postgres). SQLite overrides this to hold its
-    /// connection lock across `execute` + `last_insert_rowid()`, so the rowid
-    /// returned for INTEGER-PRIMARY-KEY tables can't race a concurrent insert.
-    async fn run_insert(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-    ) -> Result<Option<i64>, DatabaseError> {
-        self.run_execute(sql, params).await?;
-        Ok(None)
-    }
-
-    /// Whether `table` generates its own primary key on insert, in which case
-    /// `create` must not synthesize a UUID string id.
-    ///
-    /// Default `false` (Postgres: ids are always caller- or UUID-supplied).
-    /// SQLite overrides this to detect `INTEGER PRIMARY KEY` autoincrement
-    /// tables, whose ids come from [`run_insert`](Self::run_insert).
-    async fn table_autogenerates_id(&self, _table: &str) -> bool {
-        false
-    }
-
     /// Run `ops` as ONE transaction on the write path, returning one
     /// [`TxResult`] per op in the same order.
     ///
@@ -640,6 +614,31 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             cache.mark_table_present_if_gen(table, gen0);
         }
         Ok(exists)
+    }
+
+    /// Whether `table` fills its `id` column itself when an insert leaves it
+    /// out — a SQLite rowid alias, a Postgres identity or sequence-backed
+    /// column (see [`introspect::build_id_is_generated`]) — in which case
+    /// `create` must not mint one.
+    ///
+    /// Consults [`schema_cache`](Self::schema_cache) first and populates it
+    /// on a miss. Runs in STRICT_SCHEMA mode too: nothing else tells the
+    /// executor which tables number their own rows. A missing table answers
+    /// `false`, uncached (see
+    /// [`SchemaCache::set_generates_id_if_gen`]).
+    async fn table_autogenerates_id(&self, table: &str) -> Result<bool, DatabaseError> {
+        let cache = self.schema_cache();
+        if let Some(generated) = cache.and_then(|c| c.generates_id(table)) {
+            return Ok(generated);
+        }
+        // Generation snapshot before the probe yields, as in `table_columns`.
+        let gen0 = cache.map(SchemaCache::generation);
+        let (sql, params) = introspect::build_id_is_generated(table, Self::BACKEND);
+        let generated = self.run_scalar_i64(&sql, &params).await? == 1;
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_generates_id_if_gen(table, generated, gen0);
+        }
+        Ok(generated)
     }
 
     /// Column names (lowercased) of `table`; empty if the table is missing.
@@ -1110,10 +1109,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Shared `create`: id/timestamp defaulting → lazy column-add → INSERT.
     ///
     /// A missing `id` gets a synthesized UUIDv7 string ([`mint_record_id`])
-    /// unless the backend reports the table generates its own
-    /// ([`table_autogenerates_id`](Self::table_autogenerates_id)), in which
-    /// case the backend-generated id from [`run_insert`](Self::run_insert) is
-    /// folded back into the returned record.
+    /// unless the table fills its own
+    /// ([`table_autogenerates_id`](Self::table_autogenerates_id)); then the
+    /// INSERT returns the stored row (`RETURNING *`, on the write path) and
+    /// the id the database assigned is folded into the returned record.
     async fn create(
         &self,
         collection: &str,
@@ -1123,7 +1122,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
 
         // The key probe only matters for a row without an id.
-        let autogenerates_id = !data.contains_key("id") && self.table_autogenerates_id(table).await;
+        let autogenerates_id =
+            !data.contains_key("id") && self.table_autogenerates_id(table).await?;
         prepare_created_row(&mut data, autogenerates_id);
 
         // Ensure any new columns exist. Table creation itself is the block
@@ -1134,20 +1134,29 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
         let json = self.json_columns(table).await?;
         let pairs = sorted_pairs(&data, &json)?;
+        if autogenerates_id {
+            let stmt = wafer_sql_utils::query::build_insert_returning(table, &pairs, Self::BACKEND);
+            let stored = self
+                .run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values), &json)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    DatabaseError::Internal(format!("insert into {table} returned no row"))
+                })?;
+            let id = stored.data.get("id").cloned().ok_or_else(|| {
+                DatabaseError::Internal(format!("insert into {table} returned no id"))
+            })?;
+            data.insert("id".to_string(), id);
+            return Ok(Record {
+                id: stored.id,
+                data,
+            });
+        }
         let stmt = wafer_sql_utils::query::build_insert(table, &pairs, Self::BACKEND);
-        let generated = self
-            .run_insert(&stmt.sql, &sea_values_to_json(stmt.values))
+        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
-
-        let id = match data.get("id") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Number(n)) => n.to_string(),
-            _ => generated.map_or_else(String::new, |rowid| {
-                // Autoincrement table: fold the generated id into the record.
-                data.insert("id".to_string(), serde_json::json!(rowid));
-                rowid.to_string()
-            }),
-        };
+        let id = data.get("id").map(codec::record_id).unwrap_or_default();
         Ok(Record { id, data })
     }
 
@@ -1673,7 +1682,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             return Ok(0);
         }
         let table = sql_name(collection)?;
-        let autogenerates_id = self.table_autogenerates_id(table).await;
+        let autogenerates_id = self.table_autogenerates_id(table).await?;
 
         // One representative value per column across every row, for the lazy
         // column-add's type choice.
@@ -1756,7 +1765,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     mut data,
                 } => {
                     let table = sql_name(&collection)?;
-                    let autogenerates_id = self.table_autogenerates_id(table).await;
+                    let autogenerates_id =
+                        !data.contains_key("id") && self.table_autogenerates_id(table).await?;
                     prepare_created_row(&mut data, autogenerates_id);
                     self.ensure_data_columns(table, &data).await?;
                     let json = self.json_columns(table).await?;
@@ -2000,7 +2010,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sql_name(collection)?;
         self.require_columns(table, &guard_columns(guards)).await?;
         let mut data = data;
-        let autogenerates_id = !data.contains_key("id") && self.table_autogenerates_id(table).await;
+        let autogenerates_id =
+            !data.contains_key("id") && self.table_autogenerates_id(table).await?;
         prepare_created_row(&mut data, autogenerates_id);
         self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
