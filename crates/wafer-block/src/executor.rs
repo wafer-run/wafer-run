@@ -71,6 +71,11 @@ pub fn extract_path_vars(pattern: &str, path: &str, msg: &mut Message) {
 }
 
 /// Match a request path against a route pattern.
+///
+/// A pattern is an exact path, a path ending in `/**` (the prefix itself or
+/// anything below it), or a `/`-separated template whose `{name}` segments
+/// each match exactly one non-empty path segment: `/users/{id}` matches
+/// `/users/42` but not `/users/`.
 pub fn match_path(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;
@@ -92,6 +97,9 @@ pub fn match_path(pattern: &str, path: &str) -> bool {
 
     for (pp, actual) in pattern_parts.iter().zip(path_parts.iter()) {
         if pp.starts_with('{') && pp.ends_with('}') {
+            if actual.is_empty() {
+                return false;
+            }
             continue;
         }
         if pp != actual {
@@ -100,4 +108,26 @@ pub fn match_path(pattern: &str, path: &str) -> bool {
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_needs_a_non_empty_segment() {
+        assert!(match_path("/users/{id}", "/users/42"));
+        assert!(!match_path("/users/{id}", "/users/"));
+        assert!(!match_path("/users/{id}/posts", "/users//posts"));
+        assert!(!matches_pattern("GET:/users/{id}", "GET:/users/"));
+    }
+
+    #[test]
+    fn literal_and_wildcard_patterns_are_unchanged() {
+        assert!(match_path("/users", "/users"));
+        assert!(!match_path("/users", "/users/"));
+        assert!(match_path("/static/**", "/static"));
+        assert!(match_path("/static/**", "/static/a/b"));
+        assert!(!match_path("/static/**", "/staticfoo"));
+    }
 }

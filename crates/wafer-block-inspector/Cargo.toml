@@ -28,11 +28,15 @@ wafer-block-macro = { workspace = true }
 percent-encoding = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 # SEC-01 authorization unit tests (denial + role parsing) drive the async
 # `handle` on a minimal mock Context.
 tokio = { workspace = true, features = ["macros", "rt"] }
+# The redaction test drives `/app` through a real runtime, so the configs
+# and flow definitions it checks are the ones the runtime actually serves.
+wafer-run = { path = "../wafer-run", default-features = false }
 
 [lints]
 workspace = true

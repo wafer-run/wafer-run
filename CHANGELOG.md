@@ -55,6 +55,39 @@
   `Ok(None)` for an unset key. The config block's `config.get` reads the key
   from the request body only: a body that does not decode is
   `InvalidArgument`, and a `key` message meta is no longer a fallback.
+- Infrastructure blocks fail closed. `wafer-run/monitoring`: `/_stats` and
+  `/_monitoring` are gated by the new `stats_access` setting — `roles`
+  (default; the caller's `auth.user_roles` must hold one of `stats_roles`,
+  default `admin`) or `loopback` (the caller's `req.client.ip` must be
+  loopback). An empty client IP is refused in both modes (it used to be
+  trusted), and a loopback peer alone no longer suffices by default, which
+  made the endpoint public behind a same-host reverse proxy. An unknown
+  `stats_access` or an empty `stats_roles` fails Init. The payload's
+  `top_paths` (raw request paths, which carry reset tokens and share links)
+  is replaced by `routes`: counts per declared `BlockEndpoint::path`
+  template, with undeclared paths under `"(unmatched)"`.
+  `wafer-run/readonly-guard`: in read-only mode only `retrieve`, `list` and
+  an HTTP `OPTIONS` preflight pass; `execute`, custom and empty actions are
+  denied (only `create`/`update`/`delete` were). `readonly` accepts exactly
+  `true`/`1`/`false`/`0`/empty — any other block-config value (including
+  `null` or an array) fails Init, and any other step-config value denies the
+  request; `ReadonlyGuardBlock` is a unit struct (the dead `enabled` field is
+  gone). `wafer-run/router`: `parse_routes` returns
+  `Result<Vec<Route>, RouteConfigError>` and a malformed entry (missing or
+  non-string `path`/`block`, both `actions` and `methods`, a non-string
+  action, a non-array `routes`) fails Init instead of being dropped with a
+  warning. `wafer_block::match_path`: a `{var}` segment needs a non-empty
+  path segment (`/users/{id}` no longer matches `/users/`).
+  `wafer-run/web`: `web_prefix` is whole path segments and enforced — a
+  path not under it is `NotFound` (it used to be served from the folder
+  root, and `/docs` stripped `/docsecret.txt` to `ecret.txt`); a prefix
+  without a leading `/` fails Init. `wafer-run/inspector`: `/app` and
+  `/flows/{id}` replace with `"[redacted]"` the value of every config key
+  that is or ends in `SECRET`, `KEY`, `TOKEN` or `PASSWORD` (as `_SECRET`
+  etc., case-insensitive) or is declared `InputType::Password`, and mask
+  the userinfo of any other value that is a URL with credentials
+  (`postgres://redacted:redacted@db/x`), at any depth of block configs and
+  flow step configs.
 - Flow config is typed and a flow is validated wherever it is added.
   `wafer_flow::FlowConfig` fields are `on_error: Option<OnError>` (`Stop` /
   `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms:

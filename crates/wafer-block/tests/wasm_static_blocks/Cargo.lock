@@ -1486,6 +1486,7 @@ dependencies = [
  "percent-encoding",
  "serde_json",
  "tracing",
+ "url",
  "wafer-block",
  "wafer-block-macro",
  "wafer-core",
@@ -1506,6 +1507,7 @@ name = "wafer-block-readonly-guard"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "wafer-block",
  "wafer-block-macro",
 ]

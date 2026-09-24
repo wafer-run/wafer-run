@@ -54,7 +54,8 @@ enum CacheMode {
 ///   - `web_root`: storage folder, relative to this block's own
 ///     `wafer-run/web/` storage namespace (default: "public", i.e.
 ///     `wafer-run/web/public`)
-///   - `web_prefix`: URL prefix to strip (default: "")
+///   - `web_prefix`: URL prefix, whole path segments starting with `/`; only
+///     paths under it are served, with it stripped (default: "", all paths)
 ///   - `web_spa`: serve index.html for missing paths (default: false)
 ///   - `web_index`: index file name (default: "index.html")
 ///   - `cache_max_age`: Cache-Control max-age for static assets (default: 3600)
@@ -81,14 +82,16 @@ impl WebBlock {
     }
 
     async fn serve_file(ctx: &dyn Context, msg: &Message, config: &WebConfig) -> OutputStream {
-        let mut req_path = msg.path().to_string();
-
-        // Strip prefix
-        if !config.prefix.is_empty() {
-            if let Some(stripped) = req_path.strip_prefix(&config.prefix) {
-                req_path = stripped.to_string();
-            }
-        }
+        // The prefix is a whole number of path segments: `/docs` serves
+        // `/docs` and `/docs/...`, and nothing else — not `/docsecret.txt`,
+        // and not a path outside the prefix at all.
+        let Some(mut req_path) = strip_web_prefix(msg.path(), &config.prefix) else {
+            return OutputStream::error(WaferError {
+                code: ErrorCode::NotFound,
+                message: "Not found".to_string(),
+                meta: vec![],
+            });
+        };
 
         // Default to index
         if req_path.is_empty() || req_path == "/" {
@@ -187,10 +190,10 @@ impl Default for WebConfig {
 }
 
 impl WebConfig {
-    fn from_block_config(config: &BlockConfig) -> Self {
-        Self {
+    fn from_block_config(config: &BlockConfig) -> Result<Self, WaferError> {
+        Ok(Self {
             folder: config.str_or("web_root", DEFAULT_WEB_ROOT).to_string(),
-            prefix: config.str("web_prefix").to_string(),
+            prefix: normalize_web_prefix(config.str("web_prefix"))?,
             spa: config.bool("web_spa").unwrap_or(DEFAULT_WEB_SPA),
             index_file: config.str_or("web_index", DEFAULT_WEB_INDEX).to_string(),
             cache_max_age: config
@@ -205,8 +208,35 @@ impl WebConfig {
                 "no-cache" => CacheMode::NoCache,
                 _ => CacheMode::Normal,
             },
-        }
+        })
     }
+}
+
+/// Strip the segment-bounded `prefix` from `path`: `Some(rest)` when `path`
+/// is the prefix itself or continues it at a `/`, `None` otherwise. An empty
+/// prefix is the whole site.
+fn strip_web_prefix(path: &str, prefix: &str) -> Option<String> {
+    match path.strip_prefix(prefix) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => Some(rest.to_string()),
+        _ => None,
+    }
+}
+
+/// Normalise the `web_prefix` config: empty (or `/`) is no prefix, anything
+/// else must start with `/` and loses a trailing `/`, so it is compared as
+/// whole segments by [`strip_web_prefix`].
+fn normalize_web_prefix(prefix: &str) -> Result<String, WaferError> {
+    if prefix.is_empty() {
+        return Ok(String::new());
+    }
+    if !prefix.starts_with('/') {
+        return Err(WaferError {
+            code: ErrorCode::InvalidArgument,
+            message: format!("wafer-run/web: `web_prefix` must start with `/`, got {prefix:?}"),
+            meta: vec![],
+        });
+    }
+    Ok(prefix.trim_end_matches('/').to_string())
 }
 
 fn clean_path(p: &str) -> String {
@@ -354,8 +384,9 @@ impl Block for WebBlock {
             .name("Web Root"),
             ConfigVar::new(
                 "web_prefix",
-                "Optional URL path prefix that must precede every served \
-                 file (stripped before the storage lookup).",
+                "Optional URL path prefix (starting with `/`) that must \
+                 precede every served file as whole path segments; it is \
+                 stripped before the storage lookup and any other path is 404.",
                 DEFAULT_WEB_PREFIX,
             )
             .name("URL Prefix"),
@@ -418,7 +449,7 @@ impl Block for WebBlock {
     ) -> std::result::Result<(), WaferError> {
         if matches!(event.event_type, LifecycleType::Init) {
             let block_config = BlockConfig::from_event(&event);
-            let config = WebConfig::from_block_config(&block_config);
+            let config = WebConfig::from_block_config(&block_config)?;
             tracing::info!(
                 folder = %config.folder,
                 spa = config.spa,
@@ -742,18 +773,97 @@ mod tests {
             event_type: LifecycleType::Init,
             data: br#"{"cache_mode":"no-cache"}"#.to_vec(),
         };
-        let cfg = WebConfig::from_block_config(&BlockConfig::from_event(&event));
+        let cfg =
+            WebConfig::from_block_config(&BlockConfig::from_event(&event)).expect("valid config");
         assert_eq!(cfg.cache_mode, CacheMode::NoCache);
 
         let event = LifecycleEvent {
             event_type: LifecycleType::Init,
             data: br#"{"cache_mode":"sometimes"}"#.to_vec(),
         };
-        let cfg = WebConfig::from_block_config(&BlockConfig::from_event(&event));
+        let cfg =
+            WebConfig::from_block_config(&BlockConfig::from_event(&event)).expect("valid config");
         assert_eq!(
             cfg.cache_mode,
             CacheMode::Normal,
             "unknown values fall back to the default"
         );
+    }
+
+    async fn init_with(data: &[u8]) -> WebBlock {
+        let block = WebBlock::new();
+        block
+            .lifecycle(
+                &ScriptedStorageCtx::new(vec![]),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: data.to_vec(),
+                },
+            )
+            .await
+            .expect("Init lifecycle should succeed");
+        block
+    }
+
+    async fn get(
+        block: &WebBlock,
+        path: &str,
+        ctx: &ScriptedStorageCtx,
+    ) -> Result<Vec<u8>, WaferError> {
+        let mut msg = Message::new("retrieve");
+        msg.set_meta(crate::meta::META_REQ_RESOURCE, path);
+        msg.set_meta(crate::meta::META_REQ_ACTION, "retrieve");
+        block
+            .handle(ctx, msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+            .map(|r| r.body)
+            .map_err(Into::into)
+    }
+
+    /// A prefix is whole segments: `/docs` must not serve `/docsecret.txt`
+    /// (as `ecret.txt`), and a path outside the prefix must not be served
+    /// from the root of the folder either.
+    #[tokio::test]
+    async fn web_prefix_is_enforced_and_segment_bounded() {
+        let block = init_with(br#"{"web_prefix":"/docs/"}"#).await;
+        for outside in ["/docsecret.txt", "/secret.txt", "/"] {
+            let ctx = ScriptedStorageCtx::new(vec![Ok(())]);
+            let e = get(&block, outside, &ctx)
+                .await
+                .expect_err("a path outside the prefix must not be served");
+            assert_eq!(e.code, ErrorCode::NotFound, "{outside}");
+            assert!(
+                ctx.calls().is_empty(),
+                "{outside} reached storage: {:?}",
+                ctx.calls()
+            );
+        }
+
+        let ctx = ScriptedStorageCtx::new(vec![Ok(())]);
+        get(&block, "/docs/guide.txt", &ctx)
+            .await
+            .expect("inside the prefix");
+        assert_eq!(ctx.calls(), vec!["guide.txt".to_string()]);
+
+        let ctx = ScriptedStorageCtx::new(vec![Ok(())]);
+        get(&block, "/docs", &ctx).await.expect("the prefix itself");
+        assert_eq!(ctx.calls(), vec!["index.html".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn web_prefix_without_leading_slash_fails_init() {
+        let e = WebBlock::new()
+            .lifecycle(
+                &ScriptedStorageCtx::new(vec![]),
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: br#"{"web_prefix":"docs"}"#.to_vec(),
+                },
+            )
+            .await
+            .expect_err("a relative prefix can never match a request path");
+        assert_eq!(e.code, ErrorCode::InvalidArgument);
     }
 }

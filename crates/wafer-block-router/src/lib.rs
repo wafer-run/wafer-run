@@ -45,66 +45,96 @@ pub struct Route {
     pub block: String,
 }
 
+/// A route table the router refuses to load, and why.
+///
+/// Returned by [`parse_routes`] and surfaced as an `InvalidArgument` Init
+/// failure, so a misspelled or mistyped entry stops the runtime at start-up
+/// instead of silently falling through to a broader route at request time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteConfigError {
+    /// Index of the offending entry in `routes`, or `None` when the `routes`
+    /// value itself is malformed.
+    pub index: Option<usize>,
+    /// What is wrong with it.
+    pub reason: String,
+}
+
+impl std::fmt::Display for RouteConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.index {
+            Some(i) => write!(f, "routes[{i}]: {}", self.reason),
+            None => write!(f, "routes: {}", self.reason),
+        }
+    }
+}
+
+impl std::error::Error for RouteConfigError {}
+
 /// Parse routes from block config. Accepts the raw JSON config value
 /// (use `BlockConfig::as_value()` to extract from a `BlockConfig`).
 ///
-/// Drops route entries with missing or non-string `path` or
-/// `block` fields; each dropped entry produces a `tracing::warn!` with
-/// the reason and the offending entry so operators can find malformed
-/// route definitions in logs.
-pub fn parse_routes(config: &serde_json::Value) -> Vec<Route> {
-    config
-        .get("routes")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| {
-                    let path = match entry.get("path").and_then(|v| v.as_str()) {
-                        Some(s) => s.to_string(),
-                        None => {
-                            tracing::warn!(
-                                ?entry,
-                                reason = "missing or non-string `path` field",
-                                "skipped malformed route entry"
-                            );
-                            return None;
-                        }
-                    };
-                    let block = match entry.get("block").and_then(|v| v.as_str()) {
-                        Some(s) => s.to_string(),
-                        None => {
-                            tracing::warn!(
-                                ?entry,
-                                reason = "missing or non-string `block` field",
-                                "skipped malformed route entry"
-                            );
-                            return None;
-                        }
-                    };
-                    // Accept "actions" or "methods" — both are normalized.
-                    let raw = entry
-                        .get("actions")
-                        .or_else(|| entry.get("methods"))
-                        .and_then(|m| m.as_array());
-                    let raw_actions: Vec<String> = raw
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let actions: Vec<String> =
-                        raw_actions.iter().map(|a| normalize_action(a)).collect();
-                    Some(Route {
-                        path,
-                        actions,
-                        raw_actions,
-                        block,
-                    })
-                })
-                .collect()
+/// An absent `routes` key is an empty table. Anything else must be an array
+/// of objects, each with a non-empty string `path` and `block`, and at most
+/// one of `actions` / `methods`, which must be an array of strings. The
+/// first entry that is not is returned as a [`RouteConfigError`]; no entry
+/// is ever dropped. Keys the router does not read (for example a `config`
+/// a consumer keeps alongside the route) are ignored.
+pub fn parse_routes(config: &serde_json::Value) -> Result<Vec<Route>, RouteConfigError> {
+    let Some(routes) = config.get("routes") else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = routes.as_array() else {
+        return Err(RouteConfigError {
+            index: None,
+            reason: format!("expected a JSON array, got {routes}"),
+        });
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            parse_route(entry).map_err(|reason| RouteConfigError {
+                index: Some(i),
+                reason,
+            })
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+/// Parse one `routes` entry; the error is the reason it is malformed.
+fn parse_route(entry: &serde_json::Value) -> Result<Route, String> {
+    if !entry.is_object() {
+        return Err(format!("expected an object, got {entry}"));
+    }
+    let required = |key: &str| match entry.get(key).and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => Ok(s.to_string()),
+        _ => Err(format!("`{key}` must be a non-empty string in {entry}")),
+    };
+    let path = required("path")?;
+    let block = required("block")?;
+    let raw_actions = match (entry.get("actions"), entry.get("methods")) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "`actions` and `methods` are the same setting; give one, in {entry}"
+            ))
+        }
+        (Some(list), None) | (None, Some(list)) => list
+            .as_array()
+            .and_then(|arr| {
+                arr.iter()
+                    .map(|v| v.as_str().map(String::from))
+                    .collect::<Option<Vec<String>>>()
+            })
+            .ok_or_else(|| format!("`actions`/`methods` must be an array of strings in {entry}"))?,
+        (None, None) => Vec::new(),
+    };
+    let actions = raw_actions.iter().map(|a| normalize_action(a)).collect();
+    Ok(Route {
+        path,
+        actions,
+        raw_actions,
+        block,
+    })
 }
 
 /// `wafer-run/router` matches incoming messages against configured routes
@@ -201,7 +231,10 @@ impl Block for RouterBlock {
     }
 
     fn collect_block_refs(&self, config: &serde_json::Value) -> Vec<BlockConfigRef> {
+        // A malformed table yields no references here; `lifecycle(Init)`
+        // refuses the same table with the reason, so it is never served.
         parse_routes(config)
+            .unwrap_or_default()
             .into_iter()
             .map(|route| BlockConfigRef {
                 target: route.block,
@@ -223,7 +256,11 @@ impl Block for RouterBlock {
         if event.event_type == LifecycleType::Init && self.routes.get().is_none() {
             let config = wafer_block::BlockConfig::from_event(&event);
 
-            let routes = parse_routes(config.as_value());
+            let routes = parse_routes(config.as_value()).map_err(|e| WaferError {
+                code: ErrorCode::InvalidArgument,
+                message: format!("wafer-run/router: {e}"),
+                meta: vec![],
+            })?;
             if routes.is_empty() {
                 tracing::debug!("wafer-run/router initialized with no routes");
             }
@@ -247,7 +284,7 @@ mod tests {
                 {"path": "/c", "block": "c-block"}
             ]
         });
-        let routes = super::parse_routes(&cfg);
+        let routes = super::parse_routes(&cfg).expect("well-formed routes");
         assert_eq!(routes.len(), 3);
 
         // Route 0: methods=["GET"] -> raw=["GET"], actions=["retrieve"]
@@ -274,7 +311,7 @@ mod tests {
                  "actions": ["retrieve", "LIST", "Custom-Op"]}
             ]
         });
-        let routes = super::parse_routes(&cfg);
+        let routes = super::parse_routes(&cfg).expect("well-formed routes");
         // HTTP methods (any case) go through the shared http_codec table.
         assert_eq!(
             routes[0].actions,
@@ -318,25 +355,81 @@ mod tests {
     }
 
     #[test]
-    fn parse_routes_drops_malformed_entries() {
+    fn parse_routes_refuses_every_malformed_entry() {
         use serde_json::json;
-        let cfg = json!({
-            "routes": [
-                {"path": "/ok", "block": "block-a"},
-                {"path": 42, "block": "block-b"},                 // non-string path
-                {"block": "block-c"},                              // missing path
-                {"path": "/no-block"},                             // missing block
-                {"path": "/non-string-block", "block": null},     // non-string block
-                {"path": "/ok2", "block": "block-d"}
-            ]
-        });
-        let routes = super::parse_routes(&cfg);
-        assert_eq!(
-            routes.len(),
-            2,
-            "expected exactly 2 surviving routes, got: {routes:?}"
-        );
-        assert_eq!(routes[0].path, "/ok");
-        assert_eq!(routes[1].path, "/ok2");
+        for (bad, index) in [
+            (json!({"routes": [{"path": "/x", "blok": "a"}]}), Some(0)),
+            (
+                json!({"routes": [{"path": "/ok", "block": "a"}, {"path": 42, "block": "b"}]}),
+                Some(1),
+            ),
+            (json!({"routes": [{"block": "c"}]}), Some(0)),
+            (json!({"routes": [{"path": "/n", "block": null}]}), Some(0)),
+            (json!({"routes": [{"path": "", "block": "d"}]}), Some(0)),
+            (
+                json!({"routes": [{"path": "/m", "block": "e", "methods": "GET"}]}),
+                Some(0),
+            ),
+            (
+                json!({"routes": [{"path": "/m", "block": "e", "methods": ["GET", 1]}]}),
+                Some(0),
+            ),
+            (
+                json!({"routes": [{"path": "/m", "block": "e", "methods": ["GET"], "actions": ["create"]}]}),
+                Some(0),
+            ),
+            (json!({"routes": ["/x"]}), Some(0)),
+            (json!({"routes": "[]"}), None),
+        ] {
+            let err = super::parse_routes(&bad).expect_err(&format!("{bad} must be refused"));
+            assert_eq!(err.index, index, "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_routes_ignores_keys_it_does_not_read() {
+        use serde_json::json;
+        let routes = super::parse_routes(&json!({
+            "routes": [{"path": "/**", "block": "wafer-run/web", "config": {"web_spa": "true"}}]
+        }))
+        .expect("an extra key is not a malformed entry");
+        assert_eq!(routes.len(), 1);
+        assert!(super::parse_routes(&json!({}))
+            .expect("no routes key")
+            .is_empty());
+    }
+
+    /// The real Init path: a malformed table fails `lifecycle(Init)` instead
+    /// of loading a router that silently lacks the entry.
+    #[tokio::test]
+    async fn init_fails_on_a_malformed_route() {
+        use std::sync::Arc;
+
+        use wafer_block::{streams::output::TerminalNotResponse, InputStream, Message};
+        use wafer_test_support::builder::WaferBuilder;
+
+        let wafer = WaferBuilder::new()
+            .with_block("wafer-run/router", Arc::new(super::RouterBlock::new()))
+            .with_config(
+                "wafer-run/router",
+                serde_json::json!({"routes": [{"path": "/x", "blok": "a"}]}),
+            )
+            .build()
+            .await
+            .expect("an Init failure is cached on the block, not fatal to start");
+        let mut msg = Message::new("retrieve");
+        msg.set_meta("req.action", "retrieve");
+        msg.set_meta("req.resource", "/x");
+        match wafer
+            .run_block("wafer-run/router", msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert!(e.message.contains("routes[0]"), "{e:?}");
+            }
+            other => panic!("a route without `block` must fail Init, got {other:?}"),
+        }
     }
 }
