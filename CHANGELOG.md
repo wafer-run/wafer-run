@@ -629,6 +629,22 @@
 
 ### Fixed
 
+- CI now builds the feature and target shapes downstream embedders ship,
+  which no workspace member enables: `wafer-block --features json-schema`
+  and `wafer-block-sqlite --features vectors` are linted with clippy, the
+  `vectors` tests run, and `wafer-block-crypto` is built for
+  `wasm32-unknown-unknown` through a consumer fixture
+  (`crates/wafer-block-crypto/tests/wasm32_consumer`). Every cargo command in
+  `scripts/check.sh`, `scripts/build-fixtures.sh` and the coverage job passes
+  `--locked`, so a lockfile that no longer matches its manifests fails CI
+  instead of being re-resolved. The first `vectors` lint surfaced three
+  clippy errors in `wafer-block-sqlite`'s `vector.rs`, fixed here, and
+  `wafer-block-crypto` drops its unused `uuid` dependency.
+  The fixture crates' own Cargo.locks are seeded from the root one
+  (`scripts/fixture-locks.sh sync`), and `check.sh fixtures` fails when a
+  crate a fixture shares with the root lock resolves to a version the root
+  lock does not pin; run `sync` after changing the root lock.
+
 - `database.aggregate`'s `CaseWhenSum` counts `0`, not `NULL`, in an
   ungrouped query over no rows: it renders
   `COALESCE(SUM(CASE WHEN <when> THEN 1 ELSE 0 END), 0)`

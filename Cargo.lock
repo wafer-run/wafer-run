@@ -6207,7 +6207,6 @@ dependencies = [
  "subtle",
  "thiserror",
  "tracing",
- "uuid",
  "wafer-core",
 ]
 

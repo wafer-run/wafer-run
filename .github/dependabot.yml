@@ -12,6 +12,12 @@ updates:
       actions:
         patterns: ['*']
 
+  # Root lock only. The fixture crates' own Cargo.locks are not listed:
+  # scripts/fixture-locks.sh (run by `check.sh fixtures`) requires every
+  # crate they share with the root lock to resolve to a root-pinned
+  # version, so a separate fixture bump would fail it, and a root bump
+  # fails it until `./scripts/fixture-locks.sh sync` is pushed to the
+  # Dependabot PR.
   - package-ecosystem: cargo
     directory: /
     schedule:

@@ -128,8 +128,7 @@ impl SqliteVecService {
             let meta_json = e
                 .metadata
                 .as_ref()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "{}".into());
+                .map_or_else(|| "{}".into(), |v| v.to_string());
 
             // Find existing rowid (re-upsert path) or create a new one.
             let rowid: Option<i64> = tx
@@ -248,9 +247,9 @@ impl VectorService for SqliteVecService {
                 &index,
                 &vector,
                 top_k,
-                filter,
+                filter.as_ref(),
                 mode,
-                keyword_query,
+                keyword_query.as_deref(),
             )
         })
         .await
@@ -453,9 +452,9 @@ impl SqliteVecService {
         index: &str,
         vector: &[f32],
         top_k: usize,
-        filter: Option<MetadataFilter>,
+        filter: Option<&MetadataFilter>,
         mode: SearchMode,
-        keyword_query: Option<String>,
+        keyword_query: Option<&str>,
     ) -> Result<Vec<VectorMatch>, VectorError> {
         ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
         if !Self::index_exists(conn, schema)? {
@@ -500,7 +499,7 @@ impl SqliteVecService {
         // --- Keyword rankings ---
         let kw_ranking: Vec<(String, f32)> =
             if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
-                let q = keyword_query.as_deref().unwrap();
+                let q = keyword_query.unwrap();
                 let mut stmt = conn
                     .prepare(&schema.build_fts_bm25_select().sql)
                     .map_err(|e| VectorError::Internal(e.to_string()))?;
@@ -567,7 +566,7 @@ impl SqliteVecService {
             .into_iter()
             .filter_map(|id| {
                 let metadata = meta_map.get(&id).cloned();
-                if let Some(flt) = filter.as_ref() {
+                if let Some(flt) = filter {
                     if !flt.matches(metadata.as_ref()) {
                         return None;
                     }

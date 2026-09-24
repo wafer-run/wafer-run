@@ -13,7 +13,6 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true }
 argon2 = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }

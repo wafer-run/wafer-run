@@ -169,9 +169,10 @@ jobs:
 
       # Covers: guest SDK on wasm32-wasip1, wafer-run with
       # --no-default-features (wasmi off), the wafer-core wasm-component
-      # guest path, and the gizza consumer combo (wafer-run on
-      # wasm32-unknown-unknown with --features wasmi). See run_wasm in
-      # scripts/check.sh.
+      # guest path, the gizza consumer combo (wafer-run on
+      # wasm32-unknown-unknown with --features wasmi), the wasm32 compile
+      # fixtures, and wafer-block-crypto on wasm32-unknown-unknown. See
+      # run_wasm in scripts/check.sh.
       - name: Wasm & feature builds
         run: ./scripts/check.sh wasm
 

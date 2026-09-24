@@ -1,0 +1,32 @@
+# Compile fixture: `wafer-block-crypto` built for `wasm32-unknown-unknown`.
+#
+# The crate documents itself as pure Rust and wasm32-compatible, and Worker
+# and browser embedders link it on that target, but every other build in the
+# workspace is native: a native-only dependency or API added to it would
+# compile green here and break only in a downstream Worker build.
+#
+# `scripts/check.sh wasm` builds this crate for `wasm32-unknown-unknown`.
+# Excluded from the workspace (own `[workspace]` table) so
+# `cargo build --workspace` does not pick it up — same pattern as the
+# fixtures under `crates/wafer-block/tests/`.
+[workspace]
+
+[package]
+name = "wasm32-crypto-consumer-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+wafer-block-crypto = { path = "../.." }
+
+# `getrandom` (argon2's `OsRng`) and `uuid` (through wafer-core) refuse to
+# build for wasm32-unknown-unknown without a randomness source, and the choice
+# belongs to the embedding binary, not to the library crates that use them.
+# This fixture is that binary's stand-in, so it makes the choice here rather
+# than forcing one on every consumer.
+getrandom = { version = "0.2", features = ["js"] }
+uuid = { version = "1", features = ["js"] }
