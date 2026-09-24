@@ -1,4 +1,7 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::{
+    collections::HashSet,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use wafer_block::{
     core_types::*,
@@ -7,7 +10,10 @@ use wafer_block::{
 };
 
 use super::Wafer;
-use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::Instant};
+use crate::{
+    context::RuntimeContext, observability::ObservabilityBus, platform::Instant,
+    waferflow::plan::CompiledFlow,
+};
 
 /// Identity fields for the observability bracket around one block dispatch.
 pub(crate) struct DispatchObs<'a> {
@@ -108,6 +114,31 @@ where
     Ok(out)
 }
 
+/// The error for a flow id that names no flow.
+pub(crate) fn flow_not_found(flow_id: &str) -> WaferError {
+    WaferError::new(ErrorCode::NotFound, format!("flow not found: {flow_id}"))
+}
+
+/// A flow's execution plan: the seal-compiled one, or one compiled for this
+/// invocation. See [`Wafer::flow_plan`].
+pub(crate) enum FlowPlan<'a> {
+    /// Compiled at `seal()`.
+    Sealed(&'a CompiledFlow),
+    /// Compiled for this invocation.
+    AdHoc(Box<CompiledFlow>),
+}
+
+impl std::ops::Deref for FlowPlan<'_> {
+    type Target = CompiledFlow;
+
+    fn deref(&self) -> &CompiledFlow {
+        match self {
+            Self::Sealed(plan) => plan,
+            Self::AdHoc(plan) => plan,
+        }
+    }
+}
+
 impl Wafer {
     /// Refuse top-level dispatch on a runtime [`seal`](Self::seal) has not
     /// sealed successfully: capabilities, the grant gate, the downloaded
@@ -137,38 +168,57 @@ impl Wafer {
         if let Some(refused) = self.refuse_unless_sealed() {
             return refused;
         }
-        // Seal-compiled plan (PERF-03). Flows added after `seal()` are not in
-        // the plan and are compiled ad hoc for this invocation, which is no
-        // more work than the per-step reparsing the executor previously did
-        // every run.
-        let ad_hoc;
-        let compiled: &crate::waferflow::plan::CompiledFlow =
-            if let Some(compiled) = self.plan.flows.get(flow_id) {
-                compiled
-            } else if let Some(flow) = self.flows.get(flow_id) {
-                ad_hoc = crate::waferflow::plan::compile_flow(self, flow);
-                &ad_hoc
-            } else {
-                return OutputStream::error(WaferError::new(
-                    ErrorCode::NotFound,
-                    format!("flow not found: {flow_id}"),
-                ));
-            };
+        match self.flow_plan(flow_id) {
+            Some(plan) => self.run_plan(&plan, msg, input, HashSet::new()).await,
+            None => OutputStream::error(flow_not_found(flow_id)),
+        }
+    }
 
+    /// The execution plan of flow `flow_id`, if it exists. Seal-compiled
+    /// (PERF-03); a flow added after `seal()` is not in the plan and is
+    /// compiled ad hoc for this invocation, which is no more work than the
+    /// per-step reparsing the executor previously did every run.
+    pub(crate) fn flow_plan(&self, flow_id: &str) -> Option<FlowPlan<'_>> {
+        if let Some(compiled) = self.plan.flows.get(flow_id) {
+            Some(FlowPlan::Sealed(compiled))
+        } else {
+            self.flows.get(flow_id).map(|flow| {
+                FlowPlan::AdHoc(Box::new(crate::waferflow::plan::compile_flow(self, flow)))
+            })
+        }
+    }
+
+    /// Execute `plan` with the observability hooks and its timeout.
+    /// `responder_written` is the executor's record of the `msg` entries a
+    /// responding step wrote (empty unless this is a `next` transfer).
+    pub(crate) async fn run_plan(
+        &self,
+        plan: &CompiledFlow,
+        msg: Message,
+        input: InputStream,
+        responder_written: HashSet<String>,
+    ) -> OutputStream {
         // Observability: flow start
-        self.hooks.fire_flow_start(flow_id, &msg);
+        self.hooks.fire_flow_start(&plan.id, &msg);
         let start = Instant::now();
 
         // Set up flow-level timeout via deadline (parsed once at compile).
         let cancelled = Arc::new(AtomicBool::new(false));
-        let deadline = compiled.timeout.map(|t| Instant::now() + t);
+        let deadline = plan.timeout.map(|t| Instant::now() + t);
 
-        let result =
-            crate::waferflow::execute_waferflow(compiled, msg, input, self, &cancelled, deadline)
-                .await;
+        let result = crate::waferflow::execute_waferflow(
+            plan,
+            msg,
+            input,
+            self,
+            &cancelled,
+            deadline,
+            responder_written,
+        )
+        .await;
 
         // Observability: flow end
-        self.hooks.fire_flow_end(flow_id, start.elapsed());
+        self.hooks.fire_flow_end(&plan.id, start.elapsed());
 
         result
     }

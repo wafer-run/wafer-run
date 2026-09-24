@@ -4,11 +4,14 @@
 //! `wafer-run/cors` blocks and rendered by the real HTTP codec
 //! (`http_codec::collect_http_response`), the path every HTTP adapter takes.
 //!
-//! What is carried is exactly the flow message's `resp.header.*` /
-//! `resp.set_cookie.*` entries when the flow stopped: not the stopping step's
-//! own partial output, not what an earlier step removed, not a parallel
-//! branch's message, and never `resp.status` / `resp.content_type`. The
-//! terminal's own headers win.
+//! What is carried is the flow message's `resp.header.*` /
+//! `resp.set_cookie.*` entries that middleware (`Continue`) steps left there
+//! when the flow stopped: not what a responding step wrote, not the stopping
+//! step's own partial output, not what an earlier step removed, not a
+//! parallel branch's message, and never a body-describing header or
+//! `resp.status` / `resp.content_type`. The terminal's own entries win (a
+//! cookie by name/path/domain, not by its positional key) and `Vary` values
+//! are unioned.
 
 use std::sync::Arc;
 
@@ -170,6 +173,84 @@ impl Block for Ok200 {
     }
 }
 
+/// Responds like a static-asset server: a year-long immutable cache, an
+/// `ETag`, and a session cookie under a positional key — none of which may
+/// reach a later error.
+struct CachedAsset;
+
+#[async_trait::async_trait]
+impl Block for CachedAsset {
+    fn info(&self) -> BlockInfo {
+        info("test/cached-asset")
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond_with_meta(
+            b"asset".to_vec(),
+            vec![
+                meta(
+                    "resp.header.Cache-Control",
+                    "public, max-age=31536000, immutable",
+                ),
+                meta("resp.header.ETag", "\"v1\""),
+                meta("resp.set_cookie.0", "session=s1; Path=/"),
+            ],
+        )
+    }
+}
+
+/// Middleware that refreshes the `sid` cookie under a positional key, as a
+/// `ResponseBuilder`-style producer would.
+struct SessionMiddleware;
+
+#[async_trait::async_trait]
+impl Block for SessionMiddleware {
+    fn info(&self) -> BlockInfo {
+        info("test/session")
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
+        let mut next = msg;
+        next.set_meta("resp.set_cookie.0", "sid=mw; Path=/");
+        OutputStream::continue_with(next)
+    }
+}
+
+/// Responds with an unrelated cookie under the same positional key.
+struct ThemeResponder;
+
+#[async_trait::async_trait]
+impl Block for ThemeResponder {
+    fn info(&self) -> BlockInfo {
+        info("test/theme")
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond_with_meta(
+            b"themed".to_vec(),
+            vec![meta("resp.set_cookie.0", "theme=dark; Path=/")],
+        )
+    }
+}
+
+/// Fails, clearing `sid` under a different key and varying on encoding.
+struct CookieError;
+
+#[async_trait::async_trait]
+impl Block for CookieError {
+    fn info(&self) -> BlockInfo {
+        info("test/cookie-error")
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        let mut err = WaferError::new(ErrorCode::PermissionDenied, "no");
+        err.meta
+            .push(meta("resp.set_cookie.clear", "sid=; Path=/; Max-Age=0"));
+        err.meta.push(meta("resp.header.Vary", "Accept-Encoding"));
+        OutputStream::error(err)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -194,6 +275,10 @@ async fn start(flows: &[serde_json::Value]) -> Arc<Wafer> {
         ("test/rewrite", Arc::new(Rewrite)),
         ("test/mark", Arc::new(Mark)),
         ("test/ok", Arc::new(Ok200)),
+        ("test/cached-asset", Arc::new(CachedAsset)),
+        ("test/session", Arc::new(SessionMiddleware)),
+        ("test/theme", Arc::new(ThemeResponder)),
+        ("test/cookie-error", Arc::new(CookieError)),
     ];
     for (name, block) in blocks {
         w.register_block(name, block).expect("register fixture");
@@ -416,9 +501,139 @@ async fn an_executor_error_keeps_the_headers() {
     assert_middleware_headers(&parts);
 }
 
+/// A responding step's headers and cookies describe a response the flow
+/// discarded: its year-long cache, `ETag` and session cookie must not land
+/// on the later error.
+#[tokio::test]
+async fn a_responding_steps_headers_and_cookies_do_not_reach_a_later_error() {
+    let wafer = start(&[flow(
+        "api",
+        vec![
+            security_headers_step(),
+            cors_step(),
+            serde_json::json!({ "id": "asset", "block": "test/cached-asset" }),
+            serde_json::json!({ "id": "handler", "block": "test/unauthenticated" }),
+        ],
+    )])
+    .await;
+
+    let parts = run_http(&wafer, "api").await;
+
+    assert_eq!(parts.status, 401);
+    assert_middleware_headers(&parts);
+    assert!(header(&parts, "Cache-Control").is_empty(), "{parts:?}");
+    assert!(header(&parts, "ETag").is_empty(), "{parts:?}");
+    assert!(
+        header(&parts, "Set-Cookie").is_empty(),
+        "a responder's session cookie was set on a failed request: {parts:?}"
+    );
+}
+
+/// Cookies are identified by name (and path/domain), not by their
+/// positional `resp.set_cookie.N` key — on success and on error.
+#[tokio::test]
+async fn cookies_are_identified_by_name_on_success_and_on_error() {
+    let wafer = start(&[
+        flow(
+            "ok",
+            vec![
+                serde_json::json!({ "id": "session", "block": "test/session" }),
+                serde_json::json!({ "id": "theme", "block": "test/theme" }),
+            ],
+        ),
+        flow(
+            "err",
+            vec![
+                serde_json::json!({ "id": "session", "block": "test/session" }),
+                serde_json::json!({ "id": "handler", "block": "test/cookie-error" }),
+            ],
+        ),
+    ])
+    .await;
+
+    let ok = run_http(&wafer, "ok").await;
+    assert_eq!(ok.status, 200);
+    assert_eq!(
+        header(&ok, "Set-Cookie"),
+        vec!["sid=mw; Path=/", "theme=dark; Path=/"],
+        "an unrelated cookie under the same positional key clobbered the session: {ok:?}"
+    );
+
+    let err = run_http(&wafer, "err").await;
+    assert_eq!(err.status, 403);
+    assert_eq!(
+        header(&err, "Set-Cookie"),
+        vec!["sid=; Path=/; Max-Age=0"],
+        "the error's own `sid` must replace the middleware's, whatever its key: {err:?}"
+    );
+}
+
+/// `Vary` is list-valued: the terminal's values are added to the CORS
+/// middleware's `Origin`, which must survive with the reflected origin.
+#[tokio::test]
+async fn vary_values_are_unioned_with_the_terminals() {
+    let wafer = start(&[flow(
+        "api",
+        vec![
+            cors_step(),
+            serde_json::json!({ "id": "handler", "block": "test/cookie-error" }),
+        ],
+    )])
+    .await;
+
+    let parts = run_http(&wafer, "api").await;
+
+    assert_eq!(header(&parts, "Access-Control-Allow-Origin"), vec![ORIGIN]);
+    assert_eq!(header(&parts, "Vary"), vec!["Origin, Accept-Encoding"]);
+}
+
 // ---------------------------------------------------------------------------
 // Nested flows
 // ---------------------------------------------------------------------------
+
+/// The transfer hands the target the record of what responding steps wrote,
+/// so a responder before the transfer does not leak into the target's error.
+#[tokio::test]
+async fn a_transfer_keeps_the_responder_record() {
+    let mut cors = cors_step();
+    cors["next"] = serde_json::json!([{ "flow": "inner" }]);
+    let wafer = start(&[
+        flow(
+            "outer",
+            vec![
+                security_headers_step(),
+                serde_json::json!({ "id": "asset", "block": "test/cached-asset" }),
+                cors,
+            ],
+        ),
+        flow(
+            "inner",
+            vec![serde_json::json!({ "id": "handler", "block": "test/unauthenticated" })],
+        ),
+    ])
+    .await;
+
+    let parts = run_http(&wafer, "outer").await;
+
+    assert_eq!(parts.status, 401);
+    assert_middleware_headers(&parts);
+    assert!(header(&parts, "Cache-Control").is_empty(), "{parts:?}");
+    assert!(header(&parts, "Set-Cookie").is_empty(), "{parts:?}");
+}
+
+/// A transfer to a flow that does not exist fails before any executor runs;
+/// the error still carries the transferring flow's headers.
+#[tokio::test]
+async fn a_transfer_to_an_unknown_flow_keeps_the_headers() {
+    let mut cors = cors_step();
+    cors["next"] = serde_json::json!([{ "flow": "nowhere" }]);
+    let wafer = start(&[flow("outer", vec![security_headers_step(), cors])]).await;
+
+    let parts = run_http(&wafer, "outer").await;
+
+    assert_eq!(parts.status, 404, "{parts:?}");
+    assert_middleware_headers(&parts);
+}
 
 /// A `next` transfer hands the message, headers included, to the target
 /// flow, whose own boundary carries them: each header appears once.

@@ -49,31 +49,49 @@
 //! Parallel branches snapshot the body with an `Arc` clone. Mutations
 //! (pipeline outputs, `each` items) replace the `Arc` wholesale.
 //!
-//! # Short-circuit terminals keep the flow's response headers
+//! # Response meta across steps
+//!
+//! A responding step's meta is laid over the flow message with the rules in
+//! [`super::response_meta`]: a header replaces the message's header of the
+//! same name (case-insensitively), `Vary` values are unioned, and a cookie
+//! replaces the message's cookie of the same name, `Path` and `Domain` —
+//! never an unrelated cookie that happens to share its positional
+//! `resp.set_cookie.N` key.
+//!
+//! # Short-circuit terminals keep the middleware's response headers
 //!
 //! A flow that stops early — a step's `Error` under `on_error = "stop"`, a
 //! step's `Halt` or `Drop`, or an error the executor raises itself (budget,
 //! deadline, a failing `next` condition, an unresolvable input, a missing
-//! block) — returns that terminal with the flow's response headers carried
-//! onto it, exactly as a completed flow's response carries them. Carried:
-//! the `resp.header.*` and `resp.set_cookie.*` entries on the flow message at
-//! the moment the flow stopped. That message holds what the steps that
-//! COMPLETED set (CORS, security headers, a refreshed session cookie), after
-//! any of them overwrote or removed an entry; the stopping step's own output
-//! never reaches it — an erroring block's streamed `Meta` events are
-//! discarded with its partial body, and its `Continue` message is never
-//! applied. Parallel branches' message changes are discarded at the join
-//! (see step semantics), so they are not carried either. Not carried:
-//! `resp.status` and `resp.content_type` (and a `resp.header.content-type`),
-//! which describe the body — the terminal's own. The terminal's own entries
-//! win: a carried header is skipped when the terminal sets the same header
-//! name (case-insensitively), a carried cookie when it sets the same
-//! `resp.set_cookie.*` key. A flow transfer (`next` to another flow) returns
-//! the target flow's terminal unchanged: the target ran with this flow's
-//! message, so its own boundary already carried these headers.
+//! block or transfer target) — returns that terminal with the middleware's
+//! response headers and cookies carried onto it. Carried: the
+//! `resp.header.*` and `resp.set_cookie.*` entries on the flow message at the
+//! moment the flow stopped that a middleware step (`Continue`) left there, or
+//! that the flow's inbound message carried — CORS, security headers, a
+//! refreshed session cookie — after any middleware overwrote or removed one.
+//! Not carried:
+//! - what a responding step wrote (its headers and cookies describe a
+//!   response the flow discarded: a static file's year-long `Cache-Control`
+//!   must not cache a 500, a login step's session cookie must not be set on a
+//!   failed request), unless a later middleware rewrote the entry;
+//! - body-describing headers (`Content-*`, `ETag`, `Last-Modified`,
+//!   `Location`, `Accept-Ranges`) and `resp.status` / `resp.content_type`,
+//!   whatever set them: the terminal has its own body;
+//! - the stopping step's own partial output — an erroring block's streamed
+//!   `Meta` events are discarded with its partial body, and its `Continue`
+//!   message is never applied;
+//! - a parallel branch's message changes, discarded at the join (see step
+//!   semantics).
+//!
+//! The terminal's own entries are laid over the carried ones with the same
+//! rules as a responding step's, so the terminal wins and `Vary` is unioned.
+//! A flow transfer (`next` to another flow) hands the target the message and
+//! the record of what responding steps wrote, so the target's boundary
+//! applies the same rule; a transfer to an unknown flow errors with the
+//! carried headers.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -82,7 +100,6 @@ use std::{
 
 use wafer_block::{
     core_types::*,
-    http_codec::{classify_response_meta, ResponseMetaPart},
     streams::{
         input::InputStream,
         output::{BufferedResponse, OutputStream, TerminalNotResponse},
@@ -90,7 +107,10 @@ use wafer_block::{
 };
 use wafer_flow::Accumulator;
 
-use super::plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget};
+use super::{
+    plan::{CompiledBranch, CompiledEach, CompiledFlow, CompiledStep, NextTarget},
+    response_meta,
+};
 use crate::{
     platform::{BoxFuture, Instant},
     runtime::Wafer,
@@ -113,6 +133,10 @@ struct ExecState {
     acc: Accumulator,
     body: Arc<Vec<u8>>,
     msg: Message,
+    /// Keys of the `msg` response headers and cookies a responding step
+    /// wrote and no middleware has rewritten since: not carried onto a
+    /// short-circuit terminal (see the module docs).
+    responder_written: HashSet<String>,
 }
 
 /// How a single block invocation concluded (when it did not short-circuit
@@ -139,52 +163,26 @@ enum ShortCircuit {
 }
 
 impl ShortCircuit {
-    /// The flow's terminal: this short-circuit with the response headers of
-    /// `flow_meta` (the flow message's meta when the flow stopped) carried
-    /// under its own meta.
-    fn into_output(self, flow_meta: &[MetaEntry]) -> OutputStream {
+    /// The flow's terminal: this short-circuit laid over the middleware
+    /// response headers of `state`'s message (see the module docs).
+    fn into_output(self, state: &ExecState) -> OutputStream {
+        let with_carried = |own: Vec<MetaEntry>| {
+            let mut meta = response_meta::carried(&state.msg.meta, &state.responder_written);
+            response_meta::overlay(&mut meta, own);
+            meta
+        };
         match self {
             Self::Error(mut err) => {
-                err.meta = carry_response_headers(flow_meta, std::mem::take(&mut err.meta));
+                err.meta = with_carried(std::mem::take(&mut err.meta));
                 OutputStream::error(err)
             }
             Self::Halt(buf) => OutputStream::from_buffered_response(BufferedResponse {
                 body: buf.body,
-                meta: carry_response_headers(flow_meta, buf.meta),
+                meta: with_carried(buf.meta),
             }),
-            Self::Drop(meta) => {
-                OutputStream::drop_request_with_meta(carry_response_headers(flow_meta, meta))
-            }
+            Self::Drop(meta) => OutputStream::drop_request_with_meta(with_carried(meta)),
         }
     }
-}
-
-/// `own` preceded by the `resp.header.*` / `resp.set_cookie.*` entries of
-/// `flow_meta` that `own` does not set itself. See the module docs for which
-/// entries are carried and why.
-fn carry_response_headers(flow_meta: &[MetaEntry], own: Vec<MetaEntry>) -> Vec<MetaEntry> {
-    let own_sets_header = |name: &str| {
-        own.iter().any(|e| {
-            matches!(
-                classify_response_meta(e),
-                Some(ResponseMetaPart::Header { name: own_name, .. })
-                    if own_name.eq_ignore_ascii_case(name)
-            )
-        })
-    };
-    let mut merged: Vec<MetaEntry> = flow_meta
-        .iter()
-        .filter(|e| match classify_response_meta(e) {
-            Some(ResponseMetaPart::Header { name, .. }) => {
-                !name.eq_ignore_ascii_case("content-type") && !own_sets_header(name)
-            }
-            Some(ResponseMetaPart::SetCookie(_)) => !own.iter().any(|o| o.key == e.key),
-            Some(ResponseMetaPart::Status(_) | ResponseMetaPart::ContentType(_)) | None => false,
-        })
-        .cloned()
-        .collect();
-    merged.extend(own);
-    merged
 }
 
 /// Take the body buffer out of its `Arc` for a consumer that needs owned
@@ -203,8 +201,10 @@ fn unwrap_body(body: Arc<Vec<u8>>) -> Vec<u8> {
 /// see the module docs for the precise semantics.
 ///
 /// Short-circuits on a step's Error (under `on_error = "stop"`), Halt or Drop
-/// terminal, carrying the flow's response headers onto it (see the module
-/// docs).
+/// terminal, carrying the middleware's response headers onto it (see the
+/// module docs). `responder_written` names the `msg` entries a responding
+/// step already wrote: empty for a fresh run, the transferring flow's record
+/// for a `next` transfer.
 pub(crate) async fn execute(
     flow: &CompiledFlow,
     msg: Message,
@@ -212,6 +212,7 @@ pub(crate) async fn execute(
     wafer: &Wafer,
     cancelled: &Arc<AtomicBool>,
     deadline: Option<Instant>,
+    responder_written: HashSet<String>,
 ) -> OutputStream {
     let mut acc = Accumulator::new();
 
@@ -240,6 +241,7 @@ pub(crate) async fn execute(
         acc,
         body: Arc::new(body),
         msg,
+        responder_written,
     };
 
     let steps = &flow.steps;
@@ -250,7 +252,7 @@ pub(crate) async fn execute(
         let step = &steps[current];
 
         if let Err(short_circuit) = run_step(&env, step, &mut state).await {
-            return short_circuit.into_output(&state.msg.meta);
+            return short_circuit.into_output(&state);
         }
 
         // --- Advance ---
@@ -279,7 +281,7 @@ pub(crate) async fn execute(
                                     flow.id, step.id
                                 ),
                             ))
-                            .into_output(&state.msg.meta);
+                            .into_output(&state);
                         }
                     },
                 };
@@ -295,20 +297,27 @@ pub(crate) async fn execute(
                                 ErrorCode::NotFound,
                                 format!("next target step '{target_step}' not found"),
                             ))
-                            .into_output(&state.msg.meta);
+                            .into_output(&state);
                         }
                         NextTarget::Flow(target_flow) => {
                             // Flow transfer: execute the target flow (boxed to
                             // break recursion). Its terminal is returned as-is:
-                            // the target runs with this flow's message, so its
-                            // own boundary carries these response headers.
-                            let flow_result = Box::pin(wafer.run(
-                                target_flow,
+                            // the target runs with this flow's message and
+                            // responder record, so its own boundary carries
+                            // the middleware's response headers.
+                            let Some(target) = wafer.flow_plan(target_flow) else {
+                                return ShortCircuit::Error(
+                                    crate::runtime::runner::flow_not_found(target_flow),
+                                )
+                                .into_output(&state);
+                            };
+                            return Box::pin(wafer.run_plan(
+                                &target,
                                 state.msg,
                                 InputStream::from_bytes(unwrap_body(state.body)),
+                                state.responder_written,
                             ))
                             .await;
-                            return flow_result;
                         }
                         // Entry with neither `step` nor `flow`: taking it ends
                         // routing without jumping (sequential advance below).
@@ -518,6 +527,7 @@ async fn run_parallel(
             acc: Accumulator::branch_from(parent.clone()),
             body: state.body.clone(),
             msg: state.msg.clone(),
+            responder_written: state.responder_written.clone(),
         };
         async move {
             run_branch_steps(env, &branch.steps, &mut branch_state)
@@ -696,10 +706,10 @@ async fn run_invocation(
         Ok(response) => {
             state.body = Arc::new(response.body);
 
-            // Apply trailing meta to the message
-            for entry in response.meta {
-                state.msg.set_meta(entry.key, entry.value);
-            }
+            // Lay the response's meta over the message (see the module docs)
+            // and remember which headers and cookies it wrote.
+            let written = response_meta::overlay(&mut state.msg.meta, response.meta);
+            state.responder_written.extend(written);
             Ok(InvocationOutcome::Responded)
         }
         Err(TerminalNotResponse::Error(e)) => {
@@ -725,6 +735,11 @@ async fn run_invocation(
             // Middleware block — update the message. The body was never
             // taken out of `state`, so the next step sees the original
             // input with no restore copy.
+            response_meta::after_continue(
+                &mut state.responder_written,
+                &state.msg.meta,
+                &next_msg.meta,
+            );
             state.msg = next_msg;
             Ok(InvocationOutcome::NoOutput)
         }

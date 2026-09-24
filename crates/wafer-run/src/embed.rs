@@ -9,7 +9,9 @@
 //! one test suite instead of drifting copies per binding.
 
 use wafer_block::{
-    core_types::MetaEntry, http_codec::response_meta_entries, streams::output::TerminalNotResponse,
+    core_types::MetaEntry,
+    http_codec::{classify_response_meta, response_meta_entries, ResponseMetaPart},
+    streams::output::TerminalNotResponse,
 };
 
 use crate::OutputStream;
@@ -55,7 +57,8 @@ fn response_meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 ///   429 carries.
 /// - `drop` carries only `meta` — it maps to a bodiless `204` with those
 ///   headers and cookies (a flow's drop carries the response headers its
-///   completed steps set, e.g. CORS).
+///   middleware set, e.g. CORS). A drop is always a bodiless 204, so its
+///   `meta` never holds `resp.status` or `resp.content_type`.
 /// - `continue` carries the follow-up message's `kind` plus its `meta`. The
 ///   message itself does not cross the boundary: a host has nowhere further
 ///   to forward it, and the flow's in-flight message is not a response.
@@ -99,11 +102,22 @@ pub async fn output_to_json(output: OutputStream) -> String {
             })
             .to_string()
         }
-        Err(TerminalNotResponse::Drop { meta }) => serde_json::json!({
-            "action": "drop",
-            "meta": response_meta_to_json(&meta),
-        })
-        .to_string(),
+        Err(TerminalNotResponse::Drop { meta }) => {
+            let headers_and_cookies: Vec<MetaEntry> = meta
+                .into_iter()
+                .filter(|e| {
+                    matches!(
+                        classify_response_meta(e),
+                        Some(ResponseMetaPart::Header { .. } | ResponseMetaPart::SetCookie(_))
+                    )
+                })
+                .collect();
+            serde_json::json!({
+                "action": "drop",
+                "meta": response_meta_to_json(&headers_and_cookies),
+            })
+            .to_string()
+        }
         Err(TerminalNotResponse::Halt(buf)) => {
             use base64ct::{Base64, Encoding};
             let body_b64 = Base64::encode_string(&buf.body);
@@ -298,6 +312,14 @@ mod tests {
             MetaEntry {
                 key: "http.header.authorization".into(),
                 value: "Bearer SECRET_TOKEN".into(),
+            },
+            MetaEntry {
+                key: "resp.status".into(),
+                value: "200".into(),
+            },
+            MetaEntry {
+                key: "resp.content_type".into(),
+                value: "text/html".into(),
             },
         ]);
         let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
