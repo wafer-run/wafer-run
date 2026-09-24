@@ -208,6 +208,17 @@ impl Block for SecurityHeadersBlock {
                 "none",
             )
             .name("Cross-origin isolation"),
+            ConfigVar::new(
+                "allow_blob_workers",
+                "`true` adds `blob:` to `worker-src`, and only there, so a page \
+                 can start a worker from a blob URL it built (an in-browser \
+                 toolchain spawning its own sub-workers). For an embedder's own \
+                 step config: the operator `csp` value still cannot add `blob:` \
+                 to any script directive. `false` (the default) leaves \
+                 `worker-src` as the merged policy has it.",
+                "false",
+            )
+            .name("Allow blob: workers"),
         ])
     }
 
@@ -265,17 +276,21 @@ impl Block for SecurityHeadersBlock {
                 "self" => FrameAncestors::SelfOrigin,
                 _ => FrameAncestors::None,
             };
+            let allow_blob_workers = allow_blob_workers(&config)?;
             let custom_csp = config.str_or("csp", "");
             check_csp_characters(custom_csp)?;
             let merged = merge_csp(DEFAULT_CSP, custom_csp);
             for refusal in &merged.refused {
                 tracing::warn!("security-headers: CSP config refused {refusal}");
             }
+            let policy = if allow_blob_workers {
+                with_blob_workers(&merged.policy)
+            } else {
+                merged.policy
+            };
             // Write-once: Init fires a single time per registration.
             let _ = self.frame_ancestors.set(frame_ancestors);
-            let _ = self
-                .csp
-                .set(with_frame_ancestors(&merged.policy, frame_ancestors));
+            let _ = self.csp.set(with_frame_ancestors(&policy, frame_ancestors));
             match config.str_or("cross_origin_isolation", "none") {
                 "credentialless" => {
                     let _ = self
@@ -316,6 +331,69 @@ fn check_csp_characters(csp: &str) -> std::result::Result<(), WaferError> {
         )),
         None => Ok(()),
     }
+}
+
+/// The `allow_blob_workers` step config: absent, `true` or `false` (a JSON
+/// bool or its string spelling). Anything else fails Init rather than leave
+/// the reader to guess which way a typo was meant.
+fn allow_blob_workers(config: &BlockConfig) -> std::result::Result<bool, WaferError> {
+    match config.get("allow_blob_workers") {
+        None => Ok(false),
+        Some(_) => config.bool("allow_blob_workers").ok_or_else(|| {
+            WaferError::new(
+                ErrorCode::InvalidArgument,
+                "security-headers: `allow_blob_workers` must be true or false",
+            )
+        }),
+    }
+}
+
+/// Add `blob:` to the `worker-src` directive of a [`merge_csp`] policy.
+///
+/// Without a `worker-src`, a browser takes worker sources from `child-src`,
+/// then `script-src`, then `default-src`; the directive this adds starts from
+/// that fallback, so the sources workers already had are kept and `blob:` is
+/// the only addition. No other directive changes.
+fn with_blob_workers(csp: &str) -> String {
+    let mut directives: Vec<(String, Vec<String>)> = csp
+        .split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            let mut tokens = d.split_ascii_whitespace();
+            let name = tokens.next().unwrap_or_default().to_string();
+            (name, tokens.map(str::to_string).collect())
+        })
+        .collect();
+    let sources_of = |directives: &[(String, Vec<String>)], name: &str| {
+        directives
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, sources)| sources.clone())
+    };
+    if let Some((_, sources)) = directives.iter_mut().find(|(n, _)| n == "worker-src") {
+        if !sources.iter().any(|s| s == "blob:") {
+            sources.push("blob:".to_string());
+        }
+    } else {
+        let mut sources = ["child-src", "script-src", "default-src"]
+            .iter()
+            .find_map(|name| sources_of(&directives, name))
+            .unwrap_or_default();
+        sources.push("blob:".to_string());
+        directives.push(("worker-src".to_string(), sources));
+    }
+    directives
+        .into_iter()
+        .map(|(name, sources)| {
+            if sources.is_empty() {
+                name
+            } else {
+                format!("{name} {}", sources.join(" "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Rewrite the `frame-ancestors` directive of a [`merge_csp`] policy (whose
@@ -519,6 +597,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The embedder knob adds `blob:` to `worker-src` and nothing else. With
+    /// no `worker-src` in the policy the directive starts from its fallback
+    /// (here the baseline `script-src`), so workers keep the sources they had.
+    #[tokio::test]
+    async fn allow_blob_workers_adds_blob_to_worker_src_only() {
+        let off = served_csp(serde_json::json!({})).await;
+        let on = served_csp(serde_json::json!({ "allow_blob_workers": true })).await;
+        assert_eq!(
+            enforced(&on, "worker-src"),
+            Some(vec!["'self'", "'unsafe-inline'", "blob:"]),
+            "{on}"
+        );
+        for name in [
+            "script-src",
+            "default-src",
+            "child-src",
+            "frame-src",
+            "img-src",
+        ] {
+            assert_eq!(enforced(&on, name), enforced(&off, name), "{name}: {on}");
+        }
+
+        let with_own = served_csp(serde_json::json!({
+            "allow_blob_workers": "true",
+            "csp": "worker-src 'self'",
+        }))
+        .await;
+        assert_eq!(
+            enforced(&with_own, "worker-src"),
+            Some(vec!["'self'", "blob:"]),
+            "{with_own}"
+        );
+    }
+
+    /// The operator `csp` string cannot reach what the knob grants: `blob:`
+    /// in a worker or script directive is still refused, with the knob off.
+    #[tokio::test]
+    async fn operator_csp_cannot_add_blob_workers() {
+        let csp = served_csp(serde_json::json!({
+            "csp": "worker-src 'self' blob:; script-src blob:; child-src blob:",
+        }))
+        .await;
+        for name in ["worker-src", "script-src", "child-src"] {
+            assert!(
+                !enforced(&csp, name).unwrap_or_default().contains(&"blob:"),
+                "{name} admitted blob: from the operator csp: {csp}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_blob_workers_is_a_bool_or_init_fails() {
+        let block = SecurityHeadersBlock::new();
+        let err = block
+            .lifecycle(
+                &NoopCtx,
+                init_event(&serde_json::json!({ "allow_blob_workers": "yes" }).to_string()),
+            )
+            .await
+            .expect_err("a value that is not true or false must fail Init");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 
     #[tokio::test]

@@ -1154,6 +1154,15 @@
 
 ### Added
 
+- `wafer-run/security-headers` has an `allow_blob_workers` step config
+  (`true`/`false`, default `false`; any other value fails Init). `true` adds
+  `blob:` to `worker-src` and to no other directive, starting from the
+  directive's fallback (`child-src`, then `script-src`, then `default-src`)
+  when the policy has none, so workers keep the sources they had. It is for an
+  embedder whose own page must start workers from blob URLs it builds (an
+  in-browser toolchain spawning sub-workers); the operator `csp` value still
+  cannot add `blob:` to a worker or script directive.
+
 - Embedder bindings can bound a WASM guest's capabilities:
   `embed::register_block_path(wafer, name, path, capabilities_json)`, and the
   `wafer_register_block` C export, `WaferRuntime.registerBlock(name, path,
