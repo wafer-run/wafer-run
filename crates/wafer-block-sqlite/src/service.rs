@@ -522,33 +522,21 @@ impl SQLiteDatabaseService {
     /// execution queues to the write worker.
     async fn ensure_schema_table_in_one_job(&self, table: &Table) -> Result<(), DatabaseError> {
         let table_name = table.name.clone();
-        let create_sql = ddl::build_create_table(table, Backend::Sqlite)
-            .map_err(|e| {
-                DatabaseError::Internal(format!("build create table {}: {}", table.name, e))
-            })?
-            .sql;
+        let create_sql = ddl::build_create_table(table, Backend::Sqlite)?.sql;
         // (lowercased name, display name, ALTER sql) per declared column.
         let column_adds: Vec<(String, String, String)> = table
             .columns
             .iter()
             .map(|col| {
-                (
-                    col.name.to_lowercase(),
-                    col.name.clone(),
-                    ddl::build_add_column(&table.name, col, Backend::Sqlite).sql,
-                )
+                let add = ddl::build_add_column(&table.name, col, Backend::Sqlite)?;
+                Ok((col.name.to_lowercase(), col.name.clone(), add.sql))
             })
-            .collect();
+            .collect::<Result<_, DatabaseError>>()?;
         let mut index_sqls = Vec::new();
         for idx in &table.indexes {
-            index_sqls.push(
-                ddl::build_create_index(&table.name, idx, Backend::Sqlite)
-                    .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?
-                    .sql,
-            );
+            index_sqls.push(ddl::build_create_index(&table.name, idx, Backend::Sqlite)?.sql);
         }
-        let fk_sqls: Vec<String> = ddl::build_fk_indexes(table, Backend::Sqlite)
-            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?
+        let fk_sqls: Vec<String> = ddl::build_fk_indexes(table, Backend::Sqlite)?
             .into_iter()
             .map(|stmt| stmt.sql)
             .collect();
@@ -649,7 +637,7 @@ forward_database_service! {
         }
 
         async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-            let stmt = ddl::build_drop_table(name, Backend::Sqlite);
+            let stmt = ddl::build_drop_table(name, Backend::Sqlite)?;
             self.run_execute(&stmt.sql, &[]).await?;
             self.schema_cache.invalidate(name);
             Ok(())
@@ -660,7 +648,7 @@ forward_database_service! {
             table: &str,
             column: &Column,
         ) -> Result<(), DatabaseError> {
-            let stmt = ddl::build_add_column(table, column, Backend::Sqlite);
+            let stmt = ddl::build_add_column(table, column, Backend::Sqlite)?;
             self.run_execute(&stmt.sql, &[]).await?;
             self.schema_cache.invalidate(table);
             Ok(())
@@ -1576,42 +1564,50 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Lazy column-add on filtered writes (sqlite/postgres divergence resolved
-    // deliberately: both backends now lazily add missing filter/data columns
-    // on the *_where family, matching the documented lazy column-add design;
-    // previously SQLite errored with "no such column").
+    // Filtered writes: a filter never adds a column. A filter on a column the
+    // table lacks is `InvalidArgument` and changes nothing; the SET columns of
+    // an update are still added from the data.
     // -----------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn delete_where_lazily_adds_missing_filter_column() {
-        let svc = make_test_svc();
-        seed_rows(&svc, "items", vec![serde_json::json!({"name": "alpha"})]).await;
-
-        // `archived` is not in the schema: the column is lazily added (NULL),
-        // the filter matches nothing, and no error surfaces.
-        let filters = vec![Filter {
-            field: "archived".to_string(),
+    fn unknown_column_filter(field: &str) -> Vec<Filter> {
+        vec![Filter {
+            field: field.to_string(),
             operator: FilterOp::Equal,
-            value: serde_json::json!("yes"),
-        }];
-        let count = DatabaseService::delete_where_count(&svc, "items", &filters)
-            .await
-            .expect("missing filter column must be lazily added, not error");
-        assert_eq!(count, 0);
+            value: serde_json::json!("x"),
+        }]
+    }
 
-        // The row survives and the column now exists (NULL on the old row).
-        let remaining = DatabaseService::list(&svc, "items", &ListOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(remaining.records.len(), 1);
-        assert_eq!(
-            remaining.records[0].data.get("archived"),
-            Some(&serde_json::Value::Null)
+    fn assert_unknown_column(err: &DatabaseError, column: &str) {
+        assert!(
+            matches!(err, DatabaseError::InvalidArgument(msg) if msg.contains(column)),
+            "{err:?}"
         );
     }
 
     #[tokio::test]
-    async fn update_where_lazily_adds_missing_data_and_filter_columns() {
+    async fn delete_where_on_a_missing_filter_column_is_refused() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "items", vec![serde_json::json!({"name": "alpha"})]).await;
+        let before = DatabaseService::schema_columns(&svc, "items")
+            .await
+            .unwrap();
+
+        let err =
+            DatabaseService::delete_where_count(&svc, "items", &unknown_column_filter("archived"))
+                .await
+                .expect_err("a filter on a missing column must be refused");
+        assert_unknown_column(&err, "archived");
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "items")
+                .await
+                .unwrap(),
+            before
+        );
+        assert_eq!(DatabaseService::count(&svc, "items", &[]).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_where_adds_set_columns_but_refuses_a_missing_filter_column() {
         let svc = make_test_svc();
         seed_rows(
             &svc,
@@ -1622,44 +1618,67 @@ mod tests {
             ],
         )
         .await;
+        let before = DatabaseService::schema_columns(&svc, "items")
+            .await
+            .unwrap();
 
-        // Neither `flag` (SET) nor `category` (WHERE) exists yet.
+        // `category` (WHERE) does not exist: refused before `flag` is added.
         let mut patch = std::collections::HashMap::new();
         patch.insert("flag".to_string(), serde_json::json!("on"));
+        let err = DatabaseService::update_where(
+            &svc,
+            "items",
+            &unknown_column_filter("category"),
+            patch.clone(),
+        )
+        .await
+        .expect_err("a filter on a missing column must be refused");
+        assert_unknown_column(&err, "category");
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "items")
+                .await
+                .unwrap(),
+            before
+        );
+
+        // A filter on a present column: the new SET column `flag` is added.
         let filters = vec![Filter {
-            field: "category".to_string(),
-            operator: FilterOp::IsNull,
-            value: serde_json::Value::Null,
+            field: "name".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("alpha"),
         }];
         DatabaseService::update_where(&svc, "items", &filters, patch)
             .await
-            .expect("missing SET/filter columns must be lazily added, not error");
-
-        // Both rows match (category IS NULL after the lazy add) and got the flag.
+            .expect("a new SET column is added from the data");
         let rows = DatabaseService::list(&svc, "items", &ListOptions::default())
             .await
             .unwrap();
-        assert_eq!(rows.records.len(), 2);
-        for r in &rows.records {
-            assert_eq!(r.data["flag"], serde_json::json!("on"));
-        }
+        let flagged = rows
+            .records
+            .iter()
+            .filter(|r| r.data["flag"] == serde_json::json!("on"))
+            .count();
+        assert_eq!(flagged, 1);
     }
 
     #[tokio::test]
-    async fn take_where_lazily_adds_missing_filter_column() {
+    async fn take_where_on_a_missing_filter_column_is_refused() {
         let svc = make_test_svc();
         seed_rows(&svc, "codes", vec![serde_json::json!({"code": "abc"})]).await;
-        let filters = vec![Filter {
-            field: "claimed_by".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!("nobody"),
-        }];
-        let taken = DatabaseService::take_where(&svc, "codes", &filters)
+        let before = DatabaseService::schema_columns(&svc, "codes")
             .await
-            .expect("missing filter column must be lazily added, not error");
-        assert!(taken.is_empty());
-        let remaining = DatabaseService::count(&svc, "codes", &[]).await.unwrap();
-        assert_eq!(remaining, 1);
+            .unwrap();
+        let err = DatabaseService::take_where(&svc, "codes", &unknown_column_filter("claimed_by"))
+            .await
+            .expect_err("a filter on a missing column must be refused");
+        assert_unknown_column(&err, "claimed_by");
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "codes")
+                .await
+                .unwrap(),
+            before
+        );
+        assert_eq!(DatabaseService::count(&svc, "codes", &[]).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1843,13 +1862,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_with_group_filter_on_column_absent_from_schema_lazily_adds_it() {
+    async fn list_with_group_filter_on_column_absent_from_schema_is_refused() {
         // A field that appears ONLY inside a group (`filter_tree`), never in
-        // the flat `filters` list, must still get its lazy TEXT column added
-        // by `ensure_query_columns` (which now walks the tree's leaves). If it
-        // didn't, the SELECT would fail with "no such column".
+        // the flat `filters` list, is checked like a flat filter's: a column
+        // the table lacks is `InvalidArgument`, and the read adds nothing.
         let svc = make_test_svc();
         seed_rows(&svc, "rows", vec![serde_json::json!({"name": "a"})]).await;
+        let before = DatabaseService::schema_columns(&svc, "rows").await.unwrap();
 
         let tree = vec![FilterTree::Any(vec![FilterTree::Leaf(Filter {
             field: "tier".into(), // absent from the seeded schema
@@ -1860,13 +1879,18 @@ mod tests {
             filter_tree: Some(tree),
             ..Default::default()
         };
-        let list = DatabaseService::list(&svc, "rows", &opts)
+        let err = DatabaseService::list(&svc, "rows", &opts)
             .await
-            .expect("group-only filter column must be lazily added, not error");
-        // No row has tier='gold' (the column was just added as NULL), so the
-        // filter matches nothing — but the query must succeed.
-        assert!(list.records.is_empty());
-        assert_eq!(list.total_count, 0);
+            .expect_err("a group-only filter on an unknown column must be refused");
+        assert!(
+            matches!(&err, DatabaseError::InvalidArgument(msg) if msg.contains("tier")),
+            "{err:?}"
+        );
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "rows").await.unwrap(),
+            before,
+            "a read must not add a column"
+        );
     }
 
     #[tokio::test]
@@ -1913,32 +1937,6 @@ mod tests {
         // The column now exists and round-trips on a fresh read.
         let reread = DatabaseService::get(&svc, "widgets", &id).await.unwrap();
         assert_eq!(reread.data["nickname"], serde_json::json!("ace"));
-    }
-
-    #[tokio::test]
-    async fn ensure_query_columns_propagates_error_on_missing_table() {
-        // Regression for the M17 fix: `table_columns` now surfaces a real DB
-        // error instead of `Err(())` collapsed to "no columns". A
-        // `PRAGMA table_info` on a non-existent table returns no rows (not an
-        // error), so this still succeeds — but a malformed statement would now
-        // propagate. Here we assert the success-with-empty-rows contract is
-        // preserved so callers don't regress.
-        let svc = make_test_svc();
-        let filters = vec![Filter {
-            field: "whatever".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!("x"),
-        }];
-        // No such table: PRAGMA table_info yields zero rows, so the missing
-        // filter column would be "added" against a table that doesn't exist,
-        // which surfaces as a real DDL error rather than being swallowed.
-        let res = svc
-            .ensure_query_columns("no_such_table", &filters, &[], None)
-            .await;
-        assert!(
-            res.is_err(),
-            "adding a column to a non-existent table must surface an error, not be swallowed"
-        );
     }
 
     #[tokio::test]
@@ -2253,6 +2251,43 @@ mod tests {
         assert_eq!(after.total_count, 0);
     }
 
+    /// A request naming an unknown column is refused without evicting the
+    /// cached column list the other requests are served from: the uncached
+    /// re-read that confirms the column is missing leaves the cache alone.
+    #[tokio::test]
+    async fn unknown_column_requests_do_not_evict_the_schema_cache() {
+        let svc = make_test_svc();
+        seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
+        let named_a = vec![Filter {
+            field: "name".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("a"),
+        }];
+        let _ = DatabaseService::count(&svc, "widgets", &named_a)
+            .await
+            .unwrap();
+        let cache = DbExec::schema_cache(&svc).expect("the SQLite backend caches");
+        let generation = cache.generation();
+        assert!(
+            cache.columns("widgets").is_some(),
+            "the column list is cached"
+        );
+
+        let unknown = vec![Filter {
+            field: "zz".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("x"),
+        }];
+        for _ in 0..3 {
+            let err = DatabaseService::count(&svc, "widgets", &unknown)
+                .await
+                .expect_err("an unknown column is refused");
+            assert!(matches!(err, DatabaseError::InvalidArgument(_)), "{err:?}");
+        }
+        assert!(cache.columns("widgets").is_some(), "the entry survives");
+        assert_eq!(cache.generation(), generation, "nothing was invalidated");
+    }
+
     /// Adding a column out-of-band (via `schema_add_column`) invalidates the
     /// cached column list, so a subsequent filtered query sees the new column
     /// instead of a stale set that omits it.
@@ -2261,10 +2296,25 @@ mod tests {
         let svc = make_test_svc();
         seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
 
-        // Warm the column cache.
-        let _ = DatabaseService::count(&svc, "widgets", &[]).await.unwrap();
+        // Warm the column cache: a filter makes `count` read the column list.
+        let named_a = vec![Filter {
+            field: "name".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!("a"),
+        }];
+        let _ = DatabaseService::count(&svc, "widgets", &named_a)
+            .await
+            .unwrap();
+        let cache = DbExec::schema_cache(&svc).expect("the SQLite backend caches");
+        assert!(
+            cache.columns("widgets").is_some(),
+            "the column list is cached"
+        );
 
-        // Add a real column out of band; the cached column list must be dropped.
+        // Add a real column out of band; the cached column list must be
+        // dropped. Asserted on the cache itself: the column check re-reads a
+        // list that lacks a name before refusing, so a query alone would not
+        // tell a dropped entry from a stale one.
         DatabaseService::schema_add_column(
             &svc,
             "widgets",
@@ -2272,9 +2322,13 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(
+            cache.columns("widgets").is_none(),
+            "add_column drops the entry"
+        );
 
-        // A filter on the freshly-added column must resolve against the true
-        // schema — no lazy re-add, no "no such column".
+        // A filter on the freshly-added column resolves against the true
+        // schema.
         let filters = vec![Filter {
             field: "flag".to_string(),
             operator: FilterOp::IsNull,

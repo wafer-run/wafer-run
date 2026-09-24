@@ -18,8 +18,9 @@
 //! build SQL against a column set that no longer matches the database: a
 //! correctness bug, not merely a performance one. The invalidation call sites
 //! live in [`DbExec`](super::exec::DbExec) (the shared lazy-column-add and
-//! `exec_raw` paths) and in each backend's schema-management methods
-//! (`ensure_schema_table`, `schema_drop_table`, `schema_add_column`).
+//! `exec_raw` paths, and the column check's uncached re-read of a column list
+//! that lacks a name a request uses) and in each backend's schema-management
+//! methods (`ensure_schema_table`, `schema_drop_table`, `schema_add_column`).
 //!
 //! ## Probe/invalidate linearizability (the TOCTOU guard)
 //!
@@ -204,8 +205,9 @@ impl SchemaCache {
 
     /// Invalidate every cached fact for `table` and bump the generation.
     /// Called after a targeted schema mutation (migration, drop, add-column,
-    /// lazy `ALTER TABLE`): the next read re-introspects, and any write-back
-    /// still in flight from before this call is dropped.
+    /// lazy `ALTER TABLE`), or before re-reading a column list that may be
+    /// stale: the next read re-introspects, and any write-back still in
+    /// flight from before this call is dropped.
     pub fn invalidate(&self, table: &str) {
         let mut inner = self.inner.write();
         inner.tables.remove(table);

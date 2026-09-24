@@ -731,6 +731,15 @@ fn block_name_to_var_prefix(name: &str) -> String {
     prefix
 }
 
+/// Longest block name, in bytes. A block owns the tables named
+/// `{org}__{block}__{table}`, whose prefix is the name plus three bytes (`/`
+/// becomes `__`, and a `__` terminator follows). With at least one byte of
+/// table name that must fit the database layer's
+/// [`MAX_IDENT_LEN`](wafer_block::db::MAX_IDENT_LEN), so every block can own a
+/// table, and no collection name is long enough for PostgreSQL to truncate it
+/// into another's.
+pub(crate) const MAX_BLOCK_NAME_LEN: usize = wafer_block::db::MAX_IDENT_LEN - 4;
+
 /// Validate a block name follows the `{org}/{block}` convention.
 ///
 /// Rules:
@@ -738,7 +747,17 @@ fn block_name_to_var_prefix(name: &str) -> String {
 /// - Each segment: lowercase `[a-z0-9-]`, no `_`, no consecutive `--`,
 ///   not starting or ending with `-`
 /// - Minimum 1 char per segment
+/// - At most [`MAX_BLOCK_NAME_LEN`] bytes in all
 pub(crate) fn validate_block_name(name: &str) -> Result<(), RuntimeError> {
+    if name.len() > MAX_BLOCK_NAME_LEN {
+        return Err(RuntimeError::InvalidBlockName {
+            name: name.to_string(),
+            reason: format!(
+                "longer than {MAX_BLOCK_NAME_LEN} bytes, so its `{{org}}__{{block}}__` table \
+                 prefix leaves no room for a table name"
+            ),
+        });
+    }
     let (org, block) = name
         .split_once('/')
         .ok_or_else(|| RuntimeError::InvalidBlockName {
@@ -1015,6 +1034,22 @@ mod tests {
             block_name_to_var_prefix("my-org/products"),
             "MY_ORG__PRODUCTS__"
         );
+    }
+
+    #[test]
+    fn test_validate_block_name_caps_length_so_a_table_name_fits() {
+        // `o/` + block → prefix `o__{block}__` (+3 bytes) + a 1-byte table
+        // name must fit the 63-byte identifier limit.
+        let longest = format!("o/{}", "b".repeat(MAX_BLOCK_NAME_LEN - 2));
+        assert!(validate_block_name(&longest).is_ok());
+        let table = format!("{}x", longest.replace('/', "__") + "__");
+        assert_eq!(table.len(), wafer_block::db::MAX_IDENT_LEN);
+        assert!(wafer_block::db::is_plain_ident(&table));
+        let too_long = format!("o/{}", "b".repeat(MAX_BLOCK_NAME_LEN - 1));
+        assert!(matches!(
+            validate_block_name(&too_long),
+            Err(RuntimeError::InvalidBlockName { .. })
+        ));
     }
 
     #[test]

@@ -26,6 +26,46 @@
   must include the whole owner and its terminator (`acme/files/*`,
   `acme__files__*`). `acme/files*` (which also matched `acme/filesx/...`) and
   `acme/*` (all of `acme`) are rejected at `seal()` with `GrantsRejected`.
+- The database handler admits only plain lowercase identifiers
+  (`[a-z0-9_]`, 1 to 63 bytes — PostgreSQL silently truncates a longer name
+  into its 63-byte prefix, another table) as collection, column, sort,
+  filter, projection, guard, alias and schema-op names; anything else is
+  `InvalidArgument`. The rule is `wafer_block::db::is_plain_ident`
+  (`MAX_IDENT_LEN = 63`), and `wafer_sql_utils::ident::validate_ident` now
+  enforces the same rule (it admitted uppercase and any length), so the
+  executor, every DDL builder and every backend refuse what the handler
+  refuses. `ddl::build_drop_table`, `build_add_column`,
+  `build_add_column_with_type` and `build_add_column_for_value` return
+  `Result<Statement, SqlBuildError>`, and `DatabaseError` implements
+  `From<SqlBuildError>` (as `InvalidArgument`). Block names are capped at
+  59 bytes (`validate_block_name`), so a block's `{org}__{block}__` table
+  prefix always leaves room for a table name. A
+  collection is checked BEFORE the caller is authorized on it, and the SQL
+  executor runs on the authorized string verbatim: `sanitize_ident` (which
+  stripped every other character after authorization, so a block `acme/a-b`
+  requesting `acme__a-b__t` passed WRAP Rule 3 as its own owner and then read
+  and wrote `acme/ab`'s table `acme__ab__t`) is removed from
+  `wafer-sql-utils`, and `DbExec` refuses a non-identifier table or column
+  name with the new `DatabaseError::InvalidArgument`. Callers that spelled a
+  collection with `-`, uppercase or non-ASCII letters must switch to the
+  lowercase `{org}__{block}__{name}` form; those spellings never reached their
+  own table (they were silently aliased to the stripped one).
+- A read, or the filter of a write, never adds a column. `list`, `count`,
+  `delete_where[_count]`, `take_where`, `update_where[_count]`, `sum`,
+  `aggregate`,
+  `increment_field_where`, `update_guarded` and `insert_guarded` (guard
+  filters and `SumAtMost` fields) no longer `ALTER TABLE` for an unseen
+  filter, sort or projection column — which let a Read-only or append-only
+  caller reshape the owner's table. Outside STRICT_SCHEMA they answer
+  `InvalidArgument` naming the unknown column (checked against the table's
+  column list, re-read once uncached — without evicting the cache — before
+  refusing), and add nothing; in
+  STRICT_SCHEMA the backend's own "no such column" error answers, as before.
+  Writes still add the columns their DATA names; schema growth otherwise goes
+  through `database.ensure_table` / `database.add_column`. `DbExec`'s
+  `ensure_query_columns` is replaced by `require_columns`, and
+  `wafer_sql_utils::ddl::build_add_text_column` (used only by the removed
+  path) is removed — `build_add_column_with_type` covers it.
 - `InputStream` is no longer `Send` on `wasm32`. It boxes a `LocalBoxStream`
   there instead of a `BoxStream`, so that a JS-backed request body can be
   streamed to a block; native builds are unchanged and still hold a `Send`

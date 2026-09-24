@@ -2,6 +2,15 @@
 //!
 //! Any block implementing the `database@v1` interface can delegate to these
 //! functions to avoid duplicating the message protocol handling.
+//!
+//! Every collection and column a request names must be a plain identifier —
+//! at most 63 bytes of ASCII lowercase letters, digits and `_`
+//! ([`check_name`]) — or the request is `InvalidArgument`. A collection name
+//! is checked before the caller is authorized on it, and the executor puts the authorized string into SQL
+//! byte for byte, so the table a request touches is the table it was
+//! authorized on. Nothing rewrites a name: stripping `-` from `acme__a-b__t`
+//! would authorize the caller as `acme/a-b` and run the statement on
+//! `acme/ab`'s table `acme__ab__t`.
 
 use std::collections::HashMap;
 
@@ -112,12 +121,14 @@ fn convert_node(
 /// [`FilterTree::Leaf`], or — when `column` is set — a column-to-column leaf to
 /// [`FilterTree::ColumnCompare`].
 ///
-/// The column form is rejected as `InvalidArgument` when it also carries a
+/// A leaf whose `field` fails [`check_name`] is rejected as
+/// `InvalidArgument`. The column form is rejected too when it also carries a
 /// non-null `value` (the two are mutually exclusive), when its operator has no
-/// column form (`like`, `in`, `is_null`, `is_not_null`), or when either column
-/// fails [`wafer_sql_utils::ident::validate_ident`].
+/// column form (`like`, `in`, `is_null`, `is_not_null`), or when its `column`
+/// fails [`check_name`].
 fn convert_leaf(f: wire::FilterDef) -> Result<FilterTree, WaferError> {
     let operator = FilterOp::parse_wire(&f.operator).map_err(|e| invalid(e.to_string()))?;
+    check_name(&f.field)?;
     let Some(column) = f.column else {
         return Ok(FilterTree::Leaf(Filter {
             field: f.field,
@@ -136,8 +147,7 @@ fn convert_leaf(f: wire::FilterDef) -> Result<FilterTree, WaferError> {
             f.operator
         )));
     };
-    check_ident(&f.field)?;
-    check_ident(&column)?;
+    check_name(&column)?;
     Ok(FilterTree::ColumnCompare(ColumnFilter {
         field: f.field,
         operator,
@@ -145,12 +155,25 @@ fn convert_leaf(f: wire::FilterDef) -> Result<FilterTree, WaferError> {
     }))
 }
 
-/// Validate a caller-supplied identifier that reaches SQL text, mapping a
-/// failure to `InvalidArgument`.
-fn check_ident(name: &str) -> Result<(), WaferError> {
-    wafer_sql_utils::ident::validate_ident(name)
-        .map(|_| ())
-        .map_err(|e| invalid(e.to_string()))
+/// Admit `name` as a collection, column or alias name only when it is a plain
+/// identifier ([`wafer_block::db::is_plain_ident`]: non-empty, at most 63
+/// bytes, ASCII lowercase letters, digits and `_`). Anything else is
+/// `InvalidArgument`, never rewritten (see the module docs). The executor
+/// applies the same rule (`wafer_sql_utils::ident::validate_ident`), so a
+/// caller that reaches it without this handler is held to it too.
+pub(super) fn check_name(name: &str) -> Result<(), WaferError> {
+    if wafer_block::db::is_plain_ident(name) {
+        return Ok(());
+    }
+    Err(invalid(format!(
+        "{name:?} is not a collection or column name (1 to 63 of: lowercase letters, digits \
+         and `_`)"
+    )))
+}
+
+/// [`check_name`] every key of `data`: the columns a write sets.
+fn check_data_names(data: &HashMap<String, serde_json::Value>) -> Result<(), WaferError> {
+    data.keys().try_for_each(|key| check_name(key))
 }
 
 /// Flatten a tree to a leaf-only `Vec<Filter>`, rejecting any group node and
@@ -185,8 +208,8 @@ pub fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
 ///
 /// `data` values are parameter-bound and `SetColumns`/`conflict_columns` reach
 /// sea-query as quoted `DynCol`s, but we validate *all* column identifiers
-/// uniformly (via [`wafer_sql_utils::ident::validate_ident`], mapping failure
-/// to `InvalidArgument`) so a hostile name can never be interpolated — the
+/// uniformly (via [`check_name`], `InvalidArgument` on failure) so a hostile
+/// name can never be interpolated — the
 /// `WindowedCounter` builder in particular splices `count_field`/`window_field`
 /// and the timestamp columns into `CASE`/`SET` expression text, where binding
 /// is impossible. Returns the collection alongside the spec so the caller can
@@ -206,16 +229,16 @@ pub fn to_upsert_spec(
     req: wire::UpsertRequest,
 ) -> Result<(String, service::UpsertSpec), WaferError> {
     for (col, _) in &req.data {
-        check_ident(col)?;
+        check_name(col)?;
     }
     for col in &req.conflict_columns {
-        check_ident(col)?;
+        check_name(col)?;
     }
 
     let on_conflict = match req.on_conflict {
         wire::OnConflict::SetColumns(cols) => {
             for col in &cols {
-                check_ident(col)?;
+                check_name(col)?;
             }
             service::UpsertConflict::SetColumns(cols)
         }
@@ -227,10 +250,10 @@ pub fn to_upsert_spec(
             created_fields,
             updated_fields,
         } => {
-            check_ident(&count_field)?;
-            check_ident(&window_field)?;
+            check_name(&count_field)?;
+            check_name(&window_field)?;
             for col in created_fields.iter().chain(&updated_fields) {
-                check_ident(col)?;
+                check_name(col)?;
             }
             // `DbExec::upsert` derives the conflict target from
             // `conflict_columns[0]` and reads `id`/`key` insert values out of
@@ -273,33 +296,42 @@ pub fn to_upsert_spec(
 
 /// Convert one wire [`wire::BatchWrite`] into the service's
 /// [`WriteOp`](service::WriteOp), validating it exactly as its single-op arm
-/// does: `UpdateWhere` filters are bounded and flattened to AND-of-leaves (a
-/// group or a column-to-column leaf is `InvalidArgument`, as for
-/// `database.update_where`), and `Upsert` goes through [`to_upsert_spec`].
+/// does: data keys pass [`check_name`], `UpdateWhere` filters are bounded and
+/// flattened to AND-of-leaves (a group or a column-to-column leaf is
+/// `InvalidArgument`, as for `database.update_where`), and `Upsert` goes
+/// through [`to_upsert_spec`]. The collection was checked before the batch
+/// was authorized.
 fn to_write_op(write: wire::BatchWrite) -> Result<service::WriteOp, WaferError> {
     Ok(match write {
         wire::BatchWrite::Create { collection, data } => {
+            check_data_names(&data)?;
             service::WriteOp::Create { collection, data }
         }
         wire::BatchWrite::Update {
             collection,
             id,
             data,
-        } => service::WriteOp::Update {
-            collection,
-            id,
-            data,
-        },
+        } => {
+            check_data_names(&data)?;
+            service::WriteOp::Update {
+                collection,
+                id,
+                data,
+            }
+        }
         wire::BatchWrite::Delete { collection, id } => service::WriteOp::Delete { collection, id },
         wire::BatchWrite::UpdateWhere {
             collection,
             filters,
             data,
-        } => service::WriteOp::UpdateWhere {
-            collection,
-            filters: flatten_leaves(&convert_filter_tree(filters)?)?,
-            data,
-        },
+        } => {
+            check_data_names(&data)?;
+            service::WriteOp::UpdateWhere {
+                collection,
+                filters: flatten_leaves(&convert_filter_tree(filters)?)?,
+                data,
+            }
+        }
         wire::BatchWrite::Upsert(req) => {
             let (collection, spec) = to_upsert_spec(req)?;
             service::WriteOp::Upsert { collection, spec }
@@ -334,7 +366,7 @@ fn to_cap_guards(guards: Vec<wire::CapGuard>) -> Result<Vec<service::CapGuard>, 
                     add,
                     cap,
                 } => {
-                    check_ident(&field)?;
+                    check_name(&field)?;
                     service::CapGuard::SumAtMost {
                         field,
                         filters: flatten_leaves(&convert_filter_tree(filters)?)?,
@@ -375,8 +407,8 @@ fn write_outcome_to_wire(outcome: service::WriteOutcome) -> wire::BatchWriteResu
 /// `DateBucket.field`s, plain `GroupByDef::Column`s, and `select_columns` are
 /// all interpolated as identifiers (aliases/date-bucket fields reach *raw*
 /// `date(...)` / `AS <alias>` expression text where binding is impossible), so
-/// each is validated via [`wafer_sql_utils::ident::validate_ident`] — a failure
-/// maps to `InvalidArgument`, fail-closed. A `cast_as` type name is spliced
+/// each is validated via [`check_name`] — a failure is `InvalidArgument`,
+/// fail-closed. A `cast_as` type name is spliced
 /// into `CAST(... AS <type>)` text, so it is parsed against the
 /// [`CastType`] allowlist — every member for `Sum`/`SumWhere`, only
 /// `DOUBLE PRECISION` for `Avg` — and anything else is `InvalidArgument`.
@@ -397,14 +429,14 @@ pub fn to_aggregate_spec(
     req: wire::AggregateRequest,
 ) -> Result<(String, service::AggregateSpec), WaferError> {
     for col in &req.select_columns {
-        check_ident(col)?;
+        check_name(col)?;
     }
 
     let mut aggregates = Vec::with_capacity(req.aggregates.len());
     for agg in req.aggregates {
         let spec = match agg {
             wire::AggregateColumnDef::Count { alias } => {
-                check_ident(&alias)?;
+                check_name(&alias)?;
                 service::AggregateColumnSpec::Count { alias }
             }
             wire::AggregateColumnDef::Sum {
@@ -412,8 +444,8 @@ pub fn to_aggregate_spec(
                 alias,
                 cast_as,
             } => {
-                check_ident(&field)?;
-                check_ident(&alias)?;
+                check_name(&field)?;
+                check_name(&alias)?;
                 service::AggregateColumnSpec::Sum {
                     field,
                     alias,
@@ -425,8 +457,8 @@ pub fn to_aggregate_spec(
                 alias,
                 cast_as,
             } => {
-                check_ident(&field)?;
-                check_ident(&alias)?;
+                check_name(&field)?;
+                check_name(&alias)?;
                 // An average is rarely integral, and `BIGINT` rounds it on
                 // Postgres but truncates it on SQLite — the same request would
                 // answer differently per backend — so `Avg` casts to
@@ -438,12 +470,12 @@ pub fn to_aggregate_spec(
                 }
             }
             wire::AggregateColumnDef::Max { field, alias } => {
-                check_ident(&field)?;
-                check_ident(&alias)?;
+                check_name(&field)?;
+                check_name(&alias)?;
                 service::AggregateColumnSpec::Max { field, alias }
             }
             wire::AggregateColumnDef::CaseWhenSum { when, alias } => {
-                check_ident(&alias)?;
+                check_name(&alias)?;
                 service::AggregateColumnSpec::CaseWhenSum {
                     when: convert_when(when, "case-when-sum")?,
                     alias,
@@ -455,8 +487,8 @@ pub fn to_aggregate_spec(
                 alias,
                 cast_as,
             } => {
-                check_ident(&field)?;
-                check_ident(&alias)?;
+                check_name(&field)?;
+                check_name(&alias)?;
                 service::AggregateColumnSpec::SumWhere {
                     field,
                     when: convert_when(when, "sum-where")?,
@@ -472,11 +504,11 @@ pub fn to_aggregate_spec(
     for g in req.group_by {
         let spec = match g {
             wire::GroupByDef::Column(c) => {
-                check_ident(&c)?;
+                check_name(&c)?;
                 service::GroupBySpec::Column(c)
             }
             wire::GroupByDef::DateBucket { field } => {
-                check_ident(&field)?;
+                check_name(&field)?;
                 service::GroupBySpec::DateBucket { field }
             }
         };
@@ -494,7 +526,7 @@ pub fn to_aggregate_spec(
         aggregates,
         filters,
         group_by,
-        sort: convert_sort(req.sort),
+        sort: convert_sort(req.sort)?,
         limit: req.limit,
     };
     Ok((req.collection, spec))
@@ -530,11 +562,15 @@ fn parse_cast(cast_as: Option<&str>, allowed: &[CastType]) -> Result<Option<Cast
         })
 }
 
-fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Vec<SortField> {
+/// Convert wire sort keys, refusing a field that fails [`check_name`].
+fn convert_sort(defs: Vec<wire::SortFieldDef>) -> Result<Vec<SortField>, WaferError> {
     defs.into_iter()
-        .map(|s| SortField {
-            field: s.field,
-            desc: s.desc,
+        .map(|s| {
+            check_name(&s.field)?;
+            Ok(SortField {
+                field: s.field,
+                desc: s.desc,
+            })
         })
         .collect()
 }
@@ -589,6 +625,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
                 "a record with this key already exists",
             )
         }
+        // The executor's message names only the table and the column the
+        // caller sent, so it goes back to the caller as is.
+        DatabaseError::InvalidArgument(msg) => WaferError::new(ErrorCode::InvalidArgument, msg),
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {
                 tracing::warn!(error = %msg, "database structured error (preserved)");
@@ -612,13 +651,15 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 }
 
 /// The WRAP checks `op` needs on `resource`, as
-/// [`wafer_block::wrap::DATABASE_OP_ACCESS`] classifies it. An op the table
-/// does not classify for a single resource is refused rather than run
-/// unchecked.
+/// [`wafer_block::wrap::DATABASE_OP_ACCESS`] classifies it. A `resource` that
+/// fails [`check_name`] is refused before any check is listed, so the name
+/// authorized is the name the executor runs on. An op the table does not
+/// classify for a single resource is refused rather than run unchecked.
 fn op_checks(
     op: &str,
     resource: &str,
 ) -> Result<Vec<(String, ResourceType, ResourceAccess)>, WaferError> {
+    check_name(resource)?;
     match database_op_access(op) {
         Some(DatabaseOpAccess::On(accesses)) => Ok(accesses
             .iter()
@@ -646,7 +687,7 @@ fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
 
 /// The rules an insert through an append-only grant must satisfy, checked
 /// before the service runs so a refused insert changes nothing:
-/// - it names only plain column identifiers;
+/// - it names only column names that pass [`check_name`];
 /// - it names none of [`SERVER_OWNED_COLUMNS`], which the server stamps;
 /// - every column it would write — the ones it names and the server-owned
 ///   ones — already exists. Outside STRICT_SCHEMA the service adds an unseen
@@ -654,6 +695,9 @@ fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
 ///   reshapes the owner's table, which an append-only grant does not confer.
 ///   Columns are never dropped individually, so one present here is present
 ///   when the insert runs.
+///
+/// A guarded insert's guard columns need no rule here: a guard never adds a
+/// column, the executor refuses one the table lacks.
 ///
 /// So a collection lacking any of `id`, `created_at` or `updated_at` refuses
 /// EVERY append-only insert — the server would stamp the missing column and,
@@ -667,13 +711,8 @@ async fn check_append_only_rows<'a>(
     let mut named: Vec<String> = Vec::new();
     for row in rows {
         for key in row.keys() {
-            if wafer_sql_utils::ident::validate_ident(key).is_err() {
-                return Err(invalid(format!(
-                    "`{key}` is not a column name (letters, digits and `_` only)"
-                )));
-            }
-            let column = key.to_ascii_lowercase();
-            if SERVER_OWNED_COLUMNS.contains(&column.as_str()) {
+            check_name(key)?;
+            if SERVER_OWNED_COLUMNS.contains(&key.as_str()) {
                 return Err(WaferError::new(
                     ErrorCode::PermissionDenied,
                     format!(
@@ -682,8 +721,8 @@ async fn check_append_only_rows<'a>(
                     ),
                 ));
             }
-            if !named.contains(&column) {
-                named.push(column);
+            if !named.contains(key) {
+                named.push(key.clone());
             }
         }
     }
@@ -768,8 +807,19 @@ pub async fn handle_message(
                 Ok(t) => t,
                 Err(e) => return OutputStream::error(e),
             };
+            let sort = match convert_sort(req.sort) {
+                Ok(s) => s,
+                Err(e) => return OutputStream::error(e),
+            };
             if matches!(&req.columns, Some(c) if c.is_empty()) {
                 return OutputStream::error(invalid("columns must be non-empty when specified"));
+            }
+            if let Some(Err(e)) = req
+                .columns
+                .as_ref()
+                .map(|c| c.iter().try_for_each(|c| check_name(c)))
+            {
+                return OutputStream::error(e);
             }
             // All LIST filtering — flat or group — flows through
             // `filter_tree`; `DbExec::list` renders it via
@@ -781,7 +831,7 @@ pub async fn handle_message(
             // covering them).
             let opts = ListOptions {
                 filters: Vec::new(),
-                sort: convert_sort(req.sort),
+                sort,
                 limit: req.limit,
                 offset: req.offset,
                 skip_count: req.skip_count,
@@ -803,6 +853,9 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
+            if let Err(e) = check_data_names(&req.data) {
+                return OutputStream::error(e);
+            }
             if inserts_append_only(ctx, &req.collection) {
                 if let Err(e) = check_append_only_rows(service, &req.collection, [&req.data]).await
                 {
@@ -831,6 +884,9 @@ pub async fn handle_message(
                     wire::MAX_BATCH_WRITES
                 )));
             }
+            if let Err(e) = req.rows.iter().try_for_each(check_data_names) {
+                return OutputStream::error(e);
+            }
             if inserts_append_only(ctx, &req.collection) {
                 if let Err(e) = check_append_only_rows(service, &req.collection, &req.rows).await {
                     return OutputStream::error(e);
@@ -842,10 +898,10 @@ pub async fn handle_message(
             }
         }
         ServiceOp::DATABASE_BATCH => {
-            // Every write is authorized on its collection, for the access
-            // `BatchWrite::access` names, before any op is validated or run,
-            // so a batch naming one write the caller may not make never
-            // touches the service.
+            // Every write's collection must pass `check_name`, and is then
+            // authorized, for the access `BatchWrite::access` names, before
+            // any op is otherwise validated or run, so a batch naming one
+            // write the caller may not make never touches the service.
             let req = match decode_and_authorize_all::<wire::BatchRequest>(
                 ctx,
                 body,
@@ -861,6 +917,7 @@ pub async fn handle_message(
                     }
                     let mut checks: Vec<(String, ResourceType, ResourceAccess)> = Vec::new();
                     for op in &r.ops {
+                        check_name(op.collection())?;
                         let check = (op.collection().to_string(), ResourceType::Db, op.access());
                         if !checks.contains(&check) {
                             checks.push(check);
@@ -933,6 +990,9 @@ pub async fn handle_message(
                 Ok(g) => g,
                 Err(e) => return OutputStream::error(e),
             };
+            if let Err(e) = check_data_names(&req.data) {
+                return OutputStream::error(e);
+            }
             if inserts_append_only(ctx, &req.collection) {
                 if let Err(e) = check_append_only_rows(service, &req.collection, [&req.data]).await
                 {
@@ -972,6 +1032,9 @@ pub async fn handle_message(
                 Ok(g) => g,
                 Err(e) => return OutputStream::error(e),
             };
+            if let Err(e) = check_data_names(&req.data) {
+                return OutputStream::error(e);
+            }
             match service
                 .update_guarded(&req.collection, &filters, req.data, &guards)
                 .await
@@ -998,6 +1061,9 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
+            if let Err(e) = check_data_names(&req.data) {
+                return OutputStream::error(e);
+            }
             match service.update(&req.collection, &req.id, req.data).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -1078,6 +1144,9 @@ pub async fn handle_message(
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
+            if let Err(e) = check_name(&req.field) {
+                return OutputStream::error(e);
+            }
             match service.sum(&req.collection, &req.field, &filters).await {
                 Ok(sum) => to_output(&wire::SumResponse { sum }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
@@ -1210,6 +1279,9 @@ pub async fn handle_message(
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
+            if let Err(e) = check_data_names(&req.data) {
+                return OutputStream::error(e);
+            }
             match service
                 .update_where(&req.collection, &filters, req.data)
                 .await
@@ -1236,6 +1308,9 @@ pub async fn handle_message(
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
+            if let Err(e) = check_data_names(&req.data) {
+                return OutputStream::error(e);
+            }
             match service
                 .update_where_count(&req.collection, &filters, req.data)
                 .await
@@ -1262,6 +1337,9 @@ pub async fn handle_message(
                 Ok(f) => f,
                 Err(e) => return OutputStream::error(e),
             };
+            if let Err(e) = check_name(&req.col) {
+                return OutputStream::error(e);
+            }
             match service
                 .increment_field_where(&req.collection, &req.col, req.delta, &filters)
                 .await

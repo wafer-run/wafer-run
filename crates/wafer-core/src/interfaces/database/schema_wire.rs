@@ -2,12 +2,15 @@
 //!
 //! `wafer-block` (where the wire types live) does not depend on
 //! `wafer-schema`, so the mapping lives host-side. Every unknown name is
-//! `InvalidArgument`: a schema op never guesses.
+//! `InvalidArgument`: a schema op never guesses. Every table, column and
+//! index name must pass the handler's `check_name`.
 
 use wafer_block::{wire::database as wire, ErrorCode, WaferError};
 use wafer_schema::{
     default_now, default_null, Column, DataType, DefaultVal, DefaultValue, Index, Table,
 };
+
+use super::handler::check_name;
 
 fn invalid(msg: String) -> WaferError {
     WaferError::new(ErrorCode::InvalidArgument, msg)
@@ -60,6 +63,7 @@ fn default_from_def(def: &wire::DefaultDef) -> Result<DefaultValue, WaferError> 
 }
 
 pub(crate) fn column_from_def(def: &wire::ColumnDef) -> Result<Column, WaferError> {
+    check_name(&def.name)?;
     let mut column = Column::new(def.name.clone(), data_type_from_kind(&def.kind)?);
     column.nullable = def.nullable;
     column.primary_key = def.primary_key;
@@ -78,6 +82,7 @@ pub(crate) fn column_from_def(def: &wire::ColumnDef) -> Result<Column, WaferErro
 /// `tests/` compiles as a separate crate linked against the ordinary (not
 /// `cfg(test)`) build of this library.
 pub fn table_from_def(def: &wire::TableDef) -> Result<Table, WaferError> {
+    check_name(&def.name)?;
     if def.columns.is_empty() {
         return Err(invalid(format!("table `{}` declares no columns", def.name)));
     }
@@ -87,6 +92,21 @@ pub fn table_from_def(def: &wire::TableDef) -> Result<Table, WaferError> {
         .iter()
         .map(column_from_def)
         .collect::<Result<_, _>>()?;
+    for index in &def.indexes {
+        // An empty index name lets the host derive one from the columns.
+        if !index.name.is_empty() {
+            check_name(&index.name)?;
+        }
+    }
+    let key_columns = def
+        .indexes
+        .iter()
+        .flat_map(|i| &i.columns)
+        .chain(&def.primary_key)
+        .chain(def.unique_keys.iter().flatten());
+    for column in key_columns {
+        check_name(column)?;
+    }
     table.indexes = def
         .indexes
         .iter()

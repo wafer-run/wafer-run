@@ -18,11 +18,12 @@ crate::service_block! {
     info_extras: |_this, info| info.config_keys(vec![ConfigVar::new(
         handler::STRICT_SCHEMA_CONFIG_KEY,
         "When \"true\", the database service trusts its migrated schema: it \
-         skips the per-operation table-exists probe and the lazy ADD COLUMN \
-         path, removing schema-introspection round-trips from the hot path \
+         skips the per-operation table-exists probe, the lazy ADD COLUMN a \
+         write makes for a new data key, and the column check of a filter or \
+         sort, removing schema-introspection round-trips from the hot path \
          (a large win on Cloudflare D1, where each is a network round-trip). \
-         Leave \"false\" (the default) to keep the self-healing lazy-schema \
-         behavior for development. Applied once at Init.",
+         Leave \"false\" (the default) for development: writes then add the \
+         columns their data names. Applied once at Init.",
         "false",
     )
     .name("Strict Schema")

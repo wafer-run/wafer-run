@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
 use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{
-    ddl, guard, ident::sanitize_ident, introspect, value::sea_values_to_json, Backend,
+    ddl, guard, ident::validate_ident, introspect, value::sea_values_to_json, Backend,
 };
 
 use super::{
@@ -29,28 +29,70 @@ use super::{
     },
 };
 
-/// Sanitize keys and sort `data` into deterministic `(column, value)` pairs.
+/// `name` as the executor puts it in SQL: verbatim, once it passes
+/// [`validate_ident`]. A table or column name is never rewritten — stripping
+/// characters would turn one name into another (`a-b` into `ab`) and send the
+/// statement to a table or column the caller never named.
+fn sql_name(name: &str) -> Result<&str, DatabaseError> {
+    Ok(validate_ident(name)?)
+}
+
+/// Sort `data` into deterministic `(column, value)` pairs, refusing a key
+/// that is not a plain identifier (see [`sql_name`]).
 ///
 /// Sorted-key iteration keeps the generated INSERT/UPDATE shape stable across
 /// process starts: `HashMap` order is randomized by `RandomState`, which would
 /// otherwise produce N permutations of the same statement — each a distinct
-/// cached prepared statement on the backend. Keys are ident-sanitized so the
-/// statement references exactly the column names the lazy column-add step
-/// creates.
-fn sorted_pairs(data: &HashMap<String, serde_json::Value>) -> Vec<(String, serde_json::Value)> {
+/// cached prepared statement on the backend.
+fn sorted_pairs(
+    data: &HashMap<String, serde_json::Value>,
+) -> Result<Vec<(String, serde_json::Value)>, DatabaseError> {
     let mut pairs: Vec<(String, serde_json::Value)> = data
         .iter()
-        .map(|(k, v)| (sanitize_ident(k), v.clone()))
-        .collect();
+        .map(|(k, v)| Ok((sql_name(k)?.to_string(), v.clone())))
+        .collect::<Result<_, DatabaseError>>()?;
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    pairs
+    Ok(pairs)
+}
+
+/// Every column a read or a filtered write names: the `filters` fields, the
+/// `sort` fields, every column the `filter_tree` names (see
+/// [`tree_leaf_fields`]) and the `projection`. Checked by
+/// [`DbExec::require_columns`] before the statement runs.
+fn query_columns<'a>(
+    filters: &'a [Filter],
+    sort: &'a [SortField],
+    filter_tree: Option<&'a [FilterTree]>,
+    projection: Option<&'a [String]>,
+) -> Vec<&'a str> {
+    filters
+        .iter()
+        .map(|f| f.field.as_str())
+        .chain(sort.iter().map(|s| s.field.as_str()))
+        .chain(filter_tree.map(tree_leaf_fields).unwrap_or_default())
+        .chain(projection.unwrap_or_default().iter().map(String::as_str))
+        .collect()
+}
+
+/// The columns every guard's filters name, and each `SumAtMost` field.
+fn guard_columns(guards: &[CapGuard]) -> Vec<&str> {
+    guards
+        .iter()
+        .flat_map(|guard| match guard {
+            CapGuard::CountBelow { filters, .. } => query_columns(filters, &[], None, None),
+            CapGuard::SumAtMost { field, filters, .. } => {
+                let mut columns = query_columns(filters, &[], None, None);
+                columns.push(field.as_str());
+                columns
+            }
+        })
+        .collect()
 }
 
 /// Recursively collect every column a [`FilterTree`] names — the `field` of
 /// each [`FilterTree::Leaf`], and both columns of each
-/// [`FilterTree::ColumnCompare`] — depth-first. Used by [`DbExec::ensure_query_columns`] so fields that only
-/// appear inside a group (`All`/`Any`) — not the flat `opts.filters` list —
-/// still get their lazy TEXT column added before the query runs.
+/// [`FilterTree::ColumnCompare`] — depth-first, so a field that appears only
+/// inside a group (`All`/`Any`) is checked as a flat filter's is.
 fn tree_leaf_fields(nodes: &[FilterTree]) -> Vec<&str> {
     fn walk<'a>(node: &'a FilterTree, out: &mut Vec<&'a str>) {
         match node {
@@ -350,16 +392,19 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Whether the backend trusts its migrated schema (STRICT_SCHEMA mode,
     /// `WAFER_RUN__DATABASE__STRICT_SCHEMA`).
     ///
-    /// When `true`, the shared orchestration skips both the per-operation
+    /// When `true`, the shared orchestration skips the per-operation
     /// table-exists guard (migrations are authoritative — the table is assumed
-    /// present) and the lazy column-add `ALTER TABLE` path (the migrated schema
-    /// is trusted — no columns are synthesized). The one introspection left is
-    /// the primary-key lookup a sorted or paged [`list`](Self::list) orders by
+    /// present), the write path's lazy column-add `ALTER TABLE` (the migrated
+    /// schema is trusted — no columns are synthesized) and the column check a
+    /// read or filtered write runs ([`require_columns`](Self::require_columns);
+    /// the backend's own "no such column" error answers instead). The one
+    /// introspection left is the primary-key lookup a sorted or paged
+    /// [`list`](Self::list) orders by
     /// ([`get_primary_key`](Self::get_primary_key)), which a backend with a
     /// [`schema_cache`](Self::schema_cache) issues once per table, plus one
     /// existence probe for a table whose key comes back empty. Default
-    /// `false` preserves the self-healing lazy-schema behavior for
-    /// development, tests, and other implementors.
+    /// `false` keeps the introspecting behaviour — a write adds the columns
+    /// its data names — for development, tests, and other implementors.
     fn strict_schema(&self) -> bool {
         false
     }
@@ -569,9 +614,20 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // the introspection drops the write-back rather than caching a stale
         // column set (see `SchemaCache` docs).
         let gen0 = cache.map(SchemaCache::generation);
+        let columns = self.introspect_columns(table).await?;
+        if let (Some(cache), Some(gen0)) = (cache, gen0) {
+            cache.set_columns_if_gen(table, columns.clone(), gen0);
+        }
+        Ok(columns)
+    }
+
+    /// Column names (lowercased) of `table` as the database reports them now,
+    /// bypassing and not touching [`schema_cache`](Self::schema_cache); empty
+    /// if the table is missing.
+    async fn introspect_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
         let (sql, params) = introspect::build_list_columns(table, Self::BACKEND);
         let rows = self.run_fetch(&sql, &params).await?;
-        let columns: Vec<String> = rows
+        Ok(rows
             .into_iter()
             .filter_map(|r| {
                 r.data
@@ -579,11 +635,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_lowercase)
             })
-            .collect();
-        if let (Some(cache), Some(gen0)) = (cache, gen0) {
-            cache.set_columns_if_gen(table, columns.clone(), gen0);
-        }
-        Ok(columns)
+            .collect())
     }
 
     /// Primary-key columns of `table`, in key order; empty when the table has
@@ -677,11 +729,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// (BOOLEAN/BIGINT/DOUBLE PRECISION/JSONB/TEXT), SQLite always TEXT. The
     /// table itself must already exist via the block's migration files — only
     /// columns are added on demand, per the documented lazy column-add design.
+    ///
+    /// Every key must pass [`sql_name`]; one that does not refuses the whole
+    /// write before any column is added, in STRICT_SCHEMA mode too.
     async fn ensure_data_columns(
         &self,
         table: &str,
         data: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
+        for key in data.keys() {
+            sql_name(key)?;
+        }
         // STRICT_SCHEMA trusts the migrated schema: no introspection, no lazy
         // ALTER. A write referencing an unmigrated column fails loudly, which
         // is the intended contract in strict mode.
@@ -693,66 +751,86 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut keys: Vec<&String> = data.keys().collect();
         keys.sort();
         for key in keys {
-            let safe_key = sanitize_ident(key);
-            if existing.contains(&safe_key.to_lowercase()) {
+            let column = sql_name(key)?;
+            if existing.contains(&column.to_lowercase()) {
                 continue;
             }
-            let stmt = ddl::build_add_column_for_value(table, &safe_key, &data[key], Self::BACKEND);
-            self.add_column_checked(table, &safe_key, &stmt).await?;
+            let stmt = ddl::build_add_column_for_value(table, column, &data[key], Self::BACKEND)?;
+            self.add_column_checked(table, column, &stmt).await?;
         }
         Ok(())
     }
 
-    /// Lazily add TEXT columns for `filters`/`sort`/`filter_tree` fields
-    /// missing from `table` (they default to NULL), so queries and filtered
-    /// writes never fail with "no such column" for a field the schema simply
-    /// hasn't seen yet.
+    /// Refuse a statement that names a column `table` does not have, before
+    /// it runs. A read — or the filter of a write — never adds a column: the
+    /// schema grows only through the write path's data columns and the
+    /// explicit schema ops. Without this check a filter on an unknown column
+    /// would fail in the backend as an opaque internal error; here it is a
+    /// [`DatabaseError::InvalidArgument`] that names the column.
     ///
-    /// `filter_tree` fields aren't included in `filters` — a group's leaves
-    /// live only in the tree (see [`DbExec::list`]) — so `filter_tree` is
-    /// walked separately via [`tree_leaf_fields`] to cover them too.
-    async fn ensure_query_columns(
-        &self,
-        table: &str,
-        filters: &[Filter],
-        sort: &[SortField],
-        filter_tree: Option<&[FilterTree]>,
-    ) -> Result<(), DatabaseError> {
-        // STRICT_SCHEMA trusts the migrated schema: skip the lazy TEXT-column
-        // add (see [`ensure_data_columns`](Self::ensure_data_columns)).
-        if self.strict_schema() {
+    /// Every name must also pass [`sql_name`]. In STRICT_SCHEMA mode no column
+    /// set is read: the migrated schema is trusted, and a statement naming an
+    /// unknown column fails in the backend. A table with no columns does not
+    /// exist; the check passes and the statement fails in the backend, as it
+    /// did before the check.
+    ///
+    /// A cached column list can predate a column another connection added, so
+    /// a name missing from it is looked up once more, uncached
+    /// ([`introspect_columns`](Self::introspect_columns)), before the
+    /// statement is refused. That look-up leaves the cache alone unless it
+    /// finds the cached list stale, so a caller sending unknown columns costs
+    /// one introspection per request — what the failing statement would have
+    /// cost — and never evicts the entry other requests are served from.
+    async fn require_columns(&self, table: &str, columns: &[&str]) -> Result<(), DatabaseError> {
+        for column in columns {
+            sql_name(column)?;
+        }
+        if self.strict_schema() || columns.is_empty() {
             return Ok(());
         }
-        let existing = self.get_columns(table).await?;
-        let mut added: Vec<String> = Vec::new();
-        let tree_fields = filter_tree.map(tree_leaf_fields).unwrap_or_default();
-        let fields = filters
-            .iter()
-            .map(|f| f.field.as_str())
-            .chain(sort.iter().map(|s| s.field.as_str()))
-            .chain(tree_fields);
-        for field in fields {
-            let safe_field = sanitize_ident(field);
-            let lower = safe_field.to_lowercase();
-            if existing.contains(&lower) || added.contains(&lower) {
-                continue;
-            }
-            let stmt = ddl::build_add_text_column(table, &safe_field, Self::BACKEND);
-            self.add_column_checked(table, &safe_field, &stmt).await?;
-            added.push(lower);
+        let first_missing = |existing: &[String]| {
+            columns
+                .iter()
+                .find(|c| !existing.contains(&c.to_lowercase()))
+                .copied()
+        };
+        let known = self.get_columns(table).await?;
+        if !known.is_empty() && first_missing(&known).is_none() {
+            return Ok(());
         }
-        Ok(())
+        let cache = self.schema_cache();
+        let current = match cache {
+            Some(cache) => {
+                let current = self.introspect_columns(table).await?;
+                if current != known {
+                    cache.invalidate(table);
+                }
+                current
+            }
+            // Without a cache `known` was read just now.
+            None => known,
+        };
+        if current.is_empty() {
+            return Ok(());
+        }
+        match first_missing(&current) {
+            Some(column) => Err(DatabaseError::InvalidArgument(format!(
+                "`{table}` has no column `{column}`"
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Shared `get`: select-by-id → single row.
     async fn get(&self, collection: &str, id: &str) -> Result<Record, DatabaseError> {
-        let stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Self::BACKEND);
+        let stmt =
+            wafer_sql_utils::query::build_select_by_id(sql_name(collection)?, id, Self::BACKEND);
         self.run_fetch_one(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
-    /// Shared `list`: table-exists guard → ensure columns → primary key →
-    /// optional count → select.
+    /// Shared `list`: table-exists guard → [`require_columns`](Self::require_columns)
+    /// → primary key → optional count → select.
     ///
     /// A sorted or paged select ends its `ORDER BY` with the table's primary
     /// key ([`get_primary_key`](Self::get_primary_key), passed to the builder
@@ -772,8 +850,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         collection: &str,
         opts: &ListOptions,
     ) -> Result<RecordList, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(RecordList {
                 records: Vec::new(),
                 total_count: 0,
@@ -782,16 +860,19 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             });
         }
 
-        self.ensure_query_columns(
-            &table,
-            &opts.filters,
-            &opts.sort,
-            opts.filter_tree.as_deref(),
+        self.require_columns(
+            table,
+            &query_columns(
+                &opts.filters,
+                &opts.sort,
+                opts.filter_tree.as_deref(),
+                opts.columns.as_deref(),
+            ),
         )
         .await?;
 
         let primary_key = if wafer_sql_utils::query::orders_rows(opts) {
-            self.get_primary_key(&table).await?
+            self.get_primary_key(table).await?
         } else {
             Vec::new()
         };
@@ -817,7 +898,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
             let count_stmt = (!opts.skip_count).then(|| {
                 wafer_sql_utils::aggregate::build_count_with_condition(
-                    &table,
+                    table,
                     &opts.filters,
                     extra_cond.clone(),
                     Self::BACKEND,
@@ -828,7 +909,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 Some(cols) => {
                     let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
                     wafer_sql_utils::query::build_select_columns(
-                        &table,
+                        table,
                         &refs,
                         opts,
                         extra_cond,
@@ -837,7 +918,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     )
                 }
                 None => wafer_sql_utils::query::build_select_with_condition(
-                    &table,
+                    table,
                     opts,
                     extra_cond,
                     &unique_key,
@@ -908,28 +989,34 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         })
     }
 
-    /// Shared `count`: table-exists guard → ensure columns → COUNT(*).
+    /// Shared `count`: table-exists guard → [`require_columns`](Self::require_columns)
+    /// → COUNT(*).
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(0);
         }
-        self.ensure_query_columns(&table, filters, &[], None)
+        self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
-        let stmt = wafer_sql_utils::aggregate::build_count(&table, filters, Self::BACKEND);
+        let stmt = wafer_sql_utils::aggregate::build_count(table, filters, Self::BACKEND);
         self.run_scalar_i64(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
-    /// Shared `sum`: SUM(field) with filters (no table-exists guard, no ensure).
+    /// Shared `sum`: [`require_columns`](Self::require_columns) on `field` and
+    /// the filters → SUM(field). No table-exists guard: a missing table fails
+    /// in the backend.
     async fn sum(
         &self,
         collection: &str,
         field: &str,
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        let stmt = wafer_sql_utils::aggregate::build_sum(&table, field, filters, Self::BACKEND);
+        let table = sql_name(collection)?;
+        let mut columns = query_columns(filters, &[], None, None);
+        columns.push(field);
+        self.require_columns(table, &columns).await?;
+        let stmt = wafer_sql_utils::aggregate::build_sum(table, field, filters, Self::BACKEND);
         self.run_scalar_f64(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
@@ -946,22 +1033,21 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         collection: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        let table = sanitize_ident(collection);
+        let table = sql_name(collection)?;
         let mut data = data;
 
         // The key probe only matters for a row without an id.
-        let autogenerates_id =
-            !data.contains_key("id") && self.table_autogenerates_id(&table).await;
+        let autogenerates_id = !data.contains_key("id") && self.table_autogenerates_id(table).await;
         prepare_created_row(&mut data, autogenerates_id);
 
         // Ensure any new columns exist. Table creation itself is the block
         // migration's job; a failure here is a real DDL error and propagates
         // rather than letting the INSERT fail with a confusing
         // "no such column".
-        self.ensure_data_columns(&table, &data).await?;
+        self.ensure_data_columns(table, &data).await?;
 
-        let pairs = sorted_pairs(&data);
-        let stmt = wafer_sql_utils::query::build_insert(&table, &pairs, Self::BACKEND);
+        let pairs = sorted_pairs(&data)?;
+        let stmt = wafer_sql_utils::query::build_insert(table, &pairs, Self::BACKEND);
         let generated = self
             .run_insert(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
@@ -986,16 +1072,16 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         id: &str,
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
-        let table = sanitize_ident(collection);
+        let table = sql_name(collection)?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(&table, &data).await?;
+        self.ensure_data_columns(table, &data).await?;
 
-        let pairs = sorted_pairs(&data);
+        let pairs = sorted_pairs(&data)?;
         // Batch the UPDATE with the by-id re-fetch so a batching backend (D1)
         // collapses the two round-trips into one. The re-fetch mirrors
-        // [`get`](Self::get) exactly — `build_select_by_id` on the raw
-        // `collection`, decoded row-by-row. The `Execute` result stays the
+        // [`get`](Self::get) exactly — `build_select_by_id` on the same
+        // `table`, decoded row-by-row. The `Execute` result stays the
         // authoritative existence check: 0 rows affected → `NotFound`, exactly
         // as the prior explicit affected-count guard, so the (discarded) select
         // rows are only read when the row actually existed. The sequential
@@ -1003,8 +1089,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // the prior `run_execute` + `get` (empty select ⇒ `NotFound`, matching
         // `run_fetch_one`).
         let update_stmt =
-            wafer_sql_utils::query::build_update_by_id(&table, id, &pairs, Self::BACKEND);
-        let select_stmt = wafer_sql_utils::query::build_select_by_id(collection, id, Self::BACKEND);
+            wafer_sql_utils::query::build_update_by_id(table, id, &pairs, Self::BACKEND);
+        let select_stmt = wafer_sql_utils::query::build_select_by_id(table, id, Self::BACKEND);
         let update_params = sea_values_to_json(update_stmt.values);
         let select_params = sea_values_to_json(select_stmt.values);
         let results = self
@@ -1035,7 +1121,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `delete`: delete-by-id; 0 rows → `NotFound`.
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError> {
-        let stmt = wafer_sql_utils::query::build_delete_by_id(collection, id, Self::BACKEND);
+        let stmt =
+            wafer_sql_utils::query::build_delete_by_id(sql_name(collection)?, id, Self::BACKEND);
         let affected = self
             .run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
@@ -1056,26 +1143,28 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Shared `delete_where_count`: table-exists guard → lazy filter-column
-    /// add → DELETE, returning the affected-row count (0 for a missing table).
+    /// Shared `delete_where_count`: table-exists guard →
+    /// [`require_columns`](Self::require_columns) → DELETE, returning the
+    /// affected-row count (0 for a missing table).
     async fn delete_where_count(
         &self,
         collection: &str,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(0);
         }
-        self.ensure_query_columns(&table, filters, &[], None)
+        self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
-        let stmt = wafer_sql_utils::query::build_delete_where(&table, filters, Self::BACKEND);
+        let stmt = wafer_sql_utils::query::build_delete_where(table, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
     /// Shared `take_where`: DELETE ... RETURNING the deleted rows; missing
-    /// table → empty.
+    /// table → empty. The filter columns must exist
+    /// ([`require_columns`](Self::require_columns)).
     ///
     /// `DELETE … RETURNING` has side effects, so it runs through
     /// [`run_execute_returning`](Self::run_execute_returning) (the write path)
@@ -1088,71 +1177,74 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         collection: &str,
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(Vec::new());
         }
-        self.ensure_query_columns(&table, filters, &[], None)
+        self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
         let stmt =
-            wafer_sql_utils::query::build_delete_where_returning(&table, filters, Self::BACKEND);
+            wafer_sql_utils::query::build_delete_where_returning(table, filters, Self::BACKEND);
         self.run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
     /// Shared `update_where`: bulk UPDATE matching `filters`; missing table →
-    /// `NotFound`. Lazily adds both the SET columns (typed from the data) and
-    /// the filter columns.
+    /// `NotFound`. Lazily adds the SET columns (typed from the data); the
+    /// filter columns must exist ([`require_columns`](Self::require_columns)).
     async fn update_where(
         &self,
         collection: &str,
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Err(DatabaseError::NotFound);
         }
+        self.require_columns(table, &query_columns(filters, &[], None, None))
+            .await?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(&table, &data).await?;
-        self.ensure_query_columns(&table, filters, &[], None)
-            .await?;
-        let pairs = sorted_pairs(&data);
+        self.ensure_data_columns(table, &data).await?;
+        let pairs = sorted_pairs(&data)?;
         let stmt =
-            wafer_sql_utils::query::build_update_where(&table, &pairs, filters, Self::BACKEND);
+            wafer_sql_utils::query::build_update_where(table, &pairs, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
         Ok(())
     }
 
-    /// Shared `update_where_count`: table-exists guard → lazy filter/data-column
-    /// add → UPDATE, returning the affected-row count (0 for a missing table).
+    /// Shared `update_where_count`: table-exists guard →
+    /// [`require_columns`](Self::require_columns) on the filters → lazy
+    /// data-column add → UPDATE, returning the affected-row count (0 for a
+    /// missing table).
     async fn update_where_count(
         &self,
         collection: &str,
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(0);
         }
+        self.require_columns(table, &query_columns(filters, &[], None, None))
+            .await?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(&table, &data).await?;
-        self.ensure_query_columns(&table, filters, &[], None)
-            .await?;
-        let pairs = sorted_pairs(&data);
+        self.ensure_data_columns(table, &data).await?;
+        let pairs = sorted_pairs(&data)?;
         let stmt =
-            wafer_sql_utils::query::build_update_where(&table, &pairs, filters, Self::BACKEND);
+            wafer_sql_utils::query::build_update_where(table, &pairs, filters, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await
     }
 
     /// Shared `increment_field_where`: single-statement atomic
     /// `SET col = col + delta` on matching rows, returning the affected-row
-    /// count (0 for a missing table).
+    /// count (0 for a missing table). `col` and the filter columns must exist
+    /// ([`require_columns`](Self::require_columns)).
     async fn increment_field_where(
         &self,
         collection: &str,
@@ -1160,14 +1252,15 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         delta: i64,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(0);
         }
-        self.ensure_query_columns(&table, filters, &[], None)
-            .await?;
+        let mut columns = query_columns(filters, &[], None, None);
+        columns.push(col);
+        self.require_columns(table, &columns).await?;
         let stmt = wafer_sql_utils::query::build_increment_field_where(
-            &table,
+            table,
             col,
             delta,
             filters,
@@ -1211,14 +1304,23 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         collection: &str,
         spec: UpsertSpec,
     ) -> Result<wafer_sql_utils::Statement, DatabaseError> {
-        let table = sanitize_ident(collection);
+        let table = sql_name(collection)?;
         let stmt = match spec.on_conflict {
             UpsertConflict::SetColumns(update_cols) => {
+                let named = spec
+                    .data
+                    .iter()
+                    .map(|(column, _)| column)
+                    .chain(&spec.conflict_columns)
+                    .chain(&update_cols);
+                for column in named {
+                    sql_name(column)?;
+                }
                 let conflict: Vec<&str> =
                     spec.conflict_columns.iter().map(String::as_str).collect();
                 let update: Vec<&str> = update_cols.iter().map(String::as_str).collect();
                 wafer_sql_utils::upsert::build_upsert(
-                    &table,
+                    table,
                     &spec.data,
                     &conflict,
                     &update,
@@ -1249,7 +1351,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 let created: Vec<&str> = created_fields.iter().map(String::as_str).collect();
                 let updated: Vec<&str> = updated_fields.iter().map(String::as_str).collect();
                 wafer_sql_utils::upsert::build_windowed_counter_upsert(
-                    &table,
+                    table,
                     conflict_col,
                     id,
                     key,
@@ -1277,16 +1379,33 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// inside a nested block whose closing brace drops it (and every
     /// `Rc<dyn Iden>` it holds) *before* the `.await` below — the same pattern
     /// [`DbExec::list`] uses so the future stays `Send` for the native build.
-    /// Identifiers are validated at the trust boundary (the handler's
-    /// `to_aggregate_spec`) before reaching here.
+    /// Every name in the spec must pass [`sql_name`] (the handler's
+    /// `to_aggregate_spec` checks the wire the same way), and every column it
+    /// reads must exist ([`require_columns`](Self::require_columns); a sort
+    /// key may also name an output alias).
     async fn aggregate(
         &self,
         collection: &str,
         spec: AggregateSpec,
     ) -> Result<Vec<Record>, DatabaseError> {
-        let table = sanitize_ident(collection);
+        let table = sql_name(collection)?;
+        let aliases = spec.aliases();
+        for alias in &aliases {
+            sql_name(alias)?;
+        }
+        let columns: Vec<&str> = spec
+            .read_columns()
+            .into_iter()
+            .chain(
+                spec.sort
+                    .iter()
+                    .map(|s| s.field.as_str())
+                    .filter(|f| !aliases.contains(f)),
+            )
+            .collect();
+        self.require_columns(table, &columns).await?;
         let stmt = {
-            let cfg = spec.into_grouped_config(table);
+            let cfg = spec.into_grouped_config(table.to_string());
             wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)
         };
         self.run_fetch(&stmt.sql, &sea_values_to_json(stmt.values))
@@ -1328,16 +1447,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(affected)
     }
 
-    /// Shared `schema_columns`: [`get_columns`](Self::get_columns) of the
-    /// table name as `create` names it.
+    /// Shared `schema_columns`: [`get_columns`](Self::get_columns) of
+    /// `table`, which must pass [`sql_name`].
     async fn schema_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
-        self.get_columns(&sanitize_ident(table)).await
+        self.get_columns(sql_name(table)?).await
     }
 
     /// Shared `schema_table_exists`: pass-through to `dbx_table_exists`
-    /// (the primitive preserves each backend's error text).
+    /// (the primitive preserves each backend's error text) for a `name` that
+    /// passes [`sql_name`].
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        self.dbx_table_exists(name).await
+        self.dbx_table_exists(sql_name(name)?).await
     }
 
     /// Shared `ensure_schema_table`: `CREATE TABLE IF NOT EXISTS` → add every
@@ -1377,9 +1497,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         &self,
         table: &super::service::Table,
     ) -> Result<(), DatabaseError> {
-        let create = ddl::build_create_table(table, Self::BACKEND).map_err(|e| {
-            DatabaseError::Internal(format!("build create table {}: {e}", table.name))
-        })?;
+        sql_name(&table.name)?;
+        for column in &table.columns {
+            sql_name(&column.name)?;
+        }
+        let create = ddl::build_create_table(table, Self::BACKEND)?;
         self.run_execute(&create.sql, &[])
             .await
             .map_err(|e| DatabaseError::Internal(format!("create table {}: {e}", table.name)))?;
@@ -1395,21 +1517,19 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             if existing.contains(&column.name.to_lowercase()) {
                 continue;
             }
-            let stmt = ddl::build_add_column(&table.name, column, Self::BACKEND);
+            let stmt = ddl::build_add_column(&table.name, column, Self::BACKEND)?;
             self.add_column_checked(&table.name, &column.name, &stmt)
                 .await?;
         }
 
         for index in &table.indexes {
-            let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)
-                .map_err(|e| DatabaseError::Internal(format!("build create index: {e}")))?;
+            let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)?;
             self.run_execute(&stmt.sql, &[])
                 .await
                 .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
         }
 
-        let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)
-            .map_err(|e| DatabaseError::Internal(format!("build FK indexes: {e}")))?;
+        let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)?;
         for stmt in fk_indexes {
             self.run_execute(&stmt.sql, &[])
                 .await
@@ -1437,8 +1557,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if rows.is_empty() {
             return Ok(0);
         }
-        let table = sanitize_ident(collection);
-        let autogenerates_id = self.table_autogenerates_id(&table).await;
+        let table = sql_name(collection)?;
+        let autogenerates_id = self.table_autogenerates_id(table).await;
 
         // One representative value per column across every row, for the lazy
         // column-add's type choice.
@@ -1455,10 +1575,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 }
             }
             let stmt =
-                wafer_sql_utils::query::build_insert(&table, &sorted_pairs(&data), Self::BACKEND);
+                wafer_sql_utils::query::build_insert(table, &sorted_pairs(&data)?, Self::BACKEND);
             statements.push((stmt.sql, sea_values_to_json(stmt.values)));
         }
-        self.ensure_data_columns(&table, &columns).await?;
+        self.ensure_data_columns(table, &columns).await?;
 
         let ops: Vec<TxOp<'_>> = statements
             .iter()
@@ -1480,8 +1600,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `batch`: plan every op's statement (the same statement its
     /// single-op method runs, except that `Create` and `Update` return the
-    /// stored row via `RETURNING *`), lazily add the columns the ops name,
-    /// then run every statement as ONE
+    /// stored row via `RETURNING *`), lazily add the data columns the ops
+    /// write (an `UpdateWhere`'s filter columns must already exist, as for
+    /// [`update_where_count`](Self::update_where_count)), then run every
+    /// statement as ONE
     /// [`run_transaction`](Self::run_transaction).
     ///
     /// An `UpdateWhere` against a missing table settles as
@@ -1511,13 +1633,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     collection,
                     mut data,
                 } => {
-                    let table = sanitize_ident(&collection);
-                    let autogenerates_id = self.table_autogenerates_id(&table).await;
+                    let table = sql_name(&collection)?;
+                    let autogenerates_id = self.table_autogenerates_id(table).await;
                     prepare_created_row(&mut data, autogenerates_id);
-                    self.ensure_data_columns(&table, &data).await?;
+                    self.ensure_data_columns(table, &data).await?;
                     let stmt = wafer_sql_utils::query::build_insert_returning(
-                        &table,
-                        &sorted_pairs(&data),
+                        table,
+                        &sorted_pairs(&data)?,
                         Self::BACKEND,
                     );
                     (Planned::Created, stmt)
@@ -1527,20 +1649,23 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     id,
                     mut data,
                 } => {
-                    let table = sanitize_ident(&collection);
+                    let table = sql_name(&collection)?;
                     stamp_timestamps(&mut data, false);
-                    self.ensure_data_columns(&table, &data).await?;
+                    self.ensure_data_columns(table, &data).await?;
                     let stmt = wafer_sql_utils::query::build_update_by_id_returning(
-                        &table,
+                        table,
                         &id,
-                        &sorted_pairs(&data),
+                        &sorted_pairs(&data)?,
                         Self::BACKEND,
                     );
                     (Planned::Updated, stmt)
                 }
                 WriteOp::Delete { collection, id } => {
-                    let stmt =
-                        wafer_sql_utils::query::build_delete_by_id(&collection, &id, Self::BACKEND);
+                    let stmt = wafer_sql_utils::query::build_delete_by_id(
+                        sql_name(&collection)?,
+                        &id,
+                        Self::BACKEND,
+                    );
                     (Planned::Deleted, stmt)
                 }
                 WriteOp::UpdateWhere {
@@ -1548,20 +1673,20 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     filters,
                     mut data,
                 } => {
-                    let table = sanitize_ident(&collection);
-                    if !self.table_present_for_op(&table).await? {
+                    let table = sql_name(&collection)?;
+                    if !self.table_present_for_op(table).await? {
                         planned.push(Planned::Settled(WriteOutcome::UpdatedWhere {
                             rows_affected: 0,
                         }));
                         continue;
                     }
-                    stamp_timestamps(&mut data, false);
-                    self.ensure_data_columns(&table, &data).await?;
-                    self.ensure_query_columns(&table, &filters, &[], None)
+                    self.require_columns(table, &query_columns(&filters, &[], None, None))
                         .await?;
+                    stamp_timestamps(&mut data, false);
+                    self.ensure_data_columns(table, &data).await?;
                     let stmt = wafer_sql_utils::query::build_update_where(
-                        &table,
-                        &sorted_pairs(&data),
+                        table,
+                        &sorted_pairs(&data)?,
                         &filters,
                         Self::BACKEND,
                     );
@@ -1722,27 +1847,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok((write_result, refused))
     }
 
-    /// Lazily add the columns every guard's filters name, as a filtered read
-    /// would (see [`ensure_query_columns`](Self::ensure_query_columns)). A
-    /// `SumAtMost` field is not added, as the `sum` op does not add it.
-    async fn ensure_guard_columns(
-        &self,
-        table: &str,
-        guards: &[CapGuard],
-    ) -> Result<(), DatabaseError> {
-        let filters: Vec<Filter> = guards
-            .iter()
-            .flat_map(|guard| match guard {
-                CapGuard::CountBelow { filters, .. } | CapGuard::SumAtMost { filters, .. } => {
-                    filters.iter().cloned()
-                }
-            })
-            .collect();
-        self.ensure_query_columns(table, &filters, &[], None).await
-    }
-
-    /// Shared `insert_guarded`: [`create`](Self::create)'s id/timestamp
-    /// policy and lazy column-add, then ONE [`guard::build_insert_guarded`]
+    /// Shared `insert_guarded`: [`require_columns`](Self::require_columns) on
+    /// every column the guards name (a guard never adds one), then
+    /// [`create`](Self::create)'s id/timestamp policy and lazy data-column
+    /// add, then ONE [`guard::build_insert_guarded`]
     /// statement (`INSERT … SELECT … WHERE {guards} RETURNING *`) through
     /// [`run_guarded`](Self::run_guarded).
     ///
@@ -1755,16 +1863,15 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
         guards: &[CapGuard],
     ) -> Result<GuardedInsert, DatabaseError> {
-        let table = sanitize_ident(collection);
+        let table = sql_name(collection)?;
+        self.require_columns(table, &guard_columns(guards)).await?;
         let mut data = data;
-        let autogenerates_id =
-            !data.contains_key("id") && self.table_autogenerates_id(&table).await;
+        let autogenerates_id = !data.contains_key("id") && self.table_autogenerates_id(table).await;
         prepare_created_row(&mut data, autogenerates_id);
-        self.ensure_data_columns(&table, &data).await?;
-        self.ensure_guard_columns(&table, guards).await?;
-        let stmt = guard::build_insert_guarded(&table, &sorted_pairs(&data), guards, Self::BACKEND)
+        self.ensure_data_columns(table, &data).await?;
+        let stmt = guard::build_insert_guarded(table, &sorted_pairs(&data)?, guards, Self::BACKEND)
             .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        match self.run_guarded(&table, guards, stmt, true).await? {
+        match self.run_guarded(table, guards, stmt, true).await? {
             (TxResult::Returning(rows), refused) => match (rows.into_iter().next(), refused) {
                 (Some(row), _) => Ok(GuardedInsert::Inserted(row)),
                 (None, Some(guard)) => Ok(GuardedInsert::Refused { guard }),
@@ -1780,7 +1887,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     }
 
     /// Shared `update_guarded`: table-exists guard (a missing table matches
-    /// nothing) → timestamp stamping → lazy data/filter/guard column-add →
+    /// nothing) → [`require_columns`](Self::require_columns) on the filters
+    /// and guards → timestamp stamping → lazy data-column add →
     /// ONE [`guard::build_update_guarded`] statement through
     /// [`run_guarded`](Self::run_guarded).
     async fn update_guarded(
@@ -1790,25 +1898,25 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
         guards: &[CapGuard],
     ) -> Result<GuardedUpdate, DatabaseError> {
-        let table = sanitize_ident(collection);
-        if !self.table_present_for_op(&table).await? {
+        let table = sql_name(collection)?;
+        if !self.table_present_for_op(table).await? {
             return Ok(GuardedUpdate::NoMatch);
         }
+        let mut columns = query_columns(filters, &[], None, None);
+        columns.extend(guard_columns(guards));
+        self.require_columns(table, &columns).await?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(&table, &data).await?;
-        self.ensure_query_columns(&table, filters, &[], None)
-            .await?;
-        self.ensure_guard_columns(&table, guards).await?;
+        self.ensure_data_columns(table, &data).await?;
         let stmt = guard::build_update_guarded(
-            &table,
-            &sorted_pairs(&data),
+            table,
+            &sorted_pairs(&data)?,
             filters,
             guards,
             Self::BACKEND,
         )
         .map_err(|e| DatabaseError::Internal(e.to_string()))?;
-        match self.run_guarded(&table, guards, stmt, false).await? {
+        match self.run_guarded(table, guards, stmt, false).await? {
             (TxResult::Execute(rows_affected), _) if rows_affected > 0 => {
                 Ok(GuardedUpdate::Updated { rows_affected })
             }

@@ -17,9 +17,9 @@ use wafer_core::{
         service::{Column, DatabaseError, Record},
     },
 };
-use wafer_sql_utils::{ddl, introspect, Backend};
 #[cfg(test)]
-use wafer_sql_utils::{ident::sanitize_ident, value::sea_values_to_json};
+use wafer_sql_utils::value::sea_values_to_json;
+use wafer_sql_utils::{ddl, introspect, Backend};
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -58,7 +58,7 @@ impl PostgresDatabaseService {
     // -----------------------------------------------------------------
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
-        let stmt = ddl::build_drop_table(name, Backend::Postgres);
+        let stmt = ddl::build_drop_table(name, Backend::Postgres)?;
         sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
@@ -71,7 +71,7 @@ impl PostgresDatabaseService {
         table: &str,
         column: &Column,
     ) -> Result<(), DatabaseError> {
-        let stmt = ddl::build_add_column(table, column, Backend::Postgres);
+        let stmt = ddl::build_add_column(table, column, Backend::Postgres)?;
         sqlx::query(&stmt.sql)
             .execute(&self.pool)
             .await
@@ -743,18 +743,6 @@ mod tests {
 
     // pg type mapping for lazy column-add now lives in
     // wafer_sql_utils::ddl::column_type_for_value (tested there).
-
-    #[test]
-    fn test_sanitize_ident() {
-        assert_eq!(sanitize_ident("users"), "users");
-        assert_eq!(sanitize_ident("my_table"), "my_table");
-        assert_eq!(sanitize_ident("table123"), "table123");
-        assert_eq!(sanitize_ident("drop table;--"), "droptable");
-        assert_eq!(
-            sanitize_ident("Robert'); DROP TABLE users;--"),
-            "RobertDROPTABLEusers"
-        );
-    }
 
     // Filter/clause/order tests now covered by wafer-sql-utils::query::tests
     // Schema DDL tests now live in wafer-sql-utils::ddl::tests
