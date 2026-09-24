@@ -81,3 +81,24 @@ test('start after a failed resolve rejects with the same failure', async (t) => 
   );
   await assert.rejects(w.start(), (e) => e.message === resolveErr.message);
 });
+
+test('run refuses a runtime that did not seal', async (t) => {
+  const message = JSON.stringify({ kind: 'smoke.kind', meta: [] });
+
+  const w = new WaferRuntime();
+  await w.register('example/echo', ECHO_WASM);
+  await w.register('smoke', writeFlow(t));
+  const unsealed = JSON.parse(await w.run('smoke', message));
+  assert.equal(unsealed.action, 'error', JSON.stringify(unsealed));
+  assert.match(unsealed.error.message, /not sealed/);
+
+  const broken = new WaferRuntime();
+  await broken.register(
+    'broken',
+    writeFlow(t, { ...FLOW, id: 'broken', steps: [{ id: 'root', block: 'missing' }] }),
+  );
+  await assert.rejects(broken.resolve());
+  const failed = JSON.parse(await broken.run('broken', message));
+  assert.equal(failed.action, 'error', JSON.stringify(failed));
+  assert.match(failed.error.message, /failed to seal/);
+});

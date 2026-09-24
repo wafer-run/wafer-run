@@ -2,6 +2,7 @@ package wafer
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +69,35 @@ func TestStartReportsAFailedResolve(t *testing.T) {
 	}
 	if startErr.Error() != resolveErr.Error() {
 		t.Fatalf("start must re-report the resolve failure: resolve %q, start %q", resolveErr, startErr)
+	}
+}
+
+// Run dispatches only on a runtime that sealed successfully: before Start,
+// and after a failed Resolve, it answers an error naming why.
+func TestRunRefusesARuntimeThatDidNotSeal(t *testing.T) {
+	w := New()
+	defer w.Close()
+	if err := w.Register("example/echo", echoWasm); err != nil {
+		t.Fatalf("register block: %v", err)
+	}
+	if err := w.Register("smoke", echoFlow); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	res := w.Run("smoke", NewMessage("smoke.kind"))
+	if !res.IsError() || !strings.Contains(res.Error.Message, "not sealed") {
+		t.Fatalf("run before start must be refused, got %+v (error %+v)", res, res.Error)
+	}
+
+	broken := New()
+	defer broken.Close()
+	if err := broken.Register("broken", brokenFlow); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	if err := broken.Resolve(); err == nil {
+		t.Fatal("resolve must fail: the flow names an unregistered block")
+	}
+	res = broken.Run("broken", NewMessage("x"))
+	if !res.IsError() || !strings.Contains(res.Error.Message, "failed to seal") {
+		t.Fatalf("run after a failed resolve must be refused, got %+v (error %+v)", res, res.Error)
 	}
 }

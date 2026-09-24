@@ -124,6 +124,84 @@ async fn install_happy_explicit_version() {
     assert!(lf.contains(&sha), "{lf}");
 }
 
+/// Upgrading a block rewrites its lockfile entry, but keeps the
+/// `capabilities` bound the operator wrote there: no installer writes it.
+#[tokio::test]
+async fn install_upgrade_keeps_the_operator_capabilities() {
+    let server = MockServer::start().await;
+    let tarball = make_tarball("widget.wasm");
+    let sha = sha256_hex(&tarball);
+    Mock::given(method("GET"))
+        .and(path("/registry/api/packages/acme/widget/0.3.1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "org_name": "acme", "pkg_name": "widget", "version": "0.3.1",
+            "abi": 1, "sha256": sha, "storage_key": "k", "size_bytes": tarball.len() as i64,
+            "license": null, "readme_md": null, "dependencies": null, "capabilities": null,
+            "yanked": 0, "yanked_reason": null, "published_at": 0
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/registry/download/acme/widget/0.3.1.wafer"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(tarball.clone()))
+        .mount(&server)
+        .await;
+
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = tmp.path().join("proj");
+    setup_project(&home, &cwd);
+    fs::write(
+        cwd.join("wafer.lock"),
+        format!(
+            r#"version = 2
+
+[[package]]
+name = "acme/widget"
+version = "0.3.0"
+sha256 = "{old}"
+wasm_sha256 = "{old}"
+source = "registry+{registry}"
+
+[package.capabilities]
+collections = {{ Only = ["acme__widget__items"] }}
+"#,
+            old = "a".repeat(64),
+            registry = server.uri(),
+        ),
+    )
+    .unwrap();
+
+    let out = std::process::Command::new(bin())
+        .env("HOME", &home)
+        .env_remove("WAFER_REGISTRY")
+        .env("WAFER_INSTALL_LOCK_TIMEOUT_SECS", "5")
+        .current_dir(&cwd)
+        .args([
+            "install",
+            "acme/widget@0.3.1",
+            "--cache-only",
+            "--registry",
+            &server.uri(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let lf: wafer_block::lockfile::Lockfile =
+        toml::from_str(&fs::read_to_string(cwd.join("wafer.lock")).unwrap()).unwrap();
+    let entry = &lf.packages[0];
+    assert_eq!(entry.version, "0.3.1");
+    assert_eq!(entry.sha256, sha);
+    let mut expected = wafer_block::BlockCapabilities::none();
+    expected.collections = wafer_block::Allowlist::Only(["acme__widget__items".to_string()].into());
+    assert_eq!(entry.capabilities, Some(expected));
+}
+
 #[tokio::test]
 async fn install_no_version_picks_latest_non_yanked() {
     let server = MockServer::start().await;

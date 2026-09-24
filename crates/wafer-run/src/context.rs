@@ -766,7 +766,7 @@ mod tests {
             }),
         )
         .expect("register restricted block");
-        w.rebuild_all_blocks();
+        w.registration.rebuild_all_blocks();
         let mut ctx = test_ctx(&w);
         ctx.caller_id = Some("restricted/block".to_string());
 
@@ -801,7 +801,7 @@ mod tests {
             }),
         )
         .expect("register restricted block");
-        w.rebuild_all_blocks();
+        w.registration.rebuild_all_blocks();
         let mut ctx = test_ctx(&w);
         ctx.caller_id = Some("restricted/block".to_string());
 
@@ -843,7 +843,7 @@ mod tests {
             }),
         )
         .expect("register native block");
-        w2.rebuild_all_blocks();
+        w2.registration.rebuild_all_blocks();
         let mut ctx2 = test_ctx(&w2);
         ctx2.caller_id = Some("my-org/auth".to_string());
         assert!(ctx2
@@ -873,7 +873,7 @@ mod tests {
             }),
         )
         .expect("register native block");
-        w.rebuild_all_blocks();
+        w.registration.rebuild_all_blocks();
         let mut ctx = test_ctx(&w);
         ctx.caller_id = Some("my-org/auth".to_string());
 

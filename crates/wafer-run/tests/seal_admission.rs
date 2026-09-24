@@ -271,6 +271,55 @@ async fn a_seal_that_refused_boot_cannot_be_retried_into_success() {
     );
 }
 
+/// The terminal error of `out`, which must be one.
+async fn error_terminal(out: OutputStream) -> WaferError {
+    match out.collect_buffered().await {
+        Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => e,
+        _ => panic!("dispatch must be refused with an error"),
+    }
+}
+
+/// Dispatch runs only on a runtime `seal()` sealed: an unsealed one would
+/// run blocks under their load-time capabilities and no grant gate, and a
+/// failed seal left the runtime half-built.
+#[tokio::test]
+async fn dispatch_is_refused_unless_the_seal_succeeded() {
+    let bytes = guest(&widget_info());
+    let mut w = wafer();
+    w.register_block(
+        WIDGET,
+        Arc::new(WasmiBlock::load_from_bytes(&bytes).expect("loads")),
+    )
+    .expect("registers");
+
+    let err = error_terminal(
+        w.run_block(WIDGET, Message::new("x"), InputStream::empty())
+            .await,
+    )
+    .await;
+    assert_eq!(err.code, wafer_block::ErrorCode::FailedPrecondition);
+    assert!(err.message.contains("not sealed"), "{}", err.message);
+    let err = error_terminal(w.run("main", Message::new("x"), InputStream::empty()).await).await;
+    assert_eq!(err.code, wafer_block::ErrorCode::FailedPrecondition);
+
+    w.register_block(
+        "x/attacker",
+        Arc::new(Grants(
+            "x/attacker",
+            vec![ResourceGrant::read_write("x/attacker", "a__victim__*")],
+        )),
+    )
+    .expect("registers");
+    assert!(w.seal().await.is_err());
+    let err = error_terminal(
+        w.run_block(WIDGET, Message::new("x"), InputStream::empty())
+            .await,
+    )
+    .await;
+    assert_eq!(err.code, wafer_block::ErrorCode::FailedPrecondition);
+    assert!(err.message.contains("failed to seal"), "{}", err.message);
+}
+
 // ---------------------------------------------------------------------------
 // Blocks seal() downloads
 // ---------------------------------------------------------------------------
