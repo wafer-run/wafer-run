@@ -58,12 +58,16 @@
   matching rows and then deleted or updated only those, one at a time: a
   backend (or a `forward_database_service!` ledger entry marked `inherit`)
   must implement them. Every in-tree backend already does, through
-  `DbExec`. `wafer_sql_utils::aggregate::build_grouped_query` returns
+  `DbExec`. The `delete_where` default, which lists and deletes until
+  nothing matches, fails with `Internal` when a row it deleted is listed
+  again, where it used to loop forever.
+  `wafer_sql_utils::aggregate::build_grouped_query` returns
   `Result<Statement, SqlBuildError>` and refuses a `DateBucketGroup::field`
   that is not a plain identifier with `InvalidIdentifier`, the rule
   `build_daily_count` applies; the field is spliced into the `date(…)` /
   `to_char(…)` expression text, and the builder used to trust its caller to
   have checked it.
+
 - `NotFound` only ever comes from a service saying the thing a request
   names does not exist; the runtime no longer answers `NotFound` for "no
   such block". A client that reads `NotFound` as "unset" or "no row"

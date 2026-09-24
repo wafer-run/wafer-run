@@ -656,13 +656,19 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         -> Result<i64, DatabaseError>;
 
     /// Bulk-delete all records matching filters in a single query.
+    ///
+    /// Default impl: list a page of matches, delete each by id, and repeat
+    /// until nothing matches. A row that still matches after its `delete`
+    /// returned `Ok` fails the call with [`DatabaseError::Internal`] rather
+    /// than being listed and deleted again forever.
     async fn delete_where(
         &self,
         collection: &str,
         filters: &[Filter],
     ) -> Result<(), DatabaseError> {
-        // Default implementation falls back to record-by-record deletion.
-        // Loops until all matching records are deleted.
+        // Ids the previous pass deleted: a delete that took effect cannot
+        // list them again.
+        let mut last_pass: std::collections::HashSet<String> = std::collections::HashSet::new();
         loop {
             let records = self
                 .list(
@@ -677,8 +683,17 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
             if records.records.is_empty() {
                 break;
             }
+            if let Some(stuck) = records.records.iter().find(|r| last_pass.contains(&r.id)) {
+                return Err(DatabaseError::Internal(format!(
+                    "delete_where on {collection}: row {} still matches after its delete \
+                     succeeded",
+                    stuck.id
+                )));
+            }
+            last_pass.clear();
             for r in records.records {
                 self.delete(collection, &r.id).await?;
+                last_pass.insert(r.id);
             }
         }
         Ok(())
