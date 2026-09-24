@@ -96,9 +96,11 @@ run_test() {
 
     # SEC-09: the registry-download SSRF e2e has an allow-private-network
     # half (a local wiremock registry served end-to-end) that only compiles
-    # under the escape-hatch feature — no other job enables it.
-    echo "==> Registry SSRF escape-hatch e2e (allow-private-network)"
-    cargo test --locked -p wafer-run --features allow-private-network --test registry_ssrf
+    # under the escape-hatch feature — no other job enables it. The seal
+    # admission e2e's downloaded-block tests use the same local registry.
+    echo "==> Registry escape-hatch e2e (allow-private-network)"
+    cargo test --locked -p wafer-run --features allow-private-network \
+        --test registry_ssrf --test seal_admission
 
     # SEC-019: the outbound-network redirect-follow e2e is likewise only
     # reachable under the escape-hatch feature (a local wiremock server on
