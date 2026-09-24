@@ -3,7 +3,6 @@
   "private": true,
   "workspaces": [
     "packages/wafer-client-js",
-    "crates/wafer-run-node",
-    "crates/wafer-site"
+    "crates/wafer-run-node"
   ]
 }
