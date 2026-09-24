@@ -17,7 +17,8 @@
 //!    lock (another process may have populated it while we waited);
 //!    download (at most the registry's `size_bytes`, never more than
 //!    `MAX_PACKAGE_BYTES`), hash, verify, extract into a sibling temp dir
-//!    (bounded by `MAX_PACKAGE_ENTRIES` / `MAX_UNPACKED_BYTES`), then
+//!    (bounded by `MAX_DECOMPRESSED_BYTES` / `MAX_PACKAGE_ENTRIES` /
+//!    `MAX_UNPACKED_BYTES`), then
 //!    `rename` into place. Release the lock.
 //! 6. Update the lockfile with the new entry and write atomically.
 
@@ -31,7 +32,9 @@ use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use semver::Version;
 use tar::Archive;
-use wafer_block::lockfile::{MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES, MAX_UNPACKED_BYTES};
+use wafer_block::lockfile::{
+    BoundedPackageStream, MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES, MAX_UNPACKED_BYTES,
+};
 
 use crate::{
     block_name::parse_org_block,
@@ -250,14 +253,15 @@ pub(crate) fn cache_hit(
 /// into the final cache path is the caller's job). Returns number of
 /// regular files written.
 ///
-/// Bounded like the runtime's in-memory unpack of the same packages: at
-/// most [`MAX_PACKAGE_ENTRIES`] entries and [`MAX_UNPACKED_BYTES`] of file
-/// content in total, so a small, highly compressed tarball cannot fill the
-/// disk. Only regular files and directories are written; any other entry
+/// Bounded like the runtime's in-memory unpack of the same packages: a
+/// decompressed stream of at most `MAX_DECOMPRESSED_BYTES` (which bounds
+/// header records and skipped bodies too), at most [`MAX_PACKAGE_ENTRIES`]
+/// entries and [`MAX_UNPACKED_BYTES`] of file content in total, so a small,
+/// highly compressed tarball cannot fill memory or the disk. Only regular files and directories are written; any other entry
 /// type (links, devices, FIFOs) is refused.
 pub(crate) fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<usize> {
     fs::create_dir_all(dest).with_context(|| format!("create {}", dest.display()))?;
-    let mut archive = Archive::new(GzDecoder::new(bytes));
+    let mut archive = Archive::new(BoundedPackageStream::new(GzDecoder::new(bytes)));
     let mut count = 0usize;
     let mut unpacked: u64 = 0;
     for (index, entry) in archive
@@ -842,6 +846,58 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("more than"), "{err}");
+    }
+
+    /// What a tar reader consumes without surfacing it as file content is
+    /// bounded by the decompressed stream: a GNU long-name record, which the
+    /// reader buffers whole, and a directory entry declaring a huge body,
+    /// which it reads through to skip — each a small gzip of zeros.
+    #[test]
+    fn extract_tarball_bounds_header_records_and_skipped_bodies() {
+        use flate2::{write::GzEncoder, Compression};
+        use tempfile::tempdir;
+        use wafer_block::lockfile::MAX_DECOMPRESSED_BYTES;
+
+        fn build(entry_type: tar::EntryType, path: &str) -> Vec<u8> {
+            let size = MAX_DECOMPRESSED_BYTES + 1024 * 1024;
+            let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+            {
+                let mut tb = tar::Builder::new(&mut gz);
+                let mut h = tar::Header::new_gnu();
+                h.set_path(path).unwrap();
+                h.set_entry_type(entry_type);
+                h.set_size(size);
+                h.set_cksum();
+                tb.append(&h, std::io::repeat(0).take(size)).unwrap();
+                let mut f = tar::Header::new_gnu();
+                f.set_path("block.wasm").unwrap();
+                f.set_size(4);
+                f.set_cksum();
+                tb.append(&f, &b"\0asm"[..]).unwrap();
+                tb.finish().unwrap();
+            }
+            gz.finish().unwrap()
+        }
+        let tmp = tempdir().unwrap();
+        for (case, bytes) in [
+            (
+                "long name",
+                build(tar::EntryType::GNULongName, "././@LongLink"),
+            ),
+            ("huge directory", build(tar::EntryType::Directory, "dir/")),
+        ] {
+            assert!(
+                bytes.len() < MAX_PACKAGE_BYTES,
+                "{case}: the bomb downloads"
+            );
+            let err =
+                extract_tarball(&bytes, &tmp.path().join(case.replace(' ', "-"))).expect_err(case);
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("decompresses to more than"),
+                "{case}: {chain}"
+            );
+        }
     }
 
     #[test]

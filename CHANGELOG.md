@@ -19,8 +19,10 @@
   the entry's `sha256` and its `.wasm` to its `wasm_sha256`, then registers
   it under the entry's name with the entry's `capabilities` bound, like a
   cached entry. Downloads are capped at `MAX_PACKAGE_BYTES` and unpacked in
-  memory within `MAX_PACKAGE_ENTRIES` / `MAX_UNPACKED_BYTES` (new constants
-  in `wafer_block::lockfile`, shared with `wafer install`). A lockfile entry
+  memory within `MAX_DECOMPRESSED_BYTES` / `MAX_PACKAGE_ENTRIES` /
+  `MAX_UNPACKED_BYTES` (new in `wafer_block::lockfile` with the
+  `BoundedPackageStream` reader, shared with `wafer install`); a package
+  with two `wafer.toml` or two `.wasm` files is refused. A lockfile entry
   naming the admin block, cached or not, fails `seal()`. Removed with the
   old path: the `WAFER_RUN_REGISTRY_BASE_URL` variable and
   `wafer_run::REGISTRY_BASE_URL_KEY`, the registry manifest format
@@ -36,11 +38,15 @@
   `wafer.lock` changes (it used to download the new tarball and re-pin the
   lockfile to it). A different version — `@version`, a bare `org/block`
   resolving past the pin, or a bumped `[dependencies]` entry — is what
-  records a new sha. Downloads are refused past the version's advertised
-  `size_bytes` (and never above `MAX_PACKAGE_BYTES`), and extraction past
-  `MAX_PACKAGE_ENTRIES` entries or `MAX_UNPACKED_BYTES` of content, or of
-  any entry that is not a regular file or directory.
-  `registry_client::download_tarball` takes the byte cap.
+  records a new sha, and that sha is whatever the registry reports for the
+  new version (trust on first use: nothing earlier pins it). `--frozen`
+  only ever downloads the shas `wafer.lock` already pins. Downloads are
+  refused past the version's advertised `size_bytes` (and never above
+  `MAX_PACKAGE_BYTES`), and extraction past `MAX_DECOMPRESSED_BYTES` of
+  decompressed tar stream (headers, GNU long-name/long-link and pax records,
+  and skipped bodies included), `MAX_PACKAGE_ENTRIES` entries or
+  `MAX_UNPACKED_BYTES` of content, or of any entry that is not a regular
+  file or directory. `registry_client::download_tarball` takes the byte cap.
 - Config reads fail closed. `wafer_core::clients::config::get_default`
   returns `Result<String, WaferError>` (was `String`) and falls back to the
   default only when the key is not set (`ErrorCode::NotFound`); a WRAP

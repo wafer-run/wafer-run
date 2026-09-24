@@ -72,6 +72,49 @@ pub const MAX_PACKAGE_ENTRIES: usize = 256;
 /// memory or disk.
 pub const MAX_UNPACKED_BYTES: u64 = 128 * 1024 * 1024;
 
+/// Most bytes the decompressed tar stream of a package may carry: the file
+/// content bound plus room for the headers and padding of
+/// [`MAX_PACKAGE_ENTRIES`] entries. Enforced on the stream itself by
+/// [`BoundedPackageStream`], so what a tar reader consumes without
+/// surfacing it as file content — GNU long-name / long-link and pax
+/// extension records, which it buffers whole, and the declared body of a
+/// directory entry it skips — is bounded too.
+pub const MAX_DECOMPRESSED_BYTES: u64 = MAX_UNPACKED_BYTES + 16 * 1024 * 1024;
+
+/// A reader that fails once more than [`MAX_DECOMPRESSED_BYTES`] have been
+/// read through it. Wrap the gzip decoder of a package tarball in it before
+/// handing it to a tar reader: exceeding the bound is an error (never a
+/// silent end of stream a tar reader could mistake for a short archive).
+pub struct BoundedPackageStream<R> {
+    inner: R,
+    read: u64,
+}
+
+impl<R> BoundedPackageStream<R> {
+    /// Bound `inner` at [`MAX_DECOMPRESSED_BYTES`].
+    pub fn new(inner: R) -> Self {
+        Self { inner, read: 0 }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for BoundedPackageStream<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Allow one byte past the bound so reaching it is observable.
+        let remaining = (MAX_DECOMPRESSED_BYTES + 1).saturating_sub(self.read);
+        let want = buf
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..want])?;
+        self.read += n as u64;
+        if self.read > MAX_DECOMPRESSED_BYTES {
+            return Err(std::io::Error::other(format!(
+                "package decompresses to more than {MAX_DECOMPRESSED_BYTES} bytes"
+            )));
+        }
+        Ok(n)
+    }
+}
+
 /// Hex-encoded sha256 of `bytes`. The one implementation of the digest
 /// format shared by the CLI installer (recording `sha256`/`wasm_sha256`)
 /// and the runtime loader (verifying the cached `.wasm`), so the producer
@@ -188,6 +231,23 @@ pub fn is_valid_path_segment(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_package_stream_fails_past_the_bound() {
+        use std::io::Read;
+        let mut exact = BoundedPackageStream::new(std::io::repeat(0).take(MAX_DECOMPRESSED_BYTES));
+        assert_eq!(
+            std::io::copy(&mut exact, &mut std::io::sink()).expect("at the bound"),
+            MAX_DECOMPRESSED_BYTES
+        );
+        let mut over =
+            BoundedPackageStream::new(std::io::repeat(0).take(MAX_DECOMPRESSED_BYTES + 1));
+        let err = std::io::copy(&mut over, &mut std::io::sink()).expect_err("past the bound");
+        assert!(
+            err.to_string().contains("decompresses to more than"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn valid_path_segment_accepts_normal_rejects_traversal() {

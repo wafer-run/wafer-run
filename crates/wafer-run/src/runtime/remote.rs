@@ -17,8 +17,8 @@ use futures::{StreamExt, TryStreamExt};
 use wafer_block::{
     error::RuntimeError,
     lockfile::{
-        is_valid_path_segment, sha256_hex, LockfilePackage, MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES,
-        MAX_UNPACKED_BYTES, REGISTRY_SOURCE_PREFIX,
+        is_valid_path_segment, sha256_hex, BoundedPackageStream, LockfilePackage,
+        MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES, MAX_UNPACKED_BYTES, REGISTRY_SOURCE_PREFIX,
     },
 };
 
@@ -124,16 +124,20 @@ fn package_download_url(pkg: &LockfilePackage) -> Result<String, RuntimeError> {
 }
 
 /// Unpack the `.wasm` artifact from a package tarball in memory, under the
-/// same bounds `wafer install` extracts with: at most
-/// [`MAX_PACKAGE_ENTRIES`] entries and [`MAX_UNPACKED_BYTES`] of file
-/// content, regular files and directories only. The package's top level
-/// must hold exactly one `.wasm` and a `wafer.toml` naming `pkg` — what the
-/// lockfile loader requires of a cached package.
+/// same bounds `wafer install` extracts with: a decompressed stream of at
+/// most `MAX_DECOMPRESSED_BYTES` (which bounds header records and skipped
+/// bodies too), at most [`MAX_PACKAGE_ENTRIES`] entries and
+/// [`MAX_UNPACKED_BYTES`] of file content, regular files and directories
+/// only. The package's top level must hold exactly one `.wasm` and exactly
+/// one `wafer.toml` naming `pkg` — what the lockfile loader requires of a
+/// cached package.
 fn unpack_wasm(tarball: &[u8], pkg: &LockfilePackage) -> Result<Vec<u8>, RuntimeError> {
     let bad = |reason: String| {
         RuntimeError::Registry(format!("package {}@{}: {reason}", pkg.name, pkg.version))
     };
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
+    let mut archive = tar::Archive::new(BoundedPackageStream::new(flate2::read::GzDecoder::new(
+        tarball,
+    )));
     let entries = archive
         .entries()
         .map_err(|e| bad(format!("reading the tarball: {e}")))?;
@@ -182,6 +186,9 @@ fn unpack_wasm(tarball: &[u8], pkg: &LockfilePackage) -> Result<Vec<u8>, Runtime
             _ => None,
         };
         match top_level {
+            Some("wafer.toml") if manifest.is_some() => {
+                return Err(bad("holds more than one wafer.toml".to_string()));
+            }
             Some("wafer.toml") => manifest = Some(body),
             Some(file) if file.ends_with(".wasm") && wasm.is_some() => {
                 return Err(bad("holds more than one .wasm artifact".to_string()));
@@ -413,7 +420,8 @@ mod tests {
     }
 
     /// What the cache loader would refuse is refused before compiling: a
-    /// link entry, a second `.wasm`, no `.wasm`, a `wafer.toml` naming
+    /// link entry, a second `.wasm`, no `.wasm`, a second `wafer.toml`
+    /// (which would decide the name check by entry order), a `wafer.toml` naming
     /// another block, and more entries than the bound.
     #[test]
     fn unpack_refuses_what_the_cache_loader_would() {
@@ -447,6 +455,15 @@ mod tests {
                 "no .wasm",
             ),
             (
+                "two wafer.toml",
+                tarball(&[
+                    ("wafer.toml", regular, WAFER_TOML),
+                    ("./wafer.toml", regular, WAFER_TOML),
+                    ("widget.wasm", regular, b"\0asm"),
+                ]),
+                "more than one wafer.toml",
+            ),
+            (
                 "foreign name",
                 tarball(&[
                     (
@@ -462,6 +479,53 @@ mod tests {
         ] {
             let err = unpack_wasm(&bytes, &widget()).expect_err(case).to_string();
             assert!(err.contains(expected), "{case}: {err}");
+        }
+    }
+
+    /// What a tar reader consumes without surfacing it as file content is
+    /// bounded by the decompressed stream: a GNU long-name record, which the
+    /// reader buffers whole, and a directory entry declaring a huge body,
+    /// which it reads through to skip — each a small gzip of zeros followed
+    /// by an otherwise valid package.
+    #[test]
+    fn unpack_bounds_header_records_and_skipped_bodies() {
+        use wafer_block::lockfile::MAX_DECOMPRESSED_BYTES;
+
+        fn build(entry_type: tar::EntryType, path: &str) -> Vec<u8> {
+            let size = MAX_DECOMPRESSED_BYTES + 1024 * 1024;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            {
+                let mut tb = tar::Builder::new(&mut gz);
+                let mut h = tar::Header::new_gnu();
+                h.set_path(path).unwrap();
+                h.set_entry_type(entry_type);
+                h.set_size(size);
+                h.set_cksum();
+                tb.append(&h, std::io::repeat(0).take(size)).unwrap();
+                for (file, body) in [("wafer.toml", WAFER_TOML), ("widget.wasm", b"\0asm")] {
+                    let mut f = tar::Header::new_gnu();
+                    f.set_path(file).unwrap();
+                    f.set_size(body.len() as u64);
+                    f.set_cksum();
+                    tb.append(&f, body).unwrap();
+                }
+                tb.finish().unwrap();
+            }
+            gz.finish().unwrap()
+        }
+        for (case, bytes) in [
+            (
+                "long name",
+                build(tar::EntryType::GNULongName, "././@LongLink"),
+            ),
+            ("huge directory", build(tar::EntryType::Directory, "dir/")),
+        ] {
+            assert!(
+                bytes.len() < MAX_PACKAGE_BYTES,
+                "{case}: the bomb downloads"
+            );
+            let err = unpack_wasm(&bytes, &widget()).expect_err(case).to_string();
+            assert!(err.contains("decompresses to more than"), "{case}: {err}");
         }
     }
 
