@@ -56,7 +56,9 @@ pub fn require_role(role: &str) -> Result<UserIdResponse, WaferError> {
 }
 
 /// Buffered: fetch the full profile for a user id, including their
-/// org memberships.
+/// org memberships. The calling block needs a grant on
+/// `wafer_block::wrap::AUTH_USER_PROFILE_RESOURCE` declared by the auth
+/// block (or must be the admin block); otherwise `PermissionDenied`.
 pub fn user_profile(request: &UserProfileRequest) -> Result<UserProfileResponse, WaferError> {
     call(BLOCK, ServiceOp::AUTH_USER_PROFILE, request)
 }

@@ -78,7 +78,10 @@ dual_api! {
     }
 
     /// Fetch the profile for `user_id`. Does not consult the caller's
-    /// request meta — `user_id` is supplied directly in the body.
+    /// request meta — `user_id` is supplied directly in the body. The
+    /// calling block needs a grant on
+    /// [`wafer_block::wrap::AUTH_USER_PROFILE_RESOURCE`] declared by the auth
+    /// block (or must be the admin block); otherwise `PermissionDenied`.
     pub fn user_profile(ctx, user_id: String) -> Result<UserProfileResponse, WaferError> {
         let req = UserProfileRequest { user_id };
         let data = svc!(
@@ -151,13 +154,18 @@ mod tests {
         }
     }
 
+    /// The block the typed-client calls come from.
+    const CALLER: &str = "test/caller";
+
     /// Single-block test context that routes every `call_block` to the
     /// wrapped `AuthBlock`. wafer-core has no full-runtime infrastructure;
     /// this tiny stub gives the typed-client tests a real round-trip
-    /// without pulling in `wafer-run`.
+    /// without pulling in `wafer-run`. The auth handler's WRAP check runs
+    /// the real `wrap::check_access` for [`CALLER`] against `grants`.
     #[derive(Clone)]
     struct SingleAuthBlockCtx {
         block: Arc<AuthBlock>,
+        grants: Vec<wafer_block::types::ResourceGrant>,
     }
 
     #[async_trait::async_trait]
@@ -180,20 +188,48 @@ mod tests {
         fn clone_arc(&self) -> Arc<dyn Context> {
             Arc::new(self.clone())
         }
-        // Denies every access, as the trait's default `check_resource_access` does.
+        fn caller_id(&self) -> Option<&str> {
+            Some(CALLER)
+        }
+        fn check_resource_access(
+            &self,
+            resource: &str,
+            resource_type: wafer_block::types::ResourceType,
+            access: wafer_block::types::ResourceAccess,
+        ) -> Result<(), WaferError> {
+            wafer_block::wrap::check_access(
+                Some(CALLER),
+                resource,
+                access,
+                Some(&resource_type),
+                &self.grants,
+                "test/admin",
+            )
+        }
         fn resource_access_admitted(
             &self,
-            _resource: &str,
-            _resource_type: wafer_block::types::ResourceType,
-            _access: wafer_block::types::ResourceAccess,
+            resource: &str,
+            resource_type: wafer_block::types::ResourceType,
+            access: wafer_block::types::ResourceAccess,
         ) -> bool {
-            false
+            self.check_resource_access(resource, resource_type, access)
+                .is_ok()
         }
+    }
+
+    /// The grant the auth block declares for [`CALLER`] to read profiles.
+    fn user_profile_grant() -> wafer_block::types::ResourceGrant {
+        wafer_block::types::ResourceGrant::read(
+            CALLER,
+            wafer_block::wrap::AUTH_USER_PROFILE_RESOURCE,
+        )
+        .typed(wafer_block::types::ResourceType::Auth)
     }
 
     fn happy_ctx() -> SingleAuthBlockCtx {
         SingleAuthBlockCtx {
             block: Arc::new(AuthBlock::new(Arc::new(HappyAuth))),
+            grants: vec![user_profile_grant()],
         }
     }
 
@@ -234,6 +270,24 @@ mod tests {
         assert_eq!(profile.id, "u-1");
         assert_eq!(profile.email, "alice@example.test");
         assert_eq!(profile.role, "user");
+    }
+
+    /// Without the auth block's grant, `user_profile` is refused; the
+    /// credential ops, which need none, still answer.
+    #[tokio::test]
+    async fn user_profile_without_a_grant_is_permission_denied() {
+        let ctx = SingleAuthBlockCtx {
+            block: Arc::new(AuthBlock::new(Arc::new(HappyAuth))),
+            grants: Vec::new(),
+        };
+        let err = super::user_profile(&ctx, "u-1".to_string())
+            .await
+            .expect_err("no grant, no profile");
+        assert_eq!(err.code, ErrorCode::PermissionDenied, "got {err:?}");
+        let user_id = super::require_user(&ctx, &Message::new("incoming.req"))
+            .await
+            .expect("require_user needs no grant");
+        assert_eq!(user_id, "u-1");
     }
 
     /// Context standing in for a database that WRAP refuses: every call to
@@ -297,6 +351,7 @@ mod tests {
             block: Arc::new(AuthBlock::new(Arc::new(DatabaseBackedAuth {
                 db: RefusingDatabaseCtx,
             }))),
+            grants: Vec::new(),
         };
         let err = super::require_user(&ctx, &Message::new("incoming.req"))
             .await

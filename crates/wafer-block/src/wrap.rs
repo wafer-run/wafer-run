@@ -44,6 +44,39 @@ pub const SCHEMA_RESOURCE: &str = "__schema__";
 /// real folder path.
 pub const STORAGE_LIST_ALL_RESOURCE: &str = "__storage_list_all__";
 
+/// WRAP resource ([`ResourceType::Auth`](crate::types::ResourceType::Auth))
+/// of `auth.user_profile`, which returns any user's email, role and orgs
+/// for a `user_id` the caller names. The auth service answers from its own
+/// authority, so the resource sits in the auth block's `wafer_run__auth__`
+/// namespace and takes the namespace rules of [`check_access`]: the auth
+/// block and the admin block are admitted, any other caller needs a grant,
+/// and only the auth block can declare one.
+pub const AUTH_USER_PROFILE_RESOURCE: &str = "wafer_run__auth__user_profile";
+
+/// WRAP resource of `auth.require_user`. One of the credential ops (see
+/// [`is_auth_credential_resource`]).
+pub const AUTH_REQUIRE_USER_RESOURCE: &str = "wafer_run__auth__require_user";
+
+/// WRAP resource of `auth.require_token`. One of the credential ops (see
+/// [`is_auth_credential_resource`]).
+pub const AUTH_REQUIRE_TOKEN_RESOURCE: &str = "wafer_run__auth__require_token";
+
+/// WRAP resource of `auth.require_role`. One of the credential ops (see
+/// [`is_auth_credential_resource`]).
+pub const AUTH_REQUIRE_ROLE_RESOURCE: &str = "wafer_run__auth__require_role";
+
+/// Whether `resource` is one of the auth service's credential ops
+/// (`require_user`, `require_token`, `require_role`). Each resolves the
+/// credential the caller forwards in its own message, so it tells the caller
+/// nothing the credential it already holds does not: [`check_access`] admits
+/// any attributable caller to them, with no grant.
+pub fn is_auth_credential_resource(resource: &str) -> bool {
+    matches!(
+        resource,
+        AUTH_REQUIRE_USER_RESOURCE | AUTH_REQUIRE_TOKEN_RESOURCE | AUTH_REQUIRE_ROLE_RESOURCE
+    )
+}
+
 /// Extract the owning block ID from a namespaced resource name.
 ///
 /// Convention: `my_org__auth__users` → `my-org/auth`
@@ -162,12 +195,15 @@ pub fn typed_resource_owner(
 
 /// Check whether `caller_id` is allowed to access `resource`.
 ///
-/// For namespace-based resources (Db, Config, Vector, or untyped):
+/// For namespace-based resources (Db, Config, Vector, Auth, or untyped):
 /// 1. `__raw_sql__` → admin-only (exact match on `admin_block`)
 /// 2. `__ddl__` / `__schema__` → any attributable caller (NOT admin-only).
 ///    Convention is that blocks only reshape their own (`{org}__{block}__*`)
 ///    tables; this is enforced by code review + the WRAP-grant audit script,
-///    not by parsing SQL here.
+///    not by parsing SQL here. An Auth credential op
+///    ([`is_auth_credential_resource`]) is likewise open to any attributable
+///    caller; every other Auth resource (e.g. [`AUTH_USER_PROFILE_RESOURCE`])
+///    takes the rules below.
 /// 3. `WAFER_RUN_SHARED__*` → any block reads, admin-only writes
 /// 4. Own resource (`resource_owner(resource) == caller_id`) → Ok
 /// 5. Admin (`caller_id == admin_block`) → Ok
@@ -201,7 +237,8 @@ pub fn check_access(
     grants: &[ResourceGrant],
     admin_block: &str,
 ) -> Result<(), WaferError> {
-    // Namespace-based rules apply to Db, Config, Vector, or untyped resources.
+    // Namespace-based rules apply to Db, Config, Vector, Auth, or untyped
+    // resources.
     // Network, Storage, and Crypto resources use URLs / file-paths /
     // operation-names, not the {org}__{block}__{name} convention.
     let namespace_based = !matches!(
@@ -244,6 +281,25 @@ pub fn check_access(
                 None => Err(WaferError::new(
                     ErrorCode::PermissionDenied,
                     format!("WRAP: {what} requires an attributable caller (caller: None)"),
+                )),
+            };
+        }
+
+        // Rule 1b: the auth service's credential ops answer from the
+        // credential the caller forwards, not from the auth block's own
+        // authority, so any attributable caller may ask. Anonymous callers
+        // are denied, as for DDL.
+        if resource_type == Some(&crate::types::ResourceType::Auth)
+            && is_auth_credential_resource(resource)
+        {
+            return match caller_id {
+                Some(_) => Ok(()),
+                None => Err(WaferError::new(
+                    ErrorCode::PermissionDenied,
+                    format!(
+                        "WRAP: auth credential op '{resource}' requires an attributable caller \
+                         (caller: None)"
+                    ),
                 )),
             };
         }
@@ -1711,5 +1767,96 @@ mod tests {
         let res = "WAFER_RUN_SHARED__APP_NAME";
         assert!(check_access(Some("a/b"), res, ResourceAccess::Append, None, &[], admin).is_err());
         assert!(check_access(Some(admin), res, ResourceAccess::Append, None, &[], admin).is_ok());
+    }
+
+    /// `auth.user_profile` answers from the auth service's own authority,
+    /// so a caller that is neither the auth block nor the admin needs a
+    /// grant on it — and only a grant typed `Auth` (or untyped) admits it.
+    #[test]
+    fn auth_user_profile_needs_admin_own_or_grant() {
+        let admin = "my-org/admin";
+        let auth = Some(&ResourceType::Auth);
+        let check = |caller: Option<&str>, grants: &[ResourceGrant]| {
+            check_access(
+                caller,
+                AUTH_USER_PROFILE_RESOURCE,
+                ResourceAccess::Read,
+                auth,
+                grants,
+                admin,
+            )
+        };
+
+        assert!(check(Some("my-org/feature"), &[]).is_err());
+        assert!(check(None, &[]).is_err());
+        assert!(check(Some(admin), &[]).is_ok());
+        assert!(
+            check(Some("wafer-run/auth"), &[]).is_ok(),
+            "the auth block owns its own namespace"
+        );
+
+        let granted = [
+            ResourceGrant::read("my-org/feature", AUTH_USER_PROFILE_RESOURCE)
+                .typed(ResourceType::Auth),
+        ];
+        assert!(check(Some("my-org/feature"), &granted).is_ok());
+        assert!(
+            check(Some("my-org/other"), &granted).is_err(),
+            "a grant admits its grantee only"
+        );
+
+        let db_typed = [
+            ResourceGrant::read("my-org/feature", AUTH_USER_PROFILE_RESOURCE)
+                .typed(ResourceType::Db),
+        ];
+        assert!(
+            check(Some("my-org/feature"), &db_typed).is_err(),
+            "a Db-typed grant does not admit an Auth resource"
+        );
+    }
+
+    /// The credential ops resolve the credential the caller forwards, so any
+    /// attributable caller is admitted without a grant; an anonymous one is
+    /// not.
+    #[test]
+    fn auth_credential_ops_admit_any_attributable_caller() {
+        let admin = "my-org/admin";
+        for resource in [
+            AUTH_REQUIRE_USER_RESOURCE,
+            AUTH_REQUIRE_TOKEN_RESOURCE,
+            AUTH_REQUIRE_ROLE_RESOURCE,
+        ] {
+            assert!(is_auth_credential_resource(resource));
+            assert!(check_access(
+                Some("my-org/feature"),
+                resource,
+                ResourceAccess::Read,
+                Some(&ResourceType::Auth),
+                &[],
+                admin
+            )
+            .is_ok());
+            assert!(check_access(
+                None,
+                resource,
+                ResourceAccess::Read,
+                Some(&ResourceType::Auth),
+                &[],
+                admin
+            )
+            .is_err());
+            // The rule is the Auth type's: the same name asked as a Db
+            // collection takes the ordinary namespace rules.
+            assert!(check_access(
+                Some("my-org/feature"),
+                resource,
+                ResourceAccess::Read,
+                Some(&ResourceType::Db),
+                &[],
+                admin
+            )
+            .is_err());
+        }
+        assert!(!is_auth_credential_resource(AUTH_USER_PROFILE_RESOURCE));
     }
 }

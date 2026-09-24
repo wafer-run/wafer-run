@@ -1236,6 +1236,7 @@ mod tests {
             ("network.", ServiceOp::NETWORK_OPS),
             ("logger.", ServiceOp::LOGGER_OPS),
             ("config.", ServiceOp::CONFIG_OPS),
+            ("auth.", ServiceOp::AUTH_OPS),
         ] {
             for op in ops {
                 assert!(
@@ -1243,6 +1244,56 @@ mod tests {
                     "op '{op}' does not belong in the '{prefix}*' family slice"
                 );
             }
+        }
+    }
+
+    /// Every `ServiceOp::{prefix}*` constant declared in `service_names.rs`,
+    /// as `(name, value)`, read from the source so a constant added without
+    /// touching any slice is still seen.
+    fn declared_op_constants(prefix: &str) -> Vec<(String, String)> {
+        let source = include_str!("common/service_names.rs");
+        source
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ")?;
+                let (name, rest) = rest.split_once(": &str = \"")?;
+                let value = rest.strip_suffix("\";")?;
+                name.starts_with(prefix)
+                    .then(|| (name.to_string(), value.to_string()))
+            })
+            .collect()
+    }
+
+    /// Drift guard for the families whose handler guarantee is driven by a
+    /// slice, not by an interface catalog: every `AUTH_*` / `LOGGER_*` op
+    /// constant must be in `AUTH_OPS` / `LOGGER_OPS`. wafer-core's
+    /// `handler_wrap_completeness.rs` sends every op of those slices through
+    /// the real handler (auth under a deny-all context, logger checked for
+    /// caller attribution), so a new op left out of its slice would ship
+    /// untested — this fails first.
+    #[test]
+    fn every_auth_and_logger_op_constant_is_in_its_slice() {
+        for (prefix, family, ops) in [
+            ("AUTH_", "auth.", ServiceOp::AUTH_OPS),
+            ("LOGGER_", "logger.", ServiceOp::LOGGER_OPS),
+        ] {
+            let declared: Vec<_> = declared_op_constants(prefix)
+                .into_iter()
+                .filter(|(_, value)| value.starts_with(family))
+                .collect();
+            assert!(
+                !declared.is_empty(),
+                "no `{prefix}*` op constants parsed from service_names.rs — the \
+                 source shape changed; update `declared_op_constants`"
+            );
+            for (name, value) in &declared {
+                assert!(
+                    ops.contains(&value.as_str()),
+                    "ServiceOp::{name} (`{value}`) is missing from its `{prefix}OPS` slice, \
+                     so the handler completeness test never sends it"
+                );
+            }
+            assert_eq!(declared.len(), ops.len(), "{prefix}OPS has an extra entry");
         }
     }
 

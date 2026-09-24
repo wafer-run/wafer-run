@@ -18,6 +18,11 @@ pub enum ResourceType {
     /// count). Namespace-based like `Db`: the index storage name is
     /// `{org}__{block}__{index}` and its owner self-admits.
     Vector,
+    /// Operations of the auth service (`wafer-run/auth`). Namespace-based
+    /// like `Db`: each operation is a resource in the auth block's own
+    /// `wafer_run__auth__` namespace (see [`crate::wrap::AUTH_USER_PROFILE_RESOURCE`]),
+    /// so only the auth block may grant one.
+    Auth,
 }
 
 impl std::fmt::Display for ResourceType {
@@ -29,6 +34,7 @@ impl std::fmt::Display for ResourceType {
             Self::Crypto => f.write_str("crypto"),
             Self::Network => f.write_str("network"),
             Self::Vector => f.write_str("vector"),
+            Self::Auth => f.write_str("auth"),
         }
     }
 }
@@ -44,6 +50,7 @@ impl ResourceType {
             "crypto" => Some(Self::Crypto),
             "network" => Some(Self::Network),
             "vector" => Some(Self::Vector),
+            "auth" => Some(Self::Auth),
             _ => None,
         }
     }
@@ -72,7 +79,7 @@ impl std::fmt::Display for UnknownResourceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network|vector)",
+            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network|vector|auth)",
             self.0
         )
     }
@@ -332,6 +339,20 @@ mod tests {
         assert_eq!(
             ResourceType::parse_stored(Some("vector")).unwrap(),
             Some(ResourceType::Vector)
+        );
+    }
+
+    #[test]
+    fn auth_variant_round_trips() {
+        assert_eq!(ResourceType::Auth.to_string(), "auth");
+        assert_eq!(ResourceType::parse("auth"), Some(ResourceType::Auth));
+        assert_eq!(
+            ResourceType::parse_stored(Some("auth")).unwrap(),
+            Some(ResourceType::Auth)
+        );
+        assert_eq!(
+            serde_json::to_value(ResourceType::Auth).unwrap(),
+            serde_json::json!("auth")
         );
     }
 
