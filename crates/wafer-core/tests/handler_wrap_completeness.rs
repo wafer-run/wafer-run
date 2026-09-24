@@ -477,16 +477,18 @@ mod crypto_fakes {
             self.record("compare_hash");
             Ok(())
         }
-        fn sign(
+        fn sign_for(
             &self,
+            _block_id: &str,
             _claims: std::collections::HashMap<String, serde_json::Value>,
             _expiry: std::time::Duration,
         ) -> Result<String, CryptoError> {
             self.record("sign");
             Ok("token".into())
         }
-        fn verify(
+        fn verify_for(
             &self,
+            _block_id: &str,
             _token: &str,
         ) -> Result<std::collections::HashMap<String, serde_json::Value>, CryptoError> {
             self.record("verify");

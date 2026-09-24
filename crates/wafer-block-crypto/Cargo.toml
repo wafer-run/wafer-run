@@ -21,5 +21,9 @@ hkdf = { workspace = true }
 base64ct = { workspace = true }
 subtle = { workspace = true }
 
+[dev-dependencies]
+wafer-block = { path = "../wafer-block" }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
 [lints]
 workspace = true

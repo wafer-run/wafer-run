@@ -332,14 +332,19 @@ mod crypto_fakes {
         fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
             Ok(())
         }
-        fn sign(
+        fn sign_for(
             &self,
+            _block_id: &str,
             _claims: HashMap<String, serde_json::Value>,
             _expiry: Duration,
         ) -> Result<String, CryptoError> {
             Ok("token".into())
         }
-        fn verify(&self, _token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+        fn verify_for(
+            &self,
+            _block_id: &str,
+            _token: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
             Ok(HashMap::new())
         }
         fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
@@ -373,8 +378,13 @@ async fn crypto_sign_accepts_matched_op() {
     };
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::CRYPTO_SIGN, "sign", "read", "crypto");
-    let out =
-        wafer_core::interfaces::crypto::handler::handle_message(&svc, &AllowCtx, None, &msg, &body);
+    let out = wafer_core::interfaces::crypto::handler::handle_message(
+        &svc,
+        &AllowCtx,
+        Some("test/caller"),
+        &msg,
+        &body,
+    );
     assert!(terminal_error(out).await.is_none());
 }
 
