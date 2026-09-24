@@ -293,8 +293,8 @@ impl sqlx::Encode<'_, Postgres> for TypedNull {
 mod tests {
     use super::{integer, BindError};
 
-    fn message(value: serde_json::Value) -> String {
-        match integer(&value) {
+    fn message(value: &serde_json::Value) -> String {
+        match integer(value) {
             Err(BindError::Mismatch(msg)) => msg,
             other => panic!("expected a mismatch for {value}, got {:?}", other.ok()),
         }
@@ -304,14 +304,18 @@ mod tests {
     fn a_string_binds_to_an_integer_only_when_it_spells_one() {
         assert_eq!(integer(&serde_json::json!("42")).ok(), Some(42));
         assert_eq!(integer(&serde_json::json!("-7")).ok(), Some(-7));
-        assert!(message(serde_json::json!("4.2")).contains("expected an integer"));
-        assert!(message(serde_json::json!("abc")).contains("expected an integer"));
+        assert!(message(&serde_json::json!("4.2")).contains("expected an integer"));
+        assert!(message(&serde_json::json!("abc")).contains("expected an integer"));
     }
 
     #[test]
     fn an_integer_string_past_i64_is_out_of_range() {
         for s in ["9223372036854775808", "-9223372036854775809"] {
-            assert_eq!(message(serde_json::json!(s)), "integer out of range", "{s}");
+            assert_eq!(
+                message(&serde_json::json!(s)),
+                "integer out of range",
+                "{s}"
+            );
         }
     }
 }
