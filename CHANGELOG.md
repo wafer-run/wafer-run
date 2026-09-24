@@ -18,7 +18,10 @@
   `FRAME-ANCESTORS *` or `SCRIPT-SRC …` was emitted as a second directive
   that the browser enforced over the baseline, and `script-src-elem
   https:` passed unfiltered. Refused items are left out of the policy and
-  logged at Init with `warn`; Init still succeeds.
+  logged at Init with `warn`; Init still succeeds. A `csp` config holding
+  a character no header can carry (anything but visible ASCII and ASCII
+  whitespace, e.g. a pasted smart quote or NBSP) fails Init with
+  `InvalidArgument` naming the character.
 - `wafer-run/cors` never sends `Access-Control-Allow-Origin` on a request
   without `Origin` (it used to send the raw configured list, e.g.
   `https://a,https://b`), and sends `Vary: Origin` on every response once
