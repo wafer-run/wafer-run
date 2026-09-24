@@ -345,11 +345,25 @@ fn navigation_source_refusal(source: &str) -> Option<&'static str> {
 }
 
 /// Why a `report-uri` value is refused, or `None` for a path on this
-/// origin: path-absolute (`/…`), not network-path (`//host/…`).
+/// origin.
+///
+/// Browsers resolve the value with the WHATWG URL parser against the
+/// document, which reads `\` as `/` in an http(s) URL — so `/\host/r` is
+/// the network-path reference `//host/r`, another origin. The value must be
+/// path-absolute (`/…`), contain no `\`, and resolve, against any origin,
+/// to that same origin; [`is_value_token`] has already refused control
+/// characters and whitespace, which the parser would strip.
 fn report_uri_refusal(uri: &str) -> Option<&'static str> {
-    (!(uri.starts_with('/') && !uri.starts_with("//"))).then_some(
-        "reports carry page URLs and script samples; only a path on this origin is allowed",
-    )
+    const REASON: &str =
+        "reports carry page URLs and script samples; only a path on this origin is allowed";
+    if !uri.starts_with('/') || uri.starts_with("//") || uri.contains('\\') {
+        return Some(REASON);
+    }
+    let base = url::Url::parse("https://origin.invalid/").expect("a valid base URL");
+    match base.join(uri) {
+        Ok(resolved) if resolved.origin() == base.origin() => None,
+        _ => Some(REASON),
+    }
 }
 
 /// Quoted sources allowed in a script directive: keywords that do not let a
@@ -674,7 +688,7 @@ mod tests {
     fn report_uri_is_limited_to_this_origin() {
         let merged = merge_csp(
             BASE,
-            "report-uri /csp-reports https://collector.example //evil.example/r",
+            "report-uri /csp-reports https://collector.example //evil.example/r /\\evil.example/r",
         );
         assert_eq!(
             directive(&merged.policy, "report-uri"),
@@ -682,7 +696,7 @@ mod tests {
             "{}",
             merged.policy
         );
-        assert_eq!(merged.refused.len(), 2, "{:?}", merged.refused);
+        assert_eq!(merged.refused.len(), 3, "{:?}", merged.refused);
 
         let merged = merge_csp(BASE, "report-uri https://collector.example");
         assert_eq!(directive(&merged.policy, "report-uri"), None);
@@ -714,5 +728,22 @@ mod tests {
             Some(vec!["https://pay.example"])
         );
         assert_eq!(merged.refused.len(), 2, "{:?}", merged.refused);
+    }
+
+    /// `\` is `/` to the URL parser in an http(s) URL, so `/\host/r` names
+    /// another origin; so do its variants.
+    #[test]
+    fn report_uri_backslash_forms_are_refused() {
+        for uri in [
+            "/\\evil.example/r",
+            "/\\\\evil.example",
+            "\\/evil.example",
+            "/a\\b",
+        ] {
+            assert!(report_uri_refusal(uri).is_some(), "{uri} should be refused");
+        }
+        for uri in ["/csp-reports", "/a/b?c=d", "/%5Cevil.example"] {
+            assert_eq!(report_uri_refusal(uri), None, "{uri} should be accepted");
+        }
     }
 }

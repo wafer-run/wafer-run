@@ -10,6 +10,7 @@ wafer-block = { path = "../wafer-block" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -54,9 +54,6 @@ enum OriginMatch {
     Wildcard,
 }
 
-/// Match a request's `origin` against `allowed` (`*` or a comma-separated
-/// list). `None` when the request has no `Origin` or the origin is not
-/// allowed; the caller then emits no `Access-Control-Allow-Origin`.
 /// Add `Origin` to the response's `Vary`, keeping whatever an earlier block
 /// already varies on. `Vary` is a list, and adapters send one value per
 /// header name, so every `resp.header.{vary}` entry in any case is folded
@@ -86,6 +83,9 @@ fn vary_on_origin(msg: &mut Message) {
     msg.set_meta(format!("{META_RESP_HEADER_PREFIX}Vary"), fields.join(", "));
 }
 
+/// Match a request's `origin` against `allowed` (`*` or a comma-separated
+/// list). `None` when the request has no `Origin` or the origin is not
+/// allowed; the caller then emits no `Access-Control-Allow-Origin`.
 fn match_origin(allowed: &str, origin: &str) -> Option<OriginMatch> {
     if origin.is_empty() {
         None
