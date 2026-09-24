@@ -81,7 +81,10 @@ impl Block for FakeConfigBlock {
                 format!("fake config: unexpected kind {}", msg.kind),
             ));
         }
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let req: GetRequest = match codec::decode(&body) {
             Ok(r) => r,
             Err(e) => {

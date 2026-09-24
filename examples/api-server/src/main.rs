@@ -131,7 +131,10 @@ impl Block for NotesHandler {
             }
             // Create note
             ("create", "/api/notes") => {
-                let body_bytes = input.collect_to_bytes().await;
+                let body_bytes = match input.collect_to_bytes().await {
+                    Ok(bytes) => bytes,
+                    Err(e) => return OutputStream::error(e),
+                };
                 let body: serde_json::Value =
                     serde_json::from_slice(&body_bytes).unwrap_or_default();
                 let mut data = std::collections::HashMap::new();

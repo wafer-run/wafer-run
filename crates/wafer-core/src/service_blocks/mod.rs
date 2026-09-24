@@ -197,7 +197,14 @@ macro_rules! service_block {
                         return $sexpr;
                     }
                 )?
-                let $hbody = input.collect_to_bytes().await;
+                // A request body that did not arrive whole is refused with
+                // its own error, before the buffered handler sees a prefix.
+                let $hbody = match input.collect_to_bytes().await {
+                    ::core::result::Result::Ok(body) => body,
+                    ::core::result::Result::Err(e) => {
+                        return $crate::service_blocks::__private::OutputStream::error(e);
+                    }
+                };
                 let $hthis = self;
                 let $hctx = ctx;
                 let $hmsg = msg;
@@ -326,7 +333,14 @@ macro_rules! service_block {
                         return $sexpr;
                     }
                 )?
-                let $hbody = input.collect_to_bytes().await;
+                // A request body that did not arrive whole is refused with
+                // its own error, before the buffered handler sees a prefix.
+                let $hbody = match input.collect_to_bytes().await {
+                    ::core::result::Result::Ok(body) => body,
+                    ::core::result::Result::Err(e) => {
+                        return $crate::service_blocks::__private::OutputStream::error(e);
+                    }
+                };
                 let $hsvc = __wafer_svc;
                 let $hthis = self;
                 let $hctx = ctx;

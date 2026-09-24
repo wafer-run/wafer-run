@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use wafer_block::{InputStream, OutputStream};
+use wafer_block::{InputStream, OutputStream, WaferError};
 use wafer_block_macro::wafer_async_trait;
 
 /// Default read cap, in bytes, the `LocalStorageService` and
@@ -19,6 +19,15 @@ pub enum StorageError {
     /// The object is larger than the backend's read limit.
     #[error("object too large: {0}")]
     TooLarge(String),
+    /// The request is malformed: a folder or key that escapes the backend's
+    /// root, an invalid list cursor. The caller's fault, not the backend's.
+    #[error("invalid storage request: {0}")]
+    InvalidArgument(String),
+    /// The object body stream of a [`StorageService::put_streaming`] ended
+    /// in an error (see [`InputStream`]), carried as it was received.
+    /// Nothing was stored at the key.
+    #[error("object body failed: {0}")]
+    Body(WaferError),
     /// Backend-internal failure.
     #[error("storage error: {0}")]
     Internal(String),
@@ -48,6 +57,11 @@ pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// arrives as an [`InputStream`] of byte chunks instead of a single
     /// fully-buffered slice.
     ///
+    /// A stream that ends in an error is not a shorter object: an
+    /// implementation returns [`StorageError::Body`] with that error and
+    /// leaves the key as it was (the previous object, or none), never the
+    /// chunks that arrived before the error.
+    ///
     /// The default collapses the stream to bytes and forwards to
     /// [`put`](Self::put), so existing backends keep working unchanged.
     /// Backends whose driver accepts an incremental write (a filesystem
@@ -61,7 +75,7 @@ pub trait StorageService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: InputStream,
         content_type: &str,
     ) -> Result<(), StorageError> {
-        let bytes = data.collect_to_bytes().await;
+        let bytes = data.collect_to_bytes().await.map_err(StorageError::Body)?;
         self.put(folder, key, &bytes, content_type).await
     }
 

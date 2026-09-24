@@ -23,6 +23,10 @@ fn storage_error_to_wafer(e: StorageError) -> WaferError {
     match e {
         StorageError::NotFound => WaferError::new(ErrorCode::NotFound, "object not found"),
         StorageError::TooLarge(msg) => WaferError::new(ErrorCode::ResourceExhausted, msg),
+        StorageError::InvalidArgument(msg) => WaferError::new(ErrorCode::InvalidArgument, msg),
+        // The body's own error, so the transport that produced it (e.g. an
+        // HTTP listener's size cap or read deadline) is what the caller sees.
+        StorageError::Body(err) => err,
         StorageError::Internal(msg) => WaferError::new(ErrorCode::Internal, msg),
         StorageError::Other(err) => WaferError::new(ErrorCode::Internal, err.to_string()),
     }
@@ -438,11 +442,15 @@ pub async fn handle_put_streaming(
     let mut input = input;
     // Frame 1 is the header. An empty stream (no header frame at all) is a
     // malformed request — reject before touching the service.
-    let Some(header_bytes) = input.next().await else {
-        return OutputStream::error(WaferError::new(
-            ErrorCode::InvalidArgument,
-            "storage.put_streaming: request stream ended before the header frame",
-        ));
+    let header_bytes = match input.next().await {
+        Some(Ok(bytes)) => bytes,
+        Some(Err(e)) => return OutputStream::error(e),
+        None => {
+            return OutputStream::error(WaferError::new(
+                ErrorCode::InvalidArgument,
+                "storage.put_streaming: request stream ended before the header frame",
+            ))
+        }
     };
 
     // Decode + authorize the header BEFORE consuming any body frame. Same
@@ -464,7 +472,8 @@ pub async fn handle_put_streaming(
 
     // The remaining frames are the object body. `input` is now positioned at
     // the first body chunk (its cancellation token is preserved), so
-    // `put_streaming` receives a live body stream — never a buffered blob.
+    // `put_streaming` receives a live body stream — never a buffered blob —
+    // and a body that fails midway reaches the backend as that failure.
     match service
         .put_streaming(&path.folder, &header.key, input, &header.content_type)
         .await
@@ -485,5 +494,22 @@ mod tests {
         let err = storage_error_to_wafer(StorageError::TooLarge("over".into()));
         assert_eq!(err.code, ErrorCode::ResourceExhausted);
         assert_eq!(err.message, "over");
+    }
+
+    /// A malformed request is the caller's fault, not a server fault.
+    #[test]
+    fn invalid_argument_maps_to_invalid_argument() {
+        let err = storage_error_to_wafer(StorageError::InvalidArgument("bad cursor".into()));
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    /// A failed body keeps the code its producer gave it.
+    #[test]
+    fn body_failure_passes_the_body_error_through() {
+        let body_err = WaferError::new(ErrorCode::DeadlineExceeded, "body timed out");
+        assert_eq!(
+            storage_error_to_wafer(StorageError::Body(body_err.clone())),
+            body_err
+        );
     }
 }

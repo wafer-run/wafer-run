@@ -146,7 +146,10 @@ impl Block for NativeEchoBlock {
     }
 
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        OutputStream::respond(input.collect_to_bytes().await)
+        match input.collect_to_bytes().await {
+            Ok(bytes) => OutputStream::respond(bytes),
+            Err(e) => OutputStream::error(e),
+        }
     }
 }
 

@@ -105,47 +105,117 @@ fn internal_error_response() -> axum::http::Response<Body> {
         .expect("static response body is always well-formed")
 }
 
-/// Build a plain-text error response with a fixed status. Used for transport
-/// failures detected before dispatch (oversized / unreadable request bodies),
-/// where there is no `OutputStream` to map.
-fn status_text_response(status: StatusCode, message: &'static str) -> axum::http::Response<Body> {
-    axum::http::Response::builder()
-        .status(status)
-        .body(Body::from(message))
-        .unwrap_or_else(|_| internal_error_response())
+/// Why a request body stopped before its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyFailure {
+    /// More than `max_body_bytes` arrived, or were announced.
+    TooLarge,
+    /// The body was not complete when `body_read_timeout_secs` ran out.
+    TimedOut,
+    /// The transport failed: the client disconnected, or the chunked
+    /// framing was malformed.
+    Unreadable,
 }
 
-/// True if `err` (or anything in its source chain) is a
-/// [`http_body_util::LengthLimitError`].
-///
-/// `axum::body::to_bytes` wraps the body in `http_body_util::Limited`, so
-/// exceeding the byte cap surfaces as an `axum::Error` whose source is a
-/// `LengthLimitError`. Walking the chain lets us tell "body too large" apart
-/// from a genuine transport read error (client disconnect, malformed
-/// transfer-encoding).
-fn is_length_limit_error(err: &axum::Error) -> bool {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(e) = source {
-        if e.is::<http_body_util::LengthLimitError>() {
-            return true;
+impl BodyFailure {
+    /// The error a block reads from the request [`InputStream`].
+    fn to_wafer_error(self, limits: &RequestLimits, detail: &str) -> WaferError {
+        match self {
+            Self::TooLarge => WaferError::new(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "request body exceeds max_body_bytes ({} bytes)",
+                    limits.max_body_bytes
+                ),
+            ),
+            Self::TimedOut => WaferError::new(
+                ErrorCode::DeadlineExceeded,
+                format!(
+                    "request body not received within body_read_timeout_secs ({} s)",
+                    limits.body_read_timeout.as_secs()
+                ),
+            ),
+            Self::Unreadable => WaferError::new(
+                ErrorCode::InvalidArgument,
+                format!("failed to read request body: {detail}"),
+            ),
         }
-        source = e.source();
     }
-    false
+
+    /// The response the client gets, whatever the dispatched flow or block
+    /// answered: `413`, `408` or `400`. `Connection: close` because the rest
+    /// of the body may still be in flight, so the connection cannot carry
+    /// another request.
+    fn response(self, limits: &RequestLimits) -> axum::http::Response<Body> {
+        let (status, text) = match self {
+            Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "request body too large"),
+            Self::TimedOut => (StatusCode::REQUEST_TIMEOUT, "request body timed out"),
+            Self::Unreadable => (StatusCode::BAD_REQUEST, "failed to read request body"),
+        };
+        tracing::warn!(
+            status = status.as_u16(),
+            max_body_bytes = limits.max_body_bytes,
+            body_read_timeout_secs = limits.body_read_timeout.as_secs(),
+            "request body failed: {text}"
+        );
+        axum::http::Response::builder()
+            .status(status)
+            .header(axum::http::header::CONNECTION, "close")
+            .body(Body::from(text))
+            .unwrap_or_else(|_| internal_error_response())
+    }
 }
 
-/// Map a request-body read failure to an HTTP response instead of silently
-/// dispatching an empty body: exceeding `max_body_bytes` → `413 Payload Too
-/// Large`; any other read failure → `400 Bad Request`. Either way the
-/// discarded error is logged so the truncation is observable.
-fn body_read_error_response(err: &axum::Error) -> axum::http::Response<Body> {
-    if is_length_limit_error(err) {
-        tracing::warn!(error = %err, "request body exceeds max_body_bytes; returning 413");
-        status_text_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
-    } else {
-        tracing::warn!(error = %err, "failed to read request body; returning 400");
-        status_text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+/// The request body as the [`InputStream`] a flow or block reads, chunk by
+/// chunk as it arrives — never buffered whole.
+///
+/// The `max_body_bytes` cap (on the running total) and the
+/// `body_read_timeout` `deadline` are enforced as the stream's failure
+/// terminal, as is a transport read error: the block reads an `Err`, never a
+/// shorter body. The first failure is also recorded in `failure`, so the
+/// listener answers with the matching status even if the block did not pass
+/// the error on.
+fn request_body_stream(
+    body: Body,
+    limits: RequestLimits,
+    deadline: tokio::time::Instant,
+    failure: Arc<OnceLock<BodyFailure>>,
+) -> InputStream {
+    use futures::StreamExt;
+
+    struct State {
+        data: axum::body::BodyDataStream,
+        received: usize,
+        limits: RequestLimits,
+        deadline: tokio::time::Instant,
+        failure: Arc<OnceLock<BodyFailure>>,
     }
+
+    let state = State {
+        data: body.into_data_stream(),
+        received: 0,
+        limits,
+        deadline,
+        failure,
+    };
+    InputStream::from_stream(futures::stream::unfold(state, |mut st| async move {
+        let (kind, detail) = match tokio::time::timeout_at(st.deadline, st.data.next()).await {
+            Ok(None) => return None,
+            Ok(Some(Ok(bytes))) => {
+                st.received = st.received.saturating_add(bytes.len());
+                if st.received <= st.limits.max_body_bytes {
+                    return Some((Ok(Vec::from(bytes)), st));
+                }
+                (BodyFailure::TooLarge, String::new())
+            }
+            Ok(Some(Err(e))) => (BodyFailure::Unreadable, e.to_string()),
+            Err(_elapsed) => (BodyFailure::TimedOut, String::new()),
+        };
+        let _ = st.failure.set(kind);
+        // `InputStream` ends at its first `Err`, so this state is never
+        // polled again.
+        Some((Err(kind.to_wafer_error(&st.limits, &detail)), st))
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +224,7 @@ fn body_read_error_response(err: &axum::Error) -> axum::http::Response<Body> {
 
 use wafer_block::config::DispatchTarget;
 
-/// Default cap on request-body bytes buffered before dispatch — 10 MiB.
+/// Default cap on request-body bytes — 10 MiB.
 ///
 /// Single source of truth for the `max_body_bytes` default: rendered into the
 /// `max_body_bytes` [`ConfigVar`] and used when Init finds no value. An
@@ -168,7 +238,9 @@ const DEFAULT_MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 
 /// Default time a client has to deliver the whole request body once the
-/// head has arrived — 120 s (a 10 MiB body needs ~87 KB/s).
+/// head has arrived — 120 s (a 10 MiB body needs ~87 KB/s). The body streams
+/// to the dispatched flow or block, so a block that reads it slowly spends
+/// this time too.
 const DEFAULT_BODY_READ_TIMEOUT_SECS: u64 = 120;
 
 /// Default cap on concurrently open client connections.
@@ -323,7 +395,7 @@ fn resolve_client_ip<'a>(
 /// Per-connection and per-request bounds, resolved once at Init.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RequestLimits {
-    /// Request-body bytes buffered before dispatch; more → 413.
+    /// Request-body bytes a request may carry; more → 413.
     max_body_bytes: usize,
     /// Time allowed for a request head (and for an idle keep-alive wait).
     header_read_timeout: Duration,
@@ -427,21 +499,6 @@ struct RequestContext {
     limits: RequestLimits,
 }
 
-/// `408 Request Timeout` for a body that did not arrive within
-/// `body_read_timeout_secs`. `Connection: close` because the rest of the
-/// body may still be in flight: the connection cannot carry another request.
-fn body_timeout_response(timeout: Duration) -> axum::http::Response<Body> {
-    tracing::warn!(
-        timeout_secs = timeout.as_secs(),
-        "request body not received within body_read_timeout_secs; returning 408"
-    );
-    axum::http::Response::builder()
-        .status(StatusCode::REQUEST_TIMEOUT)
-        .header(axum::http::header::CONNECTION, "close")
-        .body(Body::from("request body timed out"))
-        .unwrap_or_else(|_| internal_error_response())
-}
-
 /// `400 Bad Request` for a request that repeats a header which may appear
 /// only once ([`http_codec::SINGLETON_REQUEST_HEADERS`]). `Connection: close`
 /// because the request's intent is ambiguous. (hyper refuses differing
@@ -470,22 +527,23 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
     {
         return repeated_singleton_header_response(name);
     }
-    // Buffer the request body up to `max_body_bytes` within
-    // `body_read_timeout`. A read failure must NOT be collapsed into an empty
-    // body: that would mask "too large", "too slow" and "connection dropped"
-    // as a legitimate empty request and let the handler return a misleading
-    // 2xx. They surface as 413 / 408 / 400 instead. The `Bytes` becomes the
-    // `Vec` without a copy when it is the only owner of its buffer.
-    let body_bytes = match tokio::time::timeout(
-        cx.limits.body_read_timeout,
-        axum::body::to_bytes(body, cx.limits.max_body_bytes),
-    )
-    .await
-    {
-        Ok(Ok(bytes)) => Vec::from(bytes),
-        Ok(Err(e)) => return body_read_error_response(&e),
-        Err(_elapsed) => return body_timeout_response(cx.limits.body_read_timeout),
-    };
+    // A `Content-Length` over the cap is refused before dispatch.
+    // Otherwise the body streams to the target (see `request_body_stream`):
+    // too large, too slow or a dropped connection reaches the block as the
+    // stream's failure, never as a shorter body, and the client gets 413 /
+    // 408 / 400 whatever the block answered.
+    let limits = cx.limits;
+    let announced = axum::body::HttpBody::size_hint(&body).lower();
+    if usize::try_from(announced).unwrap_or(usize::MAX) > limits.max_body_bytes {
+        return BodyFailure::TooLarge.response(&limits);
+    }
+    let body_failure = Arc::new(OnceLock::new());
+    let input = request_body_stream(
+        body,
+        limits,
+        tokio::time::Instant::now() + limits.body_read_timeout,
+        body_failure.clone(),
+    );
 
     let uri = &parts.uri;
     // SEC-07: the peer address is the `ConnectInfo` extension `serve_connection`
@@ -510,13 +568,17 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
         &parts.headers,
         &remote_addr,
     );
-    let input = InputStream::from_bytes(body_bytes);
 
     let output = match &cx.target {
         DispatchTarget::Flow(fid) => cx.runtime.run(fid, msg, input).await,
         DispatchTarget::Block(name) => cx.runtime.run_block(name, msg, input).await,
     };
-    wafer_output_to_response(output).await
+    // Built first: the output may still be reading the body while it runs.
+    let response = wafer_output_to_response(output).await;
+    match body_failure.get() {
+        Some(failure) => failure.response(&limits),
+        None => response,
+    }
 }
 
 /// Accept connections until `shutdown` fires, never holding more than
@@ -804,8 +866,9 @@ impl Block for HttpListenerBlock {
             .name("Dispatch Target"),
             ConfigVar::new(
                 "max_body_bytes",
-                "Maximum request-body size in bytes buffered before dispatch. \
-                 Larger bodies are rejected with 413 Payload Too Large. \
+                "Maximum request-body size in bytes. The body streams to the \
+                 flow or block; a larger one (announced or received) fails \
+                 that stream and is answered with 413 Payload Too Large. \
                  Must be at least 1.",
                 &DEFAULT_MAX_BODY_BYTES.to_string(),
             )
@@ -822,8 +885,9 @@ impl Block for HttpListenerBlock {
             ConfigVar::new(
                 "body_read_timeout_secs",
                 "Seconds a client has to send the whole request body after its \
-                 headers. A slower body is answered with 408 Request Timeout \
-                 and the connection is closed. 1 to 86400.",
+                 headers, counting time the flow or block spends between \
+                 reads. A slower body fails the body stream, is answered with \
+                 408 Request Timeout, and the connection is closed. 1 to 86400.",
                 &DEFAULT_BODY_READ_TIMEOUT_SECS.to_string(),
             )
             .name("Body Read Timeout (s)"),
@@ -979,40 +1043,95 @@ mod server_tests;
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn oversized_body_is_classified_and_mapped_to_413() {
-        // A body larger than the limit makes `to_bytes` fail with a
-        // LengthLimitError, which must map to 413 rather than an empty body.
-        let body = Body::from(vec![0u8; 100]);
-        let err = axum::body::to_bytes(body, 10)
-            .await
-            .expect_err("100 bytes over a 10-byte limit must error");
-        assert!(
-            is_length_limit_error(&err),
-            "over-limit read should be a length-limit error"
+    fn body_limits(max_body_bytes: usize) -> RequestLimits {
+        RequestLimits {
+            max_body_bytes,
+            header_read_timeout: Duration::from_secs(30),
+            body_read_timeout: Duration::from_secs(120),
+            max_connections: 1,
+            write_timeout: Duration::from_secs(60),
+            shutdown_grace: Duration::from_secs(10),
+        }
+    }
+
+    /// A body stream over `chunks`, then `tail` (`None` = clean end).
+    fn body_of(chunks: &[&'static [u8]], tail: Option<std::io::Error>) -> Body {
+        let mut items: Vec<Result<axum::body::Bytes, std::io::Error>> = chunks
+            .iter()
+            .map(|c| Ok(axum::body::Bytes::from_static(c)))
+            .collect();
+        if let Some(e) = tail {
+            items.push(Err(e));
+        }
+        Body::from_stream(futures::stream::iter(items))
+    }
+
+    async fn drain(
+        body: Body,
+        max_body_bytes: usize,
+    ) -> (Vec<Result<Vec<u8>, WaferError>>, Option<BodyFailure>) {
+        use futures::StreamExt;
+        let failure = Arc::new(OnceLock::new());
+        let input = request_body_stream(
+            body,
+            body_limits(max_body_bytes),
+            tokio::time::Instant::now() + Duration::from_secs(120),
+            failure.clone(),
         );
-        let resp = body_read_error_response(&err);
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let items = input.collect().await;
+        (items, failure.get().copied())
     }
 
     #[tokio::test]
-    async fn under_limit_body_reads_successfully() {
-        // Sanity: a body within the limit still reads as-is (no false 413).
-        let body = Body::from(b"hello".to_vec());
-        let bytes = axum::body::to_bytes(body, 1024)
-            .await
-            .expect("under-limit read should succeed");
-        assert_eq!(&bytes[..], b"hello");
+    async fn body_within_the_cap_streams_chunk_by_chunk() {
+        let (items, failure) = drain(body_of(&[b"hel", b"lo"], None), 5).await;
+        assert_eq!(items, vec![Ok(b"hel".to_vec()), Ok(b"lo".to_vec())]);
+        assert_eq!(failure, None);
+    }
+
+    /// Past the cap the stream fails; the chunk that crossed it is never
+    /// handed on.
+    #[tokio::test]
+    async fn body_over_the_cap_fails_the_stream() {
+        let (items, failure) = drain(body_of(&[b"hel", b"lo!"], None), 5).await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0], Ok(b"hel".to_vec()));
+        let err = items[1]
+            .as_ref()
+            .expect_err("the over-cap chunk is a failure");
+        assert_eq!(err.code, ErrorCode::ResourceExhausted);
+        assert_eq!(failure, Some(BodyFailure::TooLarge));
+    }
+
+    /// A transport read error (a dropped connection) fails the stream; it is
+    /// not an end of body.
+    #[tokio::test]
+    async fn body_read_error_fails_the_stream() {
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let (items, failure) = drain(body_of(&[b"part"], Some(reset)), 1024).await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0], Ok(b"part".to_vec()));
+        let err = items[1].as_ref().expect_err("a read error is a failure");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("reset"), "{}", err.message);
+        assert_eq!(failure, Some(BodyFailure::Unreadable));
     }
 
     #[test]
-    fn non_length_read_error_maps_to_400() {
-        // A transport-style error (not a length limit) must surface as 400,
-        // not be misreported as 413 or swallowed.
-        let err = axum::Error::new(std::io::Error::other("connection reset"));
-        assert!(!is_length_limit_error(&err));
-        let resp = body_read_error_response(&err);
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    fn body_failures_answer_413_408_400_and_close() {
+        let limits = body_limits(10);
+        for (failure, status) in [
+            (BodyFailure::TooLarge, StatusCode::PAYLOAD_TOO_LARGE),
+            (BodyFailure::TimedOut, StatusCode::REQUEST_TIMEOUT),
+            (BodyFailure::Unreadable, StatusCode::BAD_REQUEST),
+        ] {
+            let resp = failure.response(&limits);
+            assert_eq!(resp.status(), status);
+            assert_eq!(
+                resp.headers().get(axum::http::header::CONNECTION).unwrap(),
+                "close"
+            );
+        }
     }
 
     // ── SEC-07: trusted_proxies parsing (exact IPs + CIDR) ────────────────

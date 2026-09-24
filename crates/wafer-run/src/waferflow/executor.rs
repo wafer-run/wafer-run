@@ -303,7 +303,10 @@ pub(crate) async fn execute<'w>(
 
     // Collect initial input bytes; in pipeline mode also parse them into
     // the accumulator's `$.input` entry (flag precomputed at seal).
-    let body = input.collect_to_bytes().await;
+    let body = match input.collect_to_bytes().await {
+        Ok(body) => body,
+        Err(e) => return FlowOutcome::Done(OutputStream::error(e)),
+    };
     if flow.uses_accumulator {
         let input_val = match serde_json::from_slice::<serde_json::Value>(&body) {
             Ok(v) => v,
@@ -753,7 +756,9 @@ async fn run_invocation(
     // response body — without an eager per-step clone.
     let shared_body = state.body.clone();
     let step_input =
-        InputStream::from_stream(futures::stream::once(async move { (*shared_body).clone() }));
+        InputStream::from_stream(futures::stream::once(
+            async move { Ok((*shared_body).clone()) },
+        ));
     let scaffold_result = crate::runtime::runner::run_resolved(
         &env.wafer.hooks,
         crate::runtime::runner::DispatchObs {

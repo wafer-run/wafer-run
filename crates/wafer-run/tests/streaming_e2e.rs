@@ -25,7 +25,10 @@ impl Block for EchoBlock {
         BlockInfo::new("test/echo", "0.1.0", "handler@v1", "echo")
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        OutputStream::respond(input.collect_to_bytes().await)
+        match input.collect_to_bytes().await {
+            Ok(bytes) => OutputStream::respond(bytes),
+            Err(e) => OutputStream::error(e),
+        }
     }
 }
 
@@ -37,10 +40,12 @@ impl Block for UpperBlock {
         BlockInfo::new("test/upper", "0.1.0", "handler@v1", "upper")
     }
     async fn handle(&self, _ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let s = String::from_utf8_lossy(&input.collect_to_bytes().await)
-            .to_uppercase()
-            .into_bytes();
-        OutputStream::respond(s)
+        match input.collect_to_bytes().await {
+            Ok(body) => {
+                OutputStream::respond(String::from_utf8_lossy(&body).to_uppercase().into_bytes())
+            }
+            Err(e) => OutputStream::error(e),
+        }
     }
 }
 
@@ -52,7 +57,10 @@ impl Block for PipeBlock {
         BlockInfo::new("test/pipe", "0.1.0", "handler@v1", "pipe")
     }
     async fn handle(&self, ctx: &dyn Context, _msg: Message, input: InputStream) -> OutputStream {
-        let body = input.collect_to_bytes().await;
+        let body = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         ctx.call_block(
             "test/upper",
             Message::new("fwd"),
@@ -173,6 +181,24 @@ async fn echo_round_trip() {
         .await
         .unwrap();
     assert_eq!(body, b"hello streaming");
+}
+
+/// A flow whose request body fails ends with the body's error: the steps
+/// never see a prefix of it as the whole body.
+#[tokio::test]
+async fn flow_with_a_failed_body_ends_with_the_body_error() {
+    let mut w = setup();
+    w.seal().await.unwrap();
+    let failure = WaferError::new(ErrorCode::DeadlineExceeded, "request body timed out");
+    let input = InputStream::from_stream(futures::stream::iter(vec![
+        Ok(b"first half".to_vec()),
+        Err(failure.clone()),
+    ]));
+    let output = w.run("test/echo", Message::new("test"), input).await;
+    match output.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(e, failure),
+        other => panic!("expected the body's error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
