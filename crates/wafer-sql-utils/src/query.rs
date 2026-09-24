@@ -1335,7 +1335,8 @@ mod tests {
                 limit: Some(5),
             },
             Backend::Postgres,
-        );
+        )
+        .expect("renders");
         assert!(
             stmt.sql.ends_with(r#"ORDER BY "cnt" DESC LIMIT $1"#),
             "{}",

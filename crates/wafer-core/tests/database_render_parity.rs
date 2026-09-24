@@ -478,7 +478,8 @@ fn aggregate_parity(backend: Backend) {
         }],
         limit: Some(50),
     };
-    let direct = wafer_sql_utils::aggregate::build_grouped_query(cfg_direct, backend);
+    let direct = wafer_sql_utils::aggregate::build_grouped_query(cfg_direct, backend)
+        .expect("render the direct config");
 
     // (b) VIA WIRE.
     let req = wire::AggregateRequest {
@@ -526,7 +527,8 @@ fn aggregate_parity(backend: Backend) {
     // Server-side render (the `!Send` `GroupedQueryConfig` is built + consumed
     // in one expression, exactly as `DbExec::aggregate` does).
     let cfg_wire = spec.into_grouped_config(collection);
-    let via = wafer_sql_utils::aggregate::build_grouped_query(cfg_wire, backend);
+    let via = wafer_sql_utils::aggregate::build_grouped_query(cfg_wire, backend)
+        .expect("render the wire config");
 
     assert_stmt_parity(&direct, &via, "aggregate");
 }
