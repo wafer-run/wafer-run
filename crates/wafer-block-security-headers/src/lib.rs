@@ -264,7 +264,9 @@ impl Block for SecurityHeadersBlock {
                 "self" => FrameAncestors::SelfOrigin,
                 _ => FrameAncestors::None,
             };
-            let merged = merge_csp(DEFAULT_CSP, config.str_or("csp", ""));
+            let custom_csp = config.str_or("csp", "");
+            check_csp_characters(custom_csp)?;
+            let merged = merge_csp(DEFAULT_CSP, custom_csp);
             for refusal in &merged.refused {
                 tracing::warn!("security-headers: CSP config refused {refusal}");
             }
@@ -290,6 +292,28 @@ impl Block for SecurityHeadersBlock {
             }
         }
         Ok(())
+    }
+}
+
+/// Fail Init on a `csp` config character that cannot appear in a header
+/// value: anything but visible ASCII and the ASCII whitespace that separates
+/// tokens (which [`merge_csp`] re-serializes as single spaces). A pasted
+/// smart quote or control character is a configuration mistake to fix, not
+/// a source to drop.
+fn check_csp_characters(csp: &str) -> std::result::Result<(), WaferError> {
+    match csp
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_graphic() || c.is_ascii_whitespace()))
+    {
+        Some((at, c)) => Err(WaferError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "security-headers: `csp` config has {c:?} (U+{:04X}) at byte {at}; \
+                 a Content-Security-Policy may only contain visible ASCII and spaces",
+                u32::from(c),
+            ),
+        )),
+        None => Ok(()),
     }
 }
 
@@ -506,6 +530,42 @@ mod tests {
         assert_eq!(
             enforced(&csp, "frame-ancestors"),
             Some(vec!["'self'"]),
+            "{csp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_fails_on_a_csp_character_no_header_can_carry() {
+        for (csp, named) in [
+            ("script-src \u{2018}self\u{2019}", "U+2018"),
+            ("img-src https://a.example\u{1}", "U+0001"),
+            ("img-src\u{a0}https://a.example", "U+00A0"),
+        ] {
+            let block = SecurityHeadersBlock::new();
+            let err = block
+                .lifecycle(
+                    &NoopCtx,
+                    init_event(&serde_json::json!({ "csp": csp }).to_string()),
+                )
+                .await
+                .expect_err("a non-header character must fail Init");
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "{csp:?}");
+            assert!(err.message.contains(named), "{csp:?}: {}", err.message);
+        }
+        // Newlines and tabs only separate tokens.
+        let csp = served_csp(serde_json::json!({
+            "csp": "img-src\n\thttps://a.example",
+        }))
+        .await;
+        assert_eq!(
+            enforced(&csp, "img-src"),
+            Some(vec![
+                "'self'",
+                "data:",
+                "blob:",
+                "https:",
+                "https://a.example"
+            ]),
             "{csp}"
         );
     }
