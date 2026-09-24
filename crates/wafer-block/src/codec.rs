@@ -58,7 +58,8 @@ impl DecodeError {
         self.type_name
     }
 
-    /// The decoder's description of what was wrong with the body.
+    /// The decoder's description of what was wrong with the body, at most
+    /// [`MAX_DECODE_CAUSE_LEN`] bytes followed by `…` when it was longer.
     pub fn cause(&self) -> &str {
         &self.cause
     }
@@ -76,6 +77,27 @@ impl DecodeError {
     }
 }
 
+/// Longest decoder message, in bytes, a [`DecodeError`] keeps as its cause.
+///
+/// serde echoes offending values into its messages (``unknown variant
+/// `…`, expected `Red` ``), so an uncapped cause would copy an arbitrarily
+/// large sender-supplied value into every error built from it.
+pub const MAX_DECODE_CAUSE_LEN: usize = 256;
+
+/// `message` cut to at most [`MAX_DECODE_CAUSE_LEN`] bytes on a char
+/// boundary, with `…` appended when anything was cut.
+fn capped_cause(mut message: String) -> String {
+    if message.len() > MAX_DECODE_CAUSE_LEN {
+        let mut end = MAX_DECODE_CAUSE_LEN;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push('…');
+    }
+    message
+}
+
 /// Decode MessagePack bytes into `T`. Unknown fields are ignored (forward
 /// compatibility). Nesting deeper than [`WIRE_MAX_DEPTH`] is rejected before
 /// the recursive decode can endanger the stack. A failure is a
@@ -86,7 +108,7 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     de.set_max_depth(WIRE_MAX_DEPTH);
     T::deserialize(&mut de).map_err(|e| DecodeError {
         type_name: std::any::type_name::<T>(),
-        cause: e.to_string(),
+        cause: capped_cause(e.to_string()),
     })
 }
 
@@ -163,6 +185,36 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("codec decode error"), "{err}");
+    }
+
+    /// serde's unknown-variant message echoes the variant name it was sent.
+    #[derive(Deserialize, Debug)]
+    enum Colour {
+        Red,
+    }
+
+    #[test]
+    fn decode_error_caps_an_echoed_value() {
+        // A 64 KiB variant name: serde's message echoes all of it, the cause
+        // must not.
+        let huge = "é".repeat(32 * 1024);
+        let bytes = encode(&huge).expect("encode");
+        let err = decode::<Colour>(&bytes).unwrap_err();
+        let cause = err.cause();
+        assert!(cause.starts_with("unknown variant `éé"), "{cause}");
+        assert!(cause.ends_with('…'), "{cause}");
+        assert!(
+            cause.len() <= super::MAX_DECODE_CAUSE_LEN + '…'.len_utf8(),
+            "cause is {} bytes",
+            cause.len()
+        );
+        assert!(err.clone().invalid_argument().message.len() < 512);
+    }
+
+    #[test]
+    fn decode_error_keeps_a_short_cause_whole() {
+        let err = decode::<Colour>(&encode("Blue").expect("encode")).unwrap_err();
+        assert_eq!(err.cause(), "unknown variant `Blue`, expected `Red`");
     }
 
     #[test]

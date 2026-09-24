@@ -12,9 +12,12 @@
   WaferError`, so `codec::decode(..)?` in a function returning `WaferError`
   no longer compiles; `e.code`/`e.message` become that choice and
   `e.to_string()` (which keeps the `codec decode error in <type>: <cause>`
-  text). `DecodeError::type_name` and `DecodeError::cause` expose the parts.
+  text). `DecodeError::type_name` and `DecodeError::cause` expose the parts;
+  the cause is capped at `codec::MAX_DECODE_CAUSE_LEN` (256) bytes plus `…`,
+  so a value serde echoes into its message cannot make the error unbounded.
 - `wafer-test-support` no longer ships `FakeDb`, `FakeCrypto`,
-  `WaferBuilder::with_fake_db` or `WaferBuilder::with_fake_crypto`. The
+  `fake_db::FailureMode`, `WaferBuilder::with_fake_db` or
+  `WaferBuilder::with_fake_crypto`. The
   fakes parsed JSON request bodies while every production client encodes
   MessagePack (`wafer_block::codec`), so a test routing
   `wafer_core::clients::database::*` to them failed with `fake-db: bad
