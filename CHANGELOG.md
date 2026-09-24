@@ -27,6 +27,24 @@
   `SqlBuildError::DuplicateColumn`; `DbExec::upsert` maps its builder errors
   to `InvalidArgument` (was `Internal`). The executor's check is public as
   `interfaces::database::exec::windowed_counter_row`.
+- `wafer-run/ip-rate-limit` no longer declares
+  `WAFER_RUN__IP_RATE_LIMIT__DISABLE`: it was read from the process
+  environment only, never from the `ConfigSource`. Set the flow config
+  `max_requests = 0` to turn the limiter off. A present `max_requests`,
+  `window_seconds` (now positive) or new `ipv6_prefix` value that does not
+  parse fails the block's Init and denies each request with
+  `InvalidArgument`, where it used to fall back to the default.
+- The `wafer-run/s3` and `wafer-run/postgres` blocks read their declared
+  config vars (`WAFER_RUN__S3__ENDPOINT` / `__REGION` /
+  `__MAX_OBJECT_BYTES`, `WAFER_RUN__POSTGRES__DATABASE_URL`) from the Init
+  payload the runtime resolves through the embedder's `ConfigSource`. The
+  s3 block read them from `std::env` and the postgres block from the
+  embedder's config snapshot, so a source other than the process
+  environment configured neither. An embedder that set these only as env
+  vars needs a `ConfigSource` that reads the environment or holds them. `WAFER_RUN__S3__ENDPOINT` is now
+  optional: empty means AWS, and a source without it no longer fails the
+  block's Init with a missing required key.
+
 - `NotFound` only ever comes from a service saying the thing a request
   names does not exist; the runtime no longer answers `NotFound` for "no
   such block". A client that reads `NotFound` as "unset" or "no row"
@@ -1519,6 +1537,16 @@
   read-only.
 
 ### Fixed
+
+- `wafer-run/ip-rate-limit` charges an IPv6 client per /64 (the new
+  `ipv6_prefix` flow config, 1 to 128) instead of per address, which a host
+  rotating its own interface id used to get a fresh budget per request;
+  an IPv4-mapped address (`::ffff:a.b.c.d`) is charged as the IPv4 address
+  it carries. When a new client finds its shard full, the block drops
+  expired buckets, then the cheapest live ones (under budget before
+  throttled, lower count, older window). It used to drop the oldest
+  windows, which after the expiry sweep are the live clients closest to
+  their limit, and judged expiry by the triggering request's window.
 
 - A table another process creates is visible to a database service that
   saw it missing. The schema cache memoized "missing" for its lifetime, so
