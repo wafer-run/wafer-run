@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
+use wafer_block::types::ResourceGrant;
 use wafer_block_macro::wafer_async_trait;
 
 use super::service::{
@@ -17,12 +18,16 @@ use super::service::{
 /// registered backend implementations.
 pub struct MultiBackendImageService {
     impls: Vec<(String, Arc<dyn ImageService>)>,
+    grants: Vec<ResourceGrant>,
 }
 
 impl MultiBackendImageService {
     /// Construct an empty router; backends are added with [`register`](Self::register).
     pub fn new() -> Self {
-        Self { impls: Vec::new() }
+        Self {
+            impls: Vec::new(),
+            grants: Vec::new(),
+        }
     }
 
     /// Register an ImageService impl under a label. Earlier impls win when
@@ -33,6 +38,13 @@ impl MultiBackendImageService {
         service: Arc<dyn ImageService>,
     ) -> &mut Self {
         self.impls.push((label.into(), service));
+        self
+    }
+
+    /// Declare a WRAP grant for the block serving this router (see
+    /// [`ImageService::grants`]).
+    pub fn grant(&mut self, grant: ResourceGrant) -> &mut Self {
+        self.grants.push(grant);
         self
     }
 
@@ -123,6 +135,16 @@ impl ImageService for MultiBackendImageService {
         self.impls
             .iter()
             .any(|(_, svc)| svc.claims_backend(backend_id))
+    }
+
+    /// The grants declared with [`grant`](Self::grant), then each registered
+    /// backend's own, in registration order.
+    fn grants(&self) -> Vec<ResourceGrant> {
+        self.grants
+            .iter()
+            .cloned()
+            .chain(self.impls.iter().flat_map(|(_, svc)| svc.grants()))
+            .collect()
     }
 }
 

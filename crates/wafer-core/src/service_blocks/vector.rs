@@ -20,9 +20,17 @@ crate::service_block! {
         vector: Arc<dyn VectorService>,
         embedding: Arc<dyn EmbeddingService>,
     },
+    info_extras: |this, info| info.grants(this.embedding.grants()),
     handle: |this, ctx, msg, body| match msg.kind.as_str() {
         ServiceOp::EMBEDDING_EMBED | ServiceOp::EMBEDDING_COUNT_TOKENS => {
-            handler::handle_embedding_message(this.embedding.as_ref(), &msg, &body).await
+            handler::handle_embedding_message(
+                this.embedding.as_ref(),
+                ctx,
+                VectorBlock::NAME,
+                &msg,
+                &body,
+            )
+            .await
         }
         _ => handler::handle_message(this.vector.as_ref(), ctx, &msg, &body).await,
     },

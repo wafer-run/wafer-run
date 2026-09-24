@@ -78,6 +78,7 @@ pub mod __private {
 ///
 /// - `fields` become private struct fields and, in declaration order, the
 ///   parameters of the generated `new()` and `register_with()`.
+/// - The block gets a `NAME` constant holding `name` (in both forms).
 /// - `extra_fields` (optional) are additional private fields initialized with
 ///   `Default::default()` in `new()` (e.g. `DatabaseBlock`'s `tables`); custom
 ///   constructors over them are written as plain code next to the invocation.
@@ -147,6 +148,10 @@ macro_rules! service_block {
         }
 
         impl $block {
+            /// The name this block registers under, which its `info()`
+            /// reports — the namespace its service's WRAP resources live in.
+            pub const NAME: &'static str = $name;
+
             #[doc = concat!(
                 "Construct a [`", stringify!($block),
                 "`] wrapping the given service implementation(s)."
@@ -256,6 +261,10 @@ macro_rules! service_block {
         }
 
         impl $block {
+            /// The name this block registers under, which its `info()`
+            /// reports — the namespace its service's WRAP resources live in.
+            pub const NAME: &'static str = $name;
+
             #[doc = concat!(
                 "Construct an uninitialized [`", stringify!($block),
                 "`]; the service is built during `lifecycle(Init)`."

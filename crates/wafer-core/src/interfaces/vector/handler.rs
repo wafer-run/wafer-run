@@ -1,4 +1,6 @@
-//! Shared message handler logic for vector and embedding blocks.
+//! Shared message handler logic for vector and embedding blocks. Both
+//! authorize every op host-side before the service runs (see
+//! [`handle_message`] and [`handle_embedding_message`]).
 //!
 //! Any block implementing the `vector@v1` or `embedding@v1` interface can
 //! delegate to these functions to avoid duplicating the message protocol
@@ -14,17 +16,17 @@ use wafer_block::{
     streams::output::OutputStream,
     types::ResourceType,
     wire::vector as wire,
+    wrap::op_resource,
     *,
 };
 
 use super::service::{check_rename, EmbeddingService, VectorError, VectorService};
-use crate::interfaces::handler_util::{
-    decode_and_authorize, decode_and_authorize_all, decode_or_err, to_output,
-};
+use crate::interfaces::handler_util::{decode_and_authorize, decode_and_authorize_all, to_output};
 
 /// The read-only vector ops (query, count, list_indexes, describe_index,
-/// list_ids) authorize for `ResourceAccess::Read`; every other op mutates
-/// the index and authorizes for `ResourceAccess::Write`.
+/// list_ids) and both embedding ops authorize for `ResourceAccess::Read`;
+/// every other vector op mutates the index and authorizes for
+/// `ResourceAccess::Write`.
 const READ: ResourceAccess = ResourceAccess::Read;
 const WRITE: ResourceAccess = ResourceAccess::Write;
 
@@ -237,14 +239,34 @@ pub async fn handle_message(
 }
 
 /// Handle an embedding message using the given service.
+///
+/// `block` is the registered name of the block serving the call, and `ctx`
+/// its context for this call. Each op authorizes `ctx.caller_id()` for
+/// `Read` through `ctx.check_resource_access` against its
+/// [`ResourceType::Embedding`] resource in `block`'s namespace
+/// ([`op_resource`]: `{org}__{block}__embed`, `{org}__{block}__count_tokens`)
+/// before the service is touched. The serving block and the admin block are
+/// admitted; any other caller needs a grant the serving block declares (see
+/// [`EmbeddingService::grants`]).
 pub async fn handle_embedding_message(
     service: &dyn EmbeddingService,
+    ctx: &dyn Context,
+    block: &str,
     msg: &Message,
     body: &[u8],
 ) -> OutputStream {
-    match msg.kind.as_str() {
+    let op = msg.kind.as_str();
+    match op {
         ServiceOp::EMBEDDING_EMBED => {
-            let req = decode_or_err!(body, wire::EmbedRequest, "embedding.embed");
+            let req = match decode_and_authorize::<wire::EmbedRequest>(
+                ctx,
+                body,
+                "embedding.embed",
+                |_| (op_resource(block, op), ResourceType::Embedding, READ),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             match service.embed(req.texts).await {
                 Ok(vectors) => to_output(&wire::EmbedResponse {
                     model: service.model().to_string(),
@@ -255,7 +277,15 @@ pub async fn handle_embedding_message(
             }
         }
         ServiceOp::EMBEDDING_COUNT_TOKENS => {
-            let req = decode_or_err!(body, wire::CountTokensRequest, "embedding.count_tokens");
+            let req = match decode_and_authorize::<wire::CountTokensRequest>(
+                ctx,
+                body,
+                "embedding.count_tokens",
+                |_| (op_resource(block, op), ResourceType::Embedding, READ),
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
             to_output(&wire::CountTokensResponse {
                 tokens: service.count_tokens(&req.text) as u64,
             })

@@ -1,7 +1,8 @@
 //! Shared message handler for image blocks.
 //!
-//! Decodes `msg.kind` into calls on an `ImageService` impl and translates the
-//! result onto an `OutputStream`. Buffered ops (`generate`, `list_models`,
+//! Decodes `msg.kind`, authorizes the caller for the op (see
+//! [`handle_message`]), and translates the `ImageService` result onto an
+//! `OutputStream`. Buffered ops (`generate`, `list_models`,
 //! `status`, `unload_model`) produce a single `respond(body)`. The streaming
 //! op (`load_model`) produces a `from_producer` stream: each service chunk is
 //! codec-encoded (MessagePack) and emitted as its own `Chunk` event, and
@@ -19,12 +20,35 @@ use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
     streams::output::OutputStream,
+    types::ResourceType,
     wire::image as wire,
+    wrap::op_resource,
     *,
 };
 
 use super::service::{ImageError, ImageService};
-use crate::interfaces::handler_util::{decode_or_err, to_output};
+use crate::interfaces::handler_util::{decode_and_authorize_model, to_output};
+
+/// Decode an `image.*` request that names a model and authorize the caller
+/// for `access` to that model in `block`'s namespace.
+fn decode_for_model<T: serde::de::DeserializeOwned>(
+    ctx: &dyn Context,
+    block: &str,
+    body: &[u8],
+    op_name: &str,
+    access: ResourceAccess,
+    model: impl FnOnce(&T) -> (&str, &str),
+) -> Result<T, OutputStream> {
+    decode_and_authorize_model(
+        ctx,
+        block,
+        body,
+        op_name,
+        ResourceType::Image,
+        access,
+        model,
+    )
+}
 
 fn image_error_to_block_error(e: ImageError) -> (ErrorCode, String) {
     match e {
@@ -32,7 +56,7 @@ fn image_error_to_block_error(e: ImageError) -> (ErrorCode, String) {
         ImageError::InvalidRequest(msg) => (ErrorCode::InvalidArgument, msg),
         ImageError::BackendError(msg) => (ErrorCode::Internal, msg),
         ImageError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
-        ImageError::Network(msg) => (ErrorCode::Internal, format!("network: {msg}")),
+        ImageError::Network(msg) => (ErrorCode::Unavailable, format!("network: {msg}")),
         ImageError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
     }
 }
@@ -43,20 +67,33 @@ fn image_error_to_block_error(e: ImageError) -> (ErrorCode, String) {
 /// return the resulting output stream. Unknown ops yield an `INVALID_ARGUMENT`
 /// error stream.
 ///
+/// `block` is the registered name of the block serving the call, and `ctx`
+/// its context for this call. Every op authorizes `ctx.caller_id()` through
+/// `ctx.check_resource_access` against a [`ResourceType::Image`] resource in
+/// `block`'s namespace before the service is touched: `generate` and
+/// `status` read the model's
+/// [`model_resource`](wafer_block::wrap::model_resource), `load_model` and
+/// `unload_model` write it (they change what every other caller finds
+/// loaded), and `list_models` reads [`op_resource`]. The serving block and
+/// the admin block are admitted; any other caller needs a grant the serving
+/// block declares (see [`ImageService::grants`]).
+///
 /// `service` is borrowed; the streaming op (`load_model`) clones the `Arc`
 /// internally because its producer closure must be `'static`. Buffered ops
 /// just borrow it.
 pub async fn handle_message(
     service: &Arc<dyn ImageService>,
+    ctx: &dyn Context,
+    block: &str,
     msg: &Message,
     body: &[u8],
 ) -> OutputStream {
     match msg.kind.as_str() {
-        ServiceOp::IMAGE_GENERATE => generate(service.as_ref(), body).await,
-        ServiceOp::IMAGE_LIST_MODELS => list_models(service.as_ref()).await,
-        ServiceOp::IMAGE_STATUS => status(service.as_ref(), body).await,
-        ServiceOp::IMAGE_LOAD_MODEL => load_model(service, body),
-        ServiceOp::IMAGE_UNLOAD_MODEL => unload_model(service.as_ref(), body).await,
+        ServiceOp::IMAGE_GENERATE => generate(service.as_ref(), ctx, block, body).await,
+        ServiceOp::IMAGE_LIST_MODELS => list_models(service.as_ref(), ctx, block).await,
+        ServiceOp::IMAGE_STATUS => status(service.as_ref(), ctx, block, body).await,
+        ServiceOp::IMAGE_LOAD_MODEL => load_model(service, ctx, block, body),
+        ServiceOp::IMAGE_UNLOAD_MODEL => unload_model(service.as_ref(), ctx, block, body).await,
         other => OutputStream::error(WaferError::new(
             ErrorCode::InvalidArgument,
             format!("unknown image operation: {other}"),
@@ -66,8 +103,23 @@ pub async fn handle_message(
 
 // ---- Buffered ops ----
 
-async fn generate(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let req = decode_or_err!(body, wire::ImageRequest, "image.generate");
+async fn generate(
+    service: &dyn ImageService,
+    ctx: &dyn Context,
+    block: &str,
+    body: &[u8],
+) -> OutputStream {
+    let req = match decode_for_model(
+        ctx,
+        block,
+        body,
+        "image.generate",
+        ResourceAccess::Read,
+        |r: &wire::ImageRequest| (&r.backend_id, &r.model),
+    ) {
+        Ok(r) => r,
+        Err(out) => return out,
+    };
     // `generate` is not streaming — the whole response arrives at once.
     // Use a fresh cancel token (no client-side cancel propagation needed for
     // buffered ops; the OutputStream wraps the result immediately).
@@ -81,7 +133,12 @@ async fn generate(service: &dyn ImageService, body: &[u8]) -> OutputStream {
     }
 }
 
-async fn list_models(service: &dyn ImageService) -> OutputStream {
+async fn list_models(service: &dyn ImageService, ctx: &dyn Context, block: &str) -> OutputStream {
+    let resource = op_resource(block, ServiceOp::IMAGE_LIST_MODELS);
+    if let Err(e) = ctx.check_resource_access(&resource, ResourceType::Image, ResourceAccess::Read)
+    {
+        return OutputStream::error(e);
+    }
     match service.list_models().await {
         Ok(models) => to_output(models),
         Err(e) => {
@@ -91,8 +148,23 @@ async fn list_models(service: &dyn ImageService) -> OutputStream {
     }
 }
 
-async fn status(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let req = decode_or_err!(body, wire::StatusRequest, "image.status");
+async fn status(
+    service: &dyn ImageService,
+    ctx: &dyn Context,
+    block: &str,
+    body: &[u8],
+) -> OutputStream {
+    let req = match decode_for_model(
+        ctx,
+        block,
+        body,
+        "image.status",
+        ResourceAccess::Read,
+        |r: &wire::StatusRequest| (&r.backend_id, &r.model_id),
+    ) {
+        Ok(r) => r,
+        Err(out) => return out,
+    };
     match service.status(&req.backend_id, &req.model_id).await {
         Ok(s) => to_output(s),
         Err(e) => {
@@ -102,8 +174,23 @@ async fn status(service: &dyn ImageService, body: &[u8]) -> OutputStream {
     }
 }
 
-async fn unload_model(service: &dyn ImageService, body: &[u8]) -> OutputStream {
-    let req = decode_or_err!(body, wire::UnloadModelRequest, "image.unload_model");
+async fn unload_model(
+    service: &dyn ImageService,
+    ctx: &dyn Context,
+    block: &str,
+    body: &[u8],
+) -> OutputStream {
+    let req = match decode_for_model(
+        ctx,
+        block,
+        body,
+        "image.unload_model",
+        ResourceAccess::Write,
+        |r: &wire::UnloadModelRequest| (&r.backend_id, &r.model_id),
+    ) {
+        Ok(r) => r,
+        Err(out) => return out,
+    };
     match service.unload_model(&req.backend_id, &req.model_id).await {
         Ok(()) => OutputStream::respond(vec![]),
         Err(e) => {
@@ -115,8 +202,23 @@ async fn unload_model(service: &dyn ImageService, body: &[u8]) -> OutputStream {
 
 // ---- Streaming ops ----
 
-fn load_model(service: &Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
-    let req = decode_or_err!(body, wire::LoadModelRequest, "image.load_model");
+fn load_model(
+    service: &Arc<dyn ImageService>,
+    ctx: &dyn Context,
+    block: &str,
+    body: &[u8],
+) -> OutputStream {
+    let req = match decode_for_model(
+        ctx,
+        block,
+        body,
+        "image.load_model",
+        ResourceAccess::Write,
+        |r: &wire::LoadModelRequest| (&r.backend_id, &r.model_id),
+    ) {
+        Ok(r) => r,
+        Err(out) => return out,
+    };
 
     // The producer closure must be `'static`; clone the `Arc` into it.
     let service = Arc::clone(service);
@@ -153,4 +255,19 @@ fn load_model(service: &Arc<dyn ImageService>, body: &[u8]) -> OutputStream {
         }
         // Natural end of stream: auto-complete when sink drops.
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A provider that cannot be reached is unavailable (a 503 at the HTTP
+    /// edge), not an internal fault.
+    #[test]
+    fn a_network_error_is_unavailable() {
+        let (code, msg) =
+            image_error_to_block_error(ImageError::Network("connection refused".into()));
+        assert_eq!(code, ErrorCode::Unavailable);
+        assert_eq!(msg, "network: connection refused");
+    }
 }

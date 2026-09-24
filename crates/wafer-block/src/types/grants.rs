@@ -23,6 +23,19 @@ pub enum ResourceType {
     /// `wafer_run__auth__` namespace (see [`crate::wrap::AUTH_USER_PROFILE_RESOURCE`]),
     /// so only the auth block may grant one.
     Auth,
+    /// Models of an LLM service block (`llm.*`). Namespace-based like `Db`:
+    /// each model is the resource `{org}__{block}__{backend_id}/{model_id}`
+    /// in the serving block's own namespace, and `llm.list_models` is
+    /// `{org}__{block}__list_models` (see [`crate::wrap::model_resource`]),
+    /// so only that block may grant one.
+    Llm,
+    /// Models of an image-generation service block (`image.*`). Named like
+    /// [`Self::Llm`], in the serving block's namespace.
+    Image,
+    /// Operations of an embedding service block (`embedding.*`): each op is
+    /// the resource `{org}__{block}__{op}` in the serving block's namespace
+    /// (see [`crate::wrap::op_resource`]), so only that block may grant one.
+    Embedding,
 }
 
 impl std::fmt::Display for ResourceType {
@@ -35,6 +48,9 @@ impl std::fmt::Display for ResourceType {
             Self::Network => f.write_str("network"),
             Self::Vector => f.write_str("vector"),
             Self::Auth => f.write_str("auth"),
+            Self::Llm => f.write_str("llm"),
+            Self::Image => f.write_str("image"),
+            Self::Embedding => f.write_str("embedding"),
         }
     }
 }
@@ -51,6 +67,9 @@ impl ResourceType {
             "network" => Some(Self::Network),
             "vector" => Some(Self::Vector),
             "auth" => Some(Self::Auth),
+            "llm" => Some(Self::Llm),
+            "image" => Some(Self::Image),
+            "embedding" => Some(Self::Embedding),
             _ => None,
         }
     }
@@ -79,7 +98,7 @@ impl std::fmt::Display for UnknownResourceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network|vector|auth)",
+            "unrecognized resource_type `{}` (expected db|config|storage|crypto|network|vector|auth|llm|image|embedding)",
             self.0
         )
     }
@@ -354,6 +373,23 @@ mod tests {
             serde_json::to_value(ResourceType::Auth).unwrap(),
             serde_json::json!("auth")
         );
+    }
+
+    #[test]
+    fn llm_image_and_embedding_variants_round_trip() {
+        for (rt, text) in [
+            (ResourceType::Llm, "llm"),
+            (ResourceType::Image, "image"),
+            (ResourceType::Embedding, "embedding"),
+        ] {
+            assert_eq!(rt.to_string(), text);
+            assert_eq!(ResourceType::parse(text), Some(rt.clone()));
+            assert_eq!(
+                ResourceType::parse_stored(Some(text)).unwrap(),
+                Some(rt.clone())
+            );
+            assert_eq!(serde_json::to_value(&rt).unwrap(), serde_json::json!(text));
+        }
     }
 
     #[test]

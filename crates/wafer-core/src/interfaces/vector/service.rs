@@ -197,6 +197,20 @@ pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     fn count_tokens(&self, text: &str) -> usize {
         text.split_whitespace().count()
     }
+
+    /// WRAP grants the block serving this service declares for other blocks.
+    ///
+    /// The embedding handler authorizes each op for `Read` against
+    /// [`op_resource`](wafer_block::wrap::op_resource) in the serving
+    /// block's own namespace (`wafer_run__vector__embed` and
+    /// `wafer_run__vector__count_tokens` for `wafer-run/vector`).
+    /// `VectorBlock::info()` embeds these grants into its
+    /// `BlockInfo::grants`, and the runtime rejects a grant on any resource
+    /// outside that namespace. Default empty: no block but the admin block
+    /// may call the service.
+    fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

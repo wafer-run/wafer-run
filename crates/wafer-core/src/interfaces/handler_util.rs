@@ -239,6 +239,33 @@ where
     Ok((req, resolved))
 }
 
+/// [`decode_and_authorize`] for an op that names a model a model-serving
+/// block (llm, image) serves: `model` picks `(backend_id, model_id)` out of
+/// the decoded request, and the caller is authorized for `access` to
+/// [`model_resource`](wafer_block::wrap::model_resource) in `block`'s
+/// namespace, typed `resource_type`. A `backend_id` that cannot name a
+/// resource (it contains `/`) is refused with `InvalidArgument` before the
+/// check runs.
+pub fn decode_and_authorize_model<T>(
+    ctx: &dyn Context,
+    block: &str,
+    body: &[u8],
+    op_name: &str,
+    resource_type: ResourceType,
+    access: ResourceAccess,
+    model: impl FnOnce(&T) -> (&str, &str),
+) -> Result<T, OutputStream>
+where
+    T: serde::de::DeserializeOwned,
+{
+    decode_and_authorize_checked(ctx, body, op_name, |req| {
+        let (backend_id, model_id) = model(req);
+        let resource = wafer_block::wrap::model_resource(block, backend_id, model_id)?;
+        Ok(((), resource, resource_type, access))
+    })
+    .map(|(req, ())| req)
+}
+
 /// [`decode_and_authorize`] for an op that names SEVERAL resources (a
 /// `database.batch` spans collections): every resource `resources` returns is
 /// checked, in order, before the request is returned, and the first denial is
