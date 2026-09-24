@@ -4,6 +4,15 @@
 
 ### Breaking changes
 
+- `wafer_block::codec::decode` returns the new `codec::DecodeError`
+  instead of a `WaferError` whose code was always `Internal`. The caller
+  now picks the code by who sent the body: `DecodeError::invalid_argument`
+  for a request a caller sent, `DecodeError::internal` for a reply from a
+  service or host the decoder relies on. There is no `From<DecodeError> for
+  WaferError`, so `codec::decode(..)?` in a function returning `WaferError`
+  no longer compiles; `e.code`/`e.message` become that choice and
+  `e.to_string()` (which keeps the `codec decode error in <type>: <cause>`
+  text). `DecodeError::type_name` and `DecodeError::cause` expose the parts.
 - `wafer-test-support` no longer ships `FakeDb`, `FakeCrypto`,
   `WaferBuilder::with_fake_db` or `WaferBuilder::with_fake_crypto`. The
   fakes parsed JSON request bodies while every production client encodes

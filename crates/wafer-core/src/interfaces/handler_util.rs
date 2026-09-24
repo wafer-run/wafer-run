@@ -147,7 +147,7 @@ macro_rules! decode_or_err {
             Err(e) => {
                 return OutputStream::error(wafer_block::WaferError::new(
                     wafer_block::common::ErrorCode::InvalidArgument,
-                    format!("invalid {} request: {}", $op_name, e.message),
+                    format!("invalid {} request: {e}", $op_name),
                 ))
             }
         }
@@ -229,7 +229,7 @@ where
         Err(e) => {
             return Err(OutputStream::error(WaferError::new(
                 ErrorCode::InvalidArgument,
-                format!("invalid {op_name} request: {}", e.message),
+                format!("invalid {op_name} request: {e}"),
             )))
         }
     };
@@ -287,7 +287,7 @@ where
         Err(e) => {
             return Err(OutputStream::error(WaferError::new(
                 ErrorCode::InvalidArgument,
-                format!("invalid {op_name} request: {}", e.message),
+                format!("invalid {op_name} request: {e}"),
             )))
         }
     };

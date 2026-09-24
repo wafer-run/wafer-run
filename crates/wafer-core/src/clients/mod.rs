@@ -453,10 +453,11 @@ mod wasm_streaming {
     }
 }
 
-/// Deserialize MessagePack bytes into a typed value.
+/// Deserialize a service's MessagePack reply into a typed value. A reply
+/// the service could not encode correctly is `Internal`.
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, WaferError> {
     codec::decode(data)
-        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("decode error: {}", e.message)))
+        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("decode error: {e}")))
 }
 
 /// Pull events from `out` until the first `Chunk` (the header frame), decode
@@ -481,7 +482,7 @@ where
         match evt {
             StreamEvent::Chunk(bytes) => {
                 return codec::decode::<H>(&bytes).map_err(|e| {
-                    WaferError::new(e.code, format!("{context} header decode: {}", e.message))
+                    WaferError::new(ErrorCode::Internal, format!("{context} header decode: {e}"))
                 });
             }
             StreamEvent::Meta(_) => continue,
@@ -637,7 +638,10 @@ where
                 Poll::Ready(Some(StreamEvent::Chunk(bytes))) => {
                     let ctx_label = self.context;
                     return Poll::Ready(Some(codec::decode::<T>(&bytes).map_err(|e| {
-                        WaferError::new(e.code, format!("{ctx_label} frame decode: {}", e.message))
+                        WaferError::new(
+                            ErrorCode::Internal,
+                            format!("{ctx_label} frame decode: {e}"),
+                        )
                     })));
                 }
                 Poll::Ready(Some(StreamEvent::Meta(_))) => continue,

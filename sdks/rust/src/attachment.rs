@@ -25,7 +25,9 @@ pub fn lookup_attachment(id: &str) -> Result<Option<Attachment>, WaferError> {
     // SAFETY: a non-null positive reply is a `__wafer_alloc(len)` buffer the
     // host filled with the encoded attachment and handed to this guest.
     let bytes = unsafe { buffer.into_vec() };
-    let att: Attachment = codec::decode(&bytes)?;
+    // An attachment the host itself encoded that does not decode is a host
+    // fault, not the guest's.
+    let att: Attachment = codec::decode(&bytes).map_err(codec::DecodeError::internal)?;
     Ok(Some(att))
 }
 

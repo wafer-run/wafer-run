@@ -38,18 +38,55 @@ pub fn encode<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, WaferError> {
     })
 }
 
+/// A wire body that did not decode as the expected type.
+///
+/// Carries no [`ErrorCode`]: whether a malformed body is the sender's fault
+/// or a broken trusted peer depends on which side of a trust boundary the
+/// decoder sits, so the caller picks — [`DecodeError::invalid_argument`] for
+/// a request a caller sent, [`DecodeError::internal`] for a reply from a
+/// service or host the decoder relies on.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("codec decode error in {type_name}: {cause}")]
+pub struct DecodeError {
+    type_name: &'static str,
+    cause: String,
+}
+
+impl DecodeError {
+    /// The Rust type the body was being decoded as.
+    pub fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    /// The decoder's description of what was wrong with the body.
+    pub fn cause(&self) -> &str {
+        &self.cause
+    }
+
+    /// The sender supplied the malformed body: [`ErrorCode::InvalidArgument`]
+    /// carrying this error's message.
+    pub fn invalid_argument(self) -> WaferError {
+        WaferError::new(ErrorCode::InvalidArgument, self.to_string())
+    }
+
+    /// A peer the decoder trusts produced the malformed body:
+    /// [`ErrorCode::Internal`] carrying this error's message.
+    pub fn internal(self) -> WaferError {
+        WaferError::new(ErrorCode::Internal, self.to_string())
+    }
+}
+
 /// Decode MessagePack bytes into `T`. Unknown fields are ignored (forward
 /// compatibility). Nesting deeper than [`WIRE_MAX_DEPTH`] is rejected before
-/// the recursive decode can endanger the stack. Returns a [`WaferError`]
-/// with [`ErrorCode::Internal`] on deserialization failure.
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WaferError> {
+/// the recursive decode can endanger the stack. A failure is a
+/// [`DecodeError`], which the caller maps to a [`WaferError`] by who sent
+/// the body.
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DecodeError> {
     let mut de = rmp_serde::Deserializer::from_read_ref(bytes);
     de.set_max_depth(WIRE_MAX_DEPTH);
-    T::deserialize(&mut de).map_err(|e| {
-        WaferError::new(
-            ErrorCode::Internal,
-            format!("codec decode error in {}: {e}", std::any::type_name::<T>()),
-        )
+    T::deserialize(&mut de).map_err(|e| DecodeError {
+        type_name: std::any::type_name::<T>(),
+        cause: e.to_string(),
     })
 }
 
@@ -125,7 +162,21 @@ mod tests {
         let result: Result<Sample, _> = decode(&bad);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{err:?}").contains("codec decode error"));
+        assert!(err.to_string().contains("codec decode error"), "{err}");
+    }
+
+    #[test]
+    fn decode_error_maps_by_trust_boundary() {
+        let err = decode::<Sample>(&[0xff, 0xff]).unwrap_err();
+        assert!(err.type_name().ends_with("Sample"), "{}", err.type_name());
+
+        let from_caller = err.clone().invalid_argument();
+        assert_eq!(from_caller.code, ErrorCode::InvalidArgument);
+        assert_eq!(from_caller.message, err.to_string());
+
+        let from_peer = err.clone().internal();
+        assert_eq!(from_peer.code, ErrorCode::Internal);
+        assert_eq!(from_peer.message, err.to_string());
     }
 
     /// `depth` nested single-element msgpack arrays terminated by nil —
@@ -143,9 +194,8 @@ mod tests {
         let result: Result<serde_json::Value, _> = decode(&bytes);
         let err = result.expect_err("body deeper than WIRE_MAX_DEPTH must be rejected");
         assert!(
-            err.message.contains("depth"),
-            "error should name the depth limit; got: {}",
-            err.message
+            err.cause().contains("depth"),
+            "error should name the depth limit; got: {err}"
         );
     }
 
