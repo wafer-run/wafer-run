@@ -61,12 +61,26 @@ fn normalize_lexical(path: &Path) -> Option<PathBuf> {
 /// it, and [`LocalStorageService::new`] empties it.
 const STAGING_DIR: &str = ".wafer-staging";
 
+/// Whether `path` is the staging directory under any spelling the filesystem
+/// resolves to it: the name compared ASCII-case-insensitively, and — for the
+/// folds a case-insensitive filesystem applies beyond ASCII, or a link — the
+/// filesystem's own answer on whether it is the same directory.
+fn is_staging(path: &Path, staging: &Path) -> bool {
+    let named = path.file_name().is_some_and(|name| {
+        name.to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(STAGING_DIR))
+    });
+    named || same_file::is_same_file(path, staging).unwrap_or(false)
+}
+
 /// Local filesystem implementation of StorageService.
 ///
 /// One process owns a storage root: [`new`](Self::new) deletes every staged
 /// write it finds, which would fail the in-flight writes of a second process
 /// sharing the root. Every object folder must be on the root's filesystem,
-/// because a write is renamed there from the root's staging directory.
+/// because a write is renamed there from the root's staging directory; a
+/// folder mounted or symlinked onto another filesystem fails every write with
+/// an error that says so.
 pub struct LocalStorageService {
     root: PathBuf,
 }
@@ -158,7 +172,16 @@ impl LocalStorageService {
                 "path traversal: resolved path escapes storage root".to_string(),
             ));
         }
-        if normalized.starts_with(canon_root.join(STAGING_DIR)) {
+        let first = normalized
+            .strip_prefix(&canon_root)
+            .ok()
+            .and_then(|rel| rel.components().next());
+        if first.is_some_and(|first| {
+            is_staging(
+                &canon_root.join(first.as_os_str()),
+                &canon_root.join(STAGING_DIR),
+            )
+        }) {
             return Err(StorageError::InvalidArgument(format!(
                 "{STAGING_DIR} is reserved for staged writes"
             )));
@@ -176,6 +199,10 @@ impl LocalStorageService {
     /// `list` never shows the temp file — a failure (including a `fill` that
     /// returns `Err`) leaves the previous object (or nothing) in place and the
     /// temp file is removed. POSIX `rename` within one filesystem is atomic.
+    ///
+    /// Durable as well as atomic: the temp file is `fsync`ed before the
+    /// rename and, on Unix, the key's directory after it, so a power loss
+    /// leaves the previous object or the new one, never an empty file.
     ///
     /// Shared by both `put` (buffered) and `put_streaming` so the atomicity
     /// guarantee cannot drift between them.
@@ -209,6 +236,9 @@ impl LocalStorageService {
             file.flush()
                 .await
                 .map_err(|e| StorageError::Internal(format!("flush temp {tmp:?}: {e}")))?;
+            file.sync_all()
+                .await
+                .map_err(|e| StorageError::Internal(format!("fsync temp {tmp:?}: {e}")))?;
             Ok::<(), StorageError>(())
         }
         .await;
@@ -221,9 +251,30 @@ impl LocalStorageService {
         // Commit: atomically swing the name onto the final path.
         if let Err(e) = tokio::fs::rename(&tmp, path).await {
             let _ = tokio::fs::remove_file(&tmp).await;
+            if e.kind() == std::io::ErrorKind::CrossesDevices {
+                return Err(StorageError::Internal(format!(
+                    "cannot store {path:?}: its folder is on a different filesystem than the \
+                     storage root {:?} (a mount point or a symlink under the root); \
+                     LocalStorageService needs every folder on the root's filesystem",
+                    self.root
+                )));
+            }
             return Err(StorageError::Internal(format!(
                 "rename {tmp:?} -> {path:?}: {e}"
             )));
+        }
+        // Make the rename itself durable. Unix only: a directory cannot be
+        // opened as a file to sync it on Windows, where NTFS journals the
+        // rename. The object is already in place if this fails.
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            let synced = async { tokio::fs::File::open(parent).await?.sync_all().await }.await;
+            if let Err(e) = synced {
+                return Err(StorageError::Internal(format!(
+                    "fsync directory {parent:?} after writing {path:?} (the object is in \
+                     place but may not survive a power loss): {e}"
+                )));
+            }
         }
         Ok(())
     }
@@ -557,6 +608,7 @@ impl StorageService for LocalStorageService {
     /// Directory scan runs as one `spawn_blocking` hop, like [`Self::list`].
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
         let root = self.root.clone();
+        let staging = self.staging_path();
         tokio::task::spawn_blocking(move || {
             let mut folders = Vec::new();
             let entries = fs::read_dir(&root)
@@ -568,7 +620,7 @@ impl StorageService for LocalStorageService {
                 let metadata = entry
                     .metadata()
                     .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
-                if metadata.is_dir() && entry.file_name() != STAGING_DIR {
+                if metadata.is_dir() && !is_staging(&entry.path(), &staging) {
                     let created_at = metadata
                         .created()
                         .map_or_else(|_| Utc::now(), chrono::DateTime::<Utc>::from);
@@ -607,10 +659,13 @@ impl LocalStorageService {
                 .metadata()
                 .map_err(|e| StorageError::Internal(format!("metadata: {e}")))?;
 
+            // Only a directory, or a link that may resolve to one, can be the
+            // staging directory; files skip the identity check's open.
+            let dir_like = metadata.is_dir() || metadata.file_type().is_symlink();
+            if dir_like && is_staging(&path, staging) {
+                continue;
+            }
             if metadata.is_dir() {
-                if path == staging {
-                    continue;
-                }
                 Self::list_recursive(base, &path, staging, prefix, objects)?;
             } else {
                 let key = path
@@ -1221,6 +1276,97 @@ mod tests {
             matches!(delete, Err(StorageError::InvalidArgument(_))),
             "delete of staging: {delete:?}"
         );
+    }
+
+    /// Every spelling of the staging directory is refused, not only the
+    /// exact one: on a case-insensitive filesystem `.WAFER-STAGING` is the
+    /// staging directory, and `delete_folder` must not remove it.
+    #[tokio::test]
+    async fn staging_directory_is_not_addressable_in_another_case() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+
+        for name in [".WAFER-STAGING", ".Wafer-Staging"] {
+            let delete = svc.delete_folder(name).await;
+            assert!(
+                matches!(delete, Err(StorageError::InvalidArgument(_))),
+                "delete of {name}: {delete:?}"
+            );
+            let put = svc.put(name, "x", b"x", "text/plain").await;
+            assert!(
+                matches!(put, Err(StorageError::InvalidArgument(_))),
+                "put into {name}: {put:?}"
+            );
+        }
+        assert!(svc.staging_path().is_dir(), "staging survives");
+    }
+
+    /// A spelling the filesystem resolves to the staging directory — what a
+    /// case-insensitive filesystem does with a non-ASCII case fold, stood in
+    /// for here by a symlink — is refused too, and not listed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_name_that_resolves_to_the_staging_directory_is_refused() {
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        std::os::unix::fs::symlink(svc.staging_path(), svc.root.join("alias")).expect("symlink");
+        fs::write(svc.staging_path().join("1.0.tmp"), b"in flight").expect("stage");
+
+        let delete = svc.delete_folder("alias").await;
+        assert!(
+            matches!(delete, Err(StorageError::InvalidArgument(_))),
+            "delete through an alias: {delete:?}"
+        );
+        let at_root = svc.list("", &ListOptions::default()).await.expect("list");
+        assert!(at_root.objects.is_empty(), "{:?}", at_root.objects);
+        let folders = svc.list_folders().await.expect("list_folders");
+        assert!(
+            folders.iter().all(|f| f.name != "alias"),
+            "list_folders shows the staging directory under an alias"
+        );
+    }
+
+    /// A folder on another filesystem (here a symlink onto one) cannot take a
+    /// rename from the staging directory; the write fails with an error that
+    /// names the cause instead of a bare EXDEV. Needs a writable directory on
+    /// a different device from the temp dir (`/dev/shm` on Linux); where
+    /// there is none the test has nothing to exercise and says so.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_on_another_filesystem_fails_with_a_clear_error() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = tempdir();
+        let svc = LocalStorageService::new(&tmp).expect("create svc");
+        let root_dev = fs::metadata(&svc.root).expect("root metadata").dev();
+        let Some(other) = [PathBuf::from("/dev/shm")]
+            .into_iter()
+            .find(|p| fs::metadata(p).is_ok_and(|m| m.is_dir() && m.dev() != root_dev))
+        else {
+            eprintln!("skipped: no writable directory on another filesystem");
+            return;
+        };
+        let elsewhere = other.join(format!(
+            "wafer-local-storage-xdev-{}-{}",
+            std::process::id(),
+            TEMP_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&elsewhere).expect("create dir on the other filesystem");
+        std::os::unix::fs::symlink(&elsewhere, svc.root.join("mounted")).expect("symlink");
+
+        let put = svc.put("mounted", "k", b"x", "text/plain").await;
+        fs::remove_dir_all(&elsewhere).ok();
+        match put {
+            Err(StorageError::Internal(msg)) => assert!(
+                msg.contains("different filesystem"),
+                "the error must name the cause: {msg}"
+            ),
+            other => panic!("expected the cross-filesystem error, got {other:?}"),
+        }
+        let staged: Vec<_> = fs::read_dir(svc.staging_path())
+            .expect("read staging")
+            .collect();
+        assert!(staged.is_empty(), "the staged temp file is removed");
     }
 
     // Minimal tempdir helper to avoid pulling in a new dev-dep just for this.

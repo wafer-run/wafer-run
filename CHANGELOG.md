@@ -60,10 +60,15 @@
   its root instead of a hidden temp file next to the object, so `list`
   never returned an in-flight or orphaned `.{key}.tmp.{pid}.{seq}` as an
   object. `list` and `list_folders` skip the directory, a request for a
-  path inside it is `InvalidArgument`, and `LocalStorageService::new`
-  deletes whatever it holds (writes a stopped process left behind). One
-  process owns a storage root, and every folder must be on the root's
-  filesystem (the staged file is renamed onto the key).
+  path inside it — under any spelling the filesystem resolves to it, such
+  as `.WAFER-STAGING` on a case-insensitive one — is `InvalidArgument`, and
+  `LocalStorageService::new` deletes whatever it holds (writes a stopped
+  process left behind). One process owns a storage root, and every folder
+  must be on the root's filesystem (the staged file is renamed onto the
+  key); a folder mounted or symlinked onto another filesystem fails every
+  write with an error naming that cause. Writes are now durable: the
+  staged file is `fsync`ed before the rename and, on Unix, the key's
+  directory after it, so a power loss cannot leave an empty object.
 - `wafer-run/http-listener` streams the request body to the flow or block
   instead of buffering it before dispatch. A `Content-Length` over
   `max_body_bytes` is still refused with `413` before dispatch; a body that

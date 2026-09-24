@@ -6279,6 +6279,7 @@ dependencies = [
  "base64ct",
  "chrono",
  "futures",
+ "same-file",
  "tokio",
  "tracing",
  "wafer-block",
