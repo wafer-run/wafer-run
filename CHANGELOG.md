@@ -22,7 +22,9 @@
   with `@` no longer passes the owner check). A plain folder from a call with
   no calling block is `PermissionDenied`. `decode_and_authorize_checked`
   takes a resolver returning `(resolved, resource, type, access)` and returns
-  `(request, resolved)`. Embedders registering
+  `(request, resolved)`; the resolver itself is public as
+  `wafer_core::interfaces::storage::handler::resolve_folder`. Embedders
+  registering
   `wafer_core::service_blocks::storage::StorageBlock` directly: objects a
   block stored under a plain folder `f` now resolve to `{block}/f`, so data
   written before this change under the raw path is not found there — move it

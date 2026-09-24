@@ -86,7 +86,11 @@ fn service_folder_info_to_wire(info: super::service::FolderInfo) -> wire::Folder
 ///
 /// A caller-relative folder with no caller to scope it to (a top-level call)
 /// is `PermissionDenied`: there is no namespace it could belong to.
-fn resolve_folder(
+///
+/// `op` and `what` label the error (`"storage.get"`, `"folder"`). Public so a
+/// block wrapping the storage block (an access log, say) reports the same
+/// path the handler touches instead of re-deriving it.
+pub fn resolve_folder(
     ctx: &dyn Context,
     op: &str,
     what: &str,
