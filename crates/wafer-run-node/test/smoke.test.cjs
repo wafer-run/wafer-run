@@ -1,5 +1,5 @@
 // Loads the napi addon that `npm run build-test` builds from the current
-// sources into test-build/ (never the checked-in wafer-run.node) and drives
+// sources into test-build/ (never a stale `npm run build` output) and drives
 // it the way a Node embedder does. The block
 // is the `example/echo` guest (examples/wasmi-block), which
 // scripts/build-fixtures.sh builds into crates/wafer-run/testdata/.
@@ -61,6 +61,43 @@ test('register, resolve, run and stop round-trip through the addon', async (t) =
   } finally {
     await w.stop();
   }
+});
+
+// The usage example on WaferRuntime in index.d.ts, run as written: its
+// `require('wafer-run')` loads this build, and its relative paths resolve in
+// a directory holding the echo guest and a flow with id `main`.
+test('the WaferRuntime usage example in index.d.ts runs', async (t) => {
+  const dts = fs.readFileSync(path.join(__dirname, '../index.d.ts'), 'utf8');
+  const block = dts.match(/The WAFER runtime, exposed as a JavaScript class\.[\s\S]*?```js\n([\s\S]*?) \* ```/);
+  assert.ok(block, 'index.d.ts carries the WaferRuntime usage example');
+  const example = block[1].replace(/^ \* ?/gm, '');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wafer-run-node-example-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.copyFileSync(ECHO_WASM, path.join(dir, 'echo_block.wasm'));
+  fs.writeFileSync(path.join(dir, 'main-flow.json'), JSON.stringify({ ...FLOW, id: 'main' }));
+
+  const cwd = process.cwd();
+  process.chdir(dir);
+  t.after(() => process.chdir(cwd));
+  const requireAddon = (id) => {
+    assert.equal(id, 'wafer-run');
+    return require('../test-build/wafer-run.node');
+  };
+  const AsyncFunction = (async () => {}).constructor;
+  const result = await new AsyncFunction('require', `${example}\nreturn result;`)(requireAddon);
+
+  assert.equal(result.action, 'respond', `unexpected terminal: ${JSON.stringify(result)}`);
+  assert.equal(JSON.parse(result.body).kind, 'test');
+});
+
+test('registerBlock refuses invalid capabilities JSON and registers nothing', async () => {
+  const w = new WaferRuntime();
+  await assert.rejects(
+    w.registerBlock('example/echo', ECHO_WASM, '{"collections":"All"}'),
+    /^Error: invalid capabilities JSON:/,
+  );
+  assert.equal(await w.hasBlock('example/echo'), false);
 });
 
 test('run rejects a message that is not the runtime Message shape', async () => {

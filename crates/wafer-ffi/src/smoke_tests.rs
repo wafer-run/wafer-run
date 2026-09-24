@@ -14,7 +14,8 @@ use std::{
 
 use crate::{
     wafer_flows_info, wafer_free, wafer_free_string, wafer_has_block, wafer_new, wafer_register,
-    wafer_resolve, wafer_run, wafer_stop, WaferDoneCb, WaferRuntime,
+    wafer_register_block, wafer_resolve, wafer_run, wafer_start, wafer_stop, WaferDoneCb,
+    WaferRuntime, WAFER_ACCEPTED, WAFER_REFUSED_NULL_CALLBACK,
 };
 
 const ECHO_WASM: &str = concat!(
@@ -76,7 +77,7 @@ impl Pending {
     }
 }
 
-const CB: WaferDoneCb = record;
+const CB: Option<WaferDoneCb> = Some(record);
 
 fn c(s: &str) -> CString {
     CString::new(s).expect("no interior NUL")
@@ -118,12 +119,15 @@ fn register_resolve_run_stop_round_trips_through_the_c_abi() {
         );
 
         let seal = Pending::new();
-        wafer_resolve(w, CB, seal.user_data());
+        assert_eq!(wafer_resolve(w, CB, seal.user_data()), WAFER_ACCEPTED);
         assert_eq!(seal.wait(), None, "wafer_resolve reported an error");
 
         let run = Pending::new();
         let msg = c(r#"{"kind":"smoke.kind","meta":[{"key":"a","value":"1"}]}"#);
-        wafer_run(w, c("smoke").as_ptr(), msg.as_ptr(), CB, run.user_data());
+        assert_eq!(
+            wafer_run(w, c("smoke").as_ptr(), msg.as_ptr(), CB, run.user_data()),
+            WAFER_ACCEPTED
+        );
         let out: serde_json::Value =
             serde_json::from_str(&run.wait().expect("wafer_run result is never NULL")).unwrap();
         assert_eq!(out["action"], "respond", "unexpected terminal: {out}");
@@ -133,9 +137,105 @@ fn register_resolve_run_stop_round_trips_through_the_c_abi() {
         assert_eq!(body["kind"], "smoke.kind", "message kind lost: {body}");
 
         let stop = Pending::new();
-        wafer_stop(w, CB, stop.user_data());
+        assert_eq!(wafer_stop(w, CB, stop.user_data()), WAFER_ACCEPTED);
         assert_eq!(stop.wait(), None, "wafer_stop reported an error");
 
+        wafer_free(w);
+    }
+}
+
+/// A NULL callback is refused up front: nothing is spawned that could later
+/// call through it, and the runtime is left as it was — it still seals, runs
+/// and stops through a real callback afterwards.
+#[test]
+fn a_null_callback_is_refused_and_leaves_the_runtime_untouched() {
+    unsafe {
+        let w = wafer_new();
+        assert!(!w.is_null(), "wafer_new returned NULL");
+        register(w, "example/echo", ECHO_WASM);
+        register(w, "smoke", ECHO_FLOW);
+        let msg = c(r#"{"kind":"smoke.kind","meta":[]}"#);
+        let null = std::ptr::null_mut();
+
+        assert_eq!(wafer_resolve(w, None, null), WAFER_REFUSED_NULL_CALLBACK);
+        assert_eq!(wafer_start(w, None, null), WAFER_REFUSED_NULL_CALLBACK);
+        assert_eq!(
+            wafer_run(w, c("smoke").as_ptr(), msg.as_ptr(), None, null),
+            WAFER_REFUSED_NULL_CALLBACK
+        );
+        assert_eq!(wafer_stop(w, None, null), WAFER_REFUSED_NULL_CALLBACK);
+
+        // The refused resolve/start did not seal: the first real one does,
+        // where a second seal would report AlreadySealed.
+        let seal = Pending::new();
+        assert_eq!(wafer_resolve(w, CB, seal.user_data()), WAFER_ACCEPTED);
+        assert_eq!(seal.wait(), None, "wafer_resolve reported an error");
+        let run = Pending::new();
+        wafer_run(w, c("smoke").as_ptr(), msg.as_ptr(), CB, run.user_data());
+        let out: serde_json::Value =
+            serde_json::from_str(&run.wait().expect("wafer_run result is never NULL")).unwrap();
+        assert_eq!(
+            out["action"], "respond",
+            "the refused stop stopped it: {out}"
+        );
+
+        let stop = Pending::new();
+        wafer_stop(w, CB, stop.user_data());
+        assert_eq!(stop.wait(), None, "wafer_stop reported an error");
+        wafer_free(w);
+    }
+}
+
+/// `wafer_register_block` registers a guest that then runs, and refuses
+/// invalid capabilities JSON with a JSON error, registering nothing. What
+/// the bound grants is tested on `wafer_run::embed::register_block_path`,
+/// which this forwards to.
+#[test]
+fn register_block_takes_a_capability_bound() {
+    unsafe {
+        let w = wafer_new();
+        assert!(!w.is_null(), "wafer_new returned NULL");
+
+        let err = wafer_register_block(
+            w,
+            c("example/echo").as_ptr(),
+            c(ECHO_WASM).as_ptr(),
+            c(r#"{"collections":"All"}"#).as_ptr(),
+        );
+        assert!(!err.is_null(), "invalid capabilities JSON must be refused");
+        let msg = CStr::from_ptr(err).to_str().unwrap().to_owned();
+        wafer_free_string(err);
+        let json: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("invalid capabilities JSON:")),
+            "{msg}"
+        );
+        assert_eq!(wafer_has_block(w, c("example/echo").as_ptr()), 0);
+
+        let err = wafer_register_block(
+            w,
+            c("example/echo").as_ptr(),
+            c(ECHO_WASM).as_ptr(),
+            c(r#"{"crypto":true}"#).as_ptr(),
+        );
+        assert!(err.is_null(), "wafer_register_block failed");
+        register(w, "smoke", ECHO_FLOW);
+
+        let seal = Pending::new();
+        wafer_resolve(w, CB, seal.user_data());
+        assert_eq!(seal.wait(), None, "wafer_resolve reported an error");
+        let run = Pending::new();
+        let msg = c(r#"{"kind":"smoke.kind","meta":[]}"#);
+        wafer_run(w, c("smoke").as_ptr(), msg.as_ptr(), CB, run.user_data());
+        let out: serde_json::Value =
+            serde_json::from_str(&run.wait().expect("wafer_run result is never NULL")).unwrap();
+        assert_eq!(out["action"], "respond", "unexpected terminal: {out}");
+
+        let stop = Pending::new();
+        wafer_stop(w, CB, stop.user_data());
+        assert_eq!(stop.wait(), None, "wafer_stop reported an error");
         wafer_free(w);
     }
 }

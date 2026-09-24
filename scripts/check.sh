@@ -177,6 +177,29 @@ run_bindings() {
     cargo build --locked -p wafer-ffi
     cargo test --locked -p wafer-ffi
 
+    echo "==> C header: the Go copy matches, and it declares every exported symbol"
+    if ! cmp -s crates/wafer-ffi/wafer.h go/wafer-run-go/wafer.h; then
+        echo "error: go/wafer-run-go/wafer.h differs from crates/wafer-ffi/wafer.h;" >&2
+        echo "       copy the crate's header over it" >&2
+        diff -u crates/wafer-ffi/wafer.h go/wafer-run-go/wafer.h >&2 || true
+        exit 1
+    fi
+    local lib="$lib_dir/libwafer_ffi.so" nm_flags=(-D --defined-only) sym_prefix=""
+    if [ "$(uname -s)" = Darwin ]; then
+        lib="$lib_dir/libwafer_ffi.dylib" nm_flags=(-gU) sym_prefix="_"
+    fi
+    local exported declared
+    exported="$(nm "${nm_flags[@]}" "$lib" \
+        | awk -v p="${sym_prefix}wafer_" '$2 == "T" && index($3, p) == 1 { print substr($3, length(p) - 5) }' \
+        | sort)"
+    declared="$(grep -oE '^[A-Za-z].*[^A-Za-z_]wafer_[a-z_]+\(' crates/wafer-ffi/wafer.h \
+        | grep -oE 'wafer_[a-z_]+\($' | tr -d '(' | sort)"
+    if [ -z "$exported" ] || [ "$exported" != "$declared" ]; then
+        echo "error: crates/wafer-ffi/wafer.h does not declare exactly the wafer_* symbols $lib exports" >&2
+        diff -u <(echo "$declared") <(echo "$exported") >&2 || true
+        exit 1
+    fi
+
     echo "==> Go SDK (cgo, linked against libwafer_ffi)"
     local unformatted
     unformatted="$(gofmt -l go)"
@@ -199,6 +222,14 @@ run_bindings() {
 
     echo "==> Node addon (wafer-run-node): build from source, load, run a flow"
     npm run build-test -w crates/wafer-run-node
+    # napi generates the typings from the addon's Rust docs and signatures;
+    # the committed index.d.ts must be that output (`npm run build` in
+    # crates/wafer-run-node rewrites it).
+    if ! diff -u crates/wafer-run-node/index.d.ts crates/wafer-run-node/test-build/index.d.ts; then
+        echo "error: crates/wafer-run-node/index.d.ts is not what napi generates;" >&2
+        echo "       copy crates/wafer-run-node/test-build/index.d.ts over it" >&2
+        exit 1
+    fi
     npm test -w crates/wafer-run-node
 
     echo "==> wafer-client-js: typecheck, test, build"

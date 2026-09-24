@@ -1,13 +1,17 @@
 /*
- * wafer.h — C header for the WAFER runtime FFI layer.
+ * wafer.h — C header for the WAFER runtime FFI layer (crates/wafer-ffi).
+ *
+ * go/wafer-run-go/wafer.h is a byte-identical copy for cgo; scripts/check.sh
+ * fails when the two differ or when a wafer_* symbol libwafer_ffi exports is
+ * missing here.
  *
  * All complex data crosses the FFI boundary as JSON C strings.
  *
  * Operations split into two flavours:
  *
  *   Synchronous (return-value):
- *     wafer_new, wafer_free, wafer_register, wafer_flows_info,
- *     wafer_has_block, wafer_free_string
+ *     wafer_new, wafer_free, wafer_register, wafer_register_block,
+ *     wafer_flows_info, wafer_has_block, wafer_free_string
  *
  *     Strings returned by these must be freed via wafer_free_string().
  *     Functions that can fail return NULL on success, or a JSON error
@@ -23,6 +27,10 @@
  *     after the callback returns — copy any data you need before
  *     returning. For lifecycle ops the callback's result is NULL on
  *     success; for wafer_run the callback's result is always non-NULL.
+ *
+ *     The callback is required. Each returns WAFER_ACCEPTED when it took
+ *     the work, or WAFER_REFUSED_NULL_CALLBACK — having done nothing, and
+ *     with nothing to call back — when `cb` is NULL.
  */
 
 #ifndef WAFER_H
@@ -48,6 +56,16 @@ typedef struct WaferRuntime WaferRuntime;
  */
 typedef void (*wafer_done_cb)(const char* result, void* user_data);
 
+/* Returned by an async op that took the work: `cb` will be invoked. */
+#define WAFER_ACCEPTED 0
+/*
+ * Returned by an async op whose `cb` is NULL. Nothing was done and nothing
+ * will call back: every async op's completion is load-bearing (wafer_stop
+ * must finish before wafer_free; wafer_run's result is its output), so there
+ * is no fire-and-forget form.
+ */
+#define WAFER_REFUSED_NULL_CALLBACK (-1)
+
 /* --- Lifecycle ----------------------------------------------------------- */
 
 /* Create a new WAFER runtime instance. Returns NULL on allocation failure. */
@@ -67,29 +85,29 @@ void wafer_free(WaferRuntime* w);
  * Resolve all block references in registered flows (async). A runtime is
  * resolved once: a second call reports an error.
  *
- * Returns immediately. Invokes `cb` with NULL on success, or a JSON error
- * string on failure.
+ * Returns WAFER_ACCEPTED immediately and invokes `cb` with NULL on success,
+ * or a JSON error string on failure.
  */
-void wafer_resolve(WaferRuntime* w, wafer_done_cb cb, void* user_data);
+int wafer_resolve(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 
 /*
  * Start the runtime without spawning block listeners (async). Resolves the
  * runtime first unless wafer_resolve already did; after a failed
  * wafer_resolve it reports that failure again.
  *
- * Returns immediately. Invokes `cb` with NULL on success, or a JSON error
- * string on failure.
+ * Returns WAFER_ACCEPTED immediately and invokes `cb` with NULL on success,
+ * or a JSON error string on failure.
  */
-void wafer_start(WaferRuntime* w, wafer_done_cb cb, void* user_data);
+int wafer_start(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 
 /*
  * Stop the runtime and shut down all block instances (async).
  *
- * Returns immediately. Invokes `cb` with NULL when shutdown finishes.
- * Must be awaited before wafer_free so that block lifecycle(Stop)
- * handlers run.
+ * Returns WAFER_ACCEPTED immediately and invokes `cb` with NULL when
+ * shutdown finishes. Must be awaited before wafer_free so that block
+ * lifecycle(Stop) handlers run.
  */
-void wafer_stop(WaferRuntime* w, wafer_done_cb cb, void* user_data);
+int wafer_stop(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 
 /* --- Registration -------------------------------------------------------- */
 
@@ -97,13 +115,34 @@ void wafer_stop(WaferRuntime* w, wafer_done_cb cb, void* user_data);
  * Register a block or flow definition from a file path.
  * If path ends with .wasm, registers a WASM block with the given name, which
  * must be the name the block reports in its BlockInfo (a mismatch is refused).
+ * Such a block runs with no capabilities, whatever it declares; register it
+ * with wafer_register_block to grant it some.
  * Otherwise, reads the file as a JSON flow definition.
  * name: identifier (block type name for .wasm, ignored for flow defs)
  * path: filesystem path to the .wasm or .json file
  * Returns NULL on success, or a JSON error string on failure.
  * Caller must free the returned string with wafer_free_string().
+ * Call it from your own thread, never from inside a wafer_done_cb.
  */
 char* wafer_register(WaferRuntime* w, const char* name, const char* path);
+
+/*
+ * Register the WASM block at `path` under `name` (the name the block reports
+ * in its BlockInfo), bounded by `capabilities_json`: a JSON BlockCapabilities
+ * object, e.g.
+ *   {"collections": {"Only": ["acme__widget__items"]}, "crypto": true}
+ * An allowlist field is "None", "Any" or {"Only": [...]}; a flag is a bool.
+ * The block runs under that bound intersected with what it declares. A field
+ * the object omits denies, so {} grants nothing.
+ * Returns NULL on success, or a JSON error string on failure (including an
+ * invalid capabilities_json). Caller must free the returned string with
+ * wafer_free_string(). Call it from your own thread, never from inside a
+ * wafer_done_cb.
+ */
+char* wafer_register_block(WaferRuntime* w,
+                           const char* name,
+                           const char* path,
+                           const char* capabilities_json);
 
 /* --- Execution ----------------------------------------------------------- */
 
@@ -116,38 +155,55 @@ char* wafer_register(WaferRuntime* w, const char* name, const char* path);
  *                  {"kind": "...", "meta": [{"key": "...", "value": "..."}]}
  *                  Both fields are required; `meta` may be [].
  *
- * Returns immediately. Invokes `cb` with a JSON result string of the form
+ * Returns WAFER_ACCEPTED immediately and invokes `cb` with a JSON result
+ * string of the form
  *   {"action": "respond|drop|error|continue|halt", ...}
  *
- * Every action carries a "meta" object holding ONLY the canonical
- * response keys — "resp.status", "resp.header.*", "resp.cookie.*",
- * "resp.content_type" — for the host to apply to its response. Request state
- * (headers, cookies, caller identity, client IP, query) never crosses this
- * boundary, even when the block built its terminal from the request message.
- * "respond" carries "body" or "body_base64", "halt" always "body_base64",
- * "error" an {"code","message","detail_code"?} object, "continue" the
- * follow-up message's "kind".
+ * Every action carries a "meta" object of string values holding ONLY
+ * response entries, for the host to apply to its response:
+ *   "resp.status"         the status code, e.g. "404"
+ *   "resp.content_type"   the Content-Type
+ *   "resp.header.{name}"  one header, {name} as the block wrote it (compare
+ *                         case-insensitively; any case of "set-cookie" is
+ *                         one Set-Cookie directive)
+ *   "resp.set_cookie.{id}" one Set-Cookie directive: the value is the whole
+ *                         directive ("sid=abc; Path=/; HttpOnly"), emitted as
+ *                         its own Set-Cookie header, never joined. {id} only
+ *                         keeps two cookies' keys apart (a block's cookie
+ *                         helpers write "{name}[;Domain={d}][;Path={p}]",
+ *                         e.g. "resp.set_cookie.sid;Path=/api"); read
+ *                         nothing from it.
+ * Request state (headers, cookies, caller identity, client IP, query) never
+ * crosses this boundary, even when the block built its terminal from the
+ * request message.
+ * "respond" carries "body" (UTF-8) or "body_base64" (other bytes), "halt"
+ * always "body_base64", "error" an {"code","message","detail_code"?}
+ * object, "continue" the follow-up message's "kind". "drop" is a bodiless
+ * 204: its meta holds only headers and cookies.
  *
  * The result pointer is freed by the FFI after the callback returns.
  */
-void wafer_run(WaferRuntime* w,
-               const char* flow_id,
-               const char* message_json,
-               wafer_done_cb cb,
-               void* user_data);
+int wafer_run(WaferRuntime* w,
+              const char* flow_id,
+              const char* message_json,
+              wafer_done_cb cb,
+              void* user_data);
 
 /* --- Introspection ------------------------------------------------------- */
 
 /*
  * Get info about all registered flows.
- * Returns a JSON array of FlowInfo objects.
- * Caller must free the returned string with wafer_free_string().
+ * Returns a JSON array of FlowInfo objects, or a JSON {"error": ...} object
+ * if the call panicked. Caller must free the returned string with
+ * wafer_free_string(). Call it from your own thread, never from inside a
+ * wafer_done_cb.
  */
 char* wafer_flows_info(WaferRuntime* w);
 
 /*
  * Check whether a block type is registered.
- * Returns 1 if registered, 0 if not.
+ * Returns 1 if registered, 0 if not, -1 if the call panicked. Call it from
+ * your own thread, never from inside a wafer_done_cb.
  */
 int wafer_has_block(WaferRuntime* w, const char* type_name);
 

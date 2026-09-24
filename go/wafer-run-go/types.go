@@ -94,12 +94,22 @@ func (e *WaferError) Error() string {
 // when the body is not valid UTF-8, and always for Halt. Kind names the
 // follow-up message on a Continue.
 //
-// Meta holds ONLY the canonical response keys — "resp.status",
-// "resp.header.*", "resp.cookie.*", "resp.content_type" — for the host to
-// apply to its response. Request state (headers, cookies, caller identity,
-// client IP, query) never crosses this boundary, even when the block built
-// its terminal from the request message. A Drop maps to a bodiless 204 that
-// carries its Meta's headers and cookies.
+// Meta holds ONLY response entries, for the host to apply to its response:
+//   - "resp.status": the status code, e.g. "404".
+//   - "resp.content_type": the Content-Type.
+//   - "resp.header.{name}": one header, {name} as the block wrote it (compare
+//     it case-insensitively; any case of "set-cookie" is one Set-Cookie
+//     directive).
+//   - "resp.set_cookie.{id}": one Set-Cookie directive. The value is the
+//     whole directive ("sid=abc; Path=/; HttpOnly"); emit each as its own
+//     Set-Cookie header, never joined. {id} only keeps two cookies' keys
+//     apart (a block's cookie helpers write "{name}[;Domain={d}][;Path={p}]",
+//     e.g. "resp.set_cookie.sid;Path=/api"); read nothing from it.
+//
+// Request state (headers, cookies, caller identity, client IP, query) never
+// crosses this boundary, even when the block built its terminal from the
+// request message. A Drop maps to a bodiless 204 that carries its Meta's
+// headers and cookies.
 type Result struct {
 	Action     Action            `json:"action"`
 	Body       string            `json:"body,omitempty"`

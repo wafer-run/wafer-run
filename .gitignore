@@ -9,6 +9,9 @@ node_modules/
 dist/
 # wafer-run-node's `npm run build-test` output (scripts/check.sh bindings)
 crates/wafer-run-node/test-build/
+# The addon `npm run build` / `build-debug` writes (package.json `main`); a
+# binary is built from source, never committed.
+*.node
 
 # WASM
 *.wasm

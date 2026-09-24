@@ -21,21 +21,23 @@ extern void waferDoneCallback(char* result, void* user_data);
 // the cgo boundary without unsafe.Pointer(uintptr(...)) — go vet's pattern
 // matcher only accepts that conversion in narrow contexts that don't apply
 // to cgo.Handle.
-static inline void cgo_wafer_resolve(WaferRuntime* w, wafer_done_cb cb, uintptr_t ud) {
-    wafer_resolve(w, cb, (void*)ud);
+// Each returns the FFI's status: WAFER_ACCEPTED, or
+// WAFER_REFUSED_NULL_CALLBACK when nothing will call back.
+static inline int cgo_wafer_resolve(WaferRuntime* w, wafer_done_cb cb, uintptr_t ud) {
+    return wafer_resolve(w, cb, (void*)ud);
 }
-static inline void cgo_wafer_start(WaferRuntime* w, wafer_done_cb cb, uintptr_t ud) {
-    wafer_start(w, cb, (void*)ud);
+static inline int cgo_wafer_start(WaferRuntime* w, wafer_done_cb cb, uintptr_t ud) {
+    return wafer_start(w, cb, (void*)ud);
 }
-static inline void cgo_wafer_stop(WaferRuntime* w, wafer_done_cb cb, uintptr_t ud) {
-    wafer_stop(w, cb, (void*)ud);
+static inline int cgo_wafer_stop(WaferRuntime* w, wafer_done_cb cb, uintptr_t ud) {
+    return wafer_stop(w, cb, (void*)ud);
 }
-static inline void cgo_wafer_run(WaferRuntime* w,
-                                  const char* flow_id,
-                                  const char* message_json,
-                                  wafer_done_cb cb,
-                                  uintptr_t ud) {
-    wafer_run(w, flow_id, message_json, cb, (void*)ud);
+static inline int cgo_wafer_run(WaferRuntime* w,
+                                 const char* flow_id,
+                                 const char* message_json,
+                                 wafer_done_cb cb,
+                                 uintptr_t ud) {
+    return wafer_run(w, flow_id, message_json, cb, (void*)ud);
 }
 */
 import "C"
@@ -75,7 +77,8 @@ func (w *Wafer) Close() {
 // Register registers a block or flow definition from a file path.
 // If path ends with .wasm, registers a WASM block with the given name, which
 // must be the name the block reports in its BlockInfo (a mismatch is refused).
-// Otherwise, reads the file as a JSON flow definition.
+// Such a block runs with no capabilities, whatever it declares; RegisterBlock
+// grants it some. Otherwise, reads the file as a JSON flow definition.
 //
 // This is a synchronous operation in the FFI layer.
 func (w *Wafer) Register(name, path string) error {
@@ -88,23 +91,52 @@ func (w *Wafer) Register(name, path string) error {
 	return parseFFIError(cResult)
 }
 
+// RegisterBlock registers the WASM block at path under name (the name the
+// block reports in its BlockInfo), bounded by capabilitiesJSON: a JSON
+// BlockCapabilities object such as
+//
+//	{"collections": {"Only": ["acme__widget__items"]}, "crypto": true}
+//
+// An allowlist field is "None", "Any" or {"Only": [...]}; a flag is a bool.
+// The block runs under that bound intersected with what it declares. A field
+// the object omits denies, so {} grants nothing. Invalid JSON is an error.
+//
+// This is a synchronous operation in the FFI layer.
+func (w *Wafer) RegisterBlock(name, path, capabilitiesJSON string) error {
+	cName := C.CString(name)
+	cPath := C.CString(path)
+	cCaps := C.CString(capabilitiesJSON)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cPath))
+	defer C.free(unsafe.Pointer(cCaps))
+
+	cResult := C.wafer_register_block(w.ptr, cName, cPath, cCaps)
+	return parseFFIError(cResult)
+}
+
 // Resolve walks all flow trees and resolves block references.
 //
 // Async in the FFI layer; this wrapper blocks the calling goroutine until the
 // FFI callback fires.
 func (w *Wafer) Resolve() error {
-	return parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) {
-		C.cgo_wafer_resolve(w.ptr, cb, ud)
+	return w.resolveWith(C.wafer_done_cb(C.waferDoneCallback))
+}
+
+// resolveWith is Resolve with the completion callback it hands the FFI.
+func (w *Wafer) resolveWith(done C.wafer_done_cb) error {
+	return parseFFIErrorWith(done, func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_resolve(w.ptr, cb, ud)
 	})
 }
 
-// Start initializes the runtime. Calls Resolve() if not already resolved.
+// Start initializes the runtime. It seals the runtime unless Resolve already
+// did, and after a failed Resolve it reports that failure again.
 //
 // Async in the FFI layer; this wrapper blocks the calling goroutine until the
 // FFI callback fires.
 func (w *Wafer) Start() error {
-	return parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) {
-		C.cgo_wafer_start(w.ptr, cb, ud)
+	return parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_start(w.ptr, cb, ud)
 	})
 }
 
@@ -113,8 +145,8 @@ func (w *Wafer) Start() error {
 // Async in the FFI layer; this wrapper blocks the calling goroutine until the
 // FFI callback fires.
 func (w *Wafer) Stop() {
-	_ = parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) {
-		C.cgo_wafer_stop(w.ptr, cb, ud)
+	_ = parseFFIErrorAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_stop(w.ptr, cb, ud)
 	})
 }
 
@@ -133,9 +165,12 @@ func (w *Wafer) Run(flowID string, msg *Message) *Result {
 	defer C.free(unsafe.Pointer(cFlowID))
 	defer C.free(unsafe.Pointer(cMsg))
 
-	resultStr := runAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) {
-		C.cgo_wafer_run(w.ptr, cFlowID, cMsg, cb, ud)
+	resultStr, err := runAsync(func(cb C.wafer_done_cb, ud C.uintptr_t) C.int {
+		return C.cgo_wafer_run(w.ptr, cFlowID, cMsg, cb, ud)
 	})
+	if err != nil {
+		return ErrorResult("Internal", err.Error())
+	}
 
 	var result Result
 	if err := json.Unmarshal([]byte(resultStr), &result); err != nil {
@@ -186,22 +221,39 @@ type asyncResult struct {
 // The closure receives the callback fn ptr and a `uintptr_t` carrying a
 // cgo.Handle that resolves back to the result channel inside
 // waferDoneCallback. Using `uintptr_t` (rather than `void*`) avoids
-// unsafe.Pointer conversion at the cgo boundary.
-func runAsync(invoke func(C.wafer_done_cb, C.uintptr_t)) string {
+// unsafe.Pointer conversion at the cgo boundary. It returns the FFI's
+// status; anything but WAFER_ACCEPTED means no callback will fire, so
+// runAsync returns an error instead of waiting.
+func runAsync(invoke func(C.wafer_done_cb, C.uintptr_t) C.int) (string, error) {
+	return runAsyncWith(C.wafer_done_cb(C.waferDoneCallback), invoke)
+}
+
+// runAsyncWith is runAsync with the callback it hands the FFI supplied.
+func runAsyncWith(cb C.wafer_done_cb, invoke func(C.wafer_done_cb, C.uintptr_t) C.int) (string, error) {
 	ch := make(chan asyncResult, 1)
 	h := cgo.NewHandle(ch)
 	defer h.Delete()
 
-	invoke(C.wafer_done_cb(C.waferDoneCallback), C.uintptr_t(h))
+	if status := invoke(cb, C.uintptr_t(h)); status != C.WAFER_ACCEPTED {
+		return "", fmt.Errorf("wafer: the FFI refused the call (status %d)", int(status))
+	}
 
 	r := <-ch
-	return r.body
+	return r.body, nil
 }
 
 // parseFFIErrorAsync wraps runAsync for the lifecycle ops whose callback
 // result is either NULL (success) or a JSON error string.
-func parseFFIErrorAsync(invoke func(C.wafer_done_cb, C.uintptr_t)) error {
-	body := runAsync(invoke)
+func parseFFIErrorAsync(invoke func(C.wafer_done_cb, C.uintptr_t) C.int) error {
+	return parseFFIErrorWith(C.wafer_done_cb(C.waferDoneCallback), invoke)
+}
+
+// parseFFIErrorWith is parseFFIErrorAsync with the callback supplied.
+func parseFFIErrorWith(done C.wafer_done_cb, invoke func(C.wafer_done_cb, C.uintptr_t) C.int) error {
+	body, err := runAsyncWith(done, invoke)
+	if err != nil {
+		return err
+	}
 	if body == "" {
 		return nil
 	}

@@ -1,12 +1,14 @@
 //! Shared helpers for embedder bindings (`wafer-ffi`, `wafer-run-node`).
 //!
 //! Both embedder bindings — `wafer-ffi` for C callers and `wafer-run-node`
-//! for Node.js — expose the same two behaviors: encoding a collected
-//! [`OutputStream`] as an `{"action": ...}` JSON string, and registering a
-//! block or flow from a file path. They live here, in the runtime crate both
-//! bindings already depend on, so the host wire format and the
-//! `.wasm`-extension dispatch rule each have exactly one implementation and
-//! one test suite instead of drifting copies per binding.
+//! for Node.js — expose the same behaviors: encoding a collected
+//! [`OutputStream`] as an `{"action": ...}` JSON string, registering a block
+//! or flow from a file path, and registering a WASM block under a JSON
+//! capability bound. They live here, in the runtime crate both bindings
+//! already depend on, so the host wire format, the `.wasm`-extension
+//! dispatch rule and the capability-bound parsing each have exactly one
+//! implementation and one test suite instead of drifting copies per
+//! binding.
 
 use wafer_block::{
     core_types::MetaEntry,
@@ -32,17 +34,33 @@ fn response_meta_to_json(meta: &[MetaEntry]) -> Result<serde_json::Value, Invali
 /// Collect an [`OutputStream`] and encode its terminal as the embedder JSON
 /// wire format: `{"action":"respond|error|drop|halt|continue", ...}`.
 ///
-/// Every arm carries `meta`: a JSON object holding **only** the
-/// canonical response keys — `resp.status`, `resp.header.*`, `resp.cookie.*`,
-/// `resp.content_type` — under their own names. That is
-/// [`wafer_block::http_codec::response_meta_entries`], the projection the
-/// native HTTP boundary applies to the same terminals — so no embedder sees
-/// a key an HTTP client would not. Everything it drops is request or
-/// in-flight state: a block builds its terminal from the request message
-/// when it needs the headers a middleware set on it (see `wafer-run/cors`'s
-/// preflight `Halt`), and that message also carries
-/// `http.header.authorization`, `http.header.cookie`, `auth.*` identity,
-/// `req.client.ip` and the decoded query.
+/// Every arm carries `meta`: a JSON object holding **only** the entries
+/// [`classify_response_meta`] accepts as response parts, under their own
+/// names. That is [`wafer_block::http_codec::response_meta_entries`], the
+/// projection the native HTTP boundary applies to the same terminals — so no
+/// embedder sees a key an HTTP client would not. The keys, all string-valued:
+///
+/// - `resp.status` — the status code, as a decimal string.
+/// - `resp.content_type` — the `Content-Type`.
+/// - `resp.header.{name}` — one response header, `{name}` as the block wrote
+///   it (compare it case-insensitively). Any case of `content-type` is the
+///   `Content-Type`, and any case of `set-cookie` is one `Set-Cookie`
+///   directive.
+/// - `resp.set_cookie.{id}` — one `Set-Cookie` directive: the value is the
+///   whole directive (`sid=abc; Path=/; HttpOnly`), which a host emits as its
+///   own `Set-Cookie` header, never joined with another. `{id}` only keeps
+///   two cookies' keys apart; read nothing from it. A block that sets
+///   cookies through [`wafer_block::response::ResponseBuilder::set_cookie`]
+///   or [`wafer_block::response::cookie_meta`] writes the cookie's identity
+///   there ([`wafer_block::http_codec::cookie_meta_key`]): its name, then
+///   `;Domain={domain}` and `;Path={path}` when the directive sets them, as
+///   in `resp.set_cookie.sid;Path=/api`.
+///
+/// Everything the projection drops is request or in-flight state: a block
+/// builds its terminal from the request message when it needs the headers a
+/// middleware set on it (see `wafer-run/cors`'s preflight `Halt`), and that
+/// message also carries `http.header.authorization`, `http.header.cookie`,
+/// `auth.*` identity, `req.client.ip` and the decoded query.
 ///
 /// - `respond` carries `body` (a UTF-8 string) when the body is valid UTF-8
 ///   (the common case, human-readable wire shape); when it is not, it
@@ -177,31 +195,29 @@ fn encode_terminal(
 ///
 /// If `path` ends with `.wasm`, loads the file as a WASM block and registers
 /// it under `name`, which must equal the name the guest reports from
-/// `__wafer_info` (registration refuses a mismatch); otherwise reads the file as a WaferFlow JSON definition
-/// (the flow's id comes from the JSON itself, not from `name`). A WASM block
-/// loaded here has no embedder capability bound
-/// ([`WasmiBlock::load`](crate::WasmiBlock::load)), and the bindings have no
-/// way to state its `capabilities` config, so it runs with
-/// `BlockCapabilities::none()` whatever it declares. This
-/// extension-dispatch rule is owned here so every embedder binding resolves
-/// paths identically.
+/// `__wafer_info` (registration refuses a mismatch); otherwise reads the file
+/// as a WaferFlow JSON definition (the flow's id comes from the JSON itself,
+/// not from `name`). This extension-dispatch rule is owned here so every
+/// embedder binding resolves paths identically.
+///
+/// A WASM block registered here has no embedder capability bound: `seal()`
+/// bounds it by its `capabilities` block config, which the bindings' static
+/// config never sets, so it runs with `BlockCapabilities::none()` whatever it
+/// declares. To grant a guest capabilities, register it with
+/// [`register_block_path`] instead.
 ///
 /// Errors are returned as display strings ready for the binding's error
 /// surface (JSON error string / JS exception).
 ///
-/// Native-only: this reads from the filesystem (`WasmiBlock::load` and
-/// `std::fs::read_to_string`), so it is gated out on `wasm32` where there is
-/// no disk. Its only callers are the native embedder bindings (`wafer-ffi`,
-/// `wafer-run-node`); browser/wasm32 embedders load blocks from bytes via
-/// `WasmiBlock::load_with_engine` instead (see `runtime::remote`).
+/// Native-only: this reads from the filesystem, so it is gated out on
+/// `wasm32` where there is no disk. Its only callers are the native embedder
+/// bindings (`wafer-ffi`, `wafer-run-node`); browser/wasm32 embedders load
+/// blocks from bytes via `WasmiBlock::load_with_engine` instead (see
+/// `runtime::remote`).
 #[cfg(all(feature = "wasmi", not(target_arch = "wasm32")))]
 pub fn register_path(wafer: &mut crate::Wafer, name: &str, path: &str) -> Result<(), String> {
     if path.ends_with(".wasm") {
-        let block =
-            crate::WasmiBlock::load(path).map_err(|e| format!("failed to load WASM block: {e}"))?;
-        wafer
-            .register_block(name, std::sync::Arc::new(block))
-            .map_err(|e| e.to_string())
+        register_wasm(wafer, name, path, None)
     } else {
         let json =
             std::fs::read_to_string(path).map_err(|e| format!("failed to read file: {e}"))?;
@@ -209,6 +225,50 @@ pub fn register_path(wafer: &mut crate::Wafer, name: &str, path: &str) -> Result
             .add_flow_json(&json)
             .map_err(|e| format!("invalid WaferFlow JSON: {e}"))
     }
+}
+
+/// Register the WASM block at `path` under `name` (the name its guest
+/// reports), bounded by `capabilities_json`: a JSON
+/// [`BlockCapabilities`](wafer_block::BlockCapabilities) object, the bound
+/// [`WasmiBlock::load_with_capabilities`](crate::WasmiBlock::load_with_capabilities)
+/// takes. The guest runs under that bound ∩ what it declares; it cannot
+/// declare its way past it. A field the object omits denies — `{}` grants
+/// nothing — and so does one `BlockCapabilities` does not name, which serde
+/// ignores: a misspelt grant fails closed.
+///
+/// Native-only, for the same reason as [`register_path`].
+#[cfg(all(feature = "wasmi", not(target_arch = "wasm32")))]
+pub fn register_block_path(
+    wafer: &mut crate::Wafer,
+    name: &str,
+    path: &str,
+    capabilities_json: &str,
+) -> Result<(), String> {
+    let bound = serde_json::from_str(capabilities_json)
+        .map_err(|e| format!("invalid capabilities JSON: {e}"))?;
+    register_wasm(wafer, name, path, Some(bound))
+}
+
+/// Load the WASM file at `path` with the runtime's resource limits, under
+/// `bound` when the embedder states one, and register it under `name`.
+#[cfg(all(feature = "wasmi", not(target_arch = "wasm32")))]
+fn register_wasm(
+    wafer: &mut crate::Wafer,
+    name: &str,
+    path: &str,
+    bound: Option<wafer_block::BlockCapabilities>,
+) -> Result<(), String> {
+    let load_err = |e: &dyn std::fmt::Display| format!("failed to load WASM block: {e}");
+    let bytes = std::fs::read(path).map_err(|e| load_err(&e))?;
+    let limits = wafer.resource_limits();
+    let block = match bound {
+        Some(caps) => crate::WasmiBlock::load_with_capabilities_and_limits(&bytes, caps, limits),
+        None => crate::WasmiBlock::load_from_bytes_with_limits(&bytes, limits),
+    }
+    .map_err(|e| load_err(&e))?;
+    wafer
+        .register_block(name, std::sync::Arc::new(block))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -480,6 +540,92 @@ mod tests {
             let err = super::super::register_path(&mut w, "f", path.to_str().unwrap())
                 .expect_err("invalid flow JSON must fail");
             assert!(err.starts_with("invalid WaferFlow JSON:"), "got: {err}");
+        }
+
+        /// A WASM guest whose `__wafer_info` reports `acme/widget`, declaring
+        /// `collections: Only[a, c]` and `crypto`, written to `dir`.
+        fn widget_guest(dir: &std::path::Path) -> String {
+            use std::collections::BTreeSet;
+
+            use wafer_block::{Allowlist, BlockCapabilities, BlockInfo};
+
+            let mut declared = BlockCapabilities::none();
+            declared.collections = Allowlist::Only(BTreeSet::from([
+                "acme__widget__a".to_string(),
+                "acme__widget__c".to_string(),
+            ]));
+            declared.crypto = true;
+            let info = BlockInfo::new("acme/widget", "1.0.0", "handler@v1", "embed fixture")
+                .capabilities(declared);
+            let json = serde_json::to_string(&info).unwrap();
+            let packed = (64u64 << 32) | json.len() as u64;
+            let escaped = json.replace('\\', "\\\\").replace('"', "\\\"");
+            let wasm = wat::parse_str(format!(
+                r#"(module
+                    (memory (export "memory") 1)
+                    (data (i32.const 64) "{escaped}")
+                    (func (export "__wafer_info") (result i64) (i64.const {packed})))"#
+            ))
+            .unwrap();
+            let path = dir.join("widget.wasm");
+            std::fs::write(&path, wasm).unwrap();
+            path.to_str().unwrap().to_string()
+        }
+
+        /// The capabilities `seal()` installed for `acme/widget`.
+        async fn sealed_caps(mut w: Wafer) -> wafer_block::BlockCapabilities {
+            w.seal().await.expect("seal");
+            w.effective_capabilities("acme/widget")
+                .cloned()
+                .expect("acme/widget has effective capabilities")
+        }
+
+        /// The embedder's bound caps what the guest declared: it gets
+        /// `bound ∩ declared`, not its whole declaration.
+        #[tokio::test]
+        async fn register_block_path_bounds_the_guest_by_the_embedder_capabilities() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = widget_guest(dir.path());
+            let mut w = wafer();
+            super::super::register_block_path(
+                &mut w,
+                "acme/widget",
+                &path,
+                r#"{"collections":{"Only":["acme__widget__a","acme__widget__b"]}}"#,
+            )
+            .expect("registers");
+
+            let mut expected = wafer_block::BlockCapabilities::none();
+            expected.collections =
+                wafer_block::Allowlist::Only(["acme__widget__a".to_string()].into());
+            assert_eq!(sealed_caps(w).await, expected);
+        }
+
+        /// Without a bound the guest gets nothing, whatever it declares: the
+        /// bindings cannot state its `capabilities` config.
+        #[tokio::test]
+        async fn register_path_leaves_a_wasm_guest_without_capabilities() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = widget_guest(dir.path());
+            let mut w = wafer();
+            super::super::register_path(&mut w, "acme/widget", &path).expect("registers");
+            assert_eq!(sealed_caps(w).await, wafer_block::BlockCapabilities::none());
+        }
+
+        #[test]
+        fn register_block_path_refuses_invalid_capabilities_json() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = widget_guest(dir.path());
+            let mut w = wafer();
+            let err = super::super::register_block_path(
+                &mut w,
+                "acme/widget",
+                &path,
+                r#"{"collections":"All"}"#,
+            )
+            .expect_err("`All` is not an Allowlist");
+            assert!(err.starts_with("invalid capabilities JSON:"), "got: {err}");
+            assert!(!w.has_block("acme/widget"), "nothing registered on refusal");
         }
 
         #[test]

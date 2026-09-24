@@ -13,15 +13,19 @@ export declare function validateWaferflow(json: string): string | null
 /**
  * The WAFER runtime, exposed as a JavaScript class.
  *
- * Usage from Node.js / TypeScript:
+ * Usage from Node.js / TypeScript (`test/smoke.test.cjs` runs this
+ * example):
  * ```js
  * const { WaferRuntime } = require('wafer-run');
  * const w = new WaferRuntime();
- * await w.register('my-org/my-block', './block.wasm'); // the name the guest reports
+ * // A WASM block registers under the name its guest reports, here the
+ * // repo's examples/wasmi-block; registerBlock also grants capabilities.
+ * await w.registerBlock('example/echo', './echo_block.wasm', '{"crypto":true}');
+ * // A flow registers under the id in its JSON.
  * await w.register('main', './main-flow.json');
- * await w.resolve();
  * await w.start();
- * const result = JSON.parse(await w.run('main', JSON.stringify({ kind: 'test', data: '', meta: {} })));
+ * const message = { kind: 'test', meta: [{ key: 'x-request-id', value: '1' }] };
+ * const result = JSON.parse(await w.run('main', JSON.stringify(message)));
  * await w.stop();
  * ```
  */
@@ -33,17 +37,40 @@ export declare class WaferRuntime {
    *
    * If `path` ends with `.wasm`, registers a WASM block with the given name,
    * which must be the name the block reports in its `BlockInfo` (a mismatch
-   * is refused).
+   * is refused). Such a block runs with no capabilities, whatever it
+   * declares; `registerBlock` grants it some.
    * Otherwise, reads the file as a JSON flow definition.
    */
   register(name: string, path: string): Promise<void>
-  /** Resolve all block references in registered flows. */
+  /**
+   * Register the WASM block at `path` under `name` (the name the block
+   * reports in its `BlockInfo`), bounded by `capabilities`: a JSON
+   * `BlockCapabilities` object such as
+   * `{"collections":{"Only":["acme__widget__items"]},"crypto":true}`.
+   * An allowlist field is `"None"`, `"Any"` or `{"Only":[...]}`; a flag
+   * is a boolean. The block runs under that bound intersected with
+   * what it declares. A field the object omits denies, so `{}` grants
+   * nothing. Rejects on invalid JSON.
+   */
+  registerBlock(name: string, path: string, capabilities: string): Promise<void>
+  /**
+   * Finalize runtime configuration (composite config expansion, capability
+   * resolution, snapshot finalization). Block `Init` is dispatched lazily
+   * on first request. A runtime is sealed once: a second `resolve()`
+   * fails.
+   */
   resolve(): Promise<void>
   /**
-   * Start the runtime. Calls resolve() if not already resolved.
+   * Start the runtime. Calls `seal()` if `resolve()` has not; if
+   * `resolve()` failed, rejects with that failure rather than starting a
+   * runtime that never finished sealing.
    *
-   * Uses `start_without_bind()` because the Node.js dev server has its
-   * own HTTP handling — blocks that spawn listeners are not needed here.
+   * Uses `seal()` (no `bind()` on blocks) because the Node.js dev server
+   * has its own HTTP handling — blocks that spawn listeners are not needed
+   * here.
+   *
+   * Per-block `lifecycle(Init)` runs lazily on first dispatch per isolate
+   * — `start()` does not eagerly dispatch Init.
    */
   start(): Promise<void>
   /**
@@ -57,21 +84,29 @@ export declare class WaferRuntime {
   /**
    * Run a flow with the given message (body-less).
    *
-   * Takes the flow ID and a JSON message string. Returns a JSON result string:
-   * `{"action":"respond|drop|error|continue|halt","body":"...","meta":{...}}`;
-   * an `error` result carries
-   * `{"error":{"code":"...","message":"...","detail_code":"..."}}`, and a
-   * `continue` result the follow-up message's `kind`.
+   * Takes the flow ID and a JSON message string,
+   * `{"kind":"...","meta":[{"key":"...","value":"..."}]}` (both fields
+   * required; `meta` may be `[]`). Returns a JSON result string:
+   * `{"action":"respond|drop|error|continue|halt", ...,"meta":{...}}`.
+   * `respond` carries `body` (UTF-8) or `body_base64` (other bytes),
+   * `halt` always `body_base64`, `error`
+   * `{"error":{"code":"...","message":"...","detail_code":"..."}}`
+   * (`detail_code` only when set), `continue` the follow-up message's
+   * `kind`; `drop` is a bodiless 204 whose `meta` holds only headers and
+   * cookies.
    *
-   * `meta` holds only the canonical response keys — `resp.status`,
-   * `resp.header.*`, `resp.cookie.*`, `resp.content_type` — for the caller to
-   * apply to its response. Request state (headers, cookies, caller identity,
-   * client IP, query) never crosses this boundary, even when the block built
-   * its terminal from the request message. `drop` carries `meta` too: the
-   * headers and cookies for its bodiless 204.
-   *
-   * Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead of
-   * the `respond` action's `body` string — Halt may carry non-UTF-8 or empty bodies.
+   * `meta` holds only response entries, all string-valued, for the
+   * caller to apply to its response: `resp.status`, `resp.content_type`,
+   * `resp.header.{name}` (compare `{name}` case-insensitively; any case
+   * of `set-cookie` is one `Set-Cookie` directive) and
+   * `resp.set_cookie.{id}` — one `Set-Cookie` directive whose value is
+   * the whole directive (`sid=abc; Path=/; HttpOnly`), emitted as its
+   * own `Set-Cookie` header, never joined. `{id}` only keeps two
+   * cookies' keys apart (a block's cookie helpers write
+   * `{name}[;Domain={d}][;Path={p}]`, e.g. `resp.set_cookie.sid;Path=/api`);
+   * read nothing from it. Request state (headers, cookies, caller
+   * identity, client IP, query) never crosses this boundary, even when
+   * the block built its terminal from the request message.
    */
   run(flowId: string, messageJson: string): Promise<string>
   /** Get info about all registered flows as a JSON array. */

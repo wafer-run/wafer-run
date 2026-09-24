@@ -11,7 +11,8 @@ pub mod context;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discovery;
 /// Shared helpers for embedder bindings (`wafer-ffi`, `wafer-run-node`): the
-/// `{"action": ...}` JSON wire format and registration-from-path policy.
+/// `{"action": ...}` JSON wire format and registration-from-path policy,
+/// with or without a capability bound.
 pub mod embed;
 /// Observability hooks: pluggable callbacks fired on flow/block lifecycle events.
 pub mod observability;
