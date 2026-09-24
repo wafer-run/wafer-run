@@ -80,7 +80,8 @@ pub fn http_to_message(
 /// body+meta, `Error` → status from [`wafer_block::ErrorCode`] + JSON body,
 /// `Drop` → `204`, `Continue` → empty `200`, `Malformed` → `500`). This
 /// wrapper only rebuilds the transport-neutral parts as an
-/// `axum::http::Response`.
+/// `axum::http::Response`; the codec emits only header names and values
+/// hyper accepts, having dropped the rest.
 pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Response<Body> {
     let parts = http_codec::collect_http_response(output).await;
     let mut builder = axum::http::Response::builder()

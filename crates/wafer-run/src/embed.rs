@@ -103,14 +103,16 @@ pub async fn output_to_json(output: OutputStream) -> String {
             .to_string()
         }
         Err(TerminalNotResponse::Drop { meta }) => {
-            let headers_and_cookies: Vec<MetaEntry> = meta
-                .into_iter()
+            let headers_and_cookies: Vec<MetaEntry> = response_meta_entries(&meta)
                 .filter(|e| {
                     matches!(
                         classify_response_meta(e),
-                        Some(ResponseMetaPart::Header { .. } | ResponseMetaPart::SetCookie(_))
+                        Ok(Some(
+                            ResponseMetaPart::Header { .. } | ResponseMetaPart::SetCookie(_)
+                        ))
                     )
                 })
+                .cloned()
                 .collect();
             serde_json::json!({
                 "action": "drop",

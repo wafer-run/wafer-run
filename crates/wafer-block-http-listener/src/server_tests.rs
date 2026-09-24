@@ -14,7 +14,7 @@ use tokio::{
 };
 use wafer_block::{
     http_codec::META_HTTP_PATH, meta::META_REQ_CLIENT_IP, Block, InputStream, LifecycleEvent,
-    LifecycleType, Message, OutputStream,
+    LifecycleType, Message, MetaEntry, OutputStream,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -29,8 +29,10 @@ const BIG_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Runtime behind the test listener. By path: `/big` answers with
 /// [`BIG_RESPONSE_BYTES`], `/slow` answers after 500 ms, `/hang` after a
-/// minute; anything else answers with the client IP the listener put on the
-/// message.
+/// minute, `/bad-headers` with response meta no transport can send beside a
+/// valid header, `/xff` with the request's `X-Forwarded-For` header as the
+/// message carries it; anything else answers with the client IP the
+/// listener put on the message.
 struct TestRuntime;
 
 #[wafer_async_trait]
@@ -43,6 +45,24 @@ impl wafer_block::Runtime for TestRuntime {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 OutputStream::respond(b"slow done".to_vec())
             }
+            "/bad-headers" => OutputStream::respond_with_meta(
+                b"body".to_vec(),
+                vec![
+                    MetaEntry {
+                        key: "resp.header.X-Injected".into(),
+                        value: "a\r\nSet-Cookie: evil=1".into(),
+                    },
+                    MetaEntry {
+                        key: "resp.header.content-type".into(),
+                        value: "text/plain".into(),
+                    },
+                    MetaEntry {
+                        key: "resp.header.X-Good".into(),
+                        value: "ok".into(),
+                    },
+                ],
+            ),
+            "/xff" => OutputStream::respond(msg.header("x-forwarded-for").as_bytes().to_vec()),
             "/hang" => {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 OutputStream::respond(b"hang done".to_vec())
@@ -160,6 +180,58 @@ async fn multi_line_xff_from_trusted_proxy_resolves_the_real_client() {
         response.ends_with("\r\n\r\n198.51.100.7"),
         "client IP must come from the proxy-appended line: {response}"
     );
+}
+
+/// Every `X-Forwarded-For` line reaches the message's header, joined in
+/// wire order — not only the last one.
+#[tokio::test]
+async fn repeated_request_header_lines_reach_the_message_joined() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(
+            b"GET /xff HTTP/1.1\r\nHost: t\r\n\
+              X-Forwarded-For: 203.0.113.99\r\n\
+              X-Forwarded-For: 198.51.100.7\r\n\
+              Connection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.ends_with("\r\n\r\n203.0.113.99, 198.51.100.7"),
+        "{response}"
+    );
+}
+
+/// A header no transport can send is dropped; the response is served with
+/// the rest of its headers rather than failing whole as a 500, and a
+/// lower-case `content-type` header is the one Content-Type.
+#[tokio::test]
+async fn an_unsendable_response_header_is_dropped_not_a_500() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /bad-headers HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    let lower = response.to_ascii_lowercase();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(lower.contains("\r\nx-good: ok\r\n"), "{response}");
+    assert!(!lower.contains("x-injected"), "{response}");
+    assert!(!lower.contains("evil"), "{response}");
+    assert_eq!(lower.matches("\r\ncontent-type:").count(), 1, "{response}");
+    assert!(
+        lower.contains("\r\ncontent-type: text/plain\r\n"),
+        "{response}"
+    );
+    assert!(response.ends_with("\r\n\r\nbody"), "{response}");
 }
 
 /// Slowloris: a client that starts a request head and never finishes it is

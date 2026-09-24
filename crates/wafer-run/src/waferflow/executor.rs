@@ -55,8 +55,8 @@
 //! [`super::response_meta`]: a header replaces the message's header of the
 //! same name (case-insensitively), `Vary` values are unioned, and a cookie
 //! replaces the message's cookie of the same name, `Path` and `Domain` —
-//! never an unrelated cookie that happens to share its positional
-//! `resp.set_cookie.N` key.
+//! never an unrelated cookie that happens to share its `resp.set_cookie.*`
+//! key.
 //!
 //! # Short-circuit terminals keep the middleware's response headers
 //!
