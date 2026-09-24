@@ -1,152 +1,100 @@
-//! SEC-09 e2e: SSRF filtering on registry downloads.
+//! SEC-09 e2e: SSRF filtering on seal-time package downloads.
 //!
-//! The registry client refuses to fetch from private/internal addresses in
-//! default builds: the composed manifest URL is pre-checked with
+//! `seal()` downloads a `wafer.lock` entry whose cache is missing from the
+//! registry its `source` names. In default builds that fetch refuses
+//! private/internal addresses: the composed download URL is pre-checked with
 //! `wafer_net_security::is_blocked_url` and DNS results are filtered by
 //! `SsrfFilteringResolver` (rebinding). The `allow-private-network` build
 //! feature is the compile-time escape hatch for local registries — under it
-//! the same wiremock registry serves a manifest + wasm artifact end-to-end.
-//!
-//! Env-var discipline: `WAFER_RUN_REGISTRY_BASE_URL` is process-global, so
-//! each build flavor keeps ALL its phases inside one `#[tokio::test]` (the
-//! `wasm_pooling_env_kill_switch` precedent) and restores the var on exit.
+//! the same wiremock registry serves the package end-to-end.
 
 #![cfg(feature = "wasm")]
 
-use serde_json::json;
-use wafer_run::{StaticConfigSource, Wafer, REGISTRY_BASE_URL_KEY};
-use wiremock::{
-    matchers::{method, path},
-    Mock, MockServer, ResponseTemplate,
-};
+mod pinned_registry;
 
-fn new_wafer() -> Wafer {
-    let cfg: std::sync::Arc<dyn wafer_run::ConfigSource> =
-        std::sync::Arc::new(StaticConfigSource::default());
-    Wafer::new(cfg).expect("Wafer::new")
+use pinned_registry::{build_with_lock, lock_entry, package, requests, serve};
+use serial_test::serial;
+use wiremock::MockServer;
+
+const ECHO_WASM: &[u8] = include_bytes!("../testdata/echo_block.wasm");
+
+/// A registry serving `example/echo@1.0.0` (the echo-block fixture, which
+/// reports itself as `example/echo`) and the lockfile entry pinning it.
+async fn echo_registry(registry: &str, server: &MockServer) -> String {
+    let tarball = package("example/echo", "1.0.0", ECHO_WASM);
+    serve(server, "example/echo", "1.0.0", tarball.clone()).await;
+    lock_entry("example/echo", "1.0.0", &tarball, ECHO_WASM, registry)
 }
 
-/// Serve a well-formed registry for `example/echo@1.0.0` whose wasm artifact
-/// is the echo-block test fixture (which reports itself as `example/echo`).
-async fn mock_registry() -> MockServer {
-    let server = MockServer::start().await;
-    let manifest = json!({
-        "name": "example/echo",
-        "latest": "1.0.0",
-        "versions": {
-            "1.0.0": {
-                "abi": wafer_run::ABI_VERSION,
-                "wasm_url": format!("{}/example/echo/1.0.0/block.wasm", server.uri()),
-                "flow_url": null,
-            }
-        }
-    });
-    Mock::given(method("GET"))
-        .and(path("/example/echo/manifest.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&manifest))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/example/echo/1.0.0/block.wasm"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_bytes(include_bytes!("../testdata/echo_block.wasm").to_vec()),
-        )
-        .mount(&server)
-        .await;
-    server
-}
-
-/// Default build: a registry on a private/loopback address is refused, and
-/// an invalid base-URL override fails seal loudly, naming the env var.
-///
-/// One test, three phases (order matters — shared process env):
-///  1. IP-literal loopback base (`http://127.0.0.1:{port}`) → seal error
-///     citing SEC-09; the wiremock server must never be hit.
-///  2. `localhost` hostname base → same refusal (URL-level `localhost`
-///     check; had it slipped through, the DNS-layer resolver would refuse
-///     the loopback resolution — see `wafer-net-security` unit tests).
-///  3. Unparseable base → seal error naming `WAFER_RUN_REGISTRY_BASE_URL`,
-///     never a silent fallback to the default registry.
+/// Default build: a registry on a private/loopback address is refused, by
+/// IP literal and by `localhost`, and the server is never contacted.
 #[cfg(not(feature = "allow-private-network"))]
 #[tokio::test]
+#[serial]
 async fn registry_on_private_address_is_refused() {
-    let server = mock_registry().await;
-
-    // Phase 1: loopback IP literal.
-    std::env::set_var(REGISTRY_BASE_URL_KEY, server.uri());
-    let mut wafer = new_wafer();
-    wafer.add_block_config("example/echo@1.0.0", json!({}));
-    let err = wafer
-        .seal()
-        .await
-        .expect_err("loopback registry must be refused in a default build");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("SEC-09") && msg.contains("private/internal"),
-        "seal error must cite the SSRF policy: {msg}"
-    );
-    assert!(
-        server
-            .received_requests()
+    let server = MockServer::start().await;
+    let localhost = server.uri().replace("127.0.0.1", "localhost");
+    for registry in [server.uri(), localhost] {
+        let home = tempfile::tempdir().expect("tempdir");
+        let entry = echo_registry(&registry, &server).await;
+        let mut wafer = build_with_lock(home.path(), &[entry]).expect("build defers the entry");
+        let err = wafer
+            .seal()
             .await
-            .expect("recorded")
-            .is_empty(),
+            .expect_err("a private registry must be refused in a default build");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SEC-09") && msg.contains("private/internal"),
+            "seal error must cite the SSRF policy: {msg}"
+        );
+    }
+    assert_eq!(
+        requests(&server).await,
+        0,
         "the private registry must never be contacted"
     );
+}
 
-    // Phase 2: `localhost` hostname.
-    let localhost_base = server.uri().replace("127.0.0.1", "localhost");
-    std::env::set_var(REGISTRY_BASE_URL_KEY, &localhost_base);
-    let mut wafer = new_wafer();
-    wafer.add_block_config("example/echo@1.0.0", json!({}));
-    let err = wafer
-        .seal()
-        .await
-        .expect_err("localhost registry must be refused in a default build");
+/// A lockfile source that is not an absolute http(s) URL fails `seal()`
+/// naming the entry, in every build.
+#[tokio::test]
+#[serial]
+async fn a_registry_source_that_is_not_a_url_fails_seal() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let tarball = package("example/echo", "1.0.0", ECHO_WASM);
+    let entry = lock_entry("example/echo", "1.0.0", &tarball, ECHO_WASM, "not a url");
+    let mut wafer = build_with_lock(home.path(), &[entry]).expect("build defers the entry");
+    let msg = wafer.seal().await.expect_err("seal must fail").to_string();
     assert!(
-        err.to_string().contains("private/internal"),
-        "seal error must cite the SSRF policy: {err}"
+        msg.contains("example/echo@1.0.0") && msg.contains("not a URL"),
+        "the error names the entry and the cause: {msg}"
     );
-
-    // Phase 3: present-but-invalid override is a loud error naming the var.
-    std::env::set_var(REGISTRY_BASE_URL_KEY, "not a url");
-    let mut wafer = new_wafer();
-    wafer.add_block_config("example/echo@1.0.0", json!({}));
-    let err = wafer
-        .seal()
-        .await
-        .expect_err("invalid base URL must refuse seal");
-    let msg = err.to_string();
-    assert!(
-        msg.contains(REGISTRY_BASE_URL_KEY),
-        "seal error must name the env var: {msg}"
-    );
-
-    std::env::remove_var(REGISTRY_BASE_URL_KEY);
 }
 
 /// `allow-private-network` build: the same local wiremock registry serves
-/// manifest + wasm end-to-end — seal succeeds and the block is registered
-/// under its unversioned name, with the versioned reference as an alias.
-/// Proves the escape hatch works and exercises the full download pipeline
-/// (manifest fetch → version select → ABI check → wasm download → load).
+/// the package end-to-end — seal downloads it, verifies both digests and
+/// registers the block under its lockfile name.
 #[cfg(feature = "allow-private-network")]
 #[tokio::test]
+#[serial]
 async fn local_registry_works_under_escape_hatch() {
-    let server = mock_registry().await;
-
-    std::env::set_var(REGISTRY_BASE_URL_KEY, server.uri());
-    let mut wafer = new_wafer();
-    wafer.add_block_config("example/echo@1.0.0", json!({}));
-    let result = wafer.seal().await;
-    std::env::remove_var(REGISTRY_BASE_URL_KEY);
-
-    result.expect("seal must resolve the block from the local registry");
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().expect("tempdir");
+    let entry = echo_registry(&server.uri(), &server).await;
+    let mut wafer = build_with_lock(home.path(), &[entry]).expect("build defers the entry");
     assert!(
-        wafer.block_names().iter().any(|n| n == "example/echo"),
+        !wafer.has_block("example/echo"),
+        "an uncached entry is not registered at build"
+    );
+
+    wafer
+        .seal()
+        .await
+        .expect("seal must fetch the block from the local registry");
+    assert!(
+        wafer.has_block("example/echo"),
         "downloaded block must be registered; got {:?}",
         wafer.block_names()
     );
-    assert_eq!(wafer.canonicalize("example/echo@1.0.0"), "example/echo");
+    assert_eq!(requests(&server).await, 1);
 }

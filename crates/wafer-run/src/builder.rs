@@ -108,7 +108,8 @@ impl WaferBuilder {
     /// [`Metered(n)`](FuelLimit::Metered) to raise the cap.
     ///
     /// The selected limit is threaded into the runtime's shared wasmi engine
-    /// (so remote/lockfile blocks honour it) and is readable via
+    /// and into blocks loaded from `wafer.lock` (cached, or downloaded by
+    /// `seal()`), and is readable via
     /// [`Wafer::resource_limits`] for consumers that load blocks directly
     /// through
     /// [`WasmiBlock::load_from_bytes_with_limits`](crate::WasmiBlock::load_from_bytes_with_limits).
@@ -126,8 +127,8 @@ impl WaferBuilder {
     /// `syntect`+font code-screenshot tool needs ~24 MiB ≈ 384 pages); a
     /// guest whose `memory.grow` would exceed the cap is denied.
     ///
-    /// The selected cap is threaded into remote/lockfile blocks loaded through
-    /// this runtime and is readable via [`Wafer::resource_limits`] for
+    /// The selected cap is threaded into blocks loaded from `wafer.lock`
+    /// (cached, or downloaded by `seal()`) and is readable via [`Wafer::resource_limits`] for
     /// consumers that load blocks directly through
     /// [`WasmiBlock::load_from_bytes_with_limits`](crate::WasmiBlock::load_from_bytes_with_limits).
     pub fn max_wasm_memory_pages(mut self, pages: u32) -> Self {

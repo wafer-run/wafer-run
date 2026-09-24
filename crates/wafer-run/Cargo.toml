@@ -9,14 +9,15 @@ repository = "https://github.com/wafer-run/wafer-run"
 [features]
 default = ["wasm"]
 wasmi = ["dep:wasmi", "dep:getrandom"]
-# `wasm` keeps the historical bundle of "needs full async runtime + remote
-# block fetching": wasmi interpreter, reqwest for downloads, and tokio's
-# rt + rt-multi-thread for native-side hosting. tokio::sync::Mutex (used by
-# BlockSlot) is always-on via the base `tokio` dep below.
-wasm = ["wasmi", "dep:reqwest", "dep:wafer-net-security", "dep:url", "tokio/rt", "tokio/rt-multi-thread"]
+# `wasm` bundles "needs full async runtime + seal-time download of
+# lockfile-pinned blocks": wasmi interpreter, reqwest + flate2 + tar for the
+# download, and tokio's rt + rt-multi-thread for native-side hosting.
+# tokio::sync::Mutex (used by BlockSlot) is always-on via the base `tokio`
+# dep below.
+wasm = ["wasmi", "dep:reqwest", "dep:wafer-net-security", "dep:url", "dep:flate2", "dep:tar", "tokio/rt", "tokio/rt-multi-thread"]
 full = ["wasm", "dep:tracing-subscriber"]
-# SSRF escape hatch for registry downloads (SEC-09): permits registries and
-# artifact URLs on private/loopback/link-local addresses. Compile-time only
+# SSRF escape hatch for registry downloads (SEC-09): permits registries on
+# private/loopback/link-local addresses. Compile-time only
 # (SEC-018 precedent) — intended for local development and integration
 # tests, never production builds.
 allow-private-network = ["wafer-net-security?/allow-private-network"]
@@ -62,12 +63,15 @@ getrandom = { version = "0.2", optional = true }
 # both native and wasm-compiled runtimes (the browser build embeds wasmi too).
 web-time = "1"
 
-# Network (reqwest for WASM remote block downloads)
+# Network: seal() downloads a lockfile-pinned package whose cache is missing
+# (reqwest), with SSRF filtering (SEC-09), composes its download URL from the
+# lockfile's registry source (url), and unpacks the `.wasm` from the gzipped
+# tarball in memory (flate2 + tar).
 reqwest = { workspace = true, optional = true }
-# SSRF filtering for registry/manifest downloads (SEC-09); url validates the
-# WAFER_RUN_REGISTRY_BASE_URL override at seal time.
 wafer-net-security = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
 
 [lints]
 workspace = true
@@ -80,7 +84,8 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 tempfile = { workspace = true }
 tracing-test = "0.2"
 wat = "1"
-# SEC-09 registry-download SSRF e2e (tests/registry_ssrf.rs).
+# Local registry for the seal-time download e2es (tests/registry_ssrf.rs,
+# tests/remote_integrity.rs).
 wiremock = "0.6"
 wafer-sdk = { path = "../../sdks/rust" }
 wafer-test-support = { path = "../wafer-test-support" }

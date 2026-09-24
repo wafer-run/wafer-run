@@ -23,8 +23,8 @@ pub mod lifecycle;
 pub(crate) mod registration;
 /// Block registry — name-to-instance map populated via `Wafer::register_block`.
 pub mod registry;
-/// Remote-block machinery: reference parsing, registry manifest fetch, and
-/// `.wasm` / `.flow.json` download (wasm feature).
+/// Seal-time download of lockfile-pinned blocks whose cache is missing
+/// (wasm feature).
 #[cfg(feature = "wasm")]
 pub(crate) mod remote;
 /// Per-block runner with cancellation, timeout and observability hook wiring.
@@ -154,6 +154,11 @@ pub struct Wafer {
     /// Wait-for graph of the inits in flight, `Arc`-shared with every
     /// [`RuntimeContext`] so every dispatch path checks one graph.
     pub(crate) init_waits: Arc<crate::runtime::init_waits::InitWaits>,
+    /// Every `wafer.lock` entry the lockfile loader read, in lockfile order,
+    /// with whether it was deferred to [`Wafer::seal`] for want of a cache
+    /// directory. `seal()` refuses a lockfile entry naming the admin block
+    /// and downloads the deferred ones.
+    pub(crate) locked_blocks: Vec<crate::registry_loader::LockedBlock>,
 }
 
 /// The outcome of [`Wafer::seal`], which runs once per runtime.
@@ -185,9 +190,11 @@ impl Wafer {
     /// `D1ConfigSource` (the Cloudflare Workers app).
     ///
     /// Returns an error if either path fails: a duplicate block name,
-    /// a malformed lockfile, or a cache miss for a lockfile entry. A
-    /// missing `./wafer.lock` is **not** an error — Path B simply
-    /// no-ops in that case.
+    /// a malformed lockfile, or a cache miss for a lockfile entry — except,
+    /// with the `wasm` feature, a `registry+` entry whose cache directory is
+    /// missing, which [`seal`](Self::seal) downloads and verifies against the
+    /// lockfile's digests. A missing `./wafer.lock` is **not** an error —
+    /// Path B simply no-ops in that case.
     pub fn new(
         config_source: Arc<dyn crate::runtime::config_source::ConfigSource>,
     ) -> Result<Self, RuntimeError> {
@@ -215,6 +222,7 @@ impl Wafer {
             plan: crate::runtime::exec_plan::SealedPlan::empty(),
             seal_state: SealState::Unsealed,
             init_waits: Arc::default(),
+            locked_blocks: Vec::new(),
         }
     }
 
@@ -342,8 +350,8 @@ impl Wafer {
     /// (independent of HashMap's SipHash randomisation). Each entry's `name`
     /// is the block's registration name: registration refuses a block whose
     /// `info().name` differs ([`RuntimeError::BlockNameMismatch`]), including
-    /// a block `seal()` downloads from the registry, which is registered under
-    /// its unversioned `{org}/{block}`. The returned list is a snapshot —
+    /// a block loaded from `wafer.lock`, which is registered under the
+    /// entry's `{org}/{block}`. The returned list is a snapshot —
     /// later registrations are not reflected.
     pub fn block_infos(&self) -> Vec<wafer_block::BlockInfo> {
         lifecycle::sorted_snapshot(&self.registration.blocks)
@@ -909,66 +917,6 @@ mod tests {
     use wafer_block_macro::wafer_async_trait;
 
     use super::*;
-
-    /// Minimal `Block` for unit tests that need a registered handle.
-    struct NoopBlock {
-        info: wafer_block::BlockInfo,
-    }
-
-    #[wafer_async_trait]
-    impl wafer_block::Block for NoopBlock {
-        fn info(&self) -> wafer_block::BlockInfo {
-            self.info.clone()
-        }
-        async fn handle(
-            &self,
-            _ctx: &dyn wafer_block::context::Context,
-            _msg: wafer_block::Message,
-            _input: wafer_block::streams::input::InputStream,
-        ) -> wafer_block::streams::output::OutputStream {
-            wafer_block::streams::output::OutputStream::respond(vec![])
-        }
-        async fn lifecycle(
-            &self,
-            _ctx: &dyn wafer_block::context::Context,
-            _event: wafer_block::LifecycleEvent,
-        ) -> std::result::Result<(), wafer_block::WaferError> {
-            Ok(())
-        }
-    }
-
-    /// Remote-resolution path (`seal()` downloads referenced blocks not yet
-    /// registered) must pair each insertion with a `BlockSlot`. Without
-    /// this, concurrent first-callers each construct their own slot and
-    /// both run `lifecycle(Init)` — breaking the once-only-success
-    /// guarantee for stateful inits (migrations, idempotent setup).
-    #[cfg(feature = "wasm")]
-    #[test]
-    fn register_remote_block_pairs_blocks_and_slot() {
-        let mut wafer = Wafer::builder()
-            .disable_inventory()
-            .disable_lockfile()
-            .build()
-            .expect("empty wafer build is infallible");
-
-        let block = Arc::new(NoopBlock {
-            info: wafer_block::BlockInfo::new("some-org/remote", "0.1.0", "iface@v1", "test"),
-        });
-        wafer
-            .registration
-            .register_remote_block("some-org/remote", block)
-            .expect("register_remote_block succeeds for valid block");
-
-        assert!(
-            wafer.registration.blocks.contains_key("some-org/remote"),
-            "blocks map must contain remote block"
-        );
-        assert!(
-            wafer.registration.slots.contains_key("some-org/remote"),
-            "slots map must contain a slot for every registered block — \
-             missing this lets concurrent first-callers each run lifecycle(Init)"
-        );
-    }
 
     /// `requires` is looked up by registration name. A block whose `info()`
     /// later reports another block's name (here `a/victim`, which is not

@@ -361,8 +361,8 @@ impl RuntimeContext {
         // B.init -> ... -> A, in this dispatch or a concurrent one) is
         // refused instead of deadlocking.
         //
-        // Every registered block has a paired slot (`register_block_inner` /
-        // `register_remote_block`). A missing entry here means
+        // Every registered block has a paired slot (`register_block_inner`).
+        // A missing entry here means
         // `resolved_block_name` was found in `self.blocks` but not
         // `self.slots` — a runtime invariant violation, so panic loudly
         // rather than silently constructing a fresh slot (which would let

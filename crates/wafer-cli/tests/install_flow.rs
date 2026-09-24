@@ -215,7 +215,7 @@ async fn install_no_version_picks_latest_non_yanked() {
             "org": "acme", "name": "widget", "summary": null,
             "versions": [
                 {"version":"0.4.0","abi":1,"sha256":"z","size_bytes":1,"license":null,"yanked":1,"published_at":9},
-                {"version":"0.3.1","abi":1,"sha256": sha, "size_bytes":42,"license":null,"yanked":0,"published_at":3}
+                {"version":"0.3.1","abi":1,"sha256": sha, "size_bytes": tarball.len(),"license":null,"yanked":0,"published_at":3}
             ]
         })))
         .mount(&server).await;

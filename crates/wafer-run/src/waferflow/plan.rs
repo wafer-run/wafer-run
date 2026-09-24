@@ -153,9 +153,9 @@ pub(crate) fn compile_flow(wafer: &Wafer, flow: &WaferFlow) -> CompiledFlow {
 
 fn compile_step(wafer: &Wafer, step: &Step, index: &HashMap<&str, usize>) -> CompiledStep {
     let target = wafer.lookup_block(&step.block).map(|(resolved, block)| {
-        // Every registered block has a paired slot (`register_block_inner` /
-        // `register_remote_block`); a missing entry is a runtime invariant
-        // violation, matching the dispatch-time expectation this replaces.
+        // Every registered block has a paired slot (`register_block_inner`);
+        // a missing entry is a runtime invariant violation, matching the
+        // dispatch-time expectation this replaces.
         let slot = wafer
             .registration
             .slots

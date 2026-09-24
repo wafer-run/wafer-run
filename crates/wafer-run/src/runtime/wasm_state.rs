@@ -147,13 +147,14 @@ pub(crate) struct WasmState {
     /// back via `Wafer::resource_limits()`.
     pub(crate) fuel: FuelLimit,
     /// Per-guest-call WASM linear-memory cap, in 64 KiB pages, applied to WASM
-    /// blocks loaded through this runtime (remote/lockfile blocks). Set via
+    /// blocks loaded through this runtime (`wafer.lock` blocks). Set via
     /// `WaferBuilder::max_wasm_memory_pages`; defaults to
     /// [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB). Consumers that
     /// load blocks directly read it back via `Wafer::resource_limits()`.
     pub(crate) max_wasm_memory_pages: u32,
-    /// Shared fuel-metered WASM engine for all WASM blocks. Created lazily by
-    /// `Wafer::wasm_engine()` (during `seal`).
+    /// Shared fuel-metered WASM engine, created lazily by
+    /// `Wafer::wasm_engine()` for embedders that compile blocks against one
+    /// engine. The runtime's own `wafer.lock` loading does not use it.
     #[cfg(feature = "wasmi")]
     pub(crate) engine: Option<Arc<wasmi::Engine>>,
 }
@@ -189,7 +190,7 @@ impl super::Wafer {
     /// Get or create the shared WASM engine.
     ///
     /// The engine's `consume_fuel` flag is derived from the runtime's
-    /// configured [`FuelLimit`] so remote/lockfile blocks loaded against this
+    /// configured [`FuelLimit`] so blocks an embedder loads against this
     /// engine meter (or don't) consistently with the builder selection.
     pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, wafer_block::error::RuntimeError> {
         if self.wasm.engine.is_none() {

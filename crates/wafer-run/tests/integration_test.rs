@@ -1403,175 +1403,38 @@ fn test_wafer_error_meta() {
 }
 
 // ===========================================================================
-// 22. parse_versioned_block tests
+// 22. Unpinned registry references are not found, never fetched
 // ===========================================================================
 
-#[cfg(feature = "wasm")]
-mod versioned_block_tests {
-    use wafer_run::parse_versioned_block;
-
-    // --- org/block@version format ---
-
-    #[test]
-    fn test_parse_versioned_basic() {
-        let r = parse_versioned_block("acme/auth-block@v1.0.0").unwrap();
-        assert_eq!(r.org, "acme");
-        assert_eq!(r.block, "auth-block");
-        assert_eq!(r.version, "v1.0.0");
-    }
-
-    #[test]
-    fn test_parse_versioned_wafer_run() {
-        let r = parse_versioned_block("wafer-run/auth@v1.0.0").unwrap();
-        assert_eq!(r.org, "wafer-run");
-        assert_eq!(r.block, "auth");
-        assert_eq!(r.version, "v1.0.0");
-    }
-
-    #[test]
-    fn test_parse_versioned_no_version() {
-        assert!(parse_versioned_block("wafer-run/sqlite").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_latest_rejected() {
-        assert!(parse_versioned_block("acme/auth-block@latest").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_empty_version() {
-        assert!(parse_versioned_block("acme/auth-block@").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_prerelease() {
-        let r = parse_versioned_block("acme/auth-block@v2.0.0-rc.1").unwrap();
-        assert_eq!(r.org, "acme");
-        assert_eq!(r.block, "auth-block");
-        assert_eq!(r.version, "v2.0.0-rc.1");
-    }
-
-    #[test]
-    fn test_parse_versioned_wrong_segments() {
-        assert!(parse_versioned_block("acme@v1.0.0").is_none());
-        assert!(parse_versioned_block("acme/auth/extra@v1.0.0").is_none());
-    }
-
-    #[test]
-    fn test_parse_versioned_plain_name_rejected() {
-        assert!(parse_versioned_block("plain-name").is_none());
-    }
-}
-
-// ===========================================================================
-// 22b. parse_unversioned_block tests
-// ===========================================================================
-
-#[cfg(feature = "wasm")]
-mod unversioned_block_tests {
-    use wafer_run::parse_unversioned_block;
-
-    #[test]
-    fn test_parse_unversioned_basic() {
-        let r = parse_unversioned_block("acme/auth-block").unwrap();
-        assert_eq!(r.org, "acme");
-        assert_eq!(r.block, "auth-block");
-        assert_eq!(r.version, "latest");
-    }
-
-    #[test]
-    fn test_parse_unversioned_wafer_run() {
-        let r = parse_unversioned_block("wafer-run/sqlite").unwrap();
-        assert_eq!(r.org, "wafer-run");
-        assert_eq!(r.block, "sqlite");
-        assert_eq!(r.version, "latest");
-    }
-
-    #[test]
-    fn test_parse_unversioned_at_latest() {
-        let r = parse_unversioned_block("acme/auth-block@latest").unwrap();
-        assert_eq!(r.org, "acme");
-        assert_eq!(r.block, "auth-block");
-        assert_eq!(r.version, "latest");
-    }
-
-    #[test]
-    fn test_parse_unversioned_wafer_run_at_latest() {
-        let r = parse_unversioned_block("wafer-run/sqlite@latest").unwrap();
-        assert_eq!(r.org, "wafer-run");
-        assert_eq!(r.block, "sqlite");
-        assert_eq!(r.version, "latest");
-    }
-
-    #[test]
-    fn test_parse_unversioned_with_version_rejected() {
-        assert!(parse_unversioned_block("acme/auth-block@v1.0.0").is_none());
-    }
-
-    #[test]
-    fn test_parse_unversioned_wrong_segments() {
-        assert!(parse_unversioned_block("acme").is_none());
-        assert!(parse_unversioned_block("acme/repo/block").is_none());
-    }
-
-    #[test]
-    fn test_parse_unversioned_empty_segments() {
-        assert!(parse_unversioned_block("/auth-block").is_none());
-        assert!(parse_unversioned_block("acme/").is_none());
-    }
-
-    #[test]
-    fn test_parse_unversioned_plain_name_rejected() {
-        assert!(parse_unversioned_block("my-block").is_none());
-    }
-}
-
-// ===========================================================================
-// 23. Remote block resolve error paths
-// ===========================================================================
-
-#[cfg(feature = "wasm")]
+/// A flow step naming a registry block that no `wafer.lock` pins — with a
+/// version, without one, or `@latest` — is a missing reference: `seal()`
+/// reports it in `BlocksNotFound` and fetches nothing
+/// (`tests/remote_integrity.rs` proves no request reaches a registry).
 #[tokio::test]
-async fn test_resolve_versioned_block_download_error() {
+async fn unpinned_registry_references_are_not_found() {
     let mut w = empty_wafer();
+    for (id, block) in [
+        ("versioned", "acme/nonexistent-block@1.0.0"),
+        ("unversioned", "acme/nonexistent-block"),
+        ("latest", "acme/nonexistent-block@latest"),
+    ] {
+        w.add_flow(single_step_flow(id, block)).unwrap();
+    }
 
-    // Use a nonexistent remote block in a flow to trigger resolve error
-    w.add_flow(single_step_flow(
-        "remote-test",
-        "acme/nonexistent-block@v1.0.0",
-    ))
-    .unwrap();
-
-    let err = w.seal().await.unwrap_err().to_string();
-    assert!(
-        err.contains("not found")
-            || err.contains("failed to download")
-            || err.contains("failed to load remote block")
-            || err.contains("failed to fetch registry"),
-        "Expected block-not-found or download error, got: {err}"
-    );
-}
-
-#[cfg(feature = "wasm")]
-#[tokio::test]
-async fn test_resolve_unversioned_block_download_error() {
-    let mut w = empty_wafer();
-
-    w.add_flow(single_step_flow(
-        "unversioned-test",
-        "acme/nonexistent-block",
-    ))
-    .unwrap();
-
-    let err = w.seal().await.unwrap_err().to_string();
-    assert!(
-        err.contains("not found")
-            || err.contains("failed to fetch releases")
-            || err.contains("failed to download")
-            || err.contains("failed to fetch registry")
-            || err.contains("HTTP"),
-        "Expected block-not-found or download error, got: {err}"
-    );
+    match w.seal().await {
+        Err(RuntimeError::BlocksNotFound(missing)) => {
+            let names: Vec<&str> = missing.iter().map(|m| m.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec![
+                    "acme/nonexistent-block",
+                    "acme/nonexistent-block@1.0.0",
+                    "acme/nonexistent-block@latest",
+                ]
+            );
+        }
+        other => panic!("expected BlocksNotFound, got {other:?}"),
+    }
 }
 
 // ===========================================================================

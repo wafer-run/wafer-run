@@ -1,8 +1,8 @@
 //! [`Wafer::seal`] — the once-per-boot finalization pipeline, decomposed
-//! into named phases: grant-rejection gate, remote resolution, config
-//! expansion, capability computation, wasm instance-pooling policy,
-//! block-reference resolution, agent-tool-name uniqueness, and
-//! startup-snapshot finalization.
+//! into named phases: lockfile-pinned downloads, config expansion,
+//! block-reference resolution, grant-rejection gate, capability
+//! computation, wasm instance-pooling policy, agent-tool-name uniqueness,
+//! and startup-snapshot finalization.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -21,16 +21,19 @@ impl Wafer {
     /// computation — the ones the embedder registered and the ones `seal()`
     /// downloads — so both run after the last registration:
     ///
-    /// 1. Resolve remote entries (download `.flow.json` / `.wasm` for
-    ///    deferred registrations).
+    /// 1. Refuse a `wafer.lock` entry naming the admin block, then download
+    ///    the lockfile entries the loader deferred for want of a cache
+    ///    directory: each from its registry, refused unless the tarball and
+    ///    its `.wasm` match the entry's `sha256` and `wasm_sha256`. Nothing
+    ///    else is ever downloaded.
     /// 2. Expand composite configs (e.g. `wafer-run/http-server` →
     ///    `http-listener` + `router`), declarative flow `config_map` /
     ///    `config_defaults`, and `"uses"` contributions across all block
     ///    configs.
-    /// 3. Resolve remote blocks referenced by flow steps, router routes and
-    ///    other block configs. Aggregates every missing reference into one
-    ///    `RuntimeError::BlocksNotFound` so operators see the full punch
-    ///    list with each missing block's source.
+    /// 3. Check the blocks referenced by flow steps, router routes and
+    ///    other block configs are registered. Aggregates every missing
+    ///    reference into one `RuntimeError::BlocksNotFound` so operators see
+    ///    the full punch list with each missing block's source.
     /// 4. Refuse boot if any WRAP grants were rejected during registration.
     /// 5. Compute effective capabilities per block (declared ∩ config, and
     ///    for a WASM block ∩ the bound its embedder or operator stated) and
@@ -74,14 +77,15 @@ impl Wafer {
 
     /// The seal pipeline [`seal`](Self::seal) runs once.
     async fn seal_once(&mut self) -> Result<(), RuntimeError> {
+        self.refuse_locked_admin_block()?;
         #[cfg(feature = "wasm")]
-        self.resolve_remote_entries().await?;
+        self.fetch_deferred_lockfile_blocks().await?;
 
         self.expand_composite_configs();
         self.expand_declarative_flow_configs();
         self.gather_uses_configs();
 
-        self.resolve_block_references().await?;
+        self.resolve_block_references()?;
 
         self.fail_on_rejected_grants()?;
 
@@ -178,6 +182,29 @@ impl Wafer {
         }
     }
 
+    /// Refuse boot when a `wafer.lock` entry, cached or deferred, names the
+    /// admin block: the admin block is the one identity WRAP trusts with
+    /// typed Network/Crypto grants, so it comes from the embedder, never from
+    /// a registry.
+    fn refuse_locked_admin_block(&self) -> Result<(), RuntimeError> {
+        let admin_block = &*self.registration.wrap.admin_block;
+        if admin_block.is_empty() {
+            return Ok(());
+        }
+        match self
+            .locked_blocks
+            .iter()
+            .find(|locked| locked.package.name == *admin_block)
+        {
+            Some(locked) => Err(RuntimeError::Config(format!(
+                "wafer.lock pins {}@{}, which is the admin block; the admin block is \
+                 registered by the embedder, never loaded from a registry",
+                locked.package.name, locked.package.version
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Drain the grant-validation accumulator. This is the common boot
     /// funnel: both `start_with_priority()` (native) and direct `seal()`
     /// callers (Cloudflare Workers, browser WASM) pass through here, after
@@ -269,7 +296,8 @@ impl Wafer {
     /// path.) Validates the `WAFER_RUN_WASM_POOLING` kill switch here too so
     /// a mistyped value refuses boot even before any wasm block loads, then
     /// logs the effective decision per opted-in block. Runs after
-    /// `resolve_remote_entries` so downloaded WASM blocks are covered too.
+    /// `fetch_deferred_lockfile_blocks` so downloaded WASM blocks are covered
+    /// too.
     #[cfg(feature = "wasmi")]
     fn log_wasm_instance_pooling(&self) -> Result<(), RuntimeError> {
         let pooling_enabled = crate::wasm::wasmi_loader::wasm_pooling_host_override()?;
@@ -312,17 +340,14 @@ impl Wafer {
         }
     }
 
-    /// Resolve remote blocks referenced by flow steps, router routes and
-    /// other block configs. Collect every reference + its source, then
-    /// resolve-or-aggregate-fail. A downloaded block goes through
-    /// `register_remote_block`'s admission checks and is registered before
-    /// `seal()` runs the grant gate and the capability computation.
-    ///
-    /// PR A landed the flow-step half of the walk. PR B (Wave 16) extended
-    /// the collection to also include router routes; Wave 19 routed that
-    /// half through `Block::collect_block_refs` so every block type can
-    /// declare its own config-held references via the trait.
-    async fn resolve_block_references(&mut self) -> Result<(), RuntimeError> {
+    /// Check every block referenced by flow steps, router routes and other
+    /// block configs is registered. Collect every reference + its source,
+    /// then aggregate the missing ones into one `BlocksNotFound`. A missing
+    /// reference is never downloaded: a registry block reaches the runtime
+    /// only pinned in `wafer.lock` (step 1). Router routes and other
+    /// config-held references come from `Block::collect_block_refs`, so
+    /// every block type declares its own.
+    fn resolve_block_references(&self) -> Result<(), RuntimeError> {
         // BTreeMap (vs HashMap) so iteration over missing references yields
         // canonical-name-sorted order, giving stable `Display` output for
         // `BlocksNotFound` across boots.
@@ -338,10 +363,8 @@ impl Wafer {
         for (block_name, config) in &self.registration.block_configs {
             let canonical_block = self.canonicalize(block_name).to_string();
             let Some(block) = self.registration.blocks.get(&canonical_block) else {
-                // Block config exists but the block isn't registered yet
-                // (will be downloaded from registry below, or flagged as
-                // not_found). Skip — we can't ask an unregistered block
-                // to walk its own config.
+                // Config for a block that isn't registered: there is no
+                // block to ask what references its config holds.
                 continue;
             };
             for r in block.collect_block_refs(config) {
@@ -357,49 +380,11 @@ impl Wafer {
             }
         }
 
-        let mut not_found: Vec<BlockReferenceError> = Vec::new();
-
-        // Build the HTTP client once per seal() rather than per missing
-        // block — aligns with `resolve_remote_entries`, which already
-        // hoists. The client is short-lived (one seal() call) and reused
-        // across every remote-block resolution attempt in the loop.
-        #[cfg(feature = "wasm")]
-        let client = Self::registry_http_client()?;
-
-        for (canonical, sources) in references {
-            if self.registration.blocks.contains_key(&canonical) {
-                continue;
-            }
-            #[cfg(feature = "wasm")]
-            {
-                self.registration.check_downloadable(&canonical)?;
-                match self.resolve_remote_block(&client, &canonical).await {
-                    Ok(Some(block)) => {
-                        tracing::info!(block = %canonical, "downloaded remote block");
-                        self.registration.register_remote_block(&canonical, block)?;
-                        continue;
-                    }
-                    Ok(None) => {
-                        // Fall through to the not_found push below.
-                    }
-                    Err(e) => {
-                        // Don't abort the aggregator on a flaky registry response;
-                        // log + treat the entry as not_found so operators still see
-                        // the full punch list of missing references with their
-                        // original sources.
-                        tracing::warn!(
-                            block = %canonical,
-                            error = %e,
-                            "registry resolution failed during seal; treating as not_found"
-                        );
-                    }
-                }
-            }
-            not_found.push(BlockReferenceError {
-                name: canonical,
-                sources,
-            });
-        }
+        let not_found: Vec<BlockReferenceError> = references
+            .into_iter()
+            .filter(|(canonical, _)| !self.registration.blocks.contains_key(canonical))
+            .map(|(name, sources)| BlockReferenceError { name, sources })
+            .collect();
 
         if not_found.is_empty() {
             Ok(())

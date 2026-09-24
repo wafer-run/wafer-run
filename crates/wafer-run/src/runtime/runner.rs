@@ -316,10 +316,10 @@ impl Wafer {
 
     /// The once-success init slot paired with a registered block.
     ///
-    /// Every registered block has a paired slot (`register_block_inner` /
-    /// `register_remote_block`); a missing entry is a runtime invariant
-    /// violation, so panic loudly rather than silently constructing a fresh
-    /// slot (which would let concurrent callers each run `lifecycle(Init)`).
+    /// Every registered block has a paired slot (`register_block_inner`); a
+    /// missing entry is a runtime invariant violation, so panic loudly rather
+    /// than silently constructing a fresh slot (which would let concurrent
+    /// callers each run `lifecycle(Init)`).
     pub(crate) fn slot_for(&self, resolved: &str) -> Arc<super::slot::BlockSlot> {
         self.registration
             .slots

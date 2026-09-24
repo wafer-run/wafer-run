@@ -427,3 +427,106 @@ async fn flag_combinations_rejected() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("requires an"), "{stderr}");
 }
+
+/// Without `--frozen`, `wafer.lock` is still the authority for a version it
+/// pins: the registry now serving another tarball (sha B) for the pinned
+/// version (sha A), with an empty cache, is an integrity failure — nothing
+/// is downloaded or cached, and `wafer.lock` is unchanged.
+#[tokio::test]
+async fn install_refuses_a_registry_sha_that_differs_from_the_lock_pin() {
+    let server = MockServer::start().await;
+    let swapped = make_tarball("0.3.1");
+    let swapped_sha = sha256_hex(&swapped);
+    let pinned_sha = "a".repeat(64);
+    assert_ne!(swapped_sha, pinned_sha);
+    mount_version(&server, "0.3.1", &swapped_sha, swapped.len()).await;
+    mount_tarball(&server, "0.3.1", swapped).await;
+
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = tmp.path().join("proj");
+    setup_project(
+        &home,
+        &cwd,
+        "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n\n[dependencies]\n\"acme/widget\" = \"0.3.1\"\n",
+    );
+    let lock_body = format!(
+        "version = 2\n\n[[package]]\nname = \"acme/widget\"\nversion = \"0.3.1\"\nsha256 = \"{pinned_sha}\"\nwasm_sha256 = \"bb\"\nsource = \"registry+{uri}\"\n",
+        uri = server.uri(),
+    );
+    fs::write(cwd.join("wafer.lock"), &lock_body).unwrap();
+
+    let out = std::process::Command::new(bin())
+        .env("HOME", &home)
+        .env_remove("WAFER_REGISTRY")
+        .env("WAFER_INSTALL_LOCK_TIMEOUT_SECS", "5")
+        .current_dir(&cwd)
+        .args(["install", "--registry", &server.uri()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "install must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("integrity check failed"), "{stderr}");
+    assert!(stderr.contains("wafer.lock pins sha256"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(cwd.join("wafer.lock")).unwrap(),
+        lock_body,
+        "wafer.lock is unchanged"
+    );
+    assert!(
+        !home.join(".wafer/cache/acme/widget/0.3.1").exists(),
+        "nothing is cached"
+    );
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path().ends_with(".wafer")),
+        "the swapped tarball is never downloaded"
+    );
+}
+
+/// A tarball larger than the `size_bytes` the registry advertised for the
+/// version is refused before it is buffered, and nothing is installed.
+#[tokio::test]
+async fn install_refuses_a_tarball_larger_than_advertised() {
+    let server = MockServer::start().await;
+    let tarball = make_tarball("0.3.1");
+    let sha = sha256_hex(&tarball);
+    mount_version(&server, "0.3.1", &sha, tarball.len() - 1).await;
+    mount_tarball(&server, "0.3.1", tarball).await;
+
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cwd = tmp.path().join("proj");
+    setup_project(
+        &home,
+        &cwd,
+        "[package]\norg=\"me\"\nname=\"me\"\nversion=\"0.0.1\"\nabi=1\n",
+    );
+
+    let out = std::process::Command::new(bin())
+        .env("HOME", &home)
+        .env_remove("WAFER_REGISTRY")
+        .env("WAFER_INSTALL_LOCK_TIMEOUT_SECS", "5")
+        .current_dir(&cwd)
+        .args([
+            "install",
+            "acme/widget@0.3.1",
+            "--cache-only",
+            "--registry",
+            &server.uri(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "install must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("byte limit"), "{stderr}");
+    assert!(!cwd.join("wafer.lock").exists(), "nothing is pinned");
+    assert!(
+        !home.join(".wafer/cache/acme/widget/0.3.1").exists(),
+        "nothing is cached"
+    );
+}

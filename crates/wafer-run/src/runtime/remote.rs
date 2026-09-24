@@ -1,83 +1,39 @@
-//! Remote-block machinery (`wasm` feature): parsing `{org}/{block}@{version}`
-//! references, fetching registry manifests, and downloading `.wasm` /
-//! `.flow.json` artifacts during [`Wafer::seal`].
+//! Seal-time fetch of lockfile-pinned blocks (`wasm` feature).
+//!
+//! `wafer.lock` is the only thing that makes [`Wafer::seal`] download a
+//! block. The lockfile loader registers every entry whose package is in the
+//! local cache; an entry from a `registry+<url>` source whose cache directory
+//! is missing is deferred to `seal()`, which downloads the package from that
+//! registry the way `wafer install` does
+//! (`{registry}/registry/download/{org}/{block}/{version}.wafer`), refuses it
+//! unless the tarball hashes to the entry's `sha256` and its `.wasm` to the
+//! entry's `wasm_sha256`, and only then compiles it. A block that is not
+//! pinned is never fetched: a flow step, route or block config naming an
+//! unregistered block is reported as not found.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{io::Read, sync::Arc};
 
 use futures::{StreamExt, TryStreamExt};
-use wafer_block::{error::RuntimeError, Block};
+use wafer_block::{
+    error::RuntimeError,
+    lockfile::{
+        is_valid_path_segment, sha256_hex, BoundedPackageStream, LockfilePackage,
+        MAX_PACKAGE_BYTES, MAX_PACKAGE_ENTRIES, MAX_UNPACKED_BYTES, REGISTRY_SOURCE_PREFIX,
+    },
+};
 
 use super::Wafer;
 
-/// ABI version for WASM block compatibility.
-pub const ABI_VERSION: u32 = 1;
-
-/// Base URL for raw registry manifest fetches
-/// (`{base}/{org}/{block}/manifest.json`).
-const REGISTRY_MANIFEST_BASE_URL: &str =
-    "https://raw.githubusercontent.com/wafer-run/registry/main";
-
-/// Env var overriding [`REGISTRY_MANIFEST_BASE_URL`] (self-hosted or test
-/// registries). Absent or empty → the documented default above. Present but
-/// not an absolute `http(s)` URL → a loud seal error naming this var, never
-/// a silent fallback. Note the SSRF policy (SEC-09) still applies to the
-/// override in default builds: a registry on a private/loopback address
-/// additionally requires the `allow-private-network` build feature.
-pub const REGISTRY_BASE_URL_KEY: &str = "WAFER_RUN_REGISTRY_BASE_URL";
-
-/// Resolve the registry base URL from the environment (see
-/// [`REGISTRY_BASE_URL_KEY`]). Trailing slashes are trimmed so composed
-/// manifest paths stay canonical.
-fn registry_base_url() -> Result<String, RuntimeError> {
-    let raw = match std::env::var(REGISTRY_BASE_URL_KEY) {
-        Err(std::env::VarError::NotPresent) => {
-            return Ok(REGISTRY_MANIFEST_BASE_URL.to_string());
-        }
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(RuntimeError::Registry(format!(
-                "{REGISTRY_BASE_URL_KEY} is not valid UTF-8: expected an absolute http(s) URL"
-            )));
-        }
-        Ok(raw) => raw,
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        // Empty = absent (the `WAFER_LOCKFILE` / `WAFER_RUN_WASM_POOLING`
-        // precedent), so `FOO=` in an env file doesn't change behavior.
-        return Ok(REGISTRY_MANIFEST_BASE_URL.to_string());
-    }
-    let parsed = url::Url::parse(trimmed).map_err(|e| {
-        RuntimeError::Registry(format!(
-            "{REGISTRY_BASE_URL_KEY}={trimmed:?} is invalid: {e} (expected an absolute \
-             http(s) URL; unset it to use the default registry)"
-        ))
-    })?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(RuntimeError::Registry(format!(
-            "{REGISTRY_BASE_URL_KEY}={trimmed:?} is invalid: scheme {:?} is not http(s) \
-             (unset it to use the default registry)",
-            parsed.scheme()
-        )));
-    }
-    Ok(trimmed.trim_end_matches('/').to_string())
-}
-
-/// SEC-09: URL-level SSRF pre-check applied to every registry-client fetch —
-/// the composed manifest URL plus the manifest-supplied `wasm_url` /
-/// `flow_url` (a hostile registry entry is otherwise free to point artifact
-/// downloads at internal addresses, e.g. `http://169.254.169.254/`). Catches
-/// non-http(s) schemes, `localhost`, and private/link-local IP literals;
-/// hostnames that *resolve* to private IPs are caught by the
+/// SEC-09: URL-level SSRF pre-check applied to every package download.
+/// Catches non-http(s) schemes, `localhost`, and private/link-local IP
+/// literals; hostnames that *resolve* to private IPs are caught by the
 /// [`SsrfFilteringResolver`](wafer_net_security::SsrfFilteringResolver)
 /// installed on the registry client (DNS rebinding, SEC-019).
 #[cfg(not(feature = "allow-private-network"))]
-fn ensure_url_allowed(url: &str, what: &str, name: &str) -> Result<(), RuntimeError> {
+fn ensure_url_allowed(url: &str, name: &str) -> Result<(), RuntimeError> {
     if wafer_net_security::is_blocked_url(url) {
         return Err(RuntimeError::Registry(format!(
-            "refusing to fetch {what} for {name}: {url} targets a private/internal address \
+            "refusing to fetch the package for {name}: {url} targets a private/internal address \
              (SEC-09; build with the `allow-private-network` feature for local registries)"
         )));
     }
@@ -85,147 +41,225 @@ fn ensure_url_allowed(url: &str, what: &str, name: &str) -> Result<(), RuntimeEr
 }
 
 /// SSRF escape hatch: the `allow-private-network` build permits registries
-/// and artifacts on private addresses (local development / integration
-/// tests only — see the feature docs in Cargo.toml).
+/// on private addresses (local development / integration tests only — see
+/// the feature docs in Cargo.toml).
 #[cfg(feature = "allow-private-network")]
-fn ensure_url_allowed(_url: &str, _what: &str, _name: &str) -> Result<(), RuntimeError> {
+fn ensure_url_allowed(_url: &str, _name: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// A parsed reference to a remote block, e.g. `"wafer-run/sqlite@0.3.0"`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RemoteBlockRef {
-    /// Org slug (left-hand side of `org/block`).
-    pub org: String,
-    /// Block name (right-hand side of `org/block`).
-    pub block: String,
-    /// Semver-style version following `@`.
-    pub version: String,
-}
-
-/// Parse a block name into a versioned `RemoteBlockRef` if it matches the
-/// `{org}/{block}@{version}` convention.
-///
-/// Returns `None` for local block names (no `/`, no version,
-/// wrong number of segments, or empty version).
-pub fn parse_versioned_block(name: &str) -> Option<RemoteBlockRef> {
-    let at_pos = name.rfind('@')?;
-    let path = &name[..at_pos];
-    let version = &name[at_pos + 1..];
-    if version.is_empty() || version == "latest" {
-        return None;
-    }
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
-        return None;
-    }
-    Some(RemoteBlockRef {
-        org: segments[0].to_string(),
-        block: segments[1].to_string(),
-        version: version.to_string(),
-    })
-}
-
-/// Parse a block name into an unversioned `RemoteBlockRef` if it matches the
-/// `{org}/{block}` convention. No `@version` suffix.
-///
-/// Returns `None` when the name has a version, no `/`, or wrong
-/// number of segments.
-pub fn parse_unversioned_block(name: &str) -> Option<RemoteBlockRef> {
-    // Strip optional @latest suffix
-    let name = name.strip_suffix("@latest").unwrap_or(name);
-    if name.contains('@') {
-        return None;
-    }
-    let segments: Vec<&str> = name.split('/').collect();
-    if segments.len() != 2 || segments.iter().any(|s| s.is_empty()) {
-        return None;
-    }
-    Some(RemoteBlockRef {
-        org: segments[0].to_string(),
-        block: segments[1].to_string(),
-        version: "latest".to_string(),
-    })
-}
-
-/// The identity of the block a registry reference names: the unversioned
-/// `{org}/{block}` of a `{org}/{block}`, `{org}/{block}@latest` or
-/// `{org}/{block}@{version}` reference. `None` when `reference` is none of
-/// those. See `RegistrationCore::register_remote_block` for why the version
-/// is not part of the identity.
-pub(crate) fn remote_block_identity(reference: &str) -> Option<String> {
-    parse_versioned_block(reference)
-        .or_else(|| parse_unversioned_block(reference))
-        .map(|r| format!("{}/{}", r.org, r.block))
-}
-
-/// Registry manifest format for resolving remote blocks.
-#[derive(serde::Deserialize)]
-pub(crate) struct RegistryManifest {
-    #[expect(
-        dead_code,
-        reason = "deserialized for round-trip fidelity; cross-checked elsewhere"
-    )]
-    pub(crate) name: String,
-    pub(crate) latest: String,
-    pub(crate) versions: HashMap<String, VersionEntry>,
-}
-
-/// A single version entry in a registry manifest.
-#[derive(serde::Deserialize)]
-pub(crate) struct VersionEntry {
-    pub(crate) abi: u32,
-    pub(crate) wasm_url: Option<String>,
-    pub(crate) flow_url: Option<String>,
-}
-
-/// SEC-09: per-response download caps for registry fetches. Bound the memory a
-/// single (possibly compromised) registry response can consume during `seal()`.
-const MAX_MANIFEST_BYTES: usize = 256 * 1024;
-const MAX_FLOW_BYTES: usize = 4 * 1024 * 1024;
-const MAX_WASM_BYTES: usize = 64 * 1024 * 1024;
-
-/// PERF-04: bounded fan-out for registry manifest/artifact fetches during
-/// `seal()`. Small enough to stay polite to the registry origin, large
-/// enough to overlap network latency across independent candidates.
+/// PERF-04: bounded fan-out for package downloads during `seal()`. Small
+/// enough to stay polite to the registry origin, large enough to overlap
+/// network latency across independent packages.
 const REMOTE_FETCH_CONCURRENCY: usize = 8;
 
-/// Read a response body into memory, refusing more than `max` bytes. The
-/// response must advertise a `Content-Length` (registry origins — GitHub raw,
-/// CDNs — always do); a missing length means an unbounded chunked stream, which
-/// is refused outright rather than buffered without limit. The advertised
-/// length is rejected if it exceeds `max`, and the buffered body is re-checked
-/// as defense-in-depth. Replaces the previous unbounded `.bytes()`.
+/// Read a response body into memory, refusing more than `max` bytes. An
+/// advertised `Content-Length` over `max` is refused before any body is
+/// read; the body is then read chunk by chunk and refused as soon as it
+/// passes `max`, so a missing or lying length cannot make it unbounded.
 async fn read_body_capped(
-    resp: reqwest::Response,
+    mut resp: reqwest::Response,
     max: usize,
     what: &str,
 ) -> Result<Vec<u8>, RuntimeError> {
-    let len = resp.content_length().ok_or_else(|| {
-        RuntimeError::Registry(format!(
-            "{what}: response has no Content-Length; refusing unbounded download"
-        ))
-    })?;
-    if len > max as u64 {
-        return Err(RuntimeError::Registry(format!(
-            "{what} exceeds the {max}-byte limit (Content-Length {len})"
-        )));
+    if let Some(len) = resp.content_length() {
+        if len > max as u64 {
+            return Err(RuntimeError::Registry(format!(
+                "{what} exceeds the {max}-byte limit (Content-Length {len})"
+            )));
+        }
     }
-    let body = resp
-        .bytes()
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| RuntimeError::Registry(format!("reading {what}: {e}")))?;
-    if body.len() > max {
+        .map_err(|e| RuntimeError::Registry(format!("reading {what}: {e}")))?
+    {
+        if body.len() + chunk.len() > max {
+            return Err(RuntimeError::Registry(format!(
+                "{what} exceeds the {max}-byte limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// The URL `wafer install` downloads `pkg`'s tarball from: its
+/// `registry+<url>` source joined with
+/// `/registry/download/{org}/{block}/{version}.wafer`, each coordinate one
+/// percent-encoded path segment.
+fn package_download_url(pkg: &LockfilePackage) -> Result<String, RuntimeError> {
+    let invalid =
+        |reason: String| RuntimeError::Lockfile(format!("{}@{}: {reason}", pkg.name, pkg.version));
+    let base = pkg
+        .source
+        .strip_prefix(REGISTRY_SOURCE_PREFIX)
+        .ok_or_else(|| invalid(format!("source {:?} is not a registry", pkg.source)))?;
+    let (org, block) = pkg
+        .name
+        .split_once('/')
+        .ok_or_else(|| invalid("name is not {org}/{block}".to_string()))?;
+    for segment in [org, block, pkg.version.as_str()] {
+        if !is_valid_path_segment(segment) {
+            return Err(invalid(format!("{segment:?} is not a valid path segment")));
+        }
+    }
+    let mut url = url::Url::parse(base.trim_end_matches('/'))
+        .map_err(|e| invalid(format!("registry {base:?} is not a URL: {e}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(invalid(format!("registry {base:?} is not an http(s) URL")));
+    }
+    url.path_segments_mut()
+        .map_err(|()| invalid(format!("registry {base:?} cannot take a path")))?
+        .pop_if_empty()
+        .extend([
+            "registry",
+            "download",
+            org,
+            block,
+            &format!("{}.wafer", pkg.version),
+        ]);
+    Ok(url.into())
+}
+
+/// Unpack the `.wasm` artifact from a package tarball in memory, under the
+/// same bounds `wafer install` extracts with: a decompressed stream of at
+/// most `MAX_DECOMPRESSED_BYTES` (which bounds header records and skipped
+/// bodies too), at most [`MAX_PACKAGE_ENTRIES`] entries and
+/// [`MAX_UNPACKED_BYTES`] of file content, regular files and directories
+/// only. The package's top level must hold exactly one `.wasm` and exactly
+/// one `wafer.toml` naming `pkg` — what the lockfile loader requires of a
+/// cached package.
+fn unpack_wasm(tarball: &[u8], pkg: &LockfilePackage) -> Result<Vec<u8>, RuntimeError> {
+    let bad = |reason: String| {
+        RuntimeError::Registry(format!("package {}@{}: {reason}", pkg.name, pkg.version))
+    };
+    let mut archive = tar::Archive::new(BoundedPackageStream::new(flate2::read::GzDecoder::new(
+        tarball,
+    )));
+    let entries = archive
+        .entries()
+        .map_err(|e| bad(format!("reading the tarball: {e}")))?;
+    let mut unpacked: u64 = 0;
+    let mut wasm: Option<Vec<u8>> = None;
+    let mut manifest: Option<Vec<u8>> = None;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_PACKAGE_ENTRIES {
+            return Err(bad(format!(
+                "more than {MAX_PACKAGE_ENTRIES} tarball entries"
+            )));
+        }
+        let mut entry = entry.map_err(|e| bad(format!("reading a tarball entry: {e}")))?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_dir() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| bad(format!("reading an entry path: {e}")))?
+            .into_owned();
+        if !entry_type.is_file() {
+            return Err(bad(format!(
+                "entry {} is not a regular file or directory",
+                path.display()
+            )));
+        }
+        let budget = MAX_UNPACKED_BYTES - unpacked;
+        let mut body = Vec::new();
+        (&mut entry)
+            .take(budget + 1)
+            .read_to_end(&mut body)
+            .map_err(|e| bad(format!("reading {}: {e}", path.display())))?;
+        if body.len() as u64 > budget {
+            return Err(bad(format!(
+                "unpacks to more than {MAX_UNPACKED_BYTES} bytes"
+            )));
+        }
+        unpacked += body.len() as u64;
+
+        let mut parts = path
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir));
+        let top_level = match (parts.next(), parts.next()) {
+            (Some(std::path::Component::Normal(file)), None) => file.to_str(),
+            _ => None,
+        };
+        match top_level {
+            Some("wafer.toml") if manifest.is_some() => {
+                return Err(bad("holds more than one wafer.toml".to_string()));
+            }
+            Some("wafer.toml") => manifest = Some(body),
+            Some(file) if file.ends_with(".wasm") && wasm.is_some() => {
+                return Err(bad("holds more than one .wasm artifact".to_string()));
+            }
+            Some(file) if file.ends_with(".wasm") => wasm = Some(body),
+            _ => {}
+        }
+    }
+
+    let manifest = manifest.ok_or_else(|| bad("has no wafer.toml".to_string()))?;
+    let manifest =
+        std::str::from_utf8(&manifest).map_err(|e| bad(format!("wafer.toml is not UTF-8: {e}")))?;
+    let packaged = crate::registry_loader::packaged_name(manifest)
+        .map_err(|e| bad(format!("parse wafer.toml: {e}")))?;
+    if packaged != pkg.name {
+        return Err(bad(format!("wafer.toml names {packaged:?}")));
+    }
+    wasm.ok_or_else(|| bad("has no .wasm artifact".to_string()))
+}
+
+/// Download `pkg`'s tarball and return its `.wasm` once both digests the
+/// lockfile pins have matched: the tarball's against `sha256`, then the
+/// unpacked artifact's against `wasm_sha256`. Pure network plus hashing —
+/// no runtime state — so packages can be fetched concurrently.
+async fn fetch_pinned_wasm(
+    client: &reqwest::Client,
+    pkg: &LockfilePackage,
+) -> Result<Vec<u8>, RuntimeError> {
+    let name = format!("{}@{}", pkg.name, pkg.version);
+    let url = package_download_url(pkg)?;
+    ensure_url_allowed(&url, &name)?;
+    let resp = client
+        .get(&url)
+        .header(
+            "User-Agent",
+            concat!("wafer-run/", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .map_err(|e| RuntimeError::Registry(format!("downloading {name} from {url}: {e}")))?;
+    let status = resp.status().as_u16();
+    if status != 200 {
         return Err(RuntimeError::Registry(format!(
-            "{what} exceeds the {max}-byte limit"
+            "downloading {name} from {url}: HTTP {status}"
         )));
     }
-    Ok(body.to_vec())
+    let tarball = read_body_capped(resp, MAX_PACKAGE_BYTES, &format!("package {name}")).await?;
+
+    let actual = sha256_hex(&tarball);
+    if actual != pkg.sha256 {
+        return Err(RuntimeError::Registry(format!(
+            "{name}: integrity check failed — wafer.lock pins sha256 {}, the registry served \
+             a tarball hashing to {actual}",
+            pkg.sha256
+        )));
+    }
+    let wasm = unpack_wasm(&tarball, pkg)?;
+    let actual = sha256_hex(&wasm);
+    if actual != pkg.wasm_sha256 {
+        return Err(RuntimeError::Registry(format!(
+            "{name}: integrity check failed — wafer.lock pins wasm_sha256 {}, the package's \
+             .wasm hashes to {actual}",
+            pkg.wasm_sha256
+        )));
+    }
+    Ok(wasm)
 }
 
 impl Wafer {
-    /// Build the short-lived HTTP client used for registry/manifest fetches
-    /// during one `seal()` pass.
+    /// Build the short-lived HTTP client used for package downloads during
+    /// one `seal()` pass.
     ///
     /// SSRF note: like the `wafer-run/network` client, the `SsrfFilteringResolver`
     /// DNS-rebind layer only runs on direct connections. With an
@@ -233,13 +267,13 @@ impl Wafer {
     /// the proxy and the resolver is bypassed (the `ensure_url_allowed`
     /// literal-URL gate still applies per fetch); a proxied deploy must enforce
     /// SSRF at the egress proxy.
-    pub(crate) fn registry_http_client() -> Result<reqwest::Client, RuntimeError> {
+    fn registry_http_client() -> Result<reqwest::Client, RuntimeError> {
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            // SEC-09: do not follow redirects. Manifest-controlled `wasm_url` /
-            // `flow_url` values are otherwise free to bounce the fetch through a
-            // redirect chain to an unintended (e.g. internal) destination. A
-            // registry that needs a redirect must publish the final URL.
+            .timeout(std::time::Duration::from_secs(120))
+            // SEC-09: do not follow redirects. The download URL is composed
+            // from the lockfile's source; a redirect could bounce it to an
+            // unintended (e.g. internal) destination. A registry that needs
+            // a redirect must be pinned at its final URL.
             .redirect(reqwest::redirect::Policy::none())
             // SEC-09: drop DNS results pointing at private/loopback/link-local
             // IPs (DNS rebinding). URL-level checks happen per fetch in
@@ -250,408 +284,263 @@ impl Wafer {
             .map_err(|e| RuntimeError::Registry(format!("failed to create HTTP client: {e}")))
     }
 
-    /// Resolve remote blocks for deferred registrations via the registry.
+    /// Download, verify and register the lockfile entries the lockfile
+    /// loader deferred because their cache directory is missing.
     ///
-    /// PERF-04: all network work (manifest fetches + artifact downloads)
-    /// runs with bounded concurrency over immutable data (`&client` only);
-    /// runtime mutations (`add_flow`, wasm instantiation +
-    /// `register_remote_block`) are applied sequentially after the joins.
-    /// `buffered` (rather than `buffer_unordered`) keeps result order equal
-    /// to candidate order, so registration stays deterministic for a given
-    /// candidate list.
-    pub(crate) async fn resolve_remote_entries(&mut self) -> Result<(), RuntimeError> {
-        let candidates: Vec<String> = self
-            .registration
-            .block_configs
-            .keys()
-            .filter(|name| name.contains('/'))
-            .filter(|name| !self.flows.contains_key(name.as_str()))
-            .filter(|name| !self.is_registered(name))
-            .filter(|name| {
-                parse_unversioned_block(name).is_some() || parse_versioned_block(name).is_some()
-            })
-            .cloned()
+    /// Each identity is checked before anything is fetched: one the
+    /// embedder registered, or an operator alias, is refused rather than
+    /// shadowed. Downloads run with bounded concurrency over immutable data
+    /// (PERF-04); a failed download or a digest mismatch fails `seal()` with
+    /// the cause. Registration is sequential and in lockfile order, through
+    /// the same path as a cached entry.
+    pub(crate) async fn fetch_deferred_lockfile_blocks(&mut self) -> Result<(), RuntimeError> {
+        let deferred: Vec<LockfilePackage> = self
+            .locked_blocks
+            .iter()
+            .filter(|locked| locked.deferred)
+            .map(|locked| locked.package.clone())
             .collect();
-
-        if candidates.is_empty() {
+        if deferred.is_empty() {
             return Ok(());
         }
-        for name in &candidates {
-            self.registration.check_downloadable(name)?;
+        for pkg in &deferred {
+            self.registration.check_downloadable(&pkg.name)?;
         }
 
         let client = Self::registry_http_client()?;
-
-        // Phase 1 — network: fetch each candidate's manifest and artifact
-        // (flow JSON or wasm bytes) concurrently.
-        let fetched: Vec<(String, FetchedCandidate)> =
-            futures::stream::iter(candidates.into_iter().map(|name| {
+        let fetched: Vec<(LockfilePackage, Vec<u8>)> =
+            futures::stream::iter(deferred.into_iter().map(|pkg| {
                 let client = &client;
                 async move {
-                    let outcome = fetch_candidate(client, &name).await?;
-                    Ok::<_, RuntimeError>((name, outcome))
+                    let wasm = fetch_pinned_wasm(client, &pkg).await?;
+                    Ok::<_, RuntimeError>((pkg, wasm))
                 }
             }))
             .buffered(REMOTE_FETCH_CONCURRENCY)
             .try_collect()
             .await?;
 
-        // Phase 2 — apply: register flows/blocks sequentially and collect
-        // the flow block-dependencies that still need resolving. Dedup so a
-        // dependency shared by several flows is fetched once; remember the
-        // first flow that wanted it for error context.
-        let mut deps: Vec<(String, String)> = Vec::new();
-        let mut dep_seen: HashSet<String> = HashSet::new();
-        for (name, outcome) in fetched {
-            match outcome {
-                FetchedCandidate::Skipped => {}
-                FetchedCandidate::Flow(flow) => {
-                    if let Some(blocks) = flow.blocks.as_ref() {
-                        for block_name in blocks {
-                            if !self.is_registered(block_name)
-                                && dep_seen.insert(block_name.clone())
-                            {
-                                deps.push((block_name.clone(), name.clone()));
-                            }
-                        }
-                    }
-                    self.add_flow(*flow)?;
-                }
-                FetchedCandidate::Wasm(bytes) => {
-                    let block = self.load_wasm_block(&bytes, &name)?;
-                    tracing::info!(block = %name, "downloaded remote WASM block from registry");
-                    self.registration.register_remote_block(&name, block)?;
-                }
-            }
+        for (pkg, wasm) in fetched {
+            self.register_locked_wasm(&pkg, &wasm)?;
+            tracing::info!(
+                block = %pkg.name,
+                version = %pkg.version,
+                "downloaded lockfile-pinned block from its registry"
+            );
         }
-
-        // A dependency may itself have been a candidate registered above.
-        deps.retain(|(block_name, _)| !self.is_registered(block_name));
-        if deps.is_empty() {
-            return Ok(());
-        }
-        for (block_name, _) in &deps {
-            self.registration.check_downloadable(block_name)?;
-        }
-
-        // Phase 3 — network: fetch dependency manifests + wasm bytes with
-        // the same bounded fan-out.
-        let fetched_deps: Vec<(String, String, Option<Vec<u8>>)> =
-            futures::stream::iter(deps.into_iter().map(|(block_name, flow_name)| {
-                let client = &client;
-                async move {
-                    match fetch_dependency_wasm(client, &block_name).await {
-                        Ok(bytes) => Ok((block_name, flow_name, bytes)),
-                        Err(e) => Err(RuntimeError::Registry(format!(
-                            "failed to download block dependency {block_name:?} for flow {flow_name:?}: {e}"
-                        ))),
-                    }
-                }
-            }))
-            .buffered(REMOTE_FETCH_CONCURRENCY)
-            .try_collect()
-            .await?;
-
-        // Phase 4 — apply: instantiate + register sequentially.
-        for (block_name, flow_name, bytes) in fetched_deps {
-            match bytes {
-                Some(bytes) => {
-                    let block = self.load_wasm_block(&bytes, &block_name).map_err(|e| {
-                        RuntimeError::Registry(format!(
-                            "failed to download block dependency {block_name:?} for flow {flow_name:?}: {e}"
-                        ))
-                    })?;
-                    tracing::info!(block = %block_name, "downloaded remote block");
-                    self.registration
-                        .register_remote_block(&block_name, block)?;
-                }
-                None => {
-                    tracing::debug!(
-                        block = %block_name,
-                        "block not found in registry, will resolve during step resolution"
-                    );
-                }
-            }
-        }
-
         Ok(())
     }
-
-    /// Whether `reference` names a registered block, directly or through an
-    /// alias — a versioned reference `seal()` already downloaded is an alias
-    /// of the block's identity.
-    fn is_registered(&self, reference: &str) -> bool {
-        self.registration
-            .blocks
-            .contains_key(self.registration.canonicalize(reference))
-    }
-
-    /// Instantiate downloaded `.wasm` bytes as a block against the shared
-    /// engine.
-    ///
-    /// The shared engine's `consume_fuel` flag and the per-call limits
-    /// passed here are both derived from the runtime's configuration, so a
-    /// remote block honours the builder's `fuel_per_call` /
-    /// `max_wasm_memory_pages` selection.
-    fn load_wasm_block(
-        &mut self,
-        bytes: &[u8],
-        name: &str,
-    ) -> Result<Arc<dyn Block>, RuntimeError> {
-        let limits = self.wasm.resource_limits();
-        let engine = self.wasm_engine()?.clone();
-        let block = crate::wasm::WasmiBlock::load_downloaded(&engine, bytes, limits)
-            .map_err(|e| RuntimeError::Wasm(format!("failed to load remote block {name}: {e}")))?;
-
-        Ok(Arc::new(block))
-    }
-
-    /// Resolve a remote block via the registry. Returns `Ok(None)` if the block
-    /// is not found in the registry.
-    pub(crate) async fn resolve_remote_block(
-        &mut self,
-        client: &reqwest::Client,
-        name: &str,
-    ) -> Result<Option<Arc<dyn Block>>, RuntimeError> {
-        match fetch_dependency_wasm(client, name).await? {
-            Some(bytes) => Ok(Some(self.load_wasm_block(&bytes, name)?)),
-            None => Ok(None),
-        }
-    }
-}
-
-/// Network-fetched resolution outcome for one candidate name. Produced
-/// concurrently in `resolve_remote_entries` phase 1; applied to the runtime
-/// sequentially in phase 2.
-enum FetchedCandidate {
-    /// Not a registry-shaped name, not in the registry (404), or a manifest
-    /// entry with no artifact URLs — skipped.
-    Skipped,
-    /// Manifest pointed at a flow: downloaded and parsed. Boxed — the
-    /// parsed flow is far larger than the other variants.
-    Flow(Box<wafer_flow::WaferFlow>),
-    /// Manifest pointed at a wasm artifact: raw bytes, instantiated later.
-    Wasm(Vec<u8>),
-}
-
-/// Fetch one candidate's manifest entry and its artifact. Pure network —
-/// takes no runtime state, so candidates can be fetched concurrently.
-async fn fetch_candidate(
-    client: &reqwest::Client,
-    name: &str,
-) -> Result<FetchedCandidate, RuntimeError> {
-    let Some(remote_ref) = parse_versioned_block(name).or_else(|| parse_unversioned_block(name))
-    else {
-        return Ok(FetchedCandidate::Skipped);
-    };
-
-    let Some(entry) = fetch_manifest_entry(client, &remote_ref, name).await? else {
-        // Not in the registry (404) — skip this candidate.
-        return Ok(FetchedCandidate::Skipped);
-    };
-
-    if let Some(flow_url) = &entry.flow_url {
-        let flow = download_flow_from_url(client, flow_url, name).await?;
-        Ok(FetchedCandidate::Flow(Box::new(flow)))
-    } else if let Some(wasm_url) = &entry.wasm_url {
-        let bytes = download_wasm_bytes(client, wasm_url, name).await?;
-        Ok(FetchedCandidate::Wasm(bytes))
-    } else {
-        Ok(FetchedCandidate::Skipped)
-    }
-}
-
-/// Fetch the `.wasm` bytes for a block via the registry. Pure network —
-/// no runtime state — so dependency fetches can run concurrently;
-/// instantiation happens afterwards via `Wafer::load_wasm_block`.
-///
-/// Returns `Ok(None)` when the name isn't registry-shaped, the registry has
-/// no manifest for it, or the manifest entry is a flow rather than a WASM
-/// block — callers defer those to step resolution.
-async fn fetch_dependency_wasm(
-    client: &reqwest::Client,
-    name: &str,
-) -> Result<Option<Vec<u8>>, RuntimeError> {
-    let Some(remote_ref) = parse_versioned_block(name).or_else(|| parse_unversioned_block(name))
-    else {
-        return Ok(None);
-    };
-
-    let Some(entry) = fetch_manifest_entry(client, &remote_ref, name).await? else {
-        return Ok(None);
-    };
-
-    if let Some(wasm_url) = &entry.wasm_url {
-        Ok(Some(download_wasm_bytes(client, wasm_url, name).await?))
-    } else if let Some(flow_url) = &entry.flow_url {
-        tracing::debug!(block = %name, flow_url = %flow_url, "block is a flow, not a WASM block");
-        Ok(None)
-    } else {
-        let crate_name = format!("wafer-block-{}", remote_ref.block);
-        Err(RuntimeError::Registry(format!(
-            "Block \"{name}\" is native-only and must be compiled in.\n\
-             Add it with: cargo add {crate_name}"
-        )))
-    }
-}
-
-/// Download a `.flow.json` from a direct URL and parse as WaferFlow.
-async fn download_flow_from_url(
-    client: &reqwest::Client,
-    url: &str,
-    name: &str,
-) -> Result<wafer_flow::WaferFlow, RuntimeError> {
-    ensure_url_allowed(url, "flow", name)?;
-    let resp = client
-        .get(url)
-        .header("User-Agent", "wafer-run/0.1.0")
-        .send()
-        .await
-        .map_err(|e| RuntimeError::Flow(format!("failed to download flow for {name}: {e}")))?;
-
-    if resp.status().as_u16() != 200 {
-        return Err(RuntimeError::Flow(format!(
-            "failed to download flow for {}: HTTP {}",
-            name,
-            resp.status().as_u16()
-        )));
-    }
-
-    let body = read_body_capped(resp, MAX_FLOW_BYTES, &format!("flow for {name}")).await?;
-
-    let body_str = std::str::from_utf8(&body)
-        .map_err(|e| RuntimeError::Flow(format!("failed to decode flow body for {name}: {e}")))?;
-
-    let flow = wafer_flow::parse(body_str)
-        .map_err(|e| RuntimeError::Flow(format!("failed to parse flow JSON for {name}: {e}")))?;
-
-    tracing::info!(flow = %flow.id, url = %url, "downloaded remote flow definition");
-    Ok(flow)
-}
-
-/// Download a `.wasm` artifact from a direct URL, returning the raw bytes.
-async fn download_wasm_bytes(
-    client: &reqwest::Client,
-    url: &str,
-    name: &str,
-) -> Result<Vec<u8>, RuntimeError> {
-    ensure_url_allowed(url, "WASM", name)?;
-    let resp = client
-        .get(url)
-        .header("User-Agent", "wafer-run/0.1.0")
-        .send()
-        .await
-        .map_err(|e| RuntimeError::Wasm(format!("failed to download WASM for {name}: {e}")))?;
-
-    let status = resp.status().as_u16();
-    if status != 200 {
-        return Err(RuntimeError::Wasm(format!(
-            "failed to download WASM for {name}: HTTP {status}"
-        )));
-    }
-
-    let body = read_body_capped(resp, MAX_WASM_BYTES, &format!("WASM for {name}")).await?;
-
-    if body.is_empty() {
-        return Err(RuntimeError::Wasm(format!(
-            "failed to download WASM for {name}: empty response body"
-        )));
-    }
-
-    Ok(body)
-}
-
-/// Fetch the registry manifest for `remote_ref`, select the requested version
-/// (resolving `"latest"` through the manifest's `latest` field), and check ABI
-/// compatibility.
-///
-/// Returns `Ok(None)` when the registry has no manifest for the block (HTTP
-/// 404) so callers decide how to proceed (skip the candidate / report
-/// not-found). Any other non-200 status, parse failure, unknown version, or
-/// ABI mismatch is an error.
-///
-/// Shared by [`Wafer::resolve_remote_entries`] and
-/// [`Wafer::resolve_remote_block`], which keep only their flow/wasm download
-/// branching.
-async fn fetch_manifest_entry(
-    client: &reqwest::Client,
-    remote_ref: &RemoteBlockRef,
-    name: &str,
-) -> Result<Option<VersionEntry>, RuntimeError> {
-    let manifest_url = format!(
-        "{}/{}/{}/manifest.json",
-        registry_base_url()?,
-        remote_ref.org,
-        remote_ref.block
-    );
-    ensure_url_allowed(&manifest_url, "registry manifest", name)?;
-
-    let resp = client
-        .get(&manifest_url)
-        .header("User-Agent", "wafer-run/0.1.0")
-        .send()
-        .await
-        .map_err(|e| {
-            RuntimeError::Registry(format!("failed to fetch registry manifest for {name}: {e}"))
-        })?;
-
-    if resp.status().as_u16() == 404 {
-        return Ok(None);
-    }
-    if resp.status().as_u16() != 200 {
-        return Err(RuntimeError::Registry(format!(
-            "failed to fetch registry manifest for {}: HTTP {}",
-            name,
-            resp.status().as_u16()
-        )));
-    }
-
-    let manifest_bytes =
-        read_body_capped(resp, MAX_MANIFEST_BYTES, &format!("manifest for {name}")).await?;
-    let mut manifest: RegistryManifest = serde_json::from_slice(&manifest_bytes).map_err(|e| {
-        RuntimeError::Registry(format!("failed to parse registry manifest for {name}: {e}"))
-    })?;
-
-    let version = if remote_ref.version == "latest" {
-        manifest.latest.clone()
-    } else {
-        remote_ref.version.clone()
-    };
-
-    let entry = manifest.versions.remove(&version).ok_or_else(|| {
-        RuntimeError::Registry(format!(
-            "version {version} not found in registry for {name}"
-        ))
-    })?;
-
-    if entry.abi != ABI_VERSION {
-        return Err(RuntimeError::AbiMismatch {
-            name: name.to_string(),
-            required: entry.abi,
-            supported: ABI_VERSION,
-        });
-    }
-
-    Ok(Some(entry))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A hostile manifest can point `wasm_url`/`flow_url` anywhere; the
-    /// pre-check must stop internal targets before any connection (SEC-09).
+    fn pkg(name: &str, version: &str, source: &str) -> LockfilePackage {
+        LockfilePackage {
+            name: name.into(),
+            version: version.into(),
+            sha256: String::new(),
+            wasm_sha256: String::new(),
+            source: source.into(),
+            capabilities: None,
+        }
+    }
+
+    /// The runtime downloads from the URL `wafer install` does, so one
+    /// registry serves both.
+    #[test]
+    fn download_url_is_the_install_url() {
+        for source in ["registry+https://wafer.run", "registry+https://wafer.run/"] {
+            assert_eq!(
+                package_download_url(&pkg("acme/widget", "1.2.0", source)).expect("url"),
+                "https://wafer.run/registry/download/acme/widget/1.2.0.wafer"
+            );
+        }
+        assert_eq!(
+            package_download_url(&pkg("acme/widget", "1.2.0", "registry+https://x.test/base"))
+                .expect("url"),
+            "https://x.test/base/registry/download/acme/widget/1.2.0.wafer"
+        );
+    }
+
+    #[test]
+    fn download_url_refuses_what_is_not_a_registry_coordinate() {
+        for (name, version, source) in [
+            ("acme/widget", "1.2.0", "path+/srv/blocks"),
+            ("acme/widget", "1.2.0", "registry+ftp://wafer.run"),
+            ("acme/widget", "1.2.0", "registry+not a url"),
+            ("acme", "1.2.0", "registry+https://wafer.run"),
+            ("acme/..", "1.2.0", "registry+https://wafer.run"),
+            ("acme/widget", "../../x", "registry+https://wafer.run"),
+        ] {
+            assert!(
+                package_download_url(&pkg(name, version, source)).is_err(),
+                "{name}@{version} from {source} must be refused"
+            );
+        }
+    }
+
+    const WAFER_TOML: &[u8] =
+        b"[package]\norg = \"acme\"\nname = \"widget\"\nversion = \"1.2.0\"\nabi = 1\n";
+
+    /// A gzipped tarball of `(path, type, body)` entries.
+    fn tarball(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        {
+            let mut tb = tar::Builder::new(&mut gz);
+            for (path, entry_type, body) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(path).unwrap();
+                header.set_entry_type(*entry_type);
+                header.set_size(body.len() as u64);
+                if entry_type.is_symlink() {
+                    header.set_link_name("../../escape").unwrap();
+                }
+                header.set_cksum();
+                tb.append(&header, *body).unwrap();
+            }
+            tb.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    }
+
+    fn widget() -> LockfilePackage {
+        pkg("acme/widget", "1.2.0", "registry+https://wafer.run")
+    }
+
+    #[test]
+    fn unpack_returns_the_packaged_wasm() {
+        let bytes = tarball(&[
+            ("./wafer.toml", tar::EntryType::Regular, WAFER_TOML),
+            ("widget.wasm", tar::EntryType::Regular, b"\0asm"),
+            ("docs/README.md", tar::EntryType::Regular, b"hi"),
+        ]);
+        assert_eq!(unpack_wasm(&bytes, &widget()).expect("unpacks"), b"\0asm");
+    }
+
+    /// What the cache loader would refuse is refused before compiling: a
+    /// link entry, a second `.wasm`, no `.wasm`, a second `wafer.toml`
+    /// (which would decide the name check by entry order), a `wafer.toml` naming
+    /// another block, and more entries than the bound.
+    #[test]
+    fn unpack_refuses_what_the_cache_loader_would() {
+        let regular = tar::EntryType::Regular;
+        let many: Vec<(String, tar::EntryType, &[u8])> = (0..=MAX_PACKAGE_ENTRIES)
+            .map(|i| (format!("f{i}"), regular, &b""[..]))
+            .collect();
+        let many: Vec<(&str, tar::EntryType, &[u8])> =
+            many.iter().map(|(p, t, b)| (p.as_str(), *t, *b)).collect();
+        for (case, bytes, expected) in [
+            (
+                "symlink",
+                tarball(&[
+                    ("wafer.toml", regular, WAFER_TOML),
+                    ("widget.wasm", tar::EntryType::Symlink, b""),
+                ]),
+                "not a regular file",
+            ),
+            (
+                "two wasm",
+                tarball(&[
+                    ("wafer.toml", regular, WAFER_TOML),
+                    ("a.wasm", regular, b"\0asm"),
+                    ("b.wasm", regular, b"\0asm"),
+                ]),
+                "more than one .wasm",
+            ),
+            (
+                "no wasm",
+                tarball(&[("wafer.toml", regular, WAFER_TOML)]),
+                "no .wasm",
+            ),
+            (
+                "two wafer.toml",
+                tarball(&[
+                    ("wafer.toml", regular, WAFER_TOML),
+                    ("./wafer.toml", regular, WAFER_TOML),
+                    ("widget.wasm", regular, b"\0asm"),
+                ]),
+                "more than one wafer.toml",
+            ),
+            (
+                "foreign name",
+                tarball(&[
+                    (
+                        "wafer.toml",
+                        regular,
+                        b"[package]\norg = \"a\"\nname = \"victim\"\n",
+                    ),
+                    ("widget.wasm", regular, b"\0asm"),
+                ]),
+                "wafer.toml names \"a/victim\"",
+            ),
+            ("too many entries", tarball(&many), "tarball entries"),
+        ] {
+            let err = unpack_wasm(&bytes, &widget()).expect_err(case).to_string();
+            assert!(err.contains(expected), "{case}: {err}");
+        }
+    }
+
+    /// What a tar reader consumes without surfacing it as file content is
+    /// bounded by the decompressed stream: a GNU long-name record, which the
+    /// reader buffers whole, and a directory entry declaring a huge body,
+    /// which it reads through to skip — each a small gzip of zeros followed
+    /// by an otherwise valid package.
+    #[test]
+    fn unpack_bounds_header_records_and_skipped_bodies() {
+        use wafer_block::lockfile::MAX_DECOMPRESSED_BYTES;
+
+        fn build(entry_type: tar::EntryType, path: &str) -> Vec<u8> {
+            let size = MAX_DECOMPRESSED_BYTES + 1024 * 1024;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            {
+                let mut tb = tar::Builder::new(&mut gz);
+                let mut h = tar::Header::new_gnu();
+                h.set_path(path).unwrap();
+                h.set_entry_type(entry_type);
+                h.set_size(size);
+                h.set_cksum();
+                tb.append(&h, std::io::repeat(0).take(size)).unwrap();
+                for (file, body) in [("wafer.toml", WAFER_TOML), ("widget.wasm", b"\0asm")] {
+                    let mut f = tar::Header::new_gnu();
+                    f.set_path(file).unwrap();
+                    f.set_size(body.len() as u64);
+                    f.set_cksum();
+                    tb.append(&f, body).unwrap();
+                }
+                tb.finish().unwrap();
+            }
+            gz.finish().unwrap()
+        }
+        for (case, bytes) in [
+            (
+                "long name",
+                build(tar::EntryType::GNULongName, "././@LongLink"),
+            ),
+            ("huge directory", build(tar::EntryType::Directory, "dir/")),
+        ] {
+            assert!(
+                bytes.len() < MAX_PACKAGE_BYTES,
+                "{case}: the bomb downloads"
+            );
+            let err = unpack_wasm(&bytes, &widget()).expect_err(case).to_string();
+            assert!(err.contains("decompresses to more than"), "{case}: {err}");
+        }
+    }
+
+    /// A hostile registry host must be stopped before any connection (SEC-09).
     #[cfg(not(feature = "allow-private-network"))]
     #[test]
     fn ensure_url_allowed_blocks_internal_targets() {
         for url in [
             "http://169.254.169.254/latest/meta-data/", // cloud metadata
-            "http://127.0.0.1:8080/block.wasm",
-            "http://localhost/block.wasm",
-            "http://10.0.0.7/block.wasm",
+            "http://127.0.0.1:8080/registry/download/a/b/1.0.0.wafer",
+            "http://localhost/registry/download/a/b/1.0.0.wafer",
+            "http://10.0.0.7/registry/download/a/b/1.0.0.wafer",
             "file:///etc/passwd",
         ] {
-            let err = ensure_url_allowed(url, "WASM", "acme/widget").expect_err("must be refused");
+            let err = ensure_url_allowed(url, "acme/widget@1.0.0").expect_err("must be refused");
             let msg = err.to_string();
             assert!(
                 msg.contains("SEC-09") && msg.contains(url),
@@ -663,48 +552,10 @@ mod tests {
     #[cfg(not(feature = "allow-private-network"))]
     #[test]
     fn ensure_url_allowed_passes_public_targets() {
-        for url in [
-            "https://raw.githubusercontent.com/wafer-run/registry/main/a/b/manifest.json",
-            "https://github.com/wafer-run/wafer-run/releases/download/v1/block.wasm",
-        ] {
-            ensure_url_allowed(url, "WASM", "acme/widget").expect("public URL must pass");
-        }
-    }
-
-    /// One test, sequential phases — `registry_base_url` reads process env.
-    #[test]
-    fn registry_base_url_env_override() {
-        // Absent → documented default.
-        std::env::remove_var(REGISTRY_BASE_URL_KEY);
-        assert_eq!(
-            registry_base_url().expect("default"),
-            REGISTRY_MANIFEST_BASE_URL
-        );
-
-        // Empty = absent (env-file `FOO=` must not change behavior).
-        std::env::set_var(REGISTRY_BASE_URL_KEY, "  ");
-        assert_eq!(
-            registry_base_url().expect("empty is absent"),
-            REGISTRY_MANIFEST_BASE_URL
-        );
-
-        // Trailing slash is trimmed so composed paths stay canonical.
-        std::env::set_var(REGISTRY_BASE_URL_KEY, "https://registry.example.com/base/");
-        assert_eq!(
-            registry_base_url().expect("valid override"),
-            "https://registry.example.com/base"
-        );
-
-        // Present-but-invalid → loud error naming the var.
-        for bad in ["not a url", "ftp://registry.example.com"] {
-            std::env::set_var(REGISTRY_BASE_URL_KEY, bad);
-            let err = registry_base_url().expect_err("invalid value must error");
-            assert!(
-                err.to_string().contains(REGISTRY_BASE_URL_KEY),
-                "error must name the env var: {err}"
-            );
-        }
-
-        std::env::remove_var(REGISTRY_BASE_URL_KEY);
+        ensure_url_allowed(
+            "https://wafer.run/registry/download/acme/widget/1.0.0.wafer",
+            "acme/widget@1.0.0",
+        )
+        .expect("public URL must pass");
     }
 }
