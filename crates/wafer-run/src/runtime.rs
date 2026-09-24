@@ -503,8 +503,9 @@ impl Wafer {
     /// block's reported name. Both lists empty, or no such block, yields
     /// `None` — the block's `call_block` set is unrestricted, matching
     /// [`RuntimeContext::caller_requires`] semantics.
-    /// Run once per block at seal time to populate the plan, and directly only
-    /// on plan misses.
+    /// Used only when the seal-time plan has no entry for the block (a context
+    /// built before seal, or a block registered after it); the plan itself is
+    /// compiled from each block's `BlockInfo` in `compile_plan`.
     pub(crate) fn resolve_block_requires_uncached(
         &self,
         resolved_block_name: &str,
