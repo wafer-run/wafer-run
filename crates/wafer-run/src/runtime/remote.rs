@@ -276,6 +276,9 @@ impl Wafer {
         if candidates.is_empty() {
             return Ok(());
         }
+        for name in &candidates {
+            self.registration.check_downloadable(name)?;
+        }
 
         let client = Self::registry_http_client()?;
 
@@ -326,6 +329,9 @@ impl Wafer {
         deps.retain(|(block_name, _)| !self.is_registered(block_name));
         if deps.is_empty() {
             return Ok(());
+        }
+        for (block_name, _) in &deps {
+            self.registration.check_downloadable(block_name)?;
         }
 
         // Phase 3 — network: fetch dependency manifests + wasm bytes with

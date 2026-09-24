@@ -74,7 +74,8 @@ void wafer_resolve(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 
 /*
  * Start the runtime without spawning block listeners (async). Resolves the
- * runtime first unless wafer_resolve already did.
+ * runtime first unless wafer_resolve already did; after a failed
+ * wafer_resolve it reports that failure again.
  *
  * Returns immediately. Invokes `cb` with NULL on success, or a JSON error
  * string on failure.

@@ -111,6 +111,7 @@ mod tests {
             sha256: "a".repeat(64),
             wasm_sha256: "b".repeat(64),
             source: "registry+https://wafer.run".into(),
+            capabilities: None,
         }
     }
 
@@ -225,6 +226,7 @@ source = "registry+https://wafer.run"
             sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
             wasm_sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".into(),
             source: "registry+https://wafer.run".into(),
+            capabilities: None,
         });
         lf.insert_or_replace(LockfilePackage {
             name: "my-org/auth".into(),
@@ -232,6 +234,7 @@ source = "registry+https://wafer.run"
             sha256: "a".repeat(64),
             wasm_sha256: "c".repeat(64),
             source: "path+./local".into(),
+            capabilities: None,
         });
 
         let expected = format!(

@@ -23,8 +23,8 @@ pub(crate) struct WrapState {
     pub(crate) grants_external: Vec<wafer_block::types::ResourceGrant>,
     /// The block ID granted admin privileges (exact match).
     pub(crate) admin_block: Arc<String>,
-    /// Effective capabilities per block: declared ∩ config, within the
-    /// bound a WASM block was loaded with. Computed by `seal()`.
+    /// Effective capabilities per block: declared ∩ config, and for a WASM
+    /// block ∩ its bound. Computed by `seal()`.
     pub(crate) effective_capabilities: Arc<HashMap<String, wafer_block::BlockCapabilities>>,
     /// Accumulator for grant-validation failures; drained + checked by
     /// `Wafer::start()`, which fails boot with `RuntimeError::GrantsRejected`
@@ -333,6 +333,48 @@ impl RegistrationCore {
         Ok(())
     }
 
+    /// Refuse to download `reference` when registering what it names could
+    /// not succeed, or must not; returns the identity it would register as,
+    /// or `None` when `reference` is not a registry reference at all (there
+    /// is nothing to download).
+    /// `seal()` calls this before fetching anything, and
+    /// [`register_remote_block`](Self::register_remote_block) again before
+    /// registering.
+    ///
+    /// - Its identity is the admin block: the admin block is the one
+    ///   identity WRAP trusts with typed Network/Crypto grants, so it comes
+    ///   from the embedder, never from a registry.
+    /// - Its identity is already registered — a block the embedder linked
+    ///   in, or another version already downloaded (`DuplicateBlock`).
+    /// - Its identity, or the versioned reference itself, is already an
+    ///   operator alias: registering would shadow the alias or overwrite it.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn check_downloadable(
+        &self,
+        reference: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let Some(identity) = crate::runtime::remote::remote_block_identity(reference) else {
+            return Ok(None);
+        };
+        if !self.wrap.admin_block.is_empty() && identity == *self.wrap.admin_block {
+            return Err(RuntimeError::Config(format!(
+                "{reference} names the admin block {identity}, which is never downloaded; \
+                 register it before seal()"
+            )));
+        }
+        if self.blocks.contains_key(&identity) {
+            return Err(RuntimeError::DuplicateBlock { name: identity });
+        }
+        for name in [identity.as_str(), reference] {
+            if let Some(target) = self.aliases.get(name) {
+                return Err(RuntimeError::Config(format!(
+                    "remote block {reference}: {name} is already an alias of {target}"
+                )));
+            }
+        }
+        Ok(Some(identity))
+    }
+
     /// Register a block `seal()` downloaded from the registry for
     /// `reference` — `{org}/{block}`, `{org}/{block}@latest` or
     /// `{org}/{block}@{version}` — through the same checks as a
@@ -361,20 +403,14 @@ impl RegistrationCore {
         block: Arc<dyn Block>,
     ) -> Result<(), RuntimeError> {
         let identity =
-            crate::runtime::remote::remote_block_identity(reference).ok_or_else(|| {
-                RuntimeError::InvalidBlockName {
+            self.check_downloadable(reference)?
+                .ok_or_else(|| RuntimeError::InvalidBlockName {
                     name: reference.to_string(),
                     reason: "not a registry reference {org}/{block}[@{version}]".to_string(),
-                }
-            })?;
+                })?;
         let info = self.admit(&identity, &block)?;
 
         if reference != identity {
-            if self.aliases.contains_key(&identity) {
-                return Err(RuntimeError::Config(format!(
-                    "remote block {reference}: its name {identity} is already an alias"
-                )));
-            }
             if self.block_configs.contains_key(reference)
                 && self.block_configs.contains_key(&identity)
             {

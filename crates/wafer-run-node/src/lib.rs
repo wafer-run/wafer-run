@@ -23,7 +23,7 @@ mod bindings {
     use napi::bindgen_prelude::*;
     use napi_derive::napi;
     use tokio::sync::RwLock;
-    use wafer_run::{Message, StaticConfigSource, Wafer};
+    use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 
     /// The WAFER runtime, exposed as a JavaScript class.
     ///
@@ -103,7 +103,9 @@ mod bindings {
                 .map_err(|e| Error::from_reason(e.to_string()))
         }
 
-        /// Start the runtime. Calls `seal()` if not already sealed.
+        /// Start the runtime. Calls `seal()` if `resolve()` has not; if
+        /// `resolve()` failed, rejects with that failure rather than starting a
+        /// runtime that never finished sealing.
         ///
         /// Uses `seal()` (no `bind()` on blocks) because the Node.js dev server
         /// has its own HTTP handling — blocks that spawn listeners are not needed
@@ -115,11 +117,13 @@ mod bindings {
         #[napi]
         pub async fn start(&self) -> Result<()> {
             let mut inner = self.inner.write().await;
-            if !inner.is_sealed() {
-                inner
+            match inner.seal_state().clone() {
+                SealState::Unsealed => inner
                     .seal()
                     .await
-                    .map_err(|e| Error::from_reason(e.to_string()))?;
+                    .map_err(|e| Error::from_reason(e.to_string()))?,
+                SealState::Sealed => {}
+                SealState::Failed(reason) => return Err(Error::from_reason(reason)),
             }
             drop(inner);
             self.started.store(true, Ordering::Relaxed);

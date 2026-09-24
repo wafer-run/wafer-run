@@ -85,6 +85,13 @@ pub struct LockfilePackage {
     pub wasm_sha256: String,
     /// Provenance in Cargo convention: `registry+<base-url>` or `path+<dir>`.
     pub source: String,
+    /// The capabilities the operator approves for this block: the upper
+    /// bound the runtime loads it with, which the guest's own declaration
+    /// can only narrow. Absent, the block's bound is its `capabilities`
+    /// block config, and `none()` without one. Written by the operator, not
+    /// by `wafer install`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::BlockCapabilities>,
 }
 
 /// In-memory form of a `wafer.lock` file.
@@ -165,6 +172,7 @@ mod tests {
             sha256: "a".repeat(64),
             wasm_sha256: "b".repeat(64),
             source: "registry+https://wafer.run".into(),
+            capabilities: None,
         }
     }
 

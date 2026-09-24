@@ -73,6 +73,16 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
         None
     }
 
+    /// The upper bound this block's embedder constructed it with, if any — a
+    /// WASM block loaded with explicit capabilities. `None` (the default)
+    /// means no embedder stated one: `seal()` then bounds a WASM block by the
+    /// operator's `capabilities` block config read as a full statement
+    /// (`ConfigCapabilityOverrides::as_stated_bound`, `none()` when absent),
+    /// and leaves a native block, which is trusted, unbounded.
+    fn capability_bound(&self) -> Option<BlockCapabilities> {
+        None
+    }
+
     /// Update the block's runtime-enforcement capabilities atomically.
     ///
     /// Called by the runtime's `seal()` with the effective caps it computed

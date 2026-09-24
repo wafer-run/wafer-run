@@ -32,8 +32,9 @@ impl Wafer {
     ///    `RuntimeError::BlocksNotFound` so operators see the full punch
     ///    list with each missing block's source.
     /// 4. Refuse boot if any WRAP grants were rejected during registration.
-    /// 5. Compute effective capabilities per block (declared ∩ config, within
-    ///    the bound a block was loaded with) and propagate them into each
+    /// 5. Compute effective capabilities per block (declared ∩ config, and
+    ///    for a WASM block ∩ the bound its embedder or operator stated) and
+    ///    propagate them into each
     ///    block. Then resolve the wasm instance-pooling policy: validate the
     ///    host kill switch (`WAFER_RUN_WASM_POOLING` — invalid values refuse
     ///    boot) and log each WASM block whose declared `Singleton`/`PerFlow`
@@ -46,7 +47,8 @@ impl Wafer {
     /// A runtime is sealed once: a second call returns
     /// [`RuntimeError::AlreadySealed`], whether the first succeeded or not.
     /// Step 5 consumes each block config's `capabilities` narrowing, so a
-    /// second pass would recompute capabilities without it.
+    /// second pass would recompute capabilities without it. The outcome is
+    /// kept in [`seal_state`](Self::seal_state).
     ///
     /// Block `Init` lifecycle events are **not** dispatched here. Each block
     /// is initialized on first dispatch via [`Wafer::init_block`] (lazy
@@ -54,10 +56,24 @@ impl Wafer {
     /// broken paths surface as 5xx on first invocation. Use
     /// [`Wafer::validate_all_block_configs`] for proactive health checks.
     pub async fn seal(&mut self) -> Result<(), RuntimeError> {
-        if std::mem::replace(&mut self.sealed, true) {
+        if self.seal_state != super::SealState::Unsealed {
             return Err(RuntimeError::AlreadySealed);
         }
+        let result = self.seal_once().await;
+        self.seal_state = match &result {
+            Ok(()) => super::SealState::Sealed,
+            Err(e) => super::SealState::Failed(e.to_string()),
+        };
+        result
+    }
 
+    /// The outcome of [`seal`](Self::seal): not run, succeeded, or failed.
+    pub fn seal_state(&self) -> &super::SealState {
+        &self.seal_state
+    }
+
+    /// The seal pipeline [`seal`](Self::seal) runs once.
+    async fn seal_once(&mut self) -> Result<(), RuntimeError> {
         #[cfg(feature = "wasm")]
         self.resolve_remote_entries().await?;
 
@@ -78,13 +94,6 @@ impl Wafer {
 
         self.finalize_snapshot();
         Ok(())
-    }
-
-    /// Whether [`seal`](Self::seal) has run on this runtime (successfully or
-    /// not). Embedders with separate "resolve" and "start" entry points call
-    /// `seal()` from the second only when this is `false`.
-    pub fn is_sealed(&self) -> bool {
-        self.sealed
     }
 
     /// Refuse boot when two endpoints declare the same WebMCP agent-tool
@@ -183,12 +192,15 @@ impl Wafer {
         Err(RuntimeError::GrantsRejected(errors))
     }
 
-    /// Compute effective capabilities per block — declared ∩ config — and
-    /// install them in the block. A block loaded with a capability bound (a
-    /// WASM block its embedder loaded through `WasmiBlock::load_with_*`)
-    /// enforces bound ∩ that set instead, and what it reports enforcing is
-    /// what is recorded in `effective_capabilities`: the guest's own
-    /// declaration can narrow what its embedder allowed, never widen it.
+    /// Compute effective capabilities per block and install them in the
+    /// block: declared ∩ config, and for a WASM block ∩ its bound. The bound
+    /// is what someone other than the guest stated — the embedder's load
+    /// capabilities (`WasmiBlock::load_with_*`, a lockfile entry's
+    /// `capabilities`), else the operator's `capabilities` block config read
+    /// as a full statement, which is `none()` when absent. The guest's own
+    /// declaration only narrows it. What the block reports enforcing is what
+    /// is recorded in `effective_capabilities`. Native blocks are compiled
+    /// into the host and have no bound.
     /// Also strips the reserved `capabilities` subkey from each block config
     /// so it doesn't leak into `ctx.config_get(...)`.
     ///
@@ -221,7 +233,13 @@ impl Wafer {
             let config_overrides =
                 take_capability_overrides(name, self.registration.block_configs.get_mut(name))?;
 
-            let effective = declared.apply_config_overrides(&config_overrides);
+            let mut effective = declared.apply_config_overrides(&config_overrides);
+            if info.runtime == wafer_block::BlockRuntime::Wasm {
+                let bound = block
+                    .capability_bound()
+                    .unwrap_or_else(|| config_overrides.as_stated_bound());
+                effective = bound.intersect(&effective);
+            }
 
             // Warn on widening attempts (fields where config > declared).
             log_widening_attempts(name, &config_overrides, &effective);
@@ -354,6 +372,7 @@ impl Wafer {
             }
             #[cfg(feature = "wasm")]
             {
+                self.registration.check_downloadable(&canonical)?;
                 match self.resolve_remote_block(&client, &canonical).await {
                     Ok(Some(block)) => {
                         tracing::info!(block = %canonical, "downloaded remote block");

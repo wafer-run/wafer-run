@@ -149,8 +149,26 @@ pub struct Wafer {
     /// every consumer falls back to the uncompiled path on a miss.
     /// See [`SealedPlan`](crate::runtime::exec_plan::SealedPlan).
     pub(crate) plan: crate::runtime::exec_plan::SealedPlan,
-    /// Set by the first [`Wafer::seal`] call; a second call is refused.
-    pub(crate) sealed: bool,
+    /// Where [`Wafer::seal`] stands: not run, succeeded, or failed (with the
+    /// failure it reported). A second call is refused either way.
+    pub(crate) seal_state: SealState,
+}
+
+/// The outcome of [`Wafer::seal`], which runs once per runtime.
+///
+/// An embedder with separate "resolve" and "start" entry points seals from
+/// the second only while [`Unsealed`](Self::Unsealed), and re-reports a
+/// [`Failed`](Self::Failed) seal instead of starting a runtime that never
+/// finished sealing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealState {
+    /// `seal()` has not run.
+    Unsealed,
+    /// `seal()` ran and succeeded.
+    Sealed,
+    /// `seal()` ran and failed with this error (rendered). The runtime is not
+    /// usable and cannot be sealed again.
+    Failed(String),
 }
 
 impl Wafer {
@@ -193,7 +211,7 @@ impl Wafer {
             wasm: crate::runtime::wasm_state::WasmState::new(),
             config: crate::runtime::config_source::ConfigState::default_static(),
             plan: crate::runtime::exec_plan::SealedPlan::empty(),
-            sealed: false,
+            seal_state: SealState::Unsealed,
         }
     }
 
@@ -373,8 +391,9 @@ impl Wafer {
     }
 
     /// Look up the effective capabilities `seal()` computed for a registered
-    /// block: declared ∩ config, within the bound a WASM block was loaded
-    /// with — the set the block enforces. `None` before `seal()`, and for a
+    /// block: declared ∩ config, and for a WASM block ∩ its bound (the
+    /// embedder's load capabilities, else the operator's `capabilities`
+    /// statement, `none()` without one) — the set the block enforces. `None` before `seal()`, and for a
     /// name `seal()` did not see registered.
     pub fn effective_capabilities(
         &self,

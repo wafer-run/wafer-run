@@ -145,6 +145,7 @@ pub(crate) fn lockfile_entry(
         sha256: sha256.into(),
         wasm_sha256: wasm_sha256.into(),
         source: format!("registry+{registry}"),
+        capabilities: None,
     }
 }
 
@@ -754,6 +755,7 @@ mod tests {
             sha256: "zzz".into(),
             wasm_sha256: "www".into(),
             source: "registry+https://x".into(),
+            capabilities: None,
         });
         assert_eq!(
             cache_hit(&cache, &lf, "a", "b", "1.0.0").unwrap(),
