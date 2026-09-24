@@ -993,6 +993,26 @@
 
 ### Fixed
 
+- The SQLite `VectorService` (`wafer-block-sqlite`, `vectors` feature)
+  returns the top `top_k` entries that match a metadata filter. The filter
+  used to run after the ranking query's `LIMIT` (`top_k` for vector search,
+  at least 50 for keyword and hybrid), so matches ranked below that many
+  non-matching entries were dropped: a tenant-filtered query on a shared
+  index came back short or empty as the index grew. The filter now runs
+  inside each ranking query, before its `LIMIT`, through a SQL function
+  (`wafer_sql_utils::vector::METADATA_FILTER_FN`, used by the new
+  `VectorIndexSchema::build_vec_knn_select_filtered` and
+  `build_fts_bm25_select_filtered`) that evaluates `MetadataFilter::matches`
+  itself, so filtered results keep the filter's typed, dot-path semantics.
+  Its vector writes take the write lock up front
+  (`BEGIN IMMEDIATE`): `upsert` and `delete` read before writing inside a
+  deferred transaction, so while another connection to the same file (the
+  database service) held or had just committed a write, they failed at once
+  with `SQLITE_BUSY` instead of waiting through the busy handler. `delete`
+  no longer skips a rowid it cannot read (which deleted the entry's
+  metadata and left its vector orphaned), `upsert` no longer treats a failed
+  rowid lookup as "new entry", and a query no longer drops metadata rows it
+  cannot read; each is now an `Internal` error.
 - A failed Init is retried when the failure was transient. Every
   `lifecycle(Init)` error used to be cached as permanent for the life of the
   process, so one bad moment at boot (a backend `Unavailable`, a spent

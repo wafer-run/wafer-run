@@ -24,7 +24,7 @@ chrono = { workspace = true }
 
 [features]
 default = []
-vectors = ["dep:sqlite-vec"]
+vectors = ["dep:sqlite-vec", "rusqlite/functions"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
