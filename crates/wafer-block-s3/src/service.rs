@@ -18,10 +18,15 @@ use wafer_core::interfaces::storage::service::*;
 ///
 /// Objects are stored under `{prefix}/{folder}/{key}` for tenant isolation.
 /// Folders are represented by zero-length objects with a trailing `/` key.
+///
+/// `get` and `get_streaming` refuse an object larger than the read cap
+/// ([`DEFAULT_MAX_OBJECT_BYTES`] unless set with
+/// [`Self::with_max_object_bytes`]) with [`StorageError::TooLarge`].
 pub struct S3StorageService {
     client: Client,
     bucket: String,
     prefix: String,
+    max_object_bytes: u64,
 }
 
 impl S3StorageService {
@@ -29,11 +34,7 @@ impl S3StorageService {
     pub async fn new(bucket: &str, prefix: &str) -> Result<Self, StorageError> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = Client::new(&config);
-        Ok(Self {
-            client,
-            bucket: bucket.to_string(),
-            prefix: prefix.to_string(),
-        })
+        Ok(Self::from_client(client, bucket, prefix))
     }
 
     /// Create with a custom endpoint for MinIO/Tigris/R2 compatibility.
@@ -52,11 +53,105 @@ impl S3StorageService {
             .force_path_style(true) // needed for MinIO
             .build();
         let client = Client::from_conf(s3_config);
-        Ok(Self {
+        Ok(Self::from_client(client, bucket, prefix))
+    }
+
+    fn from_client(client: Client, bucket: &str, prefix: &str) -> Self {
+        Self {
             client,
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
-        })
+            max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+        }
+    }
+
+    /// Set the largest object, in bytes, `get` and `get_streaming` will read.
+    #[must_use]
+    pub fn with_max_object_bytes(mut self, max_object_bytes: u64) -> Self {
+        self.max_object_bytes = max_object_bytes;
+        self
+    }
+
+    /// Refuse an object whose advertised `Content-Length` is over the read
+    /// cap. A missing or negative length passes; the caller bounds the body
+    /// by its running total instead.
+    fn check_advertised_length(
+        &self,
+        s3_key: &str,
+        content_length: i64,
+    ) -> Result<(), StorageError> {
+        match u64::try_from(content_length) {
+            Ok(advertised) if advertised > self.max_object_bytes => {
+                Err(StorageError::TooLarge(format!(
+                    "S3 object {s3_key} is {advertised} bytes, exceeds limit of {} bytes",
+                    self.max_object_bytes
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Issue one `DeleteObjects` request for `keys` and return the keys S3
+    /// reported in the response's `Errors` list, with their error codes.
+    /// S3 answers `200 OK` even when some keys were not deleted, so an `Ok`
+    /// from the SDK alone does not mean the batch is gone.
+    async fn delete_batch(&self, keys: &[String]) -> Result<Vec<FailedDelete>, StorageError> {
+        let objects = keys
+            .iter()
+            .map(|k| {
+                aws_sdk_s3::types::ObjectIdentifier::builder()
+                    .key(k)
+                    .build()
+                    .map_err(|e| StorageError::Internal(format!("build ObjectIdentifier {k}: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let delete = aws_sdk_s3::types::Delete::builder()
+            .set_objects(Some(objects))
+            .build()
+            .map_err(|e| StorageError::Internal(format!("build Delete request: {e}")))?;
+
+        let output = self
+            .client
+            .delete_objects()
+            .bucket(&self.bucket)
+            .delete(delete)
+            .send()
+            .await
+            .map_err(|e| StorageError::Internal(format!("S3 DeleteObjects: {e}")))?;
+
+        Ok(output
+            .errors()
+            .iter()
+            .map(|e| FailedDelete {
+                key: e.key().unwrap_or_default().to_string(),
+                code: e.code().unwrap_or_default().to_string(),
+                message: e.message().unwrap_or_default().to_string(),
+            })
+            .collect())
+    }
+
+    /// Delete `keys`, retrying the keys S3 failed with a transient per-key
+    /// error ([`is_transient_delete_error`]), for [`DELETE_ATTEMPTS`]
+    /// attempts in all. Returns every key still not deleted after that.
+    async fn delete_keys(&self, keys: Vec<String>) -> Result<Vec<FailedDelete>, StorageError> {
+        let mut pending = keys;
+        let mut not_deleted = Vec::new();
+        let mut attempt: u32 = 1;
+        loop {
+            let (transient, permanent): (Vec<_>, Vec<_>) = self
+                .delete_batch(&pending)
+                .await?
+                .into_iter()
+                .partition(|f| !f.key.is_empty() && is_transient_delete_error(&f.code));
+            not_deleted.extend(permanent);
+            if transient.is_empty() || attempt == DELETE_ATTEMPTS {
+                not_deleted.extend(transient);
+                return Ok(not_deleted);
+            }
+            tokio::time::sleep(DELETE_RETRY_BACKOFF * attempt).await;
+            attempt += 1;
+            pending = transient.into_iter().map(|f| f.key).collect();
+        }
     }
 
     /// Build the full S3 key for an object: `{prefix}/{folder}/{key}`.
@@ -168,6 +263,51 @@ impl S3StorageService {
 /// per-request key limit).
 const MAX_KEYS_PER_PAGE: usize = 1000;
 
+/// `DeleteObjects` attempts per batch, the first included, when S3 reports
+/// transient per-key failures.
+const DELETE_ATTEMPTS: u32 = 3;
+
+/// Wait before retry `n` of a batch's transient failures: `n` times this.
+const DELETE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Most failed keys a `delete_folder` error names; the rest are counted.
+const MAX_REPORTED_DELETE_FAILURES: usize = 10;
+
+/// One key a `DeleteObjects` response listed under `Errors`.
+#[derive(Debug)]
+struct FailedDelete {
+    key: String,
+    code: String,
+    message: String,
+}
+
+/// Whether a per-key `DeleteObjects` error code is one S3 documents as
+/// transient, so the same request can succeed on retry.
+fn is_transient_delete_error(code: &str) -> bool {
+    matches!(code, "InternalError" | "ServiceUnavailable" | "SlowDown")
+}
+
+/// The `delete_folder` error for keys S3 did not delete: the count and the
+/// first [`MAX_REPORTED_DELETE_FAILURES`] keys with their codes.
+fn partial_delete_error(prefix: &str, failed: &[FailedDelete]) -> StorageError {
+    let listed = failed
+        .iter()
+        .take(MAX_REPORTED_DELETE_FAILURES)
+        .map(|f| format!("{} ({}: {})", f.key, f.code, f.message))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = failed.len().saturating_sub(MAX_REPORTED_DELETE_FAILURES);
+    let tail = if more > 0 {
+        format!(", and {more} more")
+    } else {
+        String::new()
+    };
+    StorageError::Internal(format!(
+        "S3 DeleteObjects {prefix}: {} object(s) not deleted: {listed}{tail}",
+        failed.len()
+    ))
+}
+
 // Streaming policy: `get_streaming` streams the `GetObject` response body
 // (`ByteStream`) without buffering it whole. `put_streaming` deliberately
 // keeps the buffered default — S3 `PutObject` requires a known
@@ -198,6 +338,10 @@ impl StorageService for S3StorageService {
         Ok(())
     }
 
+    /// Buffers the object body whole, so it enforces the read cap twice: an
+    /// advertised `Content-Length` over it is refused before any body byte
+    /// is read, and the running total is checked per chunk in case the
+    /// length is absent or understated.
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
         let s3_key = self.s3_key(folder, key);
 
@@ -223,18 +367,28 @@ impl StorageService for S3StorageService {
             .to_string();
 
         let content_length = resp.content_length().unwrap_or(0);
+        self.check_advertised_length(&s3_key, content_length)?;
 
         let last_modified = resp
             .last_modified()
             .map_or_else(Utc::now, Self::to_chrono_datetime);
 
-        let body = resp
-            .body
-            .collect()
+        let mut body = Vec::with_capacity(usize::try_from(content_length).unwrap_or(0));
+        let mut stream = resp.body;
+        while let Some(chunk) = stream
+            .next()
             .await
+            .transpose()
             .map_err(|e| StorageError::Internal(format!("S3 read body {s3_key}: {e}")))?
-            .into_bytes()
-            .to_vec();
+        {
+            if (body.len() + chunk.len()) as u64 > self.max_object_bytes {
+                return Err(StorageError::TooLarge(format!(
+                    "S3 object {s3_key} exceeds limit of {} bytes",
+                    self.max_object_bytes
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
 
         let info = ObjectInfo {
             key: key.to_string(),
@@ -252,19 +406,17 @@ impl StorageService for S3StorageService {
     /// entire body first). `ObjectInfo` is resolved eagerly from the response
     /// head. A body-read failure is surfaced as an `Error` terminal.
     ///
-    /// Enforces the same 100 MiB object cap as local-storage `get` so a huge
-    /// object cannot stream unbounded into an isolate: an advertised
-    /// `Content-Length` over the cap is rejected up front, and the running
-    /// total is checked per chunk (defending against an absent or underreported
-    /// length), surfacing an `Error` terminal on overflow.
+    /// Enforces the same read cap as `get` so a huge object cannot stream
+    /// unbounded into an isolate: an advertised `Content-Length` over the cap
+    /// is refused up front with [`StorageError::TooLarge`], and the running
+    /// total is checked per chunk (defending against an absent or
+    /// underreported length), surfacing a `ResourceExhausted` `Error`
+    /// terminal on overflow.
     async fn get_streaming(
         &self,
         folder: &str,
         key: &str,
     ) -> Result<(OutputStream, ObjectInfo), StorageError> {
-        // Parity with local-storage's `get`/`get_streaming` 100 MiB cap.
-        const MAX_STREAM_BYTES: u64 = 100 * 1024 * 1024;
-
         let s3_key = self.s3_key(folder, key);
 
         let resp = self
@@ -292,16 +444,10 @@ impl StorageService for S3StorageService {
             .last_modified()
             .map_or_else(Utc::now, Self::to_chrono_datetime);
 
-        // Reject up front when the advertised length already exceeds the cap.
-        // A negative/unknown length skips this guard; the running total below
-        // still bounds it.
-        if let Ok(advertised) = u64::try_from(content_length) {
-            if advertised > MAX_STREAM_BYTES {
-                return Err(StorageError::Internal(format!(
-                    "S3 object {s3_key} is {content_length} bytes, exceeds streaming limit of {MAX_STREAM_BYTES} bytes"
-                )));
-            }
-        }
+        // A negative/unknown length passes this guard; the running total
+        // below still bounds it.
+        self.check_advertised_length(&s3_key, content_length)?;
+        let max_object_bytes = self.max_object_bytes;
 
         let info = ObjectInfo {
             key: key.to_string(),
@@ -324,12 +470,12 @@ impl StorageService for S3StorageService {
                 match next {
                     Some(Ok(chunk)) => {
                         received = received.saturating_add(chunk.len() as u64);
-                        if received > MAX_STREAM_BYTES {
+                        if received > max_object_bytes {
                             let _ = sink
                                 .error(WaferError::new(
-                                    ErrorCode::Internal,
+                                    ErrorCode::ResourceExhausted,
                                     format!(
-                                        "S3 object {s3_key} exceeds streaming limit of {MAX_STREAM_BYTES} bytes"
+                                        "S3 object {s3_key} exceeds limit of {max_object_bytes} bytes"
                                     ),
                                 ))
                                 .await;
@@ -508,6 +654,12 @@ impl StorageService for S3StorageService {
         Ok(())
     }
 
+    /// Deletes every object under the folder, marker included. S3 reports
+    /// per-key failures inside a `200 OK` `DeleteObjects` response; keys that
+    /// failed transiently are retried, and any key still not deleted makes
+    /// this return `Err` naming them, so a caller never treats a folder with
+    /// surviving objects as gone. The remaining pages are still deleted
+    /// before the error is returned; deleting again finishes the job.
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
         let prefix = self.folder_prefix(name);
 
@@ -524,44 +676,25 @@ impl StorageService for S3StorageService {
             .into_paginator()
             .send();
 
+        let mut not_deleted = Vec::new();
         while let Some(page) = stream.next().await {
             let page = page
                 .map_err(|e| StorageError::Internal(format!("S3 list for delete {prefix}: {e}")))?;
-            // Build batch delete request
-            let objects_to_delete: Vec<aws_sdk_s3::types::ObjectIdentifier> = page
+            let keys: Vec<String> = page
                 .contents()
                 .iter()
-                .filter_map(|obj| {
-                    let k = obj.key()?;
-                    aws_sdk_s3::types::ObjectIdentifier::builder()
-                        .key(k)
-                        .build()
-                        .map_err(|e| {
-                            tracing::warn!(key = %k, err = %e, "skip object in batch delete");
-                        })
-                        .ok()
-                })
+                .filter_map(|obj| obj.key().map(str::to_string))
                 .collect();
-
-            if !objects_to_delete.is_empty() {
-                let delete = aws_sdk_s3::types::Delete::builder()
-                    .set_objects(Some(objects_to_delete))
-                    .build()
-                    .map_err(|e| StorageError::Internal(format!("build Delete request: {e}")))?;
-
-                self.client
-                    .delete_objects()
-                    .bucket(&self.bucket)
-                    .delete(delete)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        StorageError::Internal(format!("S3 DeleteObjects {prefix}: {e}"))
-                    })?;
+            if !keys.is_empty() {
+                not_deleted.extend(self.delete_keys(keys).await?);
             }
         }
 
-        Ok(())
+        if not_deleted.is_empty() {
+            Ok(())
+        } else {
+            Err(partial_delete_error(&prefix, &not_deleted))
+        }
     }
 
     /// List top-level folders, paginating until the delimiter listing is
@@ -621,11 +754,35 @@ mod tests {
 
     /// Service under test wired to a mocked S3 client — no HTTP involved.
     fn service(client: Client) -> S3StorageService {
-        S3StorageService {
-            client,
-            bucket: "bucket".to_string(),
-            prefix: String::new(),
-        }
+        S3StorageService::from_client(client, "bucket", "")
+    }
+
+    /// A `DeleteObjects` response `Errors` entry.
+    fn delete_error(key: &str, code: &str) -> aws_sdk_s3::types::Error {
+        aws_sdk_s3::types::Error::builder()
+            .key(key)
+            .code(code)
+            .message(format!("{code} for {key}"))
+            .build()
+    }
+
+    /// One listing page holding `gone/x` and `gone/y`.
+    fn two_key_page() -> aws_smithy_mocks::Rule {
+        mock!(aws_sdk_s3::Client::list_objects_v2).then_output(|| {
+            ListObjectsV2Output::builder()
+                .contents(obj("gone/x", 1))
+                .contents(obj("gone/y", 2))
+                .build()
+        })
+    }
+
+    /// The keys a `DeleteObjects` request asks to delete.
+    fn requested_keys(
+        req: &aws_sdk_s3::operation::delete_objects::DeleteObjectsInput,
+    ) -> Vec<&str> {
+        req.delete()
+            .map(|d| d.objects().iter().map(|o| o.key()).collect())
+            .unwrap_or_default()
     }
 
     fn obj(key: &str, size: i64) -> Object {
@@ -965,12 +1122,184 @@ mod tests {
             .err()
             .expect("object exceeding the streaming cap must be rejected");
         match err {
-            StorageError::Internal(msg) => assert!(
-                msg.contains("exceeds streaming limit"),
+            StorageError::TooLarge(msg) => assert!(
+                msg.contains("exceeds limit"),
                 "expected size-cap rejection, got: {msg}"
             ),
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    /// Buffered `get` refuses an object whose advertised `Content-Length` is
+    /// over the cap before reading its body (the mocked body is tiny — only
+    /// the advertised length is large).
+    #[tokio::test]
+    async fn get_rejects_advertised_length_over_cap() {
+        use aws_sdk_s3::{operation::get_object::GetObjectOutput, primitives::ByteStream};
+
+        let oversized =
+            i64::try_from(DEFAULT_MAX_OBJECT_BYTES).expect("cap fits i64") + 1024 * 1024;
+        let get = mock!(aws_sdk_s3::Client::get_object).then_output(move || {
+            GetObjectOutput::builder()
+                .content_length(oversized)
+                .body(ByteStream::from(b"x".to_vec()))
+                .build()
+        });
+        let svc = service(mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&get]));
+
+        match svc.get("folder", "huge.bin").await {
+            Err(StorageError::TooLarge(msg)) => {
+                assert!(msg.contains("folder/huge.bin"), "names the object: {msg}");
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    /// Buffered `get` bounds the body by its running total, so an object whose
+    /// `Content-Length` understates the body cannot be read past the cap.
+    #[tokio::test]
+    async fn get_rejects_body_over_cap_despite_understated_length() {
+        use aws_sdk_s3::{operation::get_object::GetObjectOutput, primitives::ByteStream};
+
+        let get = mock!(aws_sdk_s3::Client::get_object).then_output(|| {
+            GetObjectOutput::builder()
+                .content_length(3)
+                .body(ByteStream::from(b"hello".to_vec()))
+                .build()
+        });
+        let svc =
+            service(mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&get])).with_max_object_bytes(4);
+
+        match svc.get("folder", "obj.bin").await {
+            Err(StorageError::TooLarge(_)) => {}
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    /// An object exactly at the cap reads in full.
+    #[tokio::test]
+    async fn get_returns_object_at_cap() {
+        use aws_sdk_s3::{operation::get_object::GetObjectOutput, primitives::ByteStream};
+
+        let get = mock!(aws_sdk_s3::Client::get_object).then_output(|| {
+            GetObjectOutput::builder()
+                .content_length(5)
+                .body(ByteStream::from(b"hello".to_vec()))
+                .build()
+        });
+        let svc =
+            service(mock_client!(aws_sdk_s3, RuleMode::MatchAny, [&get])).with_max_object_bytes(5);
+
+        let (body, info) = svc.get("folder", "obj.bin").await.expect("get succeeds");
+        assert_eq!(body, b"hello");
+        assert_eq!(info.size, 5);
+    }
+
+    /// S3 answers `DeleteObjects` with `200 OK` and lists the keys it did not
+    /// delete under `Errors`. A permanent per-key failure must fail
+    /// `delete_folder`, name the key and code, and not be retried.
+    #[tokio::test]
+    async fn delete_folder_fails_on_per_key_error_in_ok_response() {
+        let page = two_key_page();
+        let delete = mock!(aws_sdk_s3::Client::delete_objects).then_output(|| {
+            DeleteObjectsOutput::builder()
+                .deleted(
+                    aws_sdk_s3::types::DeletedObject::builder()
+                        .key("gone/x")
+                        .build(),
+                )
+                .errors(delete_error("gone/y", "AccessDenied"))
+                .build()
+        });
+        let svc = service(mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            [&page, &delete]
+        ));
+
+        match svc.delete_folder("gone").await {
+            Err(StorageError::Internal(msg)) => {
+                assert!(msg.contains("1 object(s) not deleted"), "{msg}");
+                assert!(msg.contains("gone/y (AccessDenied"), "{msg}");
+            }
+            other => panic!("expected a partial-delete error, got {other:?}"),
+        }
+        assert_eq!(delete.num_calls(), 1, "a permanent failure is not retried");
+    }
+
+    /// A transient per-key failure is retried with only the failed keys, and
+    /// `delete_folder` succeeds once the retry deletes them.
+    #[tokio::test]
+    async fn delete_folder_retries_transient_per_key_errors() {
+        let page = two_key_page();
+        let first = mock!(aws_sdk_s3::Client::delete_objects)
+            .match_requests(|req| requested_keys(req) == ["gone/x", "gone/y"])
+            .then_output(|| {
+                DeleteObjectsOutput::builder()
+                    .errors(delete_error("gone/y", "SlowDown"))
+                    .build()
+            });
+        let retry = mock!(aws_sdk_s3::Client::delete_objects)
+            .match_requests(|req| requested_keys(req) == ["gone/y"])
+            .then_output(|| DeleteObjectsOutput::builder().build());
+        let svc = service(mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            [&page, &first, &retry]
+        ));
+
+        svc.delete_folder("gone")
+            .await
+            .expect("the retry deletes the rest");
+        assert_eq!(first.num_calls(), 1);
+        assert_eq!(retry.num_calls(), 1, "only the failed key is retried");
+    }
+
+    /// A transient failure that persists through every attempt fails
+    /// `delete_folder` after [`DELETE_ATTEMPTS`] requests.
+    #[tokio::test]
+    async fn delete_folder_fails_when_transient_errors_persist() {
+        let page = two_key_page();
+        let delete = mock!(aws_sdk_s3::Client::delete_objects)
+            .match_requests(|req| requested_keys(req).contains(&"gone/y"))
+            .then_output(|| {
+                DeleteObjectsOutput::builder()
+                    .errors(delete_error("gone/y", "InternalError"))
+                    .build()
+            });
+        let svc = service(mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            [&page, &delete]
+        ));
+
+        match svc.delete_folder("gone").await {
+            Err(StorageError::Internal(msg)) => {
+                assert!(msg.contains("gone/y (InternalError"), "{msg}");
+            }
+            other => panic!("expected a partial-delete error, got {other:?}"),
+        }
+        assert_eq!(delete.num_calls(), DELETE_ATTEMPTS as usize);
+    }
+
+    /// The error names at most [`MAX_REPORTED_DELETE_FAILURES`] keys and
+    /// counts the rest.
+    #[test]
+    fn partial_delete_error_caps_the_listed_keys() {
+        let failed: Vec<FailedDelete> = (0..12)
+            .map(|i| FailedDelete {
+                key: format!("k{i}"),
+                code: "AccessDenied".into(),
+                message: "denied".into(),
+            })
+            .collect();
+        let StorageError::Internal(msg) = partial_delete_error("p/", &failed) else {
+            panic!("expected Internal");
+        };
+        assert!(msg.contains("12 object(s) not deleted"), "{msg}");
+        assert!(msg.contains("k9 (AccessDenied: denied)"), "{msg}");
+        assert!(!msg.contains("k10 "), "{msg}");
+        assert!(msg.ends_with(", and 2 more"), "{msg}");
     }
 
     /// `delete_folder` streams listing pages and issues one DeleteObjects
