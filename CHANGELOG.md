@@ -4,6 +4,26 @@
 
 ### Breaking changes
 
+- `wafer_block_security_headers::merge_csp` returns a `CspMerge`
+  (`policy` plus the `refused` directives and sources) instead of a
+  `String`. The operator `csp` config is now parsed case-insensitively
+  (one directive per name, later duplicates refused, as browsers ignore
+  them) and more of it is refused: in `default-src`, `script-src`,
+  `script-src-elem`, `script-src-attr`, `worker-src` and `child-src`, any
+  `*` host at any scheme, port or path (`https://*/`, `https://*:443`,
+  `*:443`), every scheme-only source (including `blob:` in `worker-src`),
+  single-label wildcards (`*.com`), `'unsafe-eval'` and malformed sources;
+  any widening of `base-uri`/`form-action`; and `frame-ancestors` in any
+  spelling (use the `frame_ancestors` key). Previously an upper-case
+  `FRAME-ANCESTORS *` or `SCRIPT-SRC …` was emitted as a second directive
+  that the browser enforced over the baseline, and `script-src-elem
+  https:` passed unfiltered. Refused items are left out of the policy and
+  logged at Init with `warn`; Init still succeeds.
+- `wafer-run/cors` never sends `Access-Control-Allow-Origin` on a request
+  without `Origin` (it used to send the raw configured list, e.g.
+  `https://a,https://b`), and sends `Vary: Origin` on every response once
+  `allowed_origins` is configured, not only when it reflected an origin.
+
 - The HTTP codec (`wafer_block::http_codec`) refuses response meta no
   transport can send, instead of handing it to the adapter.
   `classify_response_meta` now returns
@@ -48,6 +68,7 @@
   middleware's message); `http_codec::CookieId` / `cookie_id` are the
   identity the flow executor merges cookies by. Code that read
   `resp.set_cookie.0` back from a builder's meta reads the identity key.
+
 
 - `wafer_core::interfaces::storage::service::StorageError` has a new
   variant, `TooLarge(String)`: an object over a backend's read cap. An
