@@ -261,7 +261,7 @@ impl RegistrationCore {
         if info.name != name {
             return Err(RuntimeError::BlockNameMismatch {
                 registered: name.to_string(),
-                reported: info.name.clone(),
+                reported: info.name,
             });
         }
         info.validate(name)?;
