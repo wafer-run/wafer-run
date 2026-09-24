@@ -26,7 +26,7 @@ fn response_meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 /// Collect an [`OutputStream`] and encode its terminal as the embedder JSON
 /// wire format: `{"action":"respond|error|drop|halt|continue", ...}`.
 ///
-/// Every arm but `drop` carries `meta`: a JSON object holding **only** the
+/// Every arm carries `meta`: a JSON object holding **only** the
 /// canonical response keys — `resp.status`, `resp.header.*`, `resp.cookie.*`,
 /// `resp.content_type` — under their own names. That is
 /// [`wafer_block::http_codec::response_meta_entries`], the projection the
@@ -53,7 +53,9 @@ fn response_meta_to_json(meta: &[MetaEntry]) -> serde_json::Value {
 ///   set. Its `meta` sits beside `error`, like every other arm's, so an
 ///   embedding host can emit the `Retry-After` / `X-RateLimit-*` headers a
 ///   429 carries.
-/// - `drop` carries no payload — it maps to a bodiless, headerless `204`.
+/// - `drop` carries only `meta` — it maps to a bodiless `204` with those
+///   headers and cookies (a flow's drop carries the response headers its
+///   completed steps set, e.g. CORS).
 /// - `continue` carries the follow-up message's `kind` plus its `meta`. The
 ///   message itself does not cross the boundary: a host has nowhere further
 ///   to forward it, and the flow's in-flight message is not a response.
@@ -97,7 +99,11 @@ pub async fn output_to_json(output: OutputStream) -> String {
             })
             .to_string()
         }
-        Err(TerminalNotResponse::Drop) => serde_json::json!({ "action": "drop" }).to_string(),
+        Err(TerminalNotResponse::Drop { meta }) => serde_json::json!({
+            "action": "drop",
+            "meta": response_meta_to_json(&meta),
+        })
+        .to_string(),
         Err(TerminalNotResponse::Halt(buf)) => {
             use base64ct::{Base64, Encoding};
             let body_b64 = Base64::encode_string(&buf.body);
@@ -279,10 +285,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_terminal_is_action_only() {
+    async fn drop_terminal_carries_only_its_response_meta() {
         let out = OutputStream::drop_request();
         let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
-        assert_eq!(json, serde_json::json!({ "action": "drop" }));
+        assert_eq!(json, serde_json::json!({ "action": "drop", "meta": {} }));
+
+        let out = OutputStream::drop_request_with_meta(vec![
+            MetaEntry {
+                key: "resp.header.Access-Control-Allow-Origin".into(),
+                value: "https://a.example".into(),
+            },
+            MetaEntry {
+                key: "http.header.authorization".into(),
+                value: "Bearer SECRET_TOKEN".into(),
+            },
+        ]);
+        let json: serde_json::Value = serde_json::from_str(&output_to_json(out).await).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "action": "drop",
+                "meta": { "resp.header.Access-Control-Allow-Origin": "https://a.example" },
+            })
+        );
     }
 
     #[tokio::test]

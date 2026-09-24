@@ -6574,6 +6574,7 @@ dependencies = [
  "wafer-block-readonly-guard",
  "wafer-block-router",
  "wafer-block-s3",
+ "wafer-block-security-headers",
  "wafer-block-sqlite",
  "wafer-core",
  "wafer-flow",

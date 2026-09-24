@@ -171,7 +171,7 @@ async fn run_flow(w: &Wafer, flow_id: &str, msg: Message, body: Vec<u8>) -> Test
         Ok(buf) => TestResult::Respond(buf.body),
         Err(TerminalNotResponse::Continue(_)) => TestResult::Continue,
         Err(TerminalNotResponse::Error(e)) => TestResult::Error(e),
-        Err(TerminalNotResponse::Drop) => TestResult::Drop,
+        Err(TerminalNotResponse::Drop { .. }) => TestResult::Drop,
         Err(TerminalNotResponse::Halt(buf)) => TestResult::Halt(buf.body),
         Err(TerminalNotResponse::Malformed) => panic!("malformed output stream"),
     }
@@ -388,7 +388,7 @@ async fn test_drop_helper() {
     let output = OutputStream::drop_request();
     assert!(matches!(
         output.collect_buffered().await,
-        Err(TerminalNotResponse::Drop)
+        Err(TerminalNotResponse::Drop { .. })
     ));
 }
 

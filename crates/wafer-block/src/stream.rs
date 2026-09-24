@@ -56,7 +56,12 @@ pub enum StreamEvent {
 
     /// Terminal: block chose to drop the request (HTTP 204-equivalent).
     /// Valid only with no preceding Chunk or Meta events.
-    Drop,
+    Drop {
+        /// Response meta (headers, cookies) for the bodiless response. Empty
+        /// for a block's own drop; the flow executor fills it with the
+        /// response headers the flow's completed steps set.
+        meta: Vec<MetaEntry>,
+    },
 
     /// Terminal: block produced a response AND requests the flow to short-circuit.
     /// At the HTTP boundary this surfaces as a normal response (status from
@@ -82,7 +87,7 @@ impl StreamEvent {
             self,
             StreamEvent::Complete { .. }
                 | StreamEvent::Error(_)
-                | StreamEvent::Drop
+                | StreamEvent::Drop { .. }
                 | StreamEvent::Continue(_)
                 | StreamEvent::Halt { .. }
         )
@@ -107,7 +112,7 @@ mod tests {
             message: "test error".into(),
             meta: vec![],
         }));
-        let _e = StreamEvent::Drop;
+        let _e = StreamEvent::Drop { meta: vec![] };
         let _f = StreamEvent::Continue(Message {
             kind: "forward".into(),
             meta: vec![],
@@ -137,7 +142,7 @@ mod tests {
             meta: vec![],
         }))
         .is_terminal());
-        assert!(StreamEvent::Drop.is_terminal());
+        assert!(StreamEvent::Drop { meta: vec![] }.is_terminal());
     }
 
     #[test]

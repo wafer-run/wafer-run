@@ -51,8 +51,8 @@ pub(crate) struct DispatchInit<'a> {
 ///
 /// 1. Lazy init — fast path on `slot`'s cached outcome; on the first
 ///    dispatch (or while init is in flight) build the init inputs via
-///    `make_init` and run the init pipeline, converting failures into a
-///    terminal error stream (`Err`).
+///    `make_init` and run the init pipeline, returning a failure as the
+///    typed error (`Err`) the caller turns into its terminal.
 /// 2. Observability — bracket the dispatch in the opt-in
 ///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
 ///
@@ -68,7 +68,7 @@ pub(crate) async fn run_resolved<'a, T, Fut>(
     msg: Message,
     input: InputStream,
     invoke: impl FnOnce(Message, InputStream) -> Fut,
-) -> Result<T, OutputStream>
+) -> Result<T, WaferError>
 where
     Fut: std::future::Future<Output = T>,
 {
@@ -81,10 +81,7 @@ where
     match target.slot.try_cached() {
         Some(Ok(_)) => {}
         Some(Err(e)) => {
-            return Err(OutputStream::error(super::init_error_to_wafer_error(
-                target.resolved,
-                e,
-            )));
+            return Err(super::init_error_to_wafer_error(target.resolved, e));
         }
         None => {
             let init = make_init();
@@ -98,10 +95,7 @@ where
             )
             .await
             {
-                return Err(OutputStream::error(super::init_error_to_wafer_error(
-                    target.resolved,
-                    e,
-                )));
+                return Err(super::init_error_to_wafer_error(target.resolved, e));
             }
         }
     }
@@ -267,7 +261,7 @@ impl Wafer {
             |msg, input| block.handle(&ctx, msg, input),
         )
         .await
-        .unwrap_or_else(|init_failure| init_failure)
+        .unwrap_or_else(OutputStream::error)
     }
 
     /// The once-success init slot paired with a registered block.

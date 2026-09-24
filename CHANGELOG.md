@@ -39,6 +39,37 @@
   `{org}/{block}/{folder}`: a block writing its plain folder `uploads` needs
   the entry `acme/app/uploads`, and a bare `uploads` entry (which the field
   doc used to describe as covering `uploads/*`) now admits nothing.
+- A flow that stops early keeps the response headers its completed steps set.
+  A step's `Error` (under `on_error = "stop"`), `Halt` or `Drop`, and an error
+  the executor raises itself (step budget, deadline, a failing `next`
+  condition, an unresolvable input, a missing block), used to return only the
+  stopping step's own meta, so every 401/403/404/429 behind `security-headers`
+  and `cors` shipped without CSP, `X-Content-Type-Options` or
+  `Access-Control-Allow-Origin` (a browser cannot even read a cross-origin
+  error without the last). The flow boundary now carries the flow message's
+  `resp.header.*` and `resp.set_cookie.*` entries under the terminal's own
+  meta: exactly what the completed steps left on the message, after any of
+  them overwrote or removed an entry. Never carried: the stopping step's own
+  partial output (streamed `Meta` before an `Error`), a parallel branch's
+  message (discarded at the join, as on success), and `resp.status` /
+  `resp.content_type` / a `resp.header.content-type`, which describe the
+  terminal's body. The terminal's own header wins by name, case-insensitively
+  (a cookie by its `resp.set_cookie.*` key). A `next` flow transfer returns
+  the target flow's terminal unchanged (the target ran with the message, so
+  its own boundary carried the headers). A WASM guest's `Error` is still
+  sanitized by the guest egress allowlist before the executor sees it; the
+  carried entries come from the host's flow message, never from the guest's
+  output. `Drop` now carries response meta so a flow's drop can keep its
+  CORS headers: `StreamEvent::Drop` and `TerminalNotResponse::Drop` are
+  struct variants `Drop { meta }` (match `Drop { .. }`), and
+  `OutputStream::drop_request_with_meta` / `OutputSink::drop_request_with_meta`
+  build one (`drop_request()` is the empty-meta drop). The HTTP codec renders
+  a drop as a `204` with its meta's headers and cookies (no `Content-Type`),
+  and the embedder wire format's `drop` action now carries `meta` like every
+  other action. Forwarders that re-emit a received `Drop` must pass its meta
+  on. Internal: `runner::run_resolved` returns its init failure as a
+  `WaferError`.
+
 - A block is the name it is registered under. `register_block` (and every
   path built on it: `load_inventory_blocks`, the lockfile loader,
   `embed::register_path` behind the Node/Go/C bindings) refuses a block whose

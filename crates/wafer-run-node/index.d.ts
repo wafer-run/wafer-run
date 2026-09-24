@@ -67,7 +67,8 @@ export declare class WaferRuntime {
    * `resp.header.*`, `resp.cookie.*`, `resp.content_type` — for the caller to
    * apply to its response. Request state (headers, cookies, caller identity,
    * client IP, query) never crosses this boundary, even when the block built
-   * its terminal from the request message. `drop` carries no `meta`.
+   * its terminal from the request message. `drop` carries `meta` too: the
+   * headers and cookies for its bodiless 204.
    *
    * Note: `halt` payloads use `body_base64` (Base64-encoded bytes) instead of
    * the `respond` action's `body` string — Halt may carry non-UTF-8 or empty bodies.

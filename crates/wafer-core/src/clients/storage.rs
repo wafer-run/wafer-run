@@ -325,7 +325,7 @@ impl Stream for NativeStorageGetStream {
                     self.finished = true;
                     return Poll::Ready(Some(Err(*e)));
                 }
-                Poll::Ready(Some(StreamEvent::Drop)) => {
+                Poll::Ready(Some(StreamEvent::Drop { .. })) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
                         ErrorCode::Internal,

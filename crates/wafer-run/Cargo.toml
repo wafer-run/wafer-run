@@ -88,6 +88,8 @@ wafer-block-readonly-guard = { path = "../wafer-block-readonly-guard" }
 wafer-block-ip-rate-limit = { path = "../wafer-block-ip-rate-limit" }
 wafer-block-monitoring = { path = "../wafer-block-monitoring" }
 wafer-block-cors = { path = "../wafer-block-cors" }
+# Flow short-circuit header carry (tests/flow_error_keeps_middleware_headers.rs).
+wafer-block-security-headers = { path = "../wafer-block-security-headers" }
 wafer-block-postgres = { path = "../wafer-block-postgres" }
 wafer-block-s3 = { path = "../wafer-block-s3" }
 wafer-block-router = { path = "../wafer-block-router" }

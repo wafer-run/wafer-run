@@ -210,7 +210,7 @@ async fn drop_returns_terminal() {
     let mut w = setup();
     w.seal().await.unwrap();
     let result = run(&w, "test/drop", vec![]).await;
-    assert!(matches!(result, Err(TerminalNotResponse::Drop)));
+    assert!(matches!(result, Err(TerminalNotResponse::Drop { .. })));
 }
 
 #[tokio::test]

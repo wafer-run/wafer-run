@@ -98,8 +98,8 @@ func (e *WaferError) Error() string {
 // "resp.header.*", "resp.cookie.*", "resp.content_type" — for the host to
 // apply to its response. Request state (headers, cookies, caller identity,
 // client IP, query) never crosses this boundary, even when the block built
-// its terminal from the request message. A Drop carries no Meta: it maps to
-// a bodiless, headerless 204.
+// its terminal from the request message. A Drop maps to a bodiless 204 that
+// carries its Meta's headers and cookies.
 type Result struct {
 	Action     Action            `json:"action"`
 	Body       string            `json:"body,omitempty"`

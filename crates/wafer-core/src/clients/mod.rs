@@ -184,7 +184,7 @@ async fn collect_response_body(out: OutputStream) -> Result<Vec<u8>, WaferError>
     match out.collect_buffered().await {
         Ok(buf) => Ok(buf.body),
         Err(TerminalNotResponse::Error(e)) => Err(e),
-        Err(TerminalNotResponse::Drop) => {
+        Err(TerminalNotResponse::Drop { .. }) => {
             Err(WaferError::new(ErrorCode::Internal, "block returned Drop"))
         }
         Err(TerminalNotResponse::Halt(_)) => Err(WaferError::new(
@@ -486,7 +486,7 @@ where
             }
             StreamEvent::Meta(_) => continue,
             StreamEvent::Error(e) => return Err(*e),
-            StreamEvent::Drop => {
+            StreamEvent::Drop { .. } => {
                 return Err(WaferError::new(
                     ErrorCode::Internal,
                     format!("{context}: block dropped before header frame"),
@@ -546,7 +546,7 @@ where
             StreamEvent::Meta(_) => continue,
             StreamEvent::Complete { .. } => return Ok((header, body)),
             StreamEvent::Error(e) => return Err(*e),
-            StreamEvent::Drop => {
+            StreamEvent::Drop { .. } => {
                 return Err(WaferError::new(
                     ErrorCode::Internal,
                     format!("{context}: block dropped"),
@@ -649,7 +649,7 @@ where
                     self.finished = true;
                     return Poll::Ready(Some(Err(*e)));
                 }
-                Poll::Ready(Some(StreamEvent::Drop)) => {
+                Poll::Ready(Some(StreamEvent::Drop { .. })) => {
                     self.finished = true;
                     return Poll::Ready(Some(Err(WaferError::new(
                         ErrorCode::Internal,
