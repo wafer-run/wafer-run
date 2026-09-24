@@ -121,7 +121,7 @@ go/                      Go bindings.
    ```
    With no arguments `check.sh` runs every step, skipping `postgres` (loudly) when `WAFER_CONFORMANCE_POSTGRES_URL` is unset.
 
-5. Open the PR. CI must pass before merge. Squash-merge is the default.
+5. Open the PR. CI must pass before merge: the `ci / ci-ok` check is green only when every job in `.github/workflows/ci-jobs.yml` succeeded. A new CI job goes in that file and in `ci-ok`'s `needs` (`scripts/lint-workflows.sh` fails the build otherwise), and every action is pinned by full commit SHA. Squash-merge is the default.
 
 ## Worktrees for parallel work
 

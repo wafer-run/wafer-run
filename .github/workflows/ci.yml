@@ -1,20 +1,19 @@
 # Pull-request trigger shim. The actual jobs live in ci-jobs.yml and the
 # commands they run live in scripts/check.sh.
+#
+# No path filter: every pull request runs the full job set, so the `ci-ok`
+# summary job in ci-jobs.yml reports on every PR and can be a required
+# status check. A filtered workflow never starts on a PR outside its
+# paths, which leaves a required check pending forever and lets a
+# toolchain-, rustfmt- or .cargo-only change merge untested.
 name: CI
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'crates/**'
-      - 'sdks/**'
-      - 'examples/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/check.sh'
-      - 'scripts/build-fixtures.sh'
-      - '.github/workflows/ci.yml'
-      - '.github/workflows/ci-jobs.yml'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}

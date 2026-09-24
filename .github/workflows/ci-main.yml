@@ -1,21 +1,15 @@
 # Push-to-main trigger shim. The actual jobs live in ci-jobs.yml and the
 # commands they run live in scripts/check.sh; this workflow additionally
-# runs the coverage job, which only makes sense on main.
+# runs the coverage job, which only makes sense on main. Like ci.yml it has
+# no path filter: every push to main is built.
 name: CI Main
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'crates/**'
-      - 'sdks/**'
-      - 'examples/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/check.sh'
-      - 'scripts/build-fixtures.sh'
-      - '.github/workflows/ci-main.yml'
-      - '.github/workflows/ci-jobs.yml'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-main
@@ -31,16 +25,20 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         run: rustup toolchain install
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: coverage
 
@@ -48,7 +46,7 @@ jobs:
         run: cargo llvm-cov --workspace --exclude wafer-run --lcov --output-path lcov.info
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -1,23 +1,72 @@
 # Shared CI jobs, called by ci.yml (pull requests) and ci-main.yml (main).
 #
-# The commands themselves live in scripts/check.sh — the single
-# definition of "green". Each job here only does GitHub-specific setup
-# (toolchains, caches) and then invokes the script's named steps.
+# The Rust commands live in scripts/check.sh — the single definition of
+# "green". Each job here only does GitHub-specific setup (toolchains,
+# caches) and then invokes the script's named steps.
+#
+# `ci-ok` at the bottom is the one job branch protection requires. It
+# passes only when every other job in this file succeeded; a job that
+# failed, was cancelled or was skipped turns it red. Adding a job here
+# means adding its id to `ci-ok.needs` — scripts/lint-workflows.sh (the
+# `workflows` job) fails the build when the two lists disagree.
 name: CI Jobs
 
 on:
   workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
 
 jobs:
+  workflows:
+    name: Workflow Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # actionlint type-checks the workflow files (expressions, `needs`,
+      # reusable-workflow calls) and shellchecks their `run:` blocks.
+      - name: Install actionlint
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tarball="actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          rm "$tarball"
+
+      - name: Run actionlint
+        run: ./actionlint -color
+
+      - name: Lint workflows
+        run: ./scripts/lint-workflows.sh
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run shellcheck
+        run: shellcheck scripts/*.sh .githooks/*
+
   check:
     name: Format & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # rust-toolchain.toml is the single source of truth for the
       # toolchain version, components, and targets; a bare
@@ -29,7 +78,7 @@ jobs:
         run: rustup toolchain install nightly --component rustfmt
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: check
 
@@ -48,13 +97,15 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         run: rustup toolchain install
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: test-v2
 
@@ -85,13 +136,15 @@ jobs:
     env:
       WAFER_CONFORMANCE_POSTGRES_URL: postgres://postgres:pw@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         run: rustup toolchain install
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: postgres
 
@@ -102,13 +155,15 @@ jobs:
     name: Wasm & Feature Builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         run: rustup toolchain install
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: wasm
 
@@ -120,17 +175,31 @@ jobs:
       - name: Wasm & feature builds
         run: ./scripts/check.sh wasm
 
+  # audit.yml is also scheduled weekly on its own, so a new advisory
+  # against an unchanged Cargo.lock is reported without waiting for a PR.
   audit:
-    name: Security Audit
+    uses: ./.github/workflows/audit.yml
+
+  ci-ok:
+    name: ci-ok
+    # always(): a failed or skipped dependency must turn this job red, not
+    # skip it — a skipped required check reads as passing.
+    if: always()
+    # Every other job id in this file, one per line. Enforced by
+    # scripts/lint-workflows.sh.
+    needs:
+      - workflows
+      - shellcheck
+      - check
+      - test
+      - postgres
+      - wasm
+      - audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: rustup toolchain install
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --quiet
-
-      - name: Run audit
-        run: ./scripts/check.sh audit
+      - name: Require every job to have succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' > /dev/null
