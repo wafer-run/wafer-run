@@ -4,6 +4,11 @@
 
 ### Breaking changes
 
+- `wafer_core::interfaces::storage::service::StorageError` has a new
+  variant, `TooLarge(String)`: an object over a backend's read cap. An
+  exhaustive `match` on `StorageError` needs an arm for it. The storage
+  handler maps it to `ResourceExhausted`.
+
 - `wafer_block_sqlite::vector::SqliteVecService::new` returns
   `rusqlite::Result<Self>`: it registers the SQL function filtered searches
   call (`wafer_sql_utils::vector::METADATA_FILTER_FN`) on the connection,
@@ -1043,6 +1048,26 @@
   read-only.
 
 ### Fixed
+
+- The S3 storage block's `delete_folder` returns `Err` when S3 did not
+  delete every object. S3 answers `DeleteObjects` with `200 OK` and lists
+  the keys it did not delete under `Errors`; that list was ignored, so a
+  partial delete reported success and a caller removed its records of the
+  folder while objects survived. Keys that failed with a transient code
+  (`InternalError`, `ServiceUnavailable`, `SlowDown`) are retried, three
+  attempts in all; the error names up to ten keys still not deleted, with
+  their codes, and counts the rest. The other pages are still deleted
+  first, so deleting again finishes the folder.
+- The S3 storage block's buffered `get` has a size cap. It collected the
+  whole body with no limit; it now refuses an advertised `Content-Length`
+  over the cap and bounds the running total, as `get_streaming` did. Both
+  S3 reads and local-storage's share
+  `wafer_core::interfaces::storage::service::DEFAULT_MAX_OBJECT_BYTES`
+  (100 MiB) and fail with `StorageError::TooLarge` (`ResourceExhausted`
+  on the wire; local-storage and S3 `get_streaming` used to return
+  `Internal`). The S3 cap is set with `WAFER_RUN__S3__MAX_OBJECT_BYTES`
+  (a positive integer; anything else fails Init) or
+  `S3StorageService::with_max_object_bytes`.
 
 - The SQLite `VectorService` (`wafer-block-sqlite`, `vectors` feature)
   returns the top `top_k` entries that match a metadata filter. The filter
