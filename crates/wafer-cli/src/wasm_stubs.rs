@@ -17,13 +17,24 @@
 //!   `random_get`, `sched_yield`). Anything else (e.g. `poll_oneoff`) is
 //!   rejected here because the runtime would reject it too.
 //!
-//! The stubs are inert: nothing in the CLI drives a real stream, so the
-//! stream functions return 0 ("permission denied" / "end-of-stream" /
-//! "no error" respectively) and `load_asset` reports `Failed`. They exist
-//! to satisfy the linker and to keep fixture runs deterministic.
+//! The stubs are inert: the CLI has no attachments, assets or callee blocks.
+//! Where the runtime has a reply for "nothing there", the stub gives that
+//! reply: `lookup_attachment` returns the `NotFound` sentinel (the Rust SDK's
+//! `Ok(None)`) and `load_asset` reports `Failed`. The stream family has no
+//! such reply: `stream_init` returns handle 0, `write_chunk`, `attach` and
+//! `finish` succeed, `read_chunk` reports end-of-stream and `take_error`
+//! reports no error, so a guest calling another block sees an empty
+//! response. The stubs exist to satisfy the linker and to keep fixture runs
+//! deterministic.
 
 use anyhow::{bail, Context};
+use wafer_block::ErrorCode;
 use wasmi::{Caller, Engine, Instance, Linker, Memory, Module, Store};
+
+/// The runtime's negative-`ErrorCode` sentinel for an absent attachment.
+fn not_found_sentinel() -> i64 {
+    -i64::from(ErrorCode::NotFound.to_ordinal())
+}
 
 /// Build a linker with the full stub import set (wafer ABI + WASI).
 pub fn build_stub_linker<T>(engine: &Engine) -> anyhow::Result<Linker<T>> {
@@ -119,12 +130,16 @@ pub fn register_wafer_host_stubs<T>(linker: &mut Linker<T>) -> anyhow::Result<()
         )
         .context("Failed to define __wafer_host_stream_close stub")?;
 
-    // __wafer_host_lookup_attachment(id_ptr, id_len) -> i64 — "no attachment".
+    // __wafer_host_lookup_attachment(id_ptr, id_len) -> i64
+    //
+    // No call frame under the CLI carries attachments, so every id is absent:
+    // the runtime's reply for an absent id is the negative `NotFound`
+    // sentinel. 0 would be a packed null buffer, not "absent".
     linker
         .func_wrap(
             "wafer",
             "__wafer_host_lookup_attachment",
-            |_: Caller<T>, _id_ptr: i32, _id_len: i32| -> i64 { 0i64 },
+            |_: Caller<T>, _id_ptr: i32, _id_len: i32| -> i64 { not_found_sentinel() },
         )
         .context("Failed to define __wafer_host_lookup_attachment stub")?;
 
@@ -353,4 +368,35 @@ pub fn read_packed_region<T>(
             )
         })?;
     Ok(data[start..end].to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_attachment_reports_not_found_like_the_runtime() {
+        let engine = Engine::default();
+        let module = Module::new(
+            &engine,
+            wat::parse_str(
+                r#"(module
+                  (import "wafer" "__wafer_host_lookup_attachment"
+                    (func $lookup (param i32 i32) (result i64)))
+                  (memory (export "memory") 1)
+                  (data (i32.const 0) "x")
+                  (func (export "probe") (result i64)
+                    (call $lookup (i32.const 0) (i32.const 1))))"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut store = Store::new(&engine, ());
+        let linker = build_stub_linker::<()>(&engine).unwrap();
+        let instance = instantiate_and_start(&linker, &mut store, &module).unwrap();
+        let probe = instance.get_typed_func::<(), i64>(&store, "probe").unwrap();
+
+        let reply = probe.call(&mut store, ()).unwrap();
+        assert_eq!(reply, -5, "the runtime's NotFound sentinel is -(ordinal 5)");
+    }
 }

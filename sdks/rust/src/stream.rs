@@ -13,7 +13,7 @@ use wafer_block::{ErrorCode, Message, WaferError};
 use crate::core_abi::{
     __wafer_host_stream_attach, __wafer_host_stream_close, __wafer_host_stream_finish,
     __wafer_host_stream_init, __wafer_host_stream_read_chunk, __wafer_host_stream_take_error,
-    __wafer_host_stream_write_chunk,
+    __wafer_host_stream_write_chunk, HostBuffer,
 };
 
 // ---------------------------------------------------------------------------
@@ -216,15 +216,11 @@ impl ResponseStream {
             if packed < 0 {
                 // Fetch full structured error via take_error.
                 let err_packed = __wafer_host_stream_take_error(self.handle);
-                if err_packed > 0 {
-                    let (ptr, len) = crate::core_abi::unpack_ptr_len(err_packed);
-                    let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize).to_vec();
-                    // Free the host-allocated guest buffer.
-                    drop(Vec::from_raw_parts(
-                        ptr as *mut u8,
-                        len as usize,
-                        len as usize,
-                    ));
+                if let Some(buffer) = (err_packed > 0)
+                    .then(|| HostBuffer::from_packed(err_packed))
+                    .flatten()
+                {
+                    let bytes = buffer.into_vec();
                     let err: WaferError = wafer_block::codec::decode(&bytes).unwrap_or_else(|_| {
                         WaferError::new(ErrorCode::Internal, "stream error (undecodable)")
                     });
@@ -236,15 +232,13 @@ impl ResponseStream {
                 ));
             }
             // Positive: packed (ptr, len) pointing to a guest-owned buffer.
-            let (ptr, len) = crate::core_abi::unpack_ptr_len(packed);
-            let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize).to_vec();
-            // Free the host-allocated guest buffer.
-            drop(Vec::from_raw_parts(
-                ptr as *mut u8,
-                len as usize,
-                len as usize,
-            ));
-            Ok(Some(bytes))
+            let Some(buffer) = HostBuffer::from_packed(packed) else {
+                return Err(WaferError::new(
+                    ErrorCode::Internal,
+                    "stream_read_chunk: the host returned a null buffer",
+                ));
+            };
+            Ok(Some(buffer.into_vec()))
         }
     }
 }

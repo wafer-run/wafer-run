@@ -47,7 +47,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     }
 
     let url = registry_client::resolve_registry(registry);
-    let entry = credentials::require(&url)?;
+    let token = credentials::require(&url)?;
 
     let file_name = tarball_path.file_name().map_or_else(
         || "package.wafer".to_string(),
@@ -62,7 +62,7 @@ pub async fn run(file: Option<PathBuf>, registry: Option<String>, dry_run: bool)
     let endpoint = url.join("/registry/api/publish");
     let resp = crate::registry_client::client_with_timeout(120)
         .post(&endpoint)
-        .bearer_auth(&entry.token)
+        .bearer_auth(&token)
         .multipart(form)
         .send()
         .await

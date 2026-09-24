@@ -40,6 +40,42 @@ pub fn unpack_ptr_len(packed: i64) -> (u32, u32) {
     (ptr, len)
 }
 
+/// A guest buffer the host allocated through [`__wafer_alloc`] and returned
+/// packed as `(ptr << 32) | len`, with capacity `len`.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HostBuffer {
+    ptr: std::num::NonZeroU32,
+    len: u32,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl HostBuffer {
+    /// Read a non-negative packed reply. `None` when the pointer half is 0:
+    /// `__wafer_alloc` hands out a `Vec`'s pointer, which is never null, so
+    /// a null pointer is a host protocol violation, and rebuilding a `Vec`
+    /// from it would be undefined behaviour.
+    pub(crate) fn from_packed(packed: i64) -> Option<Self> {
+        let (ptr, len) = unpack_ptr_len(packed);
+        Some(Self {
+            ptr: std::num::NonZeroU32::new(ptr)?,
+            len,
+        })
+    }
+
+    /// Reclaim the buffer as an owned `Vec`.
+    ///
+    /// # Safety
+    ///
+    /// The buffer must be a live `__wafer_alloc(len)` allocation the host
+    /// wrote `len` bytes into, and nothing else may reclaim it.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) unsafe fn into_vec(self) -> Vec<u8> {
+        let len = self.len as usize;
+        Vec::from_raw_parts(self.ptr.get() as *mut u8, len, len)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // WASM-only: allocator export + host import FFI
 // ---------------------------------------------------------------------------
@@ -154,6 +190,14 @@ pub fn log(_level: &str, _msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_buffer_rejects_a_null_pointer() {
+        assert_eq!(HostBuffer::from_packed(0), None);
+        assert_eq!(HostBuffer::from_packed(pack_ptr_len(0, 16)), None);
+        let buf = HostBuffer::from_packed(pack_ptr_len(64, 0)).expect("non-null pointer");
+        assert_eq!((buf.ptr.get(), buf.len), (64, 0));
+    }
 
     #[test]
     fn pack_unpack_roundtrip() {

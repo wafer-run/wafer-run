@@ -1570,6 +1570,20 @@
   `ConfigSource` and allows only a genuinely required key
   (`WAFER_RUN__POSTGRES__DATABASE_URL`) to be missing.
 
+- `wafer login --registry <url>` stores its token for that registry only.
+  It used to replace the token of whichever registry was logged in first,
+  so `wafer publish` against that registry failed with "No token" after a
+  login elsewhere. `~/.wafer/credentials.toml` now holds one token per
+  registry URL under `[tokens]`; a file in the earlier layout (`[default]`
+  plus `[registries.<name>]`) keeps working and is rewritten in the new
+  layout the next time `wafer login` or `wafer logout` changes it. An
+  older `wafer` binary does not read the new layout.
+- `wafer test` answers a guest's `lookup_attachment` with the runtime's
+  `NotFound` sentinel, which the Rust SDK reads as `Ok(None)`. The stub
+  returned 0, which the SDK unpacked as a null buffer and passed to
+  `Vec::from_raw_parts` (undefined behaviour). The Rust SDK now refuses a
+  null buffer from `lookup_attachment` and from a stream's response or
+  error read with an `Internal` error instead of reclaiming it.
 - `wafer-run/ip-rate-limit` charges an IPv6 client per /64 (the new
   `ipv6_prefix` flow config, 1 to 128) instead of per address, which a host
   rotating its own interface id used to get a fresh budget per request;
