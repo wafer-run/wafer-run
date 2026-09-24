@@ -644,6 +644,101 @@ async fn a_stamped_timestamp_binds_into_a_timestamptz_column() {
     svc.schema_drop_table(&table.name).await.expect("drop");
 }
 
+/// The windowed-counter upsert's timestamp stamp binds into real
+/// `TIMESTAMPTZ` columns — the column type a consumer's rate-limit table
+/// declares on Postgres — and the stored instant compares against an RFC 3339
+/// cutoff as a timestamp: a row written after the cutoff is never before it.
+///
+/// The stamp is bound like any other value, so Postgres types its parameter
+/// from the column it is written to (the `INSERT` column and the
+/// `DO UPDATE SET` target alike). Skipped unless
+/// `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_windowed_counter_stamps_timestamptz_columns() {
+    use wafer_block::db::{Filter, FilterOp};
+    use wafer_core::interfaces::database::service::{
+        pk, Column, DataType, DatabaseService, Table, UpsertConflict, UpsertSpec,
+    };
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres windowed-counter TIMESTAMPTZ check: set {URL_ENV} to run");
+        return;
+    };
+    let svc = PostgresDatabaseService::connect(&url)
+        .await
+        .expect("connect to the conformance PostgreSQL server");
+    let mut key = Column::new("key", DataType::Text);
+    key.unique = true;
+    let table = Table {
+        name: "conf_rl_timestamptz".to_string(),
+        columns: vec![
+            pk("id"),
+            key,
+            Column::new("count", DataType::Int64),
+            Column::new("window_start", DataType::Int64),
+            Column::new("created_at", DataType::DateTime),
+            Column::new("updated_at", DataType::DateTime),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    svc.schema_drop_table(&table.name).await.expect("drop");
+    svc.ensure_schema_table(&table).await.expect("create");
+
+    let now: i64 = 1_700_000_000;
+    let spec = || UpsertSpec {
+        data: vec![
+            ("id".to_string(), serde_json::json!("rl-1")),
+            ("key".to_string(), serde_json::json!("user:1")),
+        ],
+        conflict_columns: vec!["key".to_string()],
+        on_conflict: UpsertConflict::WindowedCounter {
+            count_field: "count".to_string(),
+            window_field: "window_start".to_string(),
+            now,
+            window_cutoff: now - 60,
+            created_fields: vec!["created_at".to_string()],
+            updated_fields: vec!["updated_at".to_string()],
+        },
+    };
+    let before = chrono::Utc::now().to_rfc3339();
+    svc.upsert(&table.name, spec())
+        .await
+        .expect("insert a counter row into TIMESTAMPTZ columns");
+    svc.upsert(&table.name, spec())
+        .await
+        .expect("re-stamp updated_at on conflict");
+
+    let got = svc.get(&table.name, "rl-1").await.expect("get");
+    assert_eq!(got.data["count"], serde_json::json!(2));
+    for stamped in ["created_at", "updated_at"] {
+        let at = got.data[stamped].as_str().expect("stamped timestamp");
+        chrono::DateTime::parse_from_rfc3339(at).expect("the stamp reads back as RFC3339");
+    }
+    let older_than = |cutoff: &str| {
+        vec![Filter {
+            field: "updated_at".to_string(),
+            operator: FilterOp::LessThan,
+            value: serde_json::json!(cutoff),
+        }]
+    };
+    assert_eq!(
+        svc.count(&table.name, &older_than(&before))
+            .await
+            .expect("filter updated_at by an RFC 3339 cutoff"),
+        0,
+        "a counter written after {before} is not older than it"
+    );
+    let after = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    assert_eq!(
+        svc.count(&table.name, &older_than(&after)).await.unwrap(),
+        1
+    );
+
+    svc.schema_drop_table(&table.name).await.expect("drop");
+}
+
 /// A service connected with `search_path = first, second`, where both
 /// schemas hold a table named `conf_dup` with different columns and a
 /// second table exists only in `second`.

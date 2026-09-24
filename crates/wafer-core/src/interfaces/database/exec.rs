@@ -163,9 +163,19 @@ pub fn mint_record_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// The current instant in the one text form the executor writes every
+/// timestamp column in: RFC 3339, UTC (`2026-09-24T10:00:00.123456789+00:00`).
+///
+/// Values of this form order correctly as text on the SQLite family, and the
+/// Postgres backend binds them into a `TIMESTAMPTZ` column as a timestamp, so
+/// a caller can compare a stored stamp against any RFC 3339 cutoff.
+fn timestamp_now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
 /// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
 fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_created: bool) {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = timestamp_now();
     if include_created && !data.contains_key("created_at") {
         data.insert(
             "created_at".to_string(),
@@ -209,32 +219,87 @@ fn prepare_created_row(
     Ok(())
 }
 
-/// Extract the `id` and `key` string values from an upsert `data` list for the
-/// windowed-counter path.
+/// The insert values of a windowed-counter upsert, read out of its `data`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowedCounterRow<'a> {
+    /// The row id a brand-new counter row is inserted with.
+    pub id: &'a str,
+    /// The UNIQUE column the counter row is keyed by (the conflict target).
+    pub conflict_column: &'a str,
+    /// The value stored in `conflict_column`.
+    pub conflict_value: &'a str,
+}
+
+/// Read a windowed-counter upsert's insert values out of its `data` and
+/// `conflict_columns`, refusing any shape whose parts the statement would not
+/// write.
 ///
-/// The windowed-counter builder binds these positionally — a fresh per-call
-/// row identifier and the conflict-target value — so both must be present and
-/// string-typed. A missing or non-string entry is a caller error (surfaced as
-/// [`DatabaseError`]), never a silent default.
-fn extract_windowed_id_key(
-    data: &[(String, serde_json::Value)],
-) -> Result<(&str, &str), DatabaseError> {
-    fn field<'a>(data: &'a [(String, serde_json::Value)], name: &str) -> Option<&'a str> {
-        data.iter()
-            .find(|(k, _)| k == name)
-            .and_then(|(_, v)| v.as_str())
+/// The statement writes one row keyed by one UNIQUE column, and takes exactly
+/// two values from `data`: `id` and the conflict column's value, both strings.
+/// The counter, window and timestamp columns are written by the statement
+/// itself. So `conflict_columns` must name exactly one column other than `id`,
+/// and `data` must hold a string for `id`, a string for that column, and
+/// nothing else. Anything else is [`DatabaseError::InvalidArgument`]: a second
+/// conflict column or another data field would otherwise be dropped without a
+/// word.
+///
+/// The database handler checks a wire request with this before it reaches a
+/// backend, and [`DbExec::upsert`] checks every spec with it again, so a
+/// caller of the service cannot get past it by skipping the handler.
+pub fn windowed_counter_row<'a>(
+    data: &'a [(String, serde_json::Value)],
+    conflict_columns: &'a [String],
+) -> Result<WindowedCounterRow<'a>, DatabaseError> {
+    let conflict_column = match conflict_columns {
+        [only] if only != "id" => only.as_str(),
+        [_] => {
+            return Err(DatabaseError::InvalidArgument(
+                "windowed-counter upsert cannot key the counter by `id`: `id` is the \
+                 per-call row id, not the counter's key"
+                    .into(),
+            ))
+        }
+        _ => {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "windowed-counter upsert requires exactly one conflict column, got {}",
+                conflict_columns.len()
+            )))
+        }
+    };
+    let mut id = None;
+    let mut conflict_value = None;
+    for (column, value) in data {
+        let slot = if column == "id" {
+            &mut id
+        } else if column == conflict_column {
+            &mut conflict_value
+        } else {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "windowed-counter upsert writes only `id` and the conflict column \
+                 `{conflict_column}` from data; `{column}` would not be written"
+            )));
+        };
+        if slot.is_some() {
+            return Err(DatabaseError::InvalidArgument(format!(
+                "windowed-counter upsert data names `{column}` twice"
+            )));
+        }
+        *slot = Some(value.as_str().ok_or_else(|| {
+            DatabaseError::InvalidArgument(format!(
+                "windowed-counter upsert requires a string `{column}` value in data"
+            ))
+        })?);
     }
-    let id = field(data, "id").ok_or_else(|| {
-        DatabaseError::Internal(
-            "windowed-counter upsert requires a string `id` value in data".into(),
-        )
-    })?;
-    let key = field(data, "key").ok_or_else(|| {
-        DatabaseError::Internal(
-            "windowed-counter upsert requires a string `key` value in data".into(),
-        )
-    })?;
-    Ok((id, key))
+    let missing = |column: &str| {
+        DatabaseError::InvalidArgument(format!(
+            "windowed-counter upsert requires a string `{column}` value in data"
+        ))
+    };
+    Ok(WindowedCounterRow {
+        id: id.ok_or_else(|| missing("id"))?,
+        conflict_column,
+        conflict_value: conflict_value.ok_or_else(|| missing(conflict_column))?,
+    })
 }
 
 /// One statement in a [`DbExec::run_batch`] call, tagged with how its result
@@ -1416,22 +1481,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// `SetColumns` renders through
     /// [`wafer_sql_utils::upsert::build_upsert`] (empty update list ⇒
-    /// `DO NOTHING`). `WindowedCounter` reads the `id`/`key` insert values
-    /// from `spec.data` (via [`extract_windowed_id_key`]) and renders the
-    /// atomic windowed-counter statement, whose `created_fields` are stamped
-    /// on INSERT only while `updated_fields` are re-stamped on conflict.
+    /// `DO NOTHING`). `WindowedCounter` reads its insert values out of the
+    /// spec with [`windowed_counter_row`] (`InvalidArgument` for a shape the
+    /// statement would not write in full) and renders the atomic
+    /// windowed-counter statement, whose `created_fields` are stamped on
+    /// INSERT only while `updated_fields` are re-stamped on conflict, all with
+    /// the same RFC 3339 instant [`create`](Self::create) stamps.
     ///
     /// Identifiers are validated at the trust boundary (the database handler's
-    /// `to_upsert_spec`) before reaching here, and again inside
-    /// `build_windowed_counter_upsert` — a fail-closed guard, since those
-    /// column names are interpolated into `CASE`/`SET` expression text.
-    ///
-    /// For `WindowedCounter`, the handler's `to_upsert_spec` also already
-    /// guarantees `spec.conflict_columns` is non-empty and that `spec.data`
-    /// carries string `id`/`key` entries (both `InvalidArgument` at the
-    /// handler boundary on a caller mistake); the `.first()`/
-    /// `extract_windowed_id_key` handling below is a defensive fallback, not
-    /// the primary validation.
+    /// `to_upsert_spec`) before reaching here, and again inside the builders
+    /// — a fail-closed guard, since the windowed-counter column names are
+    /// interpolated into `CASE`/`SET` expression text.
     async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
         let json = self.json_columns(sql_name(collection)?).await?;
         let stmt = Self::upsert_statement(collection, spec, &json)?;
@@ -1485,35 +1545,23 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 created_fields,
                 updated_fields,
             } => {
-                let (id, key) = extract_windowed_id_key(&spec.data)?;
-                let conflict_col = spec
-                    .conflict_columns
-                    .first()
-                    .map(String::as_str)
-                    .ok_or_else(|| {
-                        DatabaseError::Internal(
-                            "windowed-counter upsert requires a non-empty conflict_columns \
-                         (should have been rejected as InvalidArgument at the handler \
-                         boundary)"
-                                .into(),
-                        )
-                    })?;
+                let row = windowed_counter_row(&spec.data, &spec.conflict_columns)?;
                 let created: Vec<&str> = created_fields.iter().map(String::as_str).collect();
                 let updated: Vec<&str> = updated_fields.iter().map(String::as_str).collect();
                 wafer_sql_utils::upsert::build_windowed_counter_upsert(
                     table,
-                    conflict_col,
-                    id,
-                    key,
+                    row.conflict_column,
+                    row.id,
+                    row.conflict_value,
                     &count_field,
                     &window_field,
                     &created,
                     &updated,
+                    &timestamp_now(),
                     now,
                     window_cutoff,
                     Self::BACKEND,
-                )
-                .map_err(|e| DatabaseError::Internal(e.to_string()))?
+                )?
             }
         };
         Ok(stmt)

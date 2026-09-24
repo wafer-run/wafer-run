@@ -113,6 +113,13 @@ pub enum SqlBuildError {
         /// The rejected offset.
         offset: i64,
     },
+    /// A statement would write the same column twice: two of the column
+    /// names a builder was given for distinct roles are the same name.
+    #[error("column {column:?} is named for more than one role in the statement")]
+    DuplicateColumn {
+        /// The repeated column name.
+        column: String,
+    },
 }
 
 /// Database backend dialect for SQL rendering.

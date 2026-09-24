@@ -592,9 +592,11 @@ pub enum OnConflict {
     /// On insert the server seeds `count_field = 1` and `window_field = now`;
     /// on conflict, `count_field` resets to 1 when the stored `window_field`
     /// is strictly older than `window_cutoff` (also rolling `window_field`
-    /// forward to `now`), otherwise increments by 1. The `id` and `key`
-    /// insert values are read from `data` (a fresh row identifier and the
-    /// conflict-target value).
+    /// forward to `now`), otherwise increments by 1. `conflict_columns` names
+    /// exactly one column (not `id`), and `data` holds exactly two string
+    /// values: `id` (a fresh row identifier) and that column's value. Any
+    /// other shape is `InvalidArgument`, since the statement would not write
+    /// it.
     WindowedCounter {
         /// Counter column (e.g. `count`).
         count_field: String,
@@ -605,12 +607,13 @@ pub enum OnConflict {
         /// `now - window_secs`; rows whose stored `window_field` is strictly
         /// less than this are treated as expired and reset.
         window_cutoff: i64,
-        /// Creation-timestamp columns, stamped `CURRENT_TIMESTAMP` on INSERT
-        /// **only** — never re-written on conflict, so creation time is
-        /// immutable across counter updates.
+        /// Creation-timestamp columns, stamped with the server's current
+        /// instant as RFC 3339 text (the form `database.create` stamps) on
+        /// INSERT **only** — never re-written on conflict, so creation time
+        /// is immutable across counter updates.
         created_fields: Vec<String>,
-        /// Modification-timestamp columns, stamped `CURRENT_TIMESTAMP` on both
-        /// the initial INSERT and every conflicting update.
+        /// Modification-timestamp columns, stamped with the same RFC 3339
+        /// instant on both the initial INSERT and every conflicting update.
         updated_fields: Vec<String>,
     },
 }

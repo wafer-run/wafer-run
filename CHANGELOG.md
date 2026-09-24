@@ -4,6 +4,29 @@
 
 ### Breaking changes
 
+- The windowed-counter upsert (`OnConflict::WindowedCounter`) stamps its
+  `created_fields`/`updated_fields` with the server's current instant as
+  RFC 3339 text, bound as a parameter — the form `database.create` stamps —
+  instead of SQL `CURRENT_TIMESTAMP`. On SQLite and D1 the stored text
+  changes from `2026-09-24 10:00:00` to `2026-09-24T10:00:00.123+00:00`
+  (Postgres `TIMESTAMPTZ` columns take it as a timestamp; a Postgres TEXT
+  column stored `2026-09-24 10:00:00.123+00`). A retention sweep comparing
+  those columns against a cutoff must now spell the cutoff in RFC 3339; a
+  space-format cutoff no longer matches the stored text (and never bound
+  into a `TIMESTAMPTZ` column). The counter is keyed by the column
+  `conflict_columns` names, with its value taken from `data[that column]`,
+  not from a data field literally named `key`: `conflict_columns` must name
+  exactly one column other than `id`, and `data` must hold a string `id`, a
+  string for that column and nothing else — a second conflict column or any
+  other data field (both used to be dropped without a word) is
+  `InvalidArgument`, from the handler and from `DbExec::upsert` alike (was
+  `Internal` for a missing `id`/`key` reaching the executor directly).
+  `wafer_sql_utils::upsert::build_windowed_counter_upsert` takes a
+  `stamped_at: &str` before `now`, its `key` argument is `conflict_value`,
+  and it refuses a column named for two roles with the new
+  `SqlBuildError::DuplicateColumn`; `DbExec::upsert` maps its builder errors
+  to `InvalidArgument` (was `Internal`). The executor's check is public as
+  `interfaces::database::exec::windowed_counter_row`.
 - `NotFound` only ever comes from a service saying the thing a request
   names does not exist; the runtime no longer answers `NotFound` for "no
   such block". A client that reads `NotFound` as "unset" or "no row"

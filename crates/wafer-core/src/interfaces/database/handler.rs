@@ -27,6 +27,7 @@ use wafer_schema::Table;
 use wafer_sql_utils::aggregate::CastType;
 
 use super::{
+    exec::windowed_counter_row,
     schema_wire,
     service::{self, DatabaseError, DatabaseService},
 };
@@ -215,11 +216,11 @@ pub fn flatten_leaves(tree: &[FilterTree]) -> Result<Vec<Filter>, WaferError> {
 /// is impossible. Returns the collection alongside the spec so the caller can
 /// authorize/dispatch without a move-after-use of `req.collection`.
 ///
-/// `WindowedCounter` also requires a non-empty `conflict_columns` (the
-/// executor's conflict target) and string-valued `id`/`key` entries in `data`
-/// (the executor's insert values) — both fail closed to `InvalidArgument`
-/// here rather than surfacing as an opaque `Internal` error, or in the
-/// conflict-column case silently defaulting, deep inside `DbExec::upsert`.
+/// `WindowedCounter` also requires exactly one conflict column and `data`
+/// holding a string `id`, a string for that column and nothing else
+/// ([`windowed_counter_row`], the check `DbExec::upsert` repeats) — anything
+/// the statement would not write is `InvalidArgument` here, before a backend
+/// sees it.
 ///
 /// Public as part of the wire→builder-input conversion surface (see
 /// [`convert_filter_tree`]): it takes only the wire request and is compared
@@ -255,24 +256,7 @@ pub fn to_upsert_spec(
             for col in created_fields.iter().chain(&updated_fields) {
                 check_name(col)?;
             }
-            // `DbExec::upsert` derives the conflict target from
-            // `conflict_columns[0]` and reads `id`/`key` insert values out of
-            // `data` (see `extract_windowed_id_key`) — both fail-closed here
-            // rather than surfacing as an opaque `Internal` error (or, for the
-            // conflict column, silently defaulting) deep inside the SQL
-            // builder.
-            if req.conflict_columns.is_empty() {
-                return Err(invalid(
-                    "windowed-counter upsert requires a conflict column",
-                ));
-            }
-            let has_string_field =
-                |name: &str| req.data.iter().any(|(k, v)| k == name && v.is_string());
-            if !has_string_field("id") || !has_string_field("key") {
-                return Err(invalid(
-                    "windowed-counter upsert requires string 'id' and 'key' data fields",
-                ));
-            }
+            windowed_counter_row(&req.data, &req.conflict_columns).map_err(db_error_to_wafer)?;
             service::UpsertConflict::WindowedCounter {
                 count_field,
                 window_field,
