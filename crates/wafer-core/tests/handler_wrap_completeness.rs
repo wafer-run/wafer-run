@@ -671,6 +671,10 @@ mod vector_fakes {
             self.record("list_ids");
             Ok(vec![])
         }
+        async fn rename_index(&self, _from: &str, _to: &str) -> VResult<()> {
+            self.record("rename_index");
+            Ok(())
+        }
     }
 }
 
@@ -1140,6 +1144,10 @@ fn vector_op_body(op: &str) -> Vec<u8> {
         ServiceOp::VECTOR_LIST_IDS => codec::encode(&wire::ListIdsRequest {
             index,
             filter: wire::MetadataFilter::default(),
+        }),
+        ServiceOp::VECTOR_RENAME_INDEX => codec::encode(&wire::RenameIndexRequest {
+            from: "my_org__vector__Docs".into(),
+            to: index,
         }),
         other => panic!(
             "completeness test has no minimal-body case for vector op `{other}` — \

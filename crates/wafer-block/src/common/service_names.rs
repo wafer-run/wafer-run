@@ -170,6 +170,8 @@ impl ServiceOp {
     pub const VECTOR_DESCRIBE_INDEX: &str = "vector.describe_index";
     /// List entry ids matching a metadata equality filter.
     pub const VECTOR_LIST_IDS: &str = "vector.list_ids";
+    /// Move an index with a legacy mixed-case name to its lowercase spelling.
+    pub const VECTOR_RENAME_INDEX: &str = "vector.rename_index";
     /// Compute text embeddings.
     pub const EMBEDDING_EMBED: &str = "embedding.embed";
     /// Count tokens for a piece of text.
@@ -260,6 +262,7 @@ impl ServiceOp {
         Self::VECTOR_LIST_INDEXES,
         Self::VECTOR_DESCRIBE_INDEX,
         Self::VECTOR_LIST_IDS,
+        Self::VECTOR_RENAME_INDEX,
     ];
 
     /// Every `storage.*` op — drives the `storage@v1` action catalog in

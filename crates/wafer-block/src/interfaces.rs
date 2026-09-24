@@ -784,6 +784,18 @@ fn vector_action_spec(op: &str) -> ActionSpec {
                 "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
             })),
         },
+        ServiceOp::VECTOR_RENAME_INDEX => ActionSpec {
+            description:
+                "Move an index with a legacy mixed-case name to its lowercase spelling. \
+                 WRAP-authorized for write against both from and to."
+                    .into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "from": { "type": "string" }, "to": { "type": "string" } },
+                "required": ["from", "to"]
+            })),
+            response_schema: None,
+        },
         other => panic!(
             "BUG: no ActionSpec for vector op '{other}' — update vector_action_spec alongside ServiceOp::VECTOR_OPS"
         ),

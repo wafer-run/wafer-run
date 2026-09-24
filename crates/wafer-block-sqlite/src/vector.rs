@@ -8,11 +8,14 @@ use rusqlite::{
 use wafer_core::interfaces::vector::{
     rrf,
     service::{
-        ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, SearchMode, VectorEntry,
-        VectorError, VectorIndexConfig, VectorMatch, VectorService,
+        check_rename, ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter,
+        SearchMode, VectorEntry, VectorError, VectorIndexConfig, VectorMatch, VectorService,
     },
 };
-use wafer_sql_utils::vector::{build_list_meta_tables, VectorIndexSchema, METADATA_FILTER_FN};
+use wafer_sql_utils::vector::{
+    build_list_meta_tables, vec0_module_args, VectorIndexRename, VectorIndexSchema,
+    METADATA_FILTER_FN,
+};
 
 use crate::{
     ensure_vec_loaded,
@@ -97,6 +100,95 @@ impl SqliteVecService {
             )
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         Ok(exists)
+    }
+
+    /// Whether any catalog entry is named `name` as SQLite resolves names —
+    /// ignoring ASCII case — other than the table named exactly `except`.
+    /// This is the test for "creating or renaming a table to `name` would
+    /// collide", with the table being moved (`except`) left out.
+    fn name_taken(conn: &Connection, name: &str, except: &str) -> Result<bool, VectorError> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE name = ?1 COLLATE NOCASE AND name <> ?2)",
+            params![name, except],
+            |row| row.get(0),
+        )
+        .map_err(|e| VectorError::Internal(e.to_string()))
+    }
+
+    /// Worker-side body of [`VectorService::rename_index`]: catalog probes,
+    /// then every move in one IMMEDIATE transaction.
+    fn rename_on_conn(
+        conn: &mut Connection,
+        rename: &VectorIndexRename,
+        from: &str,
+        to: &str,
+    ) -> Result<(), VectorError> {
+        ensure_vec_loaded(conn).map_err(|e| VectorError::Internal(e.to_string()))?;
+        // IMMEDIATE for the same reason as in `upsert_on_conn`; it also holds
+        // the catalog still between the probes below and the moves.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        // `from` is matched exactly: an index stored under another spelling
+        // of the name is not this one.
+        let vec_sql: Option<String> = tx
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                params![&rename.from.vec_table],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let Some(vec_sql) = vec_sql else {
+            return Err(VectorError::IndexNotFound(from.to_string()));
+        };
+        if !Self::table_exists(&tx, &rename.from.meta_table)? {
+            return Err(VectorError::Internal(format!(
+                "vector index {from:?} has no table {:?}",
+                rename.from.meta_table
+            )));
+        }
+        let keyword_search = Self::table_exists(&tx, &rename.from.fts_table)?;
+
+        // None of `to`'s tables may exist under any spelling, bar the table
+        // of `from` that becomes it. That includes an FTS table when `from`
+        // has none: the moved index would pick it up as its keyword search.
+        for (target, own) in [
+            (&rename.to.vec_table, &rename.from.vec_table),
+            (&rename.to.meta_table, &rename.from.meta_table),
+            (&rename.to.fts_table, &rename.from.fts_table),
+        ] {
+            if Self::name_taken(&tx, target, own)? {
+                return Err(VectorError::IndexAlreadyExists(to.to_string()));
+            }
+        }
+
+        let module_args = vec0_module_args(&vec_sql).ok_or_else(|| {
+            VectorError::Internal(format!(
+                "vector table {:?} is not a virtual table: {vec_sql}",
+                rename.from.vec_table
+            ))
+        })?;
+        let mut stmt = tx
+            .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let vec_columns = stmt
+            .query_map(params![&rename.from.vec_table], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| VectorError::Internal(e.to_string()))?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+        drop(stmt);
+
+        for stmt in rename.build_statements(module_args, &vec_columns, keyword_search) {
+            tx.execute(&stmt.sql, [])
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| VectorError::Internal(e.to_string()))
     }
 
     fn index_exists(conn: &Connection, schema: &VectorIndexSchema) -> Result<bool, VectorError> {
@@ -348,6 +440,17 @@ impl VectorService for SqliteVecService {
             Ok(n as u64)
         })
         .await
+    }
+
+    async fn rename_index(&self, from: &str, to: &str) -> Result<(), VectorError> {
+        check_rename(from, to)?;
+        let rename = VectorIndexRename::new(from, to).map_err(|_| VectorError::InvalidRename {
+            from: from.to_string(),
+            to: to.to_string(),
+        })?;
+        let (from, to) = (from.to_string(), to.to_string());
+        self.on_conn(move |conn| Self::rename_on_conn(conn, &rename, &from, &to))
+            .await
     }
 
     async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>, VectorError> {
@@ -1402,5 +1505,330 @@ mod tests {
         delete.expect("delete waits for the other writer, then commits");
         assert_eq!(svc.count("docs").await.unwrap(), 1);
         drop(svc);
+    }
+
+    // --- rename_index ---------------------------------------------------
+
+    const LEGACY: &str = "my_org__vector__Docs";
+    const LOWER: &str = "my_org__vector__docs";
+
+    /// Build an index named `LEGACY` the way the service did before index
+    /// names had to be lowercase: the same three tables, created directly
+    /// because the service no longer accepts the name. Rowids are sparse
+    /// (1, 5, 9) as deletes leave them, so a move that renumbered the vec0
+    /// rows would detach vectors from their `_meta` rows.
+    async fn legacy_index(svc: &SqliteVecService, keyword_search: bool) {
+        svc.worker
+            .run(move |conn| {
+                conn.execute_batch(
+                    "CREATE VIRTUAL TABLE my_org__vector__Docs_vec USING vec0(embedding float[3]);
+                     CREATE TABLE my_org__vector__Docs_meta(
+                        id TEXT PRIMARY KEY,
+                        rowid INTEGER NOT NULL,
+                        metadata TEXT,
+                        text TEXT
+                     );",
+                )
+                .unwrap();
+                if keyword_search {
+                    conn.execute_batch(
+                        "CREATE VIRTUAL TABLE my_org__vector__Docs_fts USING fts5(id UNINDEXED, text);",
+                    )
+                    .unwrap();
+                }
+                for (rowid, id, v, tag, text) in [
+                    (1_i64, "a", [1.0_f32, 0.0, 0.0], "x", "cats are soft"),
+                    (5, "b", [0.0, 1.0, 0.0], "y", "dogs bark loud"),
+                    (9, "c", [0.0, 0.0, 1.0], "z", "fish swim deep"),
+                ] {
+                    let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+                    conn.execute(
+                        "INSERT INTO my_org__vector__Docs_vec(rowid, embedding) VALUES (?1, ?2)",
+                        params![rowid, bytes],
+                    )
+                    .unwrap();
+                    conn.execute(
+                        "INSERT INTO my_org__vector__Docs_meta(id, rowid, metadata, text) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![id, rowid, format!(r#"{{"tag":"{tag}"}}"#), text],
+                    )
+                    .unwrap();
+                    if keyword_search {
+                        conn.execute(
+                            "INSERT INTO my_org__vector__Docs_fts(id, text) VALUES (?1, ?2)",
+                            params![id, text],
+                        )
+                        .unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("vector worker alive");
+    }
+
+    /// Every table name, sorted, excluding vec0 / FTS5 shadow tables and
+    /// SQLite's own (`sqlite_sequence`, which vec0 creates).
+    async fn catalog(svc: &SqliteVecService) -> Vec<String> {
+        svc.worker
+            .run(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' \
+                         AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
+                         AND name NOT LIKE '%\\_vec\\_%' ESCAPE '\\' \
+                         AND name NOT LIKE '%\\_fts\\_%' ESCAPE '\\' ORDER BY name",
+                    )
+                    .unwrap();
+                stmt.query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<String>>>()
+                    .unwrap()
+            })
+            .await
+            .expect("vector worker alive")
+    }
+
+    /// Catalog entries of any kind — shadow tables included — still spelled
+    /// with the legacy name or the staging stem (`GLOB` is case-sensitive).
+    /// vec0 has no `xRename`, so an `ALTER TABLE` of the vec table would
+    /// leave its shadow tables here under `…Docs_vec_*`.
+    async fn leftovers(svc: &SqliteVecService) -> i64 {
+        query_i64_for_tests(
+            svc,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name GLOB '*Docs*' OR name GLOB '*-rename*'",
+        )
+        .await
+    }
+
+    async fn nearest(svc: &SqliteVecService, index: &str, v: Vec<f32>) -> VectorMatch {
+        svc.query(index, v, 1, None, SearchMode::Vector, None)
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    /// Guard (passes before and after this op exists): the service refuses
+    /// the legacy name, and the lowercase name does not find the tables,
+    /// so a legacy index is unreachable until it is renamed.
+    #[tokio::test]
+    async fn a_legacy_index_is_unreachable_by_either_spelling() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, true).await;
+        assert!(matches!(
+            svc.count(LEGACY).await.unwrap_err(),
+            VectorError::InvalidIndexName(_)
+        ));
+        assert!(matches!(
+            svc.count(LOWER).await.unwrap_err(),
+            VectorError::IndexNotFound(_)
+        ));
+    }
+
+    /// The moved index is the old one: every vector still ranks against its
+    /// own id and metadata, keyword search still finds the old text, and
+    /// the index takes new writes and deletes. Nothing is left under the
+    /// old or the staging names.
+    #[tokio::test]
+    async fn rename_index_moves_a_legacy_index_with_its_data() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, true).await;
+
+        svc.rename_index(LEGACY, LOWER).await.unwrap();
+
+        assert_eq!(svc.count(LOWER).await.unwrap(), 3);
+        for (v, id, tag) in [
+            (vec![1.0, 0.0, 0.0], "a", "x"),
+            (vec![0.0, 1.0, 0.0], "b", "y"),
+            (vec![0.0, 0.0, 1.0], "c", "z"),
+        ] {
+            let hit = nearest(&svc, LOWER, v).await;
+            assert_eq!(hit.id, id);
+            assert_eq!(hit.metadata, Some(serde_json::json!({ "tag": tag })));
+        }
+        let kw = svc
+            .query(
+                LOWER,
+                vec![0.0; 3],
+                5,
+                None,
+                SearchMode::Keyword,
+                Some("dogs".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(kw.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["b"]);
+        let desc = svc.describe_index(LOWER).await.unwrap();
+        assert!(desc.exists && desc.keyword_search);
+
+        // New writes continue after the highest moved rowid.
+        svc.upsert(
+            LOWER,
+            vec![entry("d", vec![0.5, 0.5, 0.0], Some("birds sing"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(nearest(&svc, LOWER, vec![0.5, 0.5, 0.0]).await.id, "d");
+        assert_eq!(
+            query_i64_for_tests(
+                &svc,
+                "SELECT rowid FROM my_org__vector__docs_meta WHERE id = 'd'"
+            )
+            .await,
+            10
+        );
+        svc.delete(LOWER, vec!["a".into()]).await.unwrap();
+        assert_eq!(svc.count(LOWER).await.unwrap(), 3);
+        assert_eq!(nearest(&svc, LOWER, vec![1.0, 0.0, 0.0]).await.id, "d");
+
+        assert_eq!(
+            catalog(&svc).await,
+            [
+                "my_org__vector__docs_fts",
+                "my_org__vector__docs_meta",
+                "my_org__vector__docs_vec"
+            ]
+        );
+        assert_eq!(svc.list_indexes("my_org__vector__").await.unwrap(), [LOWER]);
+        assert_eq!(leftovers(&svc).await, 0);
+    }
+
+    #[tokio::test]
+    async fn rename_index_moves_a_vector_only_index() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, false).await;
+
+        svc.rename_index(LEGACY, LOWER).await.unwrap();
+
+        assert_eq!(nearest(&svc, LOWER, vec![0.0, 1.0, 0.0]).await.id, "b");
+        assert!(!svc.describe_index(LOWER).await.unwrap().keyword_search);
+        assert_eq!(
+            catalog(&svc).await,
+            ["my_org__vector__docs_meta", "my_org__vector__docs_vec"]
+        );
+        assert_eq!(leftovers(&svc).await, 0);
+    }
+
+    /// Once moved, `from` is gone: a second run reports it missing, which a
+    /// startup migration reads as done when `to` exists.
+    #[tokio::test]
+    async fn rename_index_twice_reports_the_source_missing() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, true).await;
+        svc.rename_index(LEGACY, LOWER).await.unwrap();
+
+        match svc.rename_index(LEGACY, LOWER).await.unwrap_err() {
+            VectorError::IndexNotFound(name) => assert_eq!(name, LEGACY),
+            other => panic!("expected IndexNotFound, got {other:?}"),
+        }
+        assert!(svc.describe_index(LOWER).await.unwrap().exists);
+        assert_eq!(svc.count(LOWER).await.unwrap(), 3);
+    }
+
+    /// `from` is matched exactly: another spelling of the name is a
+    /// different index, even though SQLite would resolve it to the same
+    /// tables.
+    #[tokio::test]
+    async fn rename_index_matches_the_source_name_exactly() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, true).await;
+        match svc
+            .rename_index("my_org__vector__DOCS", LOWER)
+            .await
+            .unwrap_err()
+        {
+            VectorError::IndexNotFound(name) => assert_eq!(name, "my_org__vector__DOCS"),
+            other => panic!("expected IndexNotFound, got {other:?}"),
+        }
+        assert_eq!(
+            catalog(&svc).await,
+            [
+                "my_org__vector__Docs_fts",
+                "my_org__vector__Docs_meta",
+                "my_org__vector__Docs_vec"
+            ]
+        );
+    }
+
+    /// SQLite cannot hold two spellings of one table name, so `to` can only
+    /// be occupied by a table `from` does not have: here an FTS table beside
+    /// a vector-only legacy index. Moving the index onto it would silently
+    /// give it someone else's keyword search, so the rename is refused and
+    /// nothing moves.
+    #[tokio::test]
+    async fn rename_index_refuses_an_occupied_target() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, false).await;
+        svc.worker
+            .run(|conn| {
+                conn.execute_batch(
+                    "CREATE VIRTUAL TABLE my_org__vector__DOCS_fts USING fts5(id UNINDEXED, text);",
+                )
+                .unwrap();
+            })
+            .await
+            .expect("vector worker alive");
+
+        match svc.rename_index(LEGACY, LOWER).await.unwrap_err() {
+            VectorError::IndexAlreadyExists(name) => assert_eq!(name, LOWER),
+            other => panic!("expected IndexAlreadyExists, got {other:?}"),
+        }
+        assert_eq!(
+            catalog(&svc).await,
+            [
+                "my_org__vector__DOCS_fts",
+                "my_org__vector__Docs_meta",
+                "my_org__vector__Docs_vec"
+            ]
+        );
+    }
+
+    /// A move that fails part-way leaves the index exactly as it was: the
+    /// staging meta table is occupied, so the rename fails after the vec0
+    /// rows have been moved, and the transaction puts them back.
+    #[tokio::test]
+    async fn rename_index_failing_part_way_changes_nothing() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, true).await;
+        svc.worker
+            .run(|conn| {
+                conn.execute_batch(r#"CREATE TABLE "my_org__vector__docs-rename_meta"(x);"#)
+                    .unwrap();
+            })
+            .await
+            .expect("vector worker alive");
+
+        let err = svc.rename_index(LEGACY, LOWER).await.unwrap_err();
+        assert!(matches!(err, VectorError::Internal(_)), "{err:?}");
+        assert_eq!(
+            catalog(&svc).await,
+            [
+                "my_org__vector__Docs_fts",
+                "my_org__vector__Docs_meta",
+                "my_org__vector__Docs_vec",
+                "my_org__vector__docs-rename_meta"
+            ]
+        );
+        assert_eq!(
+            query_i64_for_tests(&svc, "SELECT COUNT(*) FROM my_org__vector__Docs_vec").await,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_index_refuses_anything_but_a_legacy_spelling() {
+        let svc = SqliteVecService::open_in_memory().unwrap();
+        legacy_index(&svc, true).await;
+        for (from, to) in [
+            (LOWER, LOWER),
+            (LEGACY, "my_org__vector__other"),
+            (LEGACY, LEGACY),
+            ("my_org__vector__Docs_x", LOWER),
+        ] {
+            let err = svc.rename_index(from, to).await.unwrap_err();
+            assert!(
+                matches!(err, VectorError::InvalidRename { .. }),
+                "{from} -> {to}: {err:?}"
+            );
+        }
     }
 }

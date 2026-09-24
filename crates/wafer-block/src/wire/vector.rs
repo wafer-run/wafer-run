@@ -148,6 +148,33 @@ pub struct DeleteIndexRequest {
     pub name: String,
 }
 
+/// Request for `vector.rename_index`: move the index `from`, whose name
+/// predates the lowercase index-name rule, to `to`, its lowercase spelling.
+///
+/// The one op that accepts a non-plain index name, and only as `from` — see
+/// [`is_legacy_spelling_of`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameIndexRequest {
+    /// Current (legacy, mixed-case) index name.
+    pub from: String,
+    /// New index name: `from` lowercased.
+    pub to: String,
+}
+
+/// Whether `from` is a legacy spelling of the index name `to`: `to` is a
+/// plain identifier ([`crate::db::is_plain_ident`]), `from` differs from it,
+/// and `from` lowercases (ASCII) to it.
+///
+/// This is the whole admission rule for `vector.rename_index`. It lets an
+/// index created before index names had to be lowercase be moved to its
+/// lowercase spelling, and nothing else: `from` can hold uppercase ASCII
+/// letters and is otherwise a plain identifier, and the op cannot give an
+/// index a different name.
+#[must_use]
+pub fn is_legacy_spelling_of(from: &str, to: &str) -> bool {
+    crate::db::is_plain_ident(to) && from != to && from.to_ascii_lowercase() == to
+}
+
 /// Request for `vector.upsert`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpsertRequest {
@@ -664,6 +691,53 @@ mod tests {
         let encoded = codec::encode(&original).expect("encode");
         let decoded: ListIdsResponse = codec::decode(&encoded).expect("decode");
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn rename_index_request_round_trips() {
+        let original = RenameIndexRequest {
+            from: "my_org__vector__Docs".into(),
+            to: "my_org__vector__docs".into(),
+        };
+        let encoded = codec::encode(&original).expect("encode");
+        let decoded: RenameIndexRequest = codec::decode(&encoded).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn schema_lock_rename_index_request() {
+        let req = RenameIndexRequest {
+            from: String::new(),
+            to: String::new(),
+        };
+        let encoded = codec::encode(&req).expect("encode");
+        let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "82a466726f6da0a2746fa0",
+            "RenameIndexRequest schema changed — review consumer impact before updating this literal"
+        );
+    }
+
+    #[test]
+    fn legacy_spelling_admits_only_an_uppercase_spelling_of_a_plain_target() {
+        assert!(is_legacy_spelling_of("Docs", "docs"));
+        assert!(is_legacy_spelling_of(
+            "my_org__vector__MyDocs2",
+            "my_org__vector__mydocs2"
+        ));
+        // Nothing to rename: the name is already plain.
+        assert!(!is_legacy_spelling_of("docs", "docs"));
+        // A different name, not a respelling.
+        assert!(!is_legacy_spelling_of("Docs", "other"));
+        assert!(!is_legacy_spelling_of("Docs", "docs2"));
+        // The target must itself be a valid index name.
+        assert!(!is_legacy_spelling_of("Docs", "Docs"));
+        assert!(!is_legacy_spelling_of("A-B", "a-b"));
+        assert!(!is_legacy_spelling_of("", ""));
+        let long = "a".repeat(crate::db::MAX_IDENT_LEN + 1);
+        assert!(!is_legacy_spelling_of(&long.to_ascii_uppercase(), &long));
+        // Non-ASCII survives ASCII lowercasing, so it never matches a plain target.
+        assert!(!is_legacy_spelling_of("DOCSÉ", "docsé"));
     }
 
     #[test]

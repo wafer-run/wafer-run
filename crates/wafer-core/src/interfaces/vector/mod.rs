@@ -12,8 +12,9 @@ pub mod service;
 pub use catalog::{get_model, model_catalog, ModelInfo, RuntimeCompat, DEFAULT_MODEL};
 pub use rrf::{fuse, fuse_scored, DEFAULT_RRF_K};
 pub use service::{
-    DistanceMetric, EmbeddingService, MetadataFilter, Result as VectorResult, SearchMode,
-    VectorEntry, VectorError, VectorIndexConfig, VectorMatch, VectorService,
+    check_rename, is_legacy_spelling_of, DistanceMetric, EmbeddingService, MetadataFilter,
+    Result as VectorResult, SearchMode, VectorEntry, VectorError, VectorIndexConfig, VectorMatch,
+    VectorService,
 };
 
 #[cfg(test)]

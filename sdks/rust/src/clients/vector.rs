@@ -4,13 +4,14 @@
 //! op (`embedding.embed`) routes to a caller-provided block name — any
 //! block implementing the embedding service (e.g. `my-org/fastembed`).
 //! All ops are buffered single-frame request/response. Index ops that
-//! mutate state (`create_index`, `delete_index`, `upsert`, `delete`)
-//! return an empty acknowledgement.
+//! mutate state (`create_index`, `delete_index`, `upsert`, `delete`,
+//! `rename_index`) return an empty acknowledgement.
 
 use wafer_block::{
     wire::vector::{
         CountRequest, CountResponse, CreateIndexRequest, DeleteIndexRequest, DeleteRequest,
-        EmbedRequest, EmbedResponse, QueryRequest, QueryResponse, UpsertRequest,
+        EmbedRequest, EmbedResponse, QueryRequest, QueryResponse, RenameIndexRequest,
+        UpsertRequest,
     },
     ServiceOp, WaferError,
 };
@@ -51,6 +52,12 @@ pub fn delete(request: &DeleteRequest) -> Result<(), WaferError> {
 /// Buffered: count the number of entries in an index.
 pub fn count(request: &CountRequest) -> Result<CountResponse, WaferError> {
     call(VECTOR_BLOCK, ServiceOp::VECTOR_COUNT, request)
+}
+
+/// Buffered: move an index whose name has uppercase letters (`from`) to its
+/// lowercase spelling (`to`). The response is an empty acknowledgement.
+pub fn rename_index(request: &RenameIndexRequest) -> Result<(), WaferError> {
+    call_ack(VECTOR_BLOCK, ServiceOp::VECTOR_RENAME_INDEX, request)
 }
 
 /// Call an embedding block to embed the given texts.

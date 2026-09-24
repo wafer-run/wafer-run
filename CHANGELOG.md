@@ -37,6 +37,13 @@
   The body is still buffered whole (streaming it into the `InputStream`
   waits for a stream failure terminal), but no longer copied once more.
 
+- `VectorService` has a required `rename_index(from, to)` method (see
+  Added). Every implementation must provide it; there is no default,
+  because a backend that cannot move an index leaves the indexes its users
+  created under mixed-case names unreachable. `VectorError` has a new
+  `InvalidRename { from, to }` variant (`InvalidArgument` on the wire), and
+  `InvalidIndexName`'s message states the lowercase rule index names follow.
+
 - `wafer_block_sqlite::vector::SqliteVecService::new` returns
   `rusqlite::Result<Self>`: it registers the SQL function filtered searches
   call (`wafer_sql_utils::vector::METADATA_FILTER_FN`) on the connection,
@@ -662,6 +669,26 @@
 
 ### Added
 
+- `vector.rename_index` (`wire::vector::RenameIndexRequest { from, to }`,
+  `ServiceOp::VECTOR_RENAME_INDEX`, `VectorService::rename_index`,
+  `clients::vector::rename_index`, and `rename_index` in the guest SDK) moves
+  an index created under a mixed-case name, which index names may no longer
+  have, to its lowercase spelling: `to` must be a valid index name and
+  `from` the same name with some letters uppercase
+  (`wire::vector::is_legacy_spelling_of`, checked by
+  `interfaces::vector::check_rename`); this is the only op that accepts
+  such a name, and it matches it exactly. The handler refuses other names
+  as `InvalidArgument` before authorizing, then requires write access to
+  both names. `NotFound` means no index is named exactly `from` (a
+  startup migration treats that as done when `to` exists);
+  `AlreadyExists` means `to` is taken — two spellings are never merged.
+  The SQLite backend moves the index in one transaction through a
+  `{to}-rename` staging stem, because SQLite folds identifier case: the
+  `_meta` and FTS5 tables are renamed, and the vec0 table, which sqlite-vec
+  cannot rename, is copied rowid for rowid into new vec0 tables declared
+  with the old module arguments (`wafer_sql_utils::vector::
+  VectorIndexRename`, `vec0_module_args`). There is no Postgres vector
+  backend.
 - CI builds and tests the embedder bindings (the `bindings` job in
   `ci-jobs.yml`, gated by `ci-ok`; `scripts/check.sh bindings`): `wafer-ffi`
   is built and driven through its `extern "C"` functions (register a wasm
