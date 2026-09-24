@@ -1,7 +1,7 @@
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
 use wafer_block::{
-    common::ServiceOp,
+    common::{ErrorCode, ServiceOp},
     wire::config::{GetRequest, GetResponse, SetRequest},
     WaferError,
 };
@@ -15,8 +15,11 @@ const BLOCK: &str = "wafer-run/config";
 // ===========================================================================
 
 dual_api! {
-    /// Fetch the typed value for `key` from the config block.
-    /// Returns `Err(WaferError)` if the key is not set or the lookup fails.
+    /// Fetch the value of `key` from the config block.
+    ///
+    /// A key that is not set is `Err` with [`ErrorCode::NotFound`]. Any other
+    /// `Err` (a WRAP denial, a transport or decode failure) means the read
+    /// failed and says nothing about the key's value.
     pub fn get(ctx, key: &str) -> Result<String, WaferError> {
         let req = GetRequest { key: key.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::CONFIG_GET, &req, Some(key), false, Some("config"))?;
@@ -24,9 +27,20 @@ dual_api! {
         Ok(resp.value)
     }
 
-    /// Like [`get`], but returns `default` (cloned) on any error rather than propagating it.
-    pub fn get_default(ctx, key: &str, default: &str) -> String {
-        svc_fn!(ctx, get(key)).unwrap_or_else(|_| default.to_string())
+    /// Like [`get`], but a key that is not set is `Ok(None)`. Every other
+    /// error is returned.
+    pub fn get_optional(ctx, key: &str) -> Result<Option<String>, WaferError> {
+        match svc_fn!(ctx, get(key)) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) if e.code == ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Like [`get`], but a key that is not set yields `default`. Every other
+    /// error is returned, never replaced by `default`.
+    pub fn get_default(ctx, key: &str, default: &str) -> Result<String, WaferError> {
+        Ok(svc_fn!(ctx, get_optional(key))?.unwrap_or_else(|| default.to_string()))
     }
 
     /// Set `key` to `value` in the config block.

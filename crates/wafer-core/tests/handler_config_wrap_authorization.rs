@@ -2,12 +2,8 @@
 //! `config.get` and `config.set` via `ctx.check_resource_access` (host-side)
 //! instead of the caller-suppliable `wrap.resource` message meta.
 //!
-//! `config.get` has a dual decode path (codec-encoded body, or a `key` meta
-//! fallback for header-routed callers) so it can't use
-//! `decode_and_authorize`'s single-decode bundling directly — it authorizes
-//! manually right after resolving `key`. These tests cover both decode paths
-//! to confirm the manual call still gates correctly. `config.set` is a
-//! straightforward `decode_and_authorize` call.
+//! Both ops decode and authorize through `decode_and_authorize`; the key is
+//! read from the codec-encoded body only, never from message meta.
 //!
 //! These tests reconstruct the meta-omission shape (WRAP metas absent on the
 //! message) and assert the *ctx*, not the meta, is what gates the call: a
@@ -220,21 +216,31 @@ async fn get_denied_never_reaches_service_body_path() {
     );
 }
 
+/// A `key` meta is not a second way to name the key: a body that does not
+/// decode is refused even for a caller holding every grant, and the service
+/// is never asked.
 #[tokio::test]
-async fn get_denied_never_reaches_service_meta_fallback_path() {
+async fn get_with_undecodable_body_ignores_key_meta() {
     let calls = new_calls();
     let svc = config_fakes::RecordingConfig::new(calls.clone());
-    // No codec-encoded body — the handler falls back to the `key` meta
-    // field. That fallback must still be gated by ctx.
     let mut msg = msg_without_wrap_meta(ServiceOp::CONFIG_GET);
     msg.set_meta("key", "MY_ORG__JWT_SECRET");
 
-    let out = wafer_core::interfaces::config::handler::handle_message(&svc, &DenyCtx, &msg, &[]);
-    expect_permission_denied(out).await;
+    let out = wafer_core::interfaces::config::handler::handle_message(&svc, &AllowCtx, &msg, &[]);
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => assert_eq!(
+            e.code,
+            ErrorCode::InvalidArgument,
+            "expected INVALID_ARGUMENT, got {:?}: {}",
+            e.code,
+            e.message
+        ),
+        other => panic!("expected an InvalidArgument error terminal, got {other:?}"),
+    }
 
     assert!(
         calls.lock().unwrap().is_empty(),
-        "get must not run on a denied request (meta fallback path); calls = {:?}",
+        "get must not run for an undecodable body; calls = {:?}",
         calls.lock().unwrap()
     );
 }

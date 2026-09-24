@@ -27,7 +27,7 @@ pub struct SetRequest {
 /// Response for `config.get`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetResponse {
-    /// Resolved value, or `""` when the key is unset.
+    /// Resolved value. An unset key is a `NotFound` error, not a response.
     pub value: String,
 }
 
