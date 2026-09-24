@@ -1,9 +1,12 @@
-//! Flow config is parsed, not trusted.
+//! Flow config is parsed, not trusted, and a flow transfer shares one budget.
 //!
 //! - `add_flow_json` / `add_flow` refuse a flow whose config or routing the
 //!   executor would otherwise misread: an `on_error` other than `"stop"` /
 //!   `"continue"`, a malformed timeout, a `next` into a parallel branch, a
 //!   transfer to the flow itself.
+//! - A `next.flow` transfer carries the step budget and the deadline of the
+//!   flow that transferred, so a cycle of transfers ends and a timeout still
+//!   holds after a hand-off.
 
 use std::{
     sync::{
@@ -14,6 +17,7 @@ use std::{
 };
 
 use serde_json::json;
+use wafer_block::streams::output::TerminalNotResponse;
 use wafer_run::*;
 
 /// Counts its invocations, waits `delay`, and passes the message through.
@@ -76,6 +80,16 @@ fn flow_error(result: Result<(), RuntimeError>) -> String {
         Err(RuntimeError::Flow(message)) => message,
         Err(other) => panic!("expected RuntimeError::Flow, got {other}"),
         Ok(()) => panic!("the flow must be refused"),
+    }
+}
+
+async fn run_to_error(w: &Wafer, flow: &str) -> WaferError {
+    let out = w
+        .run(flow, Message::new("http.request"), InputStream::empty())
+        .await;
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => e,
+        other => panic!("expected an error terminal, got {other:?}"),
     }
 }
 
@@ -181,4 +195,60 @@ async fn a_timeout_past_the_end_of_the_clock_runs() {
         .await;
     assert!(out.collect_buffered().await.is_ok());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// `a` (5 steps) and `b` (the default 1000) hand off to each other forever.
+/// The chain's step counter carries across every transfer and `a`'s budget
+/// caps it, so the fifth step is the last.
+#[tokio::test]
+async fn a_transfer_cycle_ends_when_the_step_budget_is_spent() {
+    let mut w = wafer();
+    let calls = counter(&mut w, "test/count", Duration::ZERO);
+    w.add_flow_json(&flow_json(
+        "a",
+        &json!([{ "id": "s", "block": "test/count", "next": [ { "flow": "b" } ] }]),
+        &json!({ "max_steps": 5 }),
+    ))
+    .unwrap();
+    w.add_flow_json(&flow_json(
+        "b",
+        &json!([{ "id": "s", "block": "test/count", "next": [ { "flow": "a" } ] }]),
+        &json!({}),
+    ))
+    .unwrap();
+    w.seal().await.unwrap();
+
+    let err = tokio::time::timeout(Duration::from_secs(10), run_to_error(&w, "a"))
+        .await
+        .expect("the transfer cycle must end");
+    assert_eq!(err.code, ErrorCode::ResourceExhausted, "{err:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
+/// `slow` times out after 50 ms; its one step takes 100 ms and then hands
+/// off to `next`, which has no timeout of its own. The deadline carries
+/// across the transfer, so `next`'s step never runs.
+#[tokio::test]
+async fn the_deadline_carries_across_a_transfer() {
+    let mut w = wafer();
+    let slow_calls = counter(&mut w, "test/slow", Duration::from_millis(100));
+    let after_calls = counter(&mut w, "test/after", Duration::ZERO);
+    w.add_flow_json(&flow_json(
+        "slow",
+        &json!([{ "id": "s", "block": "test/slow", "next": [ { "flow": "next" } ] }]),
+        &json!({ "timeout_ms": 50 }),
+    ))
+    .unwrap();
+    w.add_flow_json(&flow_json(
+        "next",
+        &json!([{ "id": "s", "block": "test/after" }]),
+        &json!({}),
+    ))
+    .unwrap();
+    w.seal().await.unwrap();
+
+    let err = run_to_error(&w, "slow").await;
+    assert_eq!(err.code, ErrorCode::DeadlineExceeded, "{err:?}");
+    assert_eq!(slow_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(after_calls.load(Ordering::SeqCst), 0);
 }

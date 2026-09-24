@@ -22,6 +22,14 @@
   `seal()` downloads from the registry are validated like `add_flow_json`
   ones. `wafer_block::config::parse_duration` is removed (its one caller was
   flow timeouts; `FlowTimeout` parses them).
+- A `next.flow` transfer no longer starts the target with a fresh step
+  budget and deadline. The flows one request passes through share one step
+  counter, deadline and cancellation flag; each flow entered can only
+  tighten them (its `max_steps` caps the running count, its timeout counts
+  from when it is entered). A cycle of transfers ends with
+  `ResourceExhausted` instead of recursing without bound, and transfers run
+  as a loop rather than nested calls. `flow_end` hooks for a chain fire once
+  it finishes, last-entered flow first.
 
 - `wafer_block_security_headers::merge_csp` returns a `CspMerge`
   (`policy` plus the `refused` directives and sources) instead of a

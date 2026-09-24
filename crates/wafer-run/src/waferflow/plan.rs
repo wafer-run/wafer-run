@@ -27,8 +27,8 @@ pub(crate) struct CompiledFlow {
     pub(crate) id: String,
     /// The flow's `config` timeout.
     pub(crate) timeout: Option<Duration>,
-    /// The flow's `config.max_steps` (1000 when unset): the shared step
-    /// budget for one execution.
+    /// The flow's `config.max_steps` (1000 when unset): the cap on the step
+    /// counter of the transfer chain once this flow is entered.
     pub(crate) max_steps: usize,
     /// The flow's `config.on_error`.
     pub(crate) on_error: OnError,
