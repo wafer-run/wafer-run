@@ -117,10 +117,17 @@ pub struct BlockInfo {
     /// are a fresh instance per call. See [`crate::InstanceMode`].
     #[serde(default = "default_instance_mode")]
     pub instance_mode: crate::InstanceMode,
-    /// Names of other blocks this block depends on. Used by the runtime to
-    /// validate the registry and (eventually) order initialization.
+    /// Names of other blocks this block cannot run without. `seal()` refuses
+    /// to boot while any of them is unregistered, and together with
+    /// [`optional_requires`](Self::optional_requires) the list is the
+    /// block's `call_block` allowlist (both empty: unrestricted).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// Names of other blocks this block may call but runs without. Part of
+    /// the `call_block` allowlist, not checked at `seal()`; a call to one
+    /// that is not registered fails with `Unimplemented`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_requires: Vec<String>,
 
     // -- Schema declarations --
     /// Database collections this block requires. The runtime ensures these
@@ -224,6 +231,7 @@ impl BlockInfo {
             summary: summary.into(),
             instance_mode: crate::InstanceMode::PerNode,
             requires: Vec::new(),
+            optional_requires: Vec::new(),
             collections: Vec::new(),
             config_keys: Vec::new(),
             flow_config: Vec::new(),
@@ -319,10 +327,34 @@ impl BlockInfo {
         self
     }
 
-    /// Set the list of dependency block names.
+    /// Set the blocks this block cannot run without (see
+    /// [`requires`](Self::requires)).
     pub fn requires(mut self, requires: Vec<String>) -> Self {
         self.requires = requires;
         self
+    }
+
+    /// Set the blocks this block may call but runs without (see
+    /// [`optional_requires`](Self::optional_requires)).
+    pub fn optional_requires(mut self, optional_requires: Vec<String>) -> Self {
+        self.optional_requires = optional_requires;
+        self
+    }
+
+    /// The block's `call_block` allowlist: [`requires`](Self::requires)
+    /// followed by [`optional_requires`](Self::optional_requires). `None`
+    /// when both are empty, which leaves the block's calls unrestricted.
+    pub fn call_allowlist(&self) -> Option<Vec<String>> {
+        if self.requires.is_empty() && self.optional_requires.is_empty() {
+            return None;
+        }
+        Some(
+            self.requires
+                .iter()
+                .chain(&self.optional_requires)
+                .cloned()
+                .collect(),
+        )
     }
 
     /// Set the database collections this block declares.
@@ -428,6 +460,21 @@ impl BlockInfo {
 #[cfg(test)]
 mod block_info_tests {
     use super::*;
+
+    #[test]
+    fn call_allowlist_is_none_only_when_both_lists_are_empty() {
+        assert_eq!(BlockInfo::new("a/b", "1", "i", "s").call_allowlist(), None);
+        let info = BlockInfo::new("a/b", "1", "i", "s")
+            .requires(vec!["x/hard".into()])
+            .optional_requires(vec!["x/soft".into()]);
+        assert_eq!(
+            info.call_allowlist(),
+            Some(vec!["x/hard".to_string(), "x/soft".to_string()])
+        );
+        let soft_only =
+            BlockInfo::new("a/b", "1", "i", "s").optional_requires(vec!["x/soft".into()]);
+        assert_eq!(soft_only.call_allowlist(), Some(vec!["x/soft".to_string()]));
+    }
 
     #[test]
     fn block_info_capabilities_default_none() {
