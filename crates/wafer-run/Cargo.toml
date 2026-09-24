@@ -103,6 +103,9 @@ wafer-block-sqlite = { path = "../wafer-block-sqlite" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 serial_test = "3"
+# The llm service trait's signatures name `CancellationToken`
+# (tests/model_services_caller_e2e.rs implements it).
+tokio-util = { workspace = true }
 
 # Criterion benchmark suite (PERF-01..03 measurement prerequisite, 2026-07-14
 # deep-dive review). Fixture guests are built by scripts/build-fixtures.sh.

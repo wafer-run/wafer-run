@@ -256,3 +256,18 @@ fn load_model(
         // Natural end of stream: auto-complete when sink drops.
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A provider that cannot be reached is unavailable (a 503 at the HTTP
+    /// edge), not an internal fault.
+    #[test]
+    fn a_network_error_is_unavailable() {
+        let (code, msg) =
+            image_error_to_block_error(ImageError::Network("connection refused".into()));
+        assert_eq!(code, ErrorCode::Unavailable);
+        assert_eq!(msg, "network: connection refused");
+    }
+}

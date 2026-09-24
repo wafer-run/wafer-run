@@ -5,11 +5,13 @@
 //! either via `decode_and_authorize` or, for `config.get`'s dual decode path,
 //! directly). Those changes were verified op-by-op in
 //! `handler_{database,storage,config,network,crypto}_wrap_authorization.rs`.
-//! The vector and auth handlers authorize the same way.
+//! The vector, auth, embedding, llm and image handlers authorize the same
+//! way.
 //!
 //! This file adds the mechanical guarantee that makes the property durable:
 //! it iterates the canonical op-family slices —
-//! `ServiceOp::{DATABASE,VECTOR,STORAGE,CONFIG,NETWORK,CRYPTO,AUTH}_OPS` —
+//! `ServiceOp::{DATABASE,VECTOR,STORAGE,CONFIG,NETWORK,CRYPTO,AUTH,EMBEDDING,
+//! LLM,IMAGE}_OPS` —
 //! and, for every op in each slice, dispatches a message with **no WRAP
 //! meta** (the exploit shape) through the real handler under a `Context`
 //! whose `check_resource_access` always denies. It asserts every one of them
@@ -32,6 +34,13 @@
 //! including `STORAGE_LIST_FOLDERS`, which is now admin-only via the
 //! `STORAGE_LIST_ALL_RESOURCE` sentinel (`wafer-block/src/wrap.rs`) — is
 //! covered by the deny loop.
+//!
+//! For the embedding, llm and image families a second loop runs every op
+//! under a context that admits and RECORDS each authorization request, and
+//! checks it against a per-op classification table (an exhaustive `match`
+//! that panics on an unlisted op): each op must ask for exactly its
+//! resource, type and access (load/unload as `Write`) before the service
+//! runs.
 //!
 //! The logger authorizes nothing (any block may log), so its guarantee is
 //! attribution instead: every op in `ServiceOp::LOGGER_OPS` hands the
@@ -557,6 +566,124 @@ mod auth_fakes {
                 role: Role::Admin,
                 orgs: Vec::new(),
             })
+        }
+    }
+}
+
+mod model_fakes {
+    //! Recording llm, image and embedding services: each method records its
+    //! op; streams and responses are minimal.
+
+    use futures::stream::BoxStream;
+    use tokio_util::sync::CancellationToken;
+    use wafer_block::wire::{
+        image,
+        llm::{self, ChatChunk, ChatRequest},
+        model_common::{LoadProgress, ModelStatus},
+    };
+    use wafer_core::interfaces::{
+        image::service::{ImageError, ImageRequest, ImageResponse, ImageService},
+        llm::service::{LlmError, LlmService},
+        vector::service::{EmbeddingService, Result as VResult},
+    };
+
+    use super::Calls;
+
+    pub struct RecordingModels {
+        pub calls: Calls,
+    }
+
+    impl RecordingModels {
+        pub fn new(calls: Calls) -> Self {
+            Self { calls }
+        }
+
+        fn record(&self, op: &'static str) {
+            self.calls.lock().unwrap().push(op);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmService for RecordingModels {
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> BoxStream<'static, Result<ChatChunk, LlmError>> {
+            self.record("chat");
+            Box::pin(futures::stream::empty())
+        }
+        async fn list_models(&self) -> Result<Vec<llm::ModelInfo>, LlmError> {
+            self.record("list_models");
+            Ok(Vec::new())
+        }
+        async fn status(&self, _b: &str, _m: &str) -> Result<ModelStatus, LlmError> {
+            self.record("status");
+            Ok(ModelStatus::ready())
+        }
+        fn load_model(
+            &self,
+            _b: &str,
+            _m: &str,
+            _cancel: CancellationToken,
+        ) -> BoxStream<'static, Result<LoadProgress, LlmError>> {
+            self.record("load_model");
+            Box::pin(futures::stream::empty())
+        }
+        async fn unload_model(&self, _b: &str, _m: &str) -> Result<(), LlmError> {
+            self.record("unload_model");
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ImageService for RecordingModels {
+        async fn generate(
+            &self,
+            _req: ImageRequest,
+            _cancel: CancellationToken,
+        ) -> Result<ImageResponse, ImageError> {
+            self.record("generate");
+            Ok(ImageResponse { images: Vec::new() })
+        }
+        async fn list_models(&self) -> Result<Vec<image::ModelInfo>, ImageError> {
+            self.record("list_models");
+            Ok(Vec::new())
+        }
+        async fn status(&self, _b: &str, _m: &str) -> Result<ModelStatus, ImageError> {
+            self.record("status");
+            Ok(ModelStatus::ready())
+        }
+        fn load_model(
+            &self,
+            _b: &str,
+            _m: &str,
+            _cancel: CancellationToken,
+        ) -> BoxStream<'static, Result<LoadProgress, ImageError>> {
+            self.record("load_model");
+            Box::pin(futures::stream::empty())
+        }
+        async fn unload_model(&self, _b: &str, _m: &str) -> Result<(), ImageError> {
+            self.record("unload_model");
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingService for RecordingModels {
+        fn model(&self) -> &str {
+            "m"
+        }
+        fn dimensions(&self) -> u32 {
+            1
+        }
+        async fn embed(&self, texts: Vec<String>) -> VResult<Vec<Vec<f32>>> {
+            self.record("embed");
+            Ok(texts.iter().map(|_| vec![0.0]).collect())
+        }
+        fn count_tokens(&self, _text: &str) -> usize {
+            self.record("count_tokens");
+            1
         }
     }
 }
@@ -1369,6 +1496,256 @@ async fn logger_ops_all_attribute_the_caller_and_escape_the_message() {
         assert_eq!(
             message, "ok\\nERROR forged record",
             "logger op `{op}`: the newline must reach the service escaped"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedding, llm and image: every op is authorized, and asks for the
+// resource its classification names.
+// ---------------------------------------------------------------------------
+
+/// The serving block for the model-family tests.
+const MODEL_BLOCK: &str = "acme/models";
+
+/// One op's authorization request: `(resource, type, access)`.
+type Asked = (
+    String,
+    wafer_block::types::ResourceType,
+    wafer_block::types::ResourceAccess,
+);
+
+fn embedding_op_body(op: &str) -> Vec<u8> {
+    use wafer_block::wire::vector as wire;
+
+    match op {
+        ServiceOp::EMBEDDING_EMBED => codec::encode(&wire::EmbedRequest {
+            texts: vec!["hi".into()],
+        }),
+        ServiceOp::EMBEDDING_COUNT_TOKENS => {
+            codec::encode(&wire::CountTokensRequest { text: "hi".into() })
+        }
+        other => panic!(
+            "completeness test has no minimal-body case for embedding op `{other}` — \
+             add a `match` arm to `embedding_op_body` so this op stays covered"
+        ),
+    }
+    .expect("encode must succeed")
+}
+
+/// Body for an llm or image op naming backend `b`, model `m` (list_models
+/// carries none).
+fn model_op_body(op: &str) -> Vec<u8> {
+    use wafer_block::wire::{image, llm, model_common};
+
+    match op {
+        ServiceOp::LLM_CHAT => codec::encode(&llm::ChatRequest::new("b", "m", Vec::new())),
+        ServiceOp::IMAGE_GENERATE => codec::encode(&image::ImageRequest::new("b", "m", "a cat")),
+        ServiceOp::LLM_LIST_MODELS | ServiceOp::IMAGE_LIST_MODELS => Ok(Vec::new()),
+        ServiceOp::LLM_STATUS | ServiceOp::IMAGE_STATUS => {
+            codec::encode(&model_common::StatusRequest {
+                backend_id: "b".into(),
+                model_id: "m".into(),
+            })
+        }
+        ServiceOp::LLM_LOAD_MODEL | ServiceOp::IMAGE_LOAD_MODEL => {
+            codec::encode(&model_common::LoadModelRequest {
+                backend_id: "b".into(),
+                model_id: "m".into(),
+            })
+        }
+        ServiceOp::LLM_UNLOAD_MODEL | ServiceOp::IMAGE_UNLOAD_MODEL => {
+            codec::encode(&model_common::UnloadModelRequest {
+                backend_id: "b".into(),
+                model_id: "m".into(),
+            })
+        }
+        other => panic!(
+            "completeness test has no minimal-body case for model op `{other}` — \
+             add a `match` arm to `model_op_body` so this op stays covered"
+        ),
+    }
+    .expect("encode must succeed")
+}
+
+/// The classification: what each embedding / llm / image op must ask to be
+/// authorized for, and the service method it then runs. Using a model is a
+/// read; loading or unloading one changes what every other caller finds
+/// loaded, so it is a write.
+fn classify(op: &str) -> (Asked, &'static str) {
+    use wafer_block::types::{
+        ResourceAccess::{Read, Write},
+        ResourceType::{Embedding, Image, Llm},
+    };
+
+    let model_res = "acme__models__b/m".to_string();
+    match op {
+        ServiceOp::EMBEDDING_EMBED => (("acme__models__embed".into(), Embedding, Read), "embed"),
+        ServiceOp::EMBEDDING_COUNT_TOKENS => (
+            ("acme__models__count_tokens".into(), Embedding, Read),
+            "count_tokens",
+        ),
+        ServiceOp::LLM_CHAT => ((model_res, Llm, Read), "chat"),
+        ServiceOp::LLM_LIST_MODELS => (
+            ("acme__models__list_models".into(), Llm, Read),
+            "list_models",
+        ),
+        ServiceOp::LLM_STATUS => ((model_res, Llm, Read), "status"),
+        ServiceOp::LLM_LOAD_MODEL => ((model_res, Llm, Write), "load_model"),
+        ServiceOp::LLM_UNLOAD_MODEL => ((model_res, Llm, Write), "unload_model"),
+        ServiceOp::IMAGE_GENERATE => ((model_res, Image, Read), "generate"),
+        ServiceOp::IMAGE_LIST_MODELS => (
+            ("acme__models__list_models".into(), Image, Read),
+            "list_models",
+        ),
+        ServiceOp::IMAGE_STATUS => ((model_res, Image, Read), "status"),
+        ServiceOp::IMAGE_LOAD_MODEL => ((model_res, Image, Write), "load_model"),
+        ServiceOp::IMAGE_UNLOAD_MODEL => ((model_res, Image, Write), "unload_model"),
+        other => panic!(
+            "op `{other}` has no classification — add it to `classify` with the \
+             resource, type and access its handler arm must authorize"
+        ),
+    }
+}
+
+/// Dispatch `op` of the model families through its real handler.
+async fn dispatch_model_op(
+    svc: &Arc<model_fakes::RecordingModels>,
+    ctx: &dyn Context,
+    op: &str,
+) -> OutputStream {
+    let msg = msg_without_wrap_meta(op);
+    if op.starts_with("embedding.") {
+        let body = embedding_op_body(op);
+        wafer_core::interfaces::vector::handler::handle_embedding_message(
+            svc.as_ref(),
+            ctx,
+            MODEL_BLOCK,
+            &msg,
+            &body,
+        )
+        .await
+    } else if op.starts_with("llm.") {
+        let body = model_op_body(op);
+        let svc: Arc<dyn wafer_core::interfaces::llm::service::LlmService> = svc.clone();
+        wafer_core::interfaces::llm::handler::handle_message(&svc, ctx, MODEL_BLOCK, &msg, &body)
+            .await
+    } else {
+        let body = model_op_body(op);
+        let svc: Arc<dyn wafer_core::interfaces::image::service::ImageService> = svc.clone();
+        wafer_core::interfaces::image::handler::handle_message(&svc, ctx, MODEL_BLOCK, &msg, &body)
+            .await
+    }
+}
+
+fn model_family_ops() -> impl Iterator<Item = &'static str> {
+    ServiceOp::EMBEDDING_OPS
+        .iter()
+        .chain(ServiceOp::LLM_OPS)
+        .chain(ServiceOp::IMAGE_OPS)
+        .copied()
+}
+
+#[tokio::test]
+async fn embedding_llm_and_image_ops_all_deny_under_deny_ctx() {
+    for ops in [
+        ServiceOp::EMBEDDING_OPS,
+        ServiceOp::LLM_OPS,
+        ServiceOp::IMAGE_OPS,
+    ] {
+        assert!(!ops.is_empty(), "sanity: an op slice must not be empty");
+    }
+    for op in model_family_ops() {
+        let calls = new_calls();
+        let svc = Arc::new(model_fakes::RecordingModels::new(calls.clone()));
+
+        let out = dispatch_model_op(&svc, &DenyCtx, op).await;
+        expect_permission_denied(out, op).await;
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "op `{op}` must not reach the service on a denied request; calls = {:?}",
+            calls.lock().unwrap()
+        );
+    }
+}
+
+/// Admits every request and records it, so a test sees exactly what each op
+/// asked to be authorized for.
+#[derive(Default)]
+struct RecordingCtx {
+    asked: Mutex<Vec<Asked>>,
+}
+
+#[wafer_block::wafer_async_trait]
+impl Context for RecordingCtx {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("not exercised by the model handlers")
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        unimplemented!("not exercised by the model handlers")
+    }
+    fn caller_id(&self) -> Option<&str> {
+        Some("test/caller")
+    }
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        resource_type: wafer_block::types::ResourceType,
+        access: wafer_block::types::ResourceAccess,
+    ) -> Result<(), WaferError> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((resource.to_string(), resource_type, access));
+        Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_block::types::ResourceType,
+        _access: wafer_block::types::ResourceAccess,
+    ) -> bool {
+        true
+    }
+}
+
+/// Every embedding / llm / image op asks for exactly the resource, type and
+/// access its classification names — once, in the serving block's
+/// namespace — and then reaches the service method it names.
+#[tokio::test]
+async fn embedding_llm_and_image_ops_ask_for_their_classified_resource() {
+    for op in model_family_ops() {
+        let calls = new_calls();
+        let svc = Arc::new(model_fakes::RecordingModels::new(calls.clone()));
+        let ctx = RecordingCtx::default();
+        let (expected, method) = classify(op);
+
+        let out = dispatch_model_op(&svc, &ctx, op).await;
+        // Drain the stream so a streaming op's service call runs.
+        use futures::StreamExt;
+        let _ = out.collect::<Vec<_>>().await;
+
+        assert_eq!(
+            *ctx.asked.lock().unwrap(),
+            vec![expected],
+            "op `{op}` authorized the wrong resource"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![method],
+            "op `{op}` must reach the service method it authorized for"
         );
     }
 }
