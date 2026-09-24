@@ -11,7 +11,7 @@ use wafer_core::interfaces::database::service::{pk, DataType};
 use wafer_core::{
     forward_database_service,
     interfaces::database::{
-        codec,
+        codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
         service::{Column, DatabaseError, Record, Table},
@@ -89,8 +89,7 @@ impl SQLiteDatabaseService {
     /// write worker serves reads then) rather than failing the service,
     /// matching the PRAGMA warn-and-continue policy above.
     pub fn open(path: &str) -> Result<Self, DatabaseError> {
-        let conn = Connection::open(path)
-            .map_err(|e| DatabaseError::Internal(format!("open database: {e}")))?;
+        let conn = Connection::open(path).map_err(|e| step_error("open database", &e))?;
         apply_pragmas(&conn);
 
         let mut readers = Vec::new();
@@ -130,8 +129,8 @@ impl SQLiteDatabaseService {
     /// workloads. The connection lives for the lifetime of the worker
     /// thread and is dropped with the service.
     pub fn open_in_memory() -> Result<Self, DatabaseError> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| DatabaseError::Internal(format!("open in-memory database: {e}")))?;
+        let conn =
+            Connection::open_in_memory().map_err(|e| step_error("open in-memory database", &e))?;
         Ok(Self::new(conn))
     }
 
@@ -181,7 +180,7 @@ impl SQLiteDatabaseService {
             .map_err(|()| DatabaseError::Internal(WORKER_GONE.to_string()))
     }
 
-    fn row_to_record(row: &Row) -> rusqlite::Result<Record> {
+    fn row_to_record(row: &Row, json: &JsonColumns) -> rusqlite::Result<Record> {
         let column_count = row.as_ref().column_count();
         let mut data = HashMap::new();
         let mut id = String::new();
@@ -195,9 +194,10 @@ impl SQLiteDatabaseService {
                     .map_or(serde_json::Value::Null, serde_json::Value::Number),
                 // The shared codec owns the JSON-in-TEXT policy so this backend,
                 // the browser's sql.js adapter and Cloudflare D1 decode the same
-                // column the same way.
+                // column the same way: by the declared JSON columns the
+                // executor passed, never by what the text looks like.
                 Ok(rusqlite::types::ValueRef::Text(s)) => {
-                    codec::decode_text_value(&String::from_utf8_lossy(s))
+                    codec::decode_text(&col_name, &String::from_utf8_lossy(s), json)
                 }
                 Ok(rusqlite::types::ValueRef::Blob(b)) => {
                     serde_json::Value::String(Base64::encode_string(b))
@@ -216,7 +216,7 @@ impl SQLiteDatabaseService {
     }
 
     /// Prepare `sql`, bind `sql_params`, and decode every row via
-    /// [`row_to_record`](Self::row_to_record). Shared by `run_fetch` (queued
+    /// [`row_to_record`](Self::row_to_record) with `json`'s columns. Shared by `run_fetch` (queued
     /// on a reader) and `run_execute_returning` (queued on the writer) — the
     /// two primitives differ only in which worker runs this closure, never in
     /// how rows decode, so the decode itself lives in one place.
@@ -233,10 +233,13 @@ impl SQLiteDatabaseService {
         db: &Connection,
         sql: &str,
         sql_params: &[SqlValue],
+        json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
         let mut prepared = db.prepare(sql).map_err(|e| statement_error(&e))?;
         let records = prepared
-            .query_map(as_params(sql_params).as_slice(), Self::row_to_record)
+            .query_map(as_params(sql_params).as_slice(), |row| {
+                Self::row_to_record(row, json)
+            })
             .map_err(|e| statement_error(&e))?
             .collect::<rusqlite::Result<Vec<Record>>>()
             .map_err(|e| statement_error(&e))?;
@@ -245,18 +248,37 @@ impl SQLiteDatabaseService {
 }
 
 /// A failed statement as a [`DatabaseError`]: a primary- or unique-key
-/// violation is [`DatabaseError::AlreadyExists`], anything else `Internal`.
+/// violation is [`DatabaseError::AlreadyExists`]; a busy or locked database
+/// (`SQLITE_BUSY` once the busy timeout ran out, `SQLITE_LOCKED`) is
+/// [`DatabaseError::Unavailable`], since the same statement can succeed once
+/// the other connection lets go; anything else `Internal`.
 fn statement_error(e: &rusqlite::Error) -> DatabaseError {
-    let unique = matches!(
-        e,
-        rusqlite::Error::SqliteFailure(err, _)
-            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-                || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
-    );
-    if unique {
+    let rusqlite::Error::SqliteFailure(err, _) = e else {
+        return DatabaseError::Internal(e.to_string());
+    };
+    if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+        || err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY
+    {
         DatabaseError::AlreadyExists(e.to_string())
+    } else if matches!(
+        err.code,
+        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+    ) {
+        DatabaseError::Unavailable(e.to_string())
     } else {
         DatabaseError::Internal(e.to_string())
+    }
+}
+
+/// [`statement_error`] for a step that is not a caller's statement, with
+/// `what` naming the step in the message.
+fn step_error(what: &str, e: &rusqlite::Error) -> DatabaseError {
+    match statement_error(e) {
+        DatabaseError::Unavailable(msg) => DatabaseError::Unavailable(format!("{what}: {msg}")),
+        DatabaseError::AlreadyExists(msg) | DatabaseError::Internal(msg) => {
+            DatabaseError::Internal(format!("{what}: {msg}"))
+        }
+        other => other,
     }
 }
 
@@ -292,15 +314,14 @@ fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, DatabaseEr
         .collect();
     let mut stmt = db
         .prepare(&sql)
-        .map_err(|e| DatabaseError::Internal(format!("prepare list_columns {table}: {e}")))?;
+        .map_err(|e| step_error(&format!("prepare list_columns {table}"), &e))?;
     let mut cols = Vec::new();
     let rows = stmt
         .query_map(bound_refs.as_slice(), |row| row.get::<_, String>(0))
-        .map_err(|e| DatabaseError::Internal(format!("query list_columns {table}: {e}")))?;
+        .map_err(|e| step_error(&format!("query list_columns {table}"), &e))?;
     for row in rows {
-        let name = row.map_err(|e| {
-            DatabaseError::Internal(format!("read list_columns row for {table}: {e}"))
-        })?;
+        let name =
+            row.map_err(|e| step_error(&format!("read list_columns row for {table}"), &e))?;
         cols.push(name.to_lowercase());
     }
     Ok(cols)
@@ -356,10 +377,12 @@ impl DbExec for SQLiteDatabaseService {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
         let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        self.on_read(move |db| Self::fetch_rows(db, &sql, &sql_params))
+        let json = json.clone();
+        self.on_read(move |db| Self::fetch_rows(db, &sql, &sql_params, &json))
             .await?
     }
 
@@ -367,15 +390,19 @@ impl DbExec for SQLiteDatabaseService {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Record, DatabaseError> {
         let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
+        let json = json.clone();
         self.on_read(move |db| {
-            db.query_row(&sql, as_params(&sql_params).as_slice(), Self::row_to_record)
-                .map_err(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
-                    _ => statement_error(&e),
-                })
+            db.query_row(&sql, as_params(&sql_params).as_slice(), |row| {
+                Self::row_to_record(row, &json)
+            })
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => DatabaseError::NotFound,
+                _ => statement_error(&e),
+            })
         })
         .await?
     }
@@ -404,10 +431,12 @@ impl DbExec for SQLiteDatabaseService {
         &self,
         sql: &str,
         params: &[serde_json::Value],
+        json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
         let sql = sql.to_string();
         let sql_params: Vec<SqlValue> = params.iter().map(json_to_sql_value).collect();
-        self.on_write(move |db| Self::fetch_rows(db, &sql, &sql_params))
+        let json = json.clone();
+        self.on_write(move |db| Self::fetch_rows(db, &sql, &sql_params, &json))
             .await?
     }
 
@@ -467,12 +496,18 @@ impl DbExec for SQLiteDatabaseService {
     /// interleaves with it, and returning early on a failed statement drops
     /// the uncommitted [`rusqlite::Transaction`], which rolls it back.
     async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-        let statements: Vec<(bool, String, Vec<SqlValue>)> = ops
+        // `Some(json)` for a statement whose rows are decoded, `None` for one
+        // whose affected count is the result.
+        let statements: Vec<(Option<JsonColumns>, String, Vec<SqlValue>)> = ops
             .iter()
             .map(|op| {
                 let (sql, params) = op.sql_params();
+                let returning = match op {
+                    TxOp::Returning { json, .. } => Some((*json).clone()),
+                    TxOp::Execute { .. } => None,
+                };
                 (
-                    matches!(op, TxOp::Returning { .. }),
+                    returning,
                     sql.to_string(),
                     params.iter().map(json_to_sql_value).collect(),
                 )
@@ -481,11 +516,11 @@ impl DbExec for SQLiteDatabaseService {
         self.on_write(move |db| {
             let tx = db
                 .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|e| DatabaseError::Internal(format!("begin transaction: {e}")))?;
+                .map_err(|e| step_error("begin transaction", &e))?;
             let mut results = Vec::with_capacity(statements.len());
             for (returning, sql, params) in &statements {
-                let result = if *returning {
-                    TxResult::Returning(Self::fetch_rows(&tx, sql, params)?)
+                let result = if let Some(json) = returning {
+                    TxResult::Returning(Self::fetch_rows(&tx, sql, params, json)?)
                 } else {
                     let rows = tx
                         .execute(sql, as_params(params).as_slice())
@@ -495,7 +530,7 @@ impl DbExec for SQLiteDatabaseService {
                 results.push(result);
             }
             tx.commit()
-                .map_err(|e| DatabaseError::Internal(format!("commit transaction: {e}")))?;
+                .map_err(|e| step_error("commit transaction", &e))?;
             Ok(results)
         })
         .await?
@@ -543,7 +578,7 @@ impl SQLiteDatabaseService {
 
         self.on_write(move |db| {
             db.execute_batch(&create_sql)
-                .map_err(|e| DatabaseError::Internal(format!("create table {table_name}: {e}")))?;
+                .map_err(|e| step_error(&format!("create table {table_name}"), &e))?;
 
             // Add any missing columns. The table was just created above, so a
             // failure to read its columns is a real error, not "no columns" —
@@ -564,22 +599,23 @@ impl SQLiteDatabaseService {
                     // happen — every later write against the column then fails
                     // with "no such column" instead.
                     if !table_columns(db, &table_name)?.contains(lower) {
-                        return Err(DatabaseError::Internal(format!(
-                            "add column {name} to {table_name}: {e}"
-                        )));
+                        return Err(step_error(
+                            &format!("add column {name} to {table_name}"),
+                            &e,
+                        ));
                     }
                 }
             }
 
             for sql in &index_sqls {
                 db.execute_batch(sql)
-                    .map_err(|e| DatabaseError::Internal(format!("create index: {e}")))?;
+                    .map_err(|e| step_error("create index", &e))?;
             }
 
             // Indexes for columns with foreign keys
             for sql in &fk_sqls {
                 db.execute_batch(sql)
-                    .map_err(|e| DatabaseError::Internal(format!("create FK index: {e}")))?;
+                    .map_err(|e| step_error("create FK index", &e))?;
             }
             Ok(())
         })
@@ -667,6 +703,40 @@ mod tests {
     use wafer_sql_utils::value::sea_values_to_json;
 
     use super::*;
+
+    #[test]
+    fn busy_and_locked_are_unavailable_and_a_taken_key_already_exists() {
+        let failure = |code: std::ffi::c_int| {
+            rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            rusqlite::ffi::SQLITE_LOCKED,
+        ] {
+            assert!(
+                matches!(
+                    statement_error(&failure(code)),
+                    DatabaseError::Unavailable(_)
+                ),
+                "code {code} is transient"
+            );
+        }
+        assert!(matches!(
+            statement_error(&failure(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)),
+            DatabaseError::AlreadyExists(_)
+        ));
+        for code in [rusqlite::ffi::SQLITE_ERROR, rusqlite::ffi::SQLITE_CORRUPT] {
+            assert!(
+                matches!(statement_error(&failure(code)), DatabaseError::Internal(_)),
+                "code {code} is not transient"
+            );
+        }
+        assert!(matches!(
+            step_error("begin transaction", &failure(rusqlite::ffi::SQLITE_BUSY)),
+            DatabaseError::Unavailable(msg) if msg.starts_with("begin transaction: ")
+        ));
+    }
 
     // -----------------------------------------------------------------------
     // json_to_sql_value type conversion tests
@@ -1156,7 +1226,11 @@ mod tests {
         .await;
 
         let err = svc
-            .run_execute_returning("DELETE FROM parent WHERE id = 'p1' RETURNING *", &[])
+            .run_execute_returning(
+                "DELETE FROM parent WHERE id = 'p1' RETURNING *",
+                &[],
+                JsonColumns::NONE,
+            )
             .await
             .expect_err(
                 "a DELETE that violates a FOREIGN KEY constraint must error, not return Ok([])",
@@ -1687,7 +1761,8 @@ mod tests {
     async fn create_stores_objects_as_json_and_roundtrips() {
         // Objects flow through the shared create default →
         // wafer_sql_utils::query::build_insert → Value::Json → TEXT bind on
-        // SQLite; the read path parses JSON-looking text back into a value.
+        // SQLite, into a column the lazy add declares `JSON`; the read path
+        // parses that column's text back into a value.
         let svc = make_test_svc();
         seed_rows(&svc, "items", vec![serde_json::json!({"name": "seed"})]).await;
         let mut data = std::collections::HashMap::new();
@@ -2034,7 +2109,11 @@ mod tests {
         seed_rows(&svc, "rows", vec![serde_json::json!({"id": "a", "v": "1"})]).await;
 
         let err = svc
-            .run_fetch_one("INSERT INTO rows (id) VALUES ('evil')", &[])
+            .run_fetch_one(
+                "INSERT INTO rows (id) VALUES ('evil')",
+                &[],
+                JsonColumns::NONE,
+            )
             .await
             .expect_err("write through the read path must fail");
         assert!(
@@ -2043,7 +2122,11 @@ mod tests {
         );
 
         let err = svc
-            .run_fetch("INSERT INTO rows (id) VALUES ('evil2') RETURNING *", &[])
+            .run_fetch(
+                "INSERT INTO rows (id) VALUES ('evil2') RETURNING *",
+                &[],
+                JsonColumns::NONE,
+            )
             .await
             .expect_err("write through run_fetch must error, not return Ok([])");
         assert!(

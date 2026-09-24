@@ -66,17 +66,15 @@ pub fn build_count_with_condition(
     )
 }
 
-/// Build SELECT COALESCE(SUM({field}), 0.0) FROM {table} WHERE {filters}.
+/// Build `SELECT COALESCE(CAST(SUM({field}) AS DOUBLE PRECISION), 0.0) FROM
+/// {table} WHERE {filters}`.
 ///
-/// The COALESCE fallback is a **floating-point** `0.0`, not an integer `0`, on
-/// purpose. The `sum` op decodes its scalar result as `f64`. On Postgres
-/// `SUM(<int column>)` returns `INT8`, and `COALESCE(INT8, 0)` (an integer
-/// fallback) stays `INT8` — which the `f64` scalar decode rejects. Binding the
-/// fallback as `DOUBLE PRECISION` makes Postgres resolve the whole
-/// `COALESCE(...)` to `DOUBLE PRECISION` (the preferred type between `INT8` and
-/// `FLOAT8`), so an integer-column sum comes back as a value the `f64` decode
-/// accepts. SQLite is unaffected: it decodes either an integer or a real sum to
-/// `f64` regardless of the fallback's type.
+/// The `sum` op decodes its scalar result as `f64`, so the sum is cast to
+/// `DOUBLE PRECISION` in the SQL itself. On Postgres `SUM(<int column>)` is
+/// `INT8` and `SUM(<bigint column>)` is `NUMERIC`, neither of which the `f64`
+/// decode accepts; the fallback parameter takes its type from the sum it
+/// stands in for, so it cannot widen the result. On SQLite the cast turns an
+/// integer sum into a real, which the decode accepts either way.
 pub fn build_sum(
     table: &str,
     field: &str,
@@ -84,7 +82,8 @@ pub fn build_sum(
     backend: Backend,
 ) -> crate::Statement {
     let expr = Func::coalesce([
-        Func::sum(Expr::col(DynCol(field.into()))).into(),
+        Expr::expr(Func::sum(Expr::col(DynCol(field.into()))))
+            .cast_as(Alias::new(CastType::Double.as_sql())),
         Expr::val(0.0_f64).into(),
     ]);
     agg_select(table, expr.into(), "total", filters, None, backend)
@@ -188,8 +187,8 @@ pub enum AggFunc {
     /// in an ungrouped query).
     Sum,
     /// `COALESCE(SUM(...), 0)` — [`Sum`](Self::Sum), but `0` where `SUM`
-    /// would be `NULL`. The `0` is an inline literal, so it takes the sum's
-    /// type on Postgres instead of binding as `INT8`.
+    /// would be `NULL`. The `0` is an inline literal, so the result has the
+    /// sum's type on Postgres.
     SumOrZero,
     /// `AVG(...)` — arithmetic mean of the inner expression.
     Avg,
@@ -300,11 +299,10 @@ impl AggregateColumn {
     /// ```
     pub fn case_when_sum(alias: impl Into<String>, when: SimpleExpr) -> Self {
         // The THEN/ELSE operands are emitted as INLINE integer literals (`1` /
-        // `0`), not bound parameters. A bound integer parameter binds as `INT8`
-        // (`BIGINT`) on Postgres, so `SUM(CASE ... THEN $1 ELSE $2 END)` sums
-        // `INT8` and Postgres returns `NUMERIC` — which the `f64` row decoder
-        // cannot read, silently dropping the count to NULL. An inline `1`/`0` is
-        // an `INT4` literal, so the SUM is `INT8`, which decodes cleanly as the
+        // `0`), not bound parameters. A `CASE` whose branches are all bound
+        // parameters gives Postgres nothing to infer their type from, so it
+        // types them `text` and `SUM` refuses them; an inline `1`/`0` is an
+        // `INT4` literal, so the SUM is `INT8`, which decodes cleanly as the
         // integer this conditional row-count is. SQLite is unaffected (it sums
         // to an integer either way).
         let case: SimpleExpr = sea_query::CaseStatement::new()
@@ -329,8 +327,7 @@ impl AggregateColumn {
     /// group with no matching row (the `ELSE 0`), matching rows whose `field`
     /// is `NULL`, and an ungrouped query over no rows (the `COALESCE`). Both
     /// zeros are inline literals, as in [`case_when_sum`], so the `CASE` keeps
-    /// `field`'s type (an inline `INT4` literal widens to it; a bound
-    /// parameter would bind as `INT8` and widen an `INT4` column's `CASE`).
+    /// `field`'s type (an inline `INT4` literal widens to it).
     /// `field` reaches sea-query as a quoted [`DynCol`]. The result is
     /// `SUM(<field type>)`, which Postgres widens to `NUMERIC` for a `BIGINT`
     /// column, so a caller that needs an integer sets

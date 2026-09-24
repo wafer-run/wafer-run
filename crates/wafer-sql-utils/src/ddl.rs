@@ -38,7 +38,9 @@ fn data_type_to_sql(dt: DataType, backend: Backend) -> &'static str {
             DataType::Float => "REAL",
             DataType::Bool => "INTEGER",
             DataType::DateTime => "DATETIME",
-            DataType::Json => "TEXT",
+            // Stored as JSON text; the declared type is what tells a reader
+            // the column holds JSON (see `introspect::is_json_decl_type`).
+            DataType::Json => "JSON",
             DataType::Blob => "BLOB",
         },
         Backend::Postgres => match dt {
@@ -317,11 +319,15 @@ pub fn build_add_column_with_type(
 /// Pick the dialect column type for a lazily added column holding `value`.
 ///
 /// Postgres maps the JSON value onto a native type (`BOOLEAN`, `BIGINT`,
-/// `DOUBLE PRECISION`, `JSONB`, `TEXT`); SQLite — dynamically typed — always
-/// declares `TEXT`, matching its historical lazy column-add behaviour.
+/// `DOUBLE PRECISION`, `JSONB`, `TEXT`). SQLite is dynamically typed, so only
+/// the one distinction a reader needs is declared: an object or array gets a
+/// `JSON` column, so it reads back structured, and everything else `TEXT`.
 pub fn column_type_for_value(value: &serde_json::Value, backend: Backend) -> &'static str {
     match backend {
-        Backend::Sqlite => "TEXT",
+        Backend::Sqlite => match value {
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => "JSON",
+            _ => "TEXT",
+        },
         Backend::Postgres => match value {
             serde_json::Value::Null | serde_json::Value::String(_) => "TEXT",
             serde_json::Value::Bool(_) => "BOOLEAN",
@@ -551,9 +557,16 @@ mod tests {
         ] {
             assert_eq!(column_type_for_value(&value, Backend::Postgres), expected);
         }
-        // SQLite: always TEXT (dynamic typing).
-        for value in [json!(true), json!(42), json!({"key": "val"})] {
-            assert_eq!(column_type_for_value(&value, Backend::Sqlite), "TEXT");
+        // SQLite: JSON for a structured value, TEXT for everything else.
+        for (value, expected) in [
+            (serde_json::Value::Null, "TEXT"),
+            (json!("[1]"), "TEXT"),
+            (json!(true), "TEXT"),
+            (json!(42), "TEXT"),
+            (json!([1, 2, 3]), "JSON"),
+            (json!({"key": "val"}), "JSON"),
+        ] {
+            assert_eq!(column_type_for_value(&value, Backend::Sqlite), expected);
         }
     }
 
@@ -577,7 +590,7 @@ mod tests {
             Backend::Sqlite,
         )
         .expect("plain identifiers");
-        assert_eq!(stmt.sql, "ALTER TABLE \"orders\" ADD COLUMN \"meta\" TEXT");
+        assert_eq!(stmt.sql, "ALTER TABLE \"orders\" ADD COLUMN \"meta\" JSON");
     }
 
     #[test]

@@ -5,9 +5,10 @@
 //! column-list introspection query, issued *before* the actual data query. On
 //! a local SQLite file those are cheap, but on Cloudflare D1 each is a network
 //! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes both
-//! facts per table — plus the table's primary key, which a sorted or paged
-//! `list` appends to its `ORDER BY` — so a warm backend issues zero
-//! introspection round-trips in steady state.
+//! facts per table — the column list together with which columns are declared
+//! to hold JSON, which every row read decodes by — plus the table's primary
+//! key, which a sorted or paged `list` appends to its `ORDER BY`, so a warm
+//! backend issues zero introspection round-trips in steady state.
 //!
 //! # Correctness
 //!
@@ -56,6 +57,19 @@ use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
+use super::codec::JsonColumns;
+
+/// A table's columns as introspected: every column name (lowercased), and
+/// the columns whose declared type holds JSON (see
+/// [`codec`](super::codec)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableColumns {
+    /// Lowercased column names, in declaration order.
+    pub names: Vec<String>,
+    /// The columns declared to hold JSON.
+    pub json: JsonColumns,
+}
+
 /// Memoized introspection facts for one table. Each fact is independently
 /// populated (`dbx_table_exists` fills `exists`, the column-list introspection
 /// fills `columns`, the primary-key introspection fills `primary_key`), so
@@ -64,8 +78,8 @@ use parking_lot::RwLock;
 struct TableSchema {
     /// Whether the table exists, once probed.
     exists: Option<bool>,
-    /// Lowercased column names, once listed.
-    columns: Option<Vec<String>>,
+    /// Column names and JSON columns, once listed.
+    columns: Option<TableColumns>,
     /// Primary-key column names in key order, as the catalog spells them;
     /// empty for a table with no primary key.
     primary_key: Option<Vec<String>>,
@@ -127,9 +141,9 @@ impl SchemaCache {
         inner.tables.entry(table.to_string()).or_default().exists = Some(exists);
     }
 
-    /// Cached column list (lowercased), or `None` on a miss.
+    /// Cached columns, or `None` on a miss.
     #[must_use]
-    pub fn columns(&self, table: &str) -> Option<Vec<String>> {
+    pub fn columns(&self, table: &str) -> Option<TableColumns> {
         self.inner
             .read()
             .tables
@@ -137,29 +151,32 @@ impl SchemaCache {
             .and_then(|t| t.columns.clone())
     }
 
-    /// Record the full lowercased column list for `table`, but only if the
-    /// cache has not been mutated since `expected_gen` (see the module docs).
+    /// Record the full column list for `table`, but only if the cache has
+    /// not been mutated since `expected_gen` (see the module docs).
     ///
     /// A non-empty list also proves the table exists, so the exists fact is set
-    /// alongside it; an empty list (a missing table's introspection result)
-    /// leaves the exists fact untouched — the authoritative existence probe
-    /// owns it.
+    /// alongside it. An empty list is a missing table's introspection result
+    /// and is not recorded: every row read decodes by the cached list's JSON
+    /// columns, and pinning "none" for a table a later migration creates
+    /// would read its JSON columns back as text for the life of the cache.
+    /// The exists fact stays with the authoritative existence probe.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "the write guard covers the whole critical section — the \
-                  generation check, the conditional exists-set and the \
-                  columns-set mutate the same entry and are the entire body; \
-                  there is nothing to tighten"
+                  generation check, the exists-set and the columns-set \
+                  mutate the same entry and are the entire body; there is \
+                  nothing to tighten"
     )]
-    pub fn set_columns_if_gen(&self, table: &str, columns: Vec<String>, expected_gen: u64) {
+    pub fn set_columns_if_gen(&self, table: &str, columns: TableColumns, expected_gen: u64) {
+        if columns.names.is_empty() {
+            return;
+        }
         let mut inner = self.inner.write();
         if inner.generation != expected_gen {
             return;
         }
         let entry = inner.tables.entry(table.to_string()).or_default();
-        if !columns.is_empty() {
-            entry.exists = Some(true);
-        }
+        entry.exists = Some(true);
         entry.columns = Some(columns);
     }
 
@@ -227,7 +244,14 @@ impl SchemaCache {
 
 #[cfg(test)]
 mod tests {
-    use super::SchemaCache;
+    use super::{SchemaCache, TableColumns};
+
+    fn cols(names: &[&str]) -> TableColumns {
+        TableColumns {
+            names: names.iter().map(ToString::to_string).collect(),
+            json: Default::default(),
+        }
+    }
 
     #[test]
     fn exists_miss_then_hit() {
@@ -245,17 +269,14 @@ mod tests {
         let cache = SchemaCache::new();
         let gen0 = cache.generation();
         assert_eq!(cache.columns("users"), None);
-        cache.set_columns_if_gen("users", vec!["id".into(), "name".into()], gen0);
-        assert_eq!(
-            cache.columns("users"),
-            Some(vec!["id".into(), "name".into()])
-        );
+        cache.set_columns_if_gen("users", cols(&["id", "name"]), gen0);
+        assert_eq!(cache.columns("users"), Some(cols(&["id", "name"])));
     }
 
     #[test]
     fn non_empty_columns_imply_existence() {
         let cache = SchemaCache::new();
-        cache.set_columns_if_gen("users", vec!["id".into()], cache.generation());
+        cache.set_columns_if_gen("users", cols(&["id"]), cache.generation());
         assert_eq!(
             cache.table_exists("users"),
             Some(true),
@@ -264,14 +285,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_columns_do_not_touch_existence() {
+    fn empty_columns_are_not_cached_and_leave_existence_alone() {
         let cache = SchemaCache::new();
         cache.set_table_exists_if_gen("ghost", false, cache.generation());
-        cache.set_columns_if_gen("ghost", Vec::new(), cache.generation());
+        cache.set_columns_if_gen("ghost", cols(&[]), cache.generation());
         assert_eq!(
             cache.table_exists("ghost"),
             Some(false),
             "an empty column list must not overwrite the existence probe"
+        );
+        assert_eq!(
+            cache.columns("ghost"),
+            None,
+            "a missing table's empty column list is not cached, so the table's \
+             columns are read once a migration creates it"
         );
     }
 
@@ -308,18 +335,18 @@ mod tests {
     #[test]
     fn invalidate_drops_only_the_named_table() {
         let cache = SchemaCache::new();
-        cache.set_columns_if_gen("a", vec!["id".into()], cache.generation());
-        cache.set_columns_if_gen("b", vec!["id".into()], cache.generation());
+        cache.set_columns_if_gen("a", cols(&["id"]), cache.generation());
+        cache.set_columns_if_gen("b", cols(&["id"]), cache.generation());
         cache.invalidate("a");
         assert_eq!(cache.columns("a"), None, "invalidated");
         assert_eq!(cache.table_exists("a"), None, "invalidated");
-        assert_eq!(cache.columns("b"), Some(vec!["id".into()]), "untouched");
+        assert_eq!(cache.columns("b"), Some(cols(&["id"])), "untouched");
     }
 
     #[test]
     fn clear_drops_everything() {
         let cache = SchemaCache::new();
-        cache.set_columns_if_gen("a", vec!["id".into()], cache.generation());
+        cache.set_columns_if_gen("a", cols(&["id"]), cache.generation());
         cache.set_table_exists_if_gen("b", true, cache.generation());
         cache.clear();
         assert_eq!(cache.columns("a"), None);
@@ -358,7 +385,7 @@ mod tests {
         );
 
         // The column write-back is guarded identically.
-        cache.set_columns_if_gen("orders", vec!["id".into()], gen0);
+        cache.set_columns_if_gen("orders", cols(&["id"]), gen0);
         assert_eq!(
             cache.columns("orders"),
             None,

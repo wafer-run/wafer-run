@@ -3,48 +3,81 @@
 //! A SQL backend that reads a row has to answer the same three questions each
 //! time: how a column's raw value becomes a [`serde_json::Value`], how a row
 //! map becomes a [`Record`], and how a single-column aggregate row becomes a
-//! scalar. Each backend used to answer them privately, and they had drifted —
-//! most visibly on the JSON-in-TEXT question.
+//! scalar. This module answers them once, so the same row reads the same way
+//! on native SQLite, PostgreSQL, Cloudflare D1 and the browser's sql.js.
 //!
-//! # Why JSON-looking TEXT is re-parsed
+//! # Structure comes from the column's declared type
 //!
-//! SQLite (and therefore Cloudflare D1 and the browser's sql.js) has no
-//! array/object storage class, so the shared write path serializes a
-//! [`serde_json::Value::Object`]/[`Array`](serde_json::Value::Array) to its
-//! JSON text and binds it as TEXT (see `json_to_sql_value` in
-//! `wafer-block-sqlite`, and `build_add_column_for_value`, which gives such a
-//! column `TEXT` on SQLite and `JSONB` on Postgres). Without a matching decode
-//! the round trip is lossy in a way block code can see: it writes an object and
-//! reads back a string.
+//! SQLite (and therefore D1 and sql.js) has no array/object storage class, so
+//! the write path stores an object or array as its JSON text. Whether a text
+//! value is JSON to parse back or a string to return as written is decided by
+//! the column's declared type, never by what the text looks like: a column
+//! declared `JSON` (SQLite) or `json`/`jsonb` (Postgres) holds JSON, and every
+//! other column holds plain values. Guessing from content would turn a user's
+//! title `[1]` or `{}` back into an array or object.
 //!
-//! Native SQLite and the browser adapter each re-parsed such a column; the D1
-//! adapter did not. Block code that runs on all three therefore saw
-//! `Value::Object` on two platforms and `Value::String` on the third. That is
-//! the divergence this module removes: one policy, applied by every backend's
-//! row decoder, pinned end-to-end by
-//! [`run_conformance`](super::conformance::run_conformance).
+//! The declared types come from the table's schema
+//! ([`build_list_columns`](wafer_sql_utils::introspect::build_list_columns),
+//! decided by [`is_json_decl_type`](wafer_sql_utils::introspect::is_json_decl_type)).
+//! The shared executor looks them up (through the
+//! [`SchemaCache`](super::schema_cache::SchemaCache)) for the table a
+//! statement reads and hands them to the backend's row-returning primitive as
+//! [`JsonColumns`]; a backend whose driver reports no column types (D1,
+//! sql.js) decodes with them, and so does native SQLite, so all three agree by
+//! construction. Postgres returns `json`/`jsonb` columns structured from the
+//! driver, so a Postgres text column is always a string. A statement with no
+//! single source table — raw SQL, aggregates, introspection — is decoded with
+//! [`JsonColumns::NONE`]: its text comes back as text.
 //!
-//! The predicate is deliberately narrow and *untrimmed* — the text must begin
-//! with `{` and end with `}` (or `[`/`]`) and parse as JSON. Anything else,
-//! including braced text that does not parse, is returned verbatim as a
-//! string, so a column holding hand-written text is never lost.
+//! A JSON column whose text does not parse (a value written before the column
+//! was declared `JSON`, say) is returned verbatim as a string rather than lost.
 
 use std::collections::HashMap;
 
 use super::service::Record;
 
-/// Decode one TEXT column value.
+/// The columns of a result row that hold JSON text, by name.
 ///
-/// Text that is a serialized JSON object or array is parsed back into the
-/// structured value the writer put in; everything else — including malformed
-/// JSON and JSON *scalars* such as `42`, `true` or `null`, which the write path
-/// never stores as text — stays a [`serde_json::Value::String`]. See the module
-/// docs for why.
+/// Built from a table's declared column types; see the module docs. Names
+/// compare ASCII case-insensitively, as SQL identifiers do.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JsonColumns(Vec<String>);
+
+impl JsonColumns {
+    /// No JSON columns: every text value decodes as a string.
+    pub const NONE: &'static Self = &Self(Vec::new());
+
+    /// The JSON columns named in `names`.
+    #[must_use]
+    pub fn new<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(names.into_iter().map(Into::into).collect())
+    }
+
+    /// Whether `column` holds JSON text.
+    #[must_use]
+    pub fn contains(&self, column: &str) -> bool {
+        self.0.iter().any(|c| c.eq_ignore_ascii_case(column))
+    }
+
+    /// Whether no column holds JSON text.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Decode the text value of column `column`.
+///
+/// In a JSON column the text is parsed; text that does not parse stays a
+/// [`serde_json::Value::String`]. In any other column the text is returned
+/// as a string, whatever it looks like.
 #[must_use]
-pub fn decode_text_value(text: &str) -> serde_json::Value {
-    let looks_like_json = (text.starts_with('{') && text.ends_with('}'))
-        || (text.starts_with('[') && text.ends_with(']'));
-    if looks_like_json {
+pub fn decode_text(column: &str, text: &str, json: &JsonColumns) -> serde_json::Value {
+    if json.contains(column) {
         if let Ok(parsed) = serde_json::from_str(text) {
             return parsed;
         }
@@ -53,10 +86,10 @@ pub fn decode_text_value(text: &str) -> serde_json::Value {
 }
 
 /// Convert a result row already shaped as a JSON object (column name → value)
-/// into a [`Record`].
+/// into a [`Record`], decoding the text of `json`'s columns.
 ///
-/// Every string-valued column goes through [`decode_text_value`], so a backend
-/// that hands rows over as JSON (Cloudflare D1, the sql.js bridge) decodes them
+/// Every string-valued column goes through [`decode_text`], so a backend that
+/// hands rows over as JSON (Cloudflare D1, the sql.js bridge) decodes them
 /// exactly as a backend reading native column values does. `id` is copied into
 /// [`Record::id`] **and** retained in [`Record::data`]: row decoders in block
 /// repositories consume the complete column map.
@@ -64,7 +97,7 @@ pub fn decode_text_value(text: &str) -> serde_json::Value {
 /// A non-object row yields an empty record — the caller asked for a row shape
 /// the backend did not produce, and there is no id to report.
 #[must_use]
-pub fn record_from_json_row(row: serde_json::Value) -> Record {
+pub fn record_from_json_row(row: serde_json::Value, json: &JsonColumns) -> Record {
     let serde_json::Value::Object(map) = row else {
         return Record {
             id: String::new(),
@@ -76,7 +109,7 @@ pub fn record_from_json_row(row: serde_json::Value) -> Record {
     let mut id = String::new();
     for (name, value) in map {
         let value = match value {
-            serde_json::Value::String(s) => decode_text_value(&s),
+            serde_json::Value::String(s) => decode_text(&name, &s, json),
             other => other,
         };
         if name == "id" {

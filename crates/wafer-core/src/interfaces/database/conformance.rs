@@ -58,14 +58,15 @@
 //! Running the suite against a live PostgreSQL server (the gated
 //! `wafer-block-postgres` test) was the first live-DB exercise of that backend,
 //! and it exposed four real defects that SQLite's dynamic typing had hidden.
-//! Three are now fixed at the shared renderer / decoder layer, and this suite
-//! exercises the exact shapes that tripped them so it regression-guards each;
-//! the fourth is deferred (it does not manifest for any real code):
+//! All four are fixed, in the shared renderer / decoder layer and in how the
+//! Postgres backend binds parameters; this suite exercises the shapes that
+//! tripped the first three, and the Postgres test the fourth (its stored form
+//! reads back differently per backend, so it is not a shared check):
 //!
 //! 2. **`sum` over an `INT` column (FIXED).** The top-level `sum` op decodes its
 //!    scalar as `f64`, but Postgres `COALESCE(SUM(int), 0)` returned `INT8`,
-//!    which the `f64` decode rejected. The `COALESCE` fallback is now
-//!    floating-point, so the result resolves to `DOUBLE PRECISION`.
+//!    which the `f64` decode rejected. The sum is now cast to
+//!    `DOUBLE PRECISION` in the statement.
 //!    `check_count_and_sum` sums the integer `score` column to cover this.
 //! 3. **`upsert` `WindowedCounter` ambiguous column (FIXED).** The `ON CONFLICT
 //!    DO UPDATE SET` CASE expressions referenced the counter/window columns
@@ -79,17 +80,14 @@
 //!    `INT4` literals (so the SUM is `INT8`), the decoder now decodes `NUMERIC`
 //!    proper, and an undecodable value now hard-errors instead of NULLing.
 //!
-//! 1. **Timestamp string vs `TIMESTAMPTZ` (DEFERRED — does not manifest).** The
-//!    shared `create`/`update` path (`stamp_timestamps` in `exec.rs`)
-//!    auto-stamps `created_at`/`updated_at` as an RFC3339 *string*. A real
-//!    Postgres `TIMESTAMPTZ` column (declared via `wafer_schema::timestamps()`)
-//!    rejects that bound text parameter. But **no block in the workspace uses a
-//!    `TIMESTAMPTZ` timestamp column** — they all hand-write TEXT columns
-//!    holding one canonical RFC3339 string so `expires_at < cutoff` string
-//!    comparisons work, and TEXT accepts the stamped string fine. Fixing this
-//!    correctly needs a column-type-aware bind (the value-driven shortcut would
-//!    break the TEXT convention — see the `generate_bind!` note in the Postgres
-//!    service), so it is deferred and this suite keeps TEXT timestamps.
+//! 1. **Timestamp string vs `TIMESTAMPTZ` (FIXED).** The shared
+//!    `create`/`update` path (`stamp_timestamps` in `exec.rs`) auto-stamps
+//!    `created_at`/`updated_at` as an RFC3339 *string*, which a real Postgres
+//!    `TIMESTAMPTZ` column (declared via `wafer_schema::timestamps()`) refused
+//!    as a bound text parameter. The Postgres backend now binds every value by
+//!    the type Postgres infers for its parameter, so the string binds as a
+//!    timestamp there and as text for a TEXT column — the convention every
+//!    block follows, so `expires_at < cutoff` string comparisons keep working.
 //!
 //! [`exec_raw`]: DatabaseService::exec_raw
 
@@ -164,12 +162,6 @@ fn field_f64(rec: &Record, key: &str) -> f64 {
 /// RFC3339 string (`stamp_timestamps` in `exec.rs`), which a TEXT column stores
 /// verbatim on every backend, and the Postgres date-bucket expression casts the
 /// text to a date so grouping still works.
-///
-/// A block declaring a real `TIMESTAMPTZ` column (via
-/// `wafer_schema::timestamps()`) would need a column-type-aware bind for the
-/// stamped string — a deferred follow-up (see the `generate_bind!` note in the
-/// Postgres service). No block does this today, so the suite stays on TEXT
-/// timestamps rather than exercising an unfixed path.
 fn crud_table(name: &str) -> Table {
     Table {
         name: name.to_string(),
@@ -234,8 +226,10 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `CaseWhenSum`, and `DateBucket`, then — over `BIGINT` money columns — the
 /// `cast_as` output cast, `SumWhere`, and column-to-column predicates in both
 /// an aggregate `when` and a `list` filter); `query_raw`/`exec_raw`; and the
-/// structured-value round trip that every backend's row decoder must agree on
-/// (see [`check_json_value_round_trip`]); and that a name is never rewritten
+/// declared-type value round trip that every backend's row decoder must agree
+/// on (see [`check_json_value_round_trip`]); values — `NULL` included — bound
+/// by the type of the column they are written to (see
+/// [`check_typed_values_round_trip`]); and that a name is never rewritten
 /// and a read never adds a column (see
 /// [`check_names_are_verbatim_and_reads_never_reshape`]).
 pub async fn run_conformance(svc: &dyn DatabaseService) {
@@ -263,6 +257,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
     check_json_value_round_trip(svc).await;
+    check_typed_values_round_trip(svc).await;
     check_names_are_verbatim_and_reads_never_reshape(svc).await;
     check_names_longer_than_postgres_keeps_are_refused(svc).await;
 }
@@ -271,36 +266,43 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 // JSON round trip
 // ---------------------------------------------------------------------------
 
-/// A structured value written through `create` must come back structured,
-/// whichever backend stored it.
+/// A value comes back with the structure its column declares: a JSON column's
+/// text is JSON, and any other column's text is text, however it looks.
 ///
-/// This is the cross-platform shape agreement that
-/// [`codec`](super::codec) exists to hold. SQL backends in the SQLite family
-/// have no array/object storage class, so the write path serializes such a
-/// value to JSON text and the read path parses it back; Postgres stores it in a
-/// native `JSONB` column. Both must present block code with the same
-/// `Value::Object`. They did not: two adapters re-parsed JSON-looking TEXT and a
-/// third did not, so the same row decoded differently depending on where the
-/// block ran.
+/// SQL backends in the SQLite family have no array/object storage class, so
+/// the write path serializes a structured value to JSON text, and the read
+/// path parses it back only in a column declared `JSON`; Postgres stores it in
+/// a native `JSONB` column. Every backend must present the same value to block
+/// code. Deciding by content instead would hand a user who titled something
+/// `[1]` or `{}` an array or an object where they wrote a string.
 ///
-/// Two shapes are checked, because they take different paths:
+/// Shapes checked:
 ///
-/// - a **lazily added** column, whose type each backend picks from the value
-///   (`TEXT` on SQLite, `JSONB` on Postgres), and
-/// - a column **declared TEXT** in the schema and written as an
-///   already-serialized JSON *string*, which is how blocks that serialize
-///   payloads themselves store them.
-///
-/// Plain text is asserted alongside, so a backend cannot pass by parsing
-/// everything.
+/// - a column **declared TEXT** holding text that is valid JSON — an array, an
+///   empty object, an already-serialized object — reads back as that text;
+/// - a **lazily added** column first written with a string that looks like
+///   JSON (it gets a text type) reads back as the string;
+/// - a column **declared JSON** and a **lazily added** one first written with
+///   an object or array (it gets `JSON` on SQLite, `JSONB` on Postgres) read
+///   back structured;
+/// - a string written to a JSON column is JSON text when it parses (a block
+///   that serializes its own payloads keeps working once the column is
+///   declared JSON) and a string otherwise;
+/// - an id that looks like JSON is still the record's id;
+/// - `get`, `list` and `update`'s re-read decode alike.
 async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
     let table = Table {
         name: "conf_json".to_string(),
-        // `declared_text` is deliberately TEXT: it is the column shape that
-        // diverged. `lazy_json` is absent so the lazy column-add picks the type.
+        // `lazy_*` and `plain` are absent so the lazy column-add picks their
+        // types from the first value written.
         columns: vec![
             pk("id"),
             Column::new("declared_text", DataType::Text).null(),
+            Column::new("empty_object_text", DataType::Text).null(),
+            Column::new("serialized_text", DataType::Text).null(),
+            Column::new("declared_json", DataType::Json).null(),
+            Column::new("serialized_json", DataType::Json).null(),
+            Column::new("word_json", DataType::Json).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
@@ -310,47 +312,52 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
 
     let object = serde_json::json!({ "k": [1, 2], "nested": { "b": true } });
     let array = serde_json::json!(["a", "b"]);
+    let id = "[1]";
     svc.create(
         "conf_json",
         row([
-            ("id", serde_json::json!("j1")),
-            // Already-serialized JSON in a declared TEXT column.
-            ("declared_text", serde_json::json!(object.to_string())),
-            // A structured value handed straight to the backend.
+            ("id", serde_json::json!(id)),
+            ("declared_text", serde_json::json!("[1]")),
+            ("empty_object_text", serde_json::json!("{}")),
+            ("serialized_text", serde_json::json!(object.to_string())),
+            ("lazy_text", serde_json::json!("{\"a\":1}")),
+            ("declared_json", object.clone()),
+            ("serialized_json", serde_json::json!(object.to_string())),
+            ("word_json", serde_json::json!("not json")),
             ("lazy_json", object.clone()),
             ("lazy_array", array.clone()),
             ("plain", serde_json::json!("not json")),
         ]),
     )
     .await
-    .expect("create with JSON payloads must succeed");
+    .expect("create with JSON-looking payloads must succeed");
 
-    let got = svc.get("conf_json", "j1").await.expect("get must succeed");
-    assert_eq!(
-        got.data.get("declared_text"),
-        Some(&object),
-        "a serialized JSON object in a TEXT column must decode back to the object \
-         (got {:?})",
-        got.data.get("declared_text")
-    );
-    assert_eq!(
-        got.data.get("lazy_json"),
-        Some(&object),
-        "a structured object must round-trip structured (got {:?})",
-        got.data.get("lazy_json")
-    );
-    assert_eq!(
-        got.data.get("lazy_array"),
-        Some(&array),
-        "a structured array must round-trip structured (got {:?})",
-        got.data.get("lazy_array")
-    );
-    assert_eq!(
-        got.data.get("plain"),
-        Some(&serde_json::json!("not json")),
-        "plain text must stay a string (got {:?})",
-        got.data.get("plain")
-    );
+    let expect = |rec: &Record, how: &str| {
+        let text = |s: &str| serde_json::Value::String(s.to_string());
+        for (column, want) in [
+            ("declared_text", text("[1]")),
+            ("empty_object_text", text("{}")),
+            ("serialized_text", text(&object.to_string())),
+            ("lazy_text", text("{\"a\":1}")),
+            ("declared_json", object.clone()),
+            ("serialized_json", object.clone()),
+            ("word_json", text("not json")),
+            ("lazy_json", object.clone()),
+            ("lazy_array", array.clone()),
+            ("plain", text("not json")),
+        ] {
+            assert_eq!(
+                rec.data.get(column),
+                Some(&want),
+                "{how}: column {column:?} must read back as {want:?} (got {:?})",
+                rec.data.get(column)
+            );
+        }
+        assert_eq!(rec.id, id, "{how}: a JSON-looking id is still the id");
+    };
+
+    let got = svc.get("conf_json", id).await.expect("get must succeed");
+    expect(&got, "get");
 
     // `list` decodes rows through the same path as `get`; a backend that fixed
     // only one of them would still be inconsistent.
@@ -358,17 +365,135 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
         .list(
             "conf_json",
             &ListOptions {
-                filters: vec![eq("id", serde_json::json!("j1"))],
+                filters: vec![eq("id", serde_json::json!(id))],
                 ..Default::default()
             },
         )
         .await
         .expect("list must succeed");
     assert_eq!(listed.records.len(), 1);
+    expect(&listed.records[0], "list");
+
+    // `update` returns the row re-read after the write.
+    let updated = svc
+        .update(
+            "conf_json",
+            id,
+            row([("declared_text", serde_json::json!("[1]"))]),
+        )
+        .await
+        .expect("update must succeed");
+    expect(&updated, "update");
+}
+
+/// A value binds by the type of the column it is written to, not by its own
+/// JSON type.
+///
+/// Postgres fixes each parameter's type when a statement is prepared, and a
+/// backend that bound by the value's type failed two ways: a `null` bound as
+/// text cannot be written to an `INTEGER`, `BIGINT`, `BOOLEAN` or `JSONB`
+/// column at all, and once one execution of an `INSERT` had bound a float for
+/// a `DOUBLE PRECISION` column, a later execution of the same SQL carrying an
+/// integer had its bytes read as a float (`2` stored as `1e-323`). SQLite
+/// accepts both, so the checks pin that every backend does.
+async fn check_typed_values_round_trip(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_typed".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("n", DataType::Int).null(),
+            Column::new("big", DataType::Int64).null(),
+            Column::new("flag", DataType::Bool).null(),
+            Column::new("doc", DataType::Json).null(),
+            Column::new("amount", DataType::Float).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+
+    let filled = |id: &str, amount: serde_json::Value| {
+        row([
+            ("id", serde_json::json!(id.to_string())),
+            ("n", serde_json::json!(1)),
+            ("big", serde_json::json!(2)),
+            ("flag", serde_json::json!(true)),
+            ("doc", serde_json::json!({ "a": 1 })),
+            ("amount", amount),
+        ])
+    };
+    let nulls = || {
+        row([
+            ("n", serde_json::Value::Null),
+            ("big", serde_json::Value::Null),
+            ("flag", serde_json::Value::Null),
+            ("doc", serde_json::Value::Null),
+        ])
+    };
+    let assert_nulls = |rec: &Record, how: &str| {
+        for column in ["n", "big", "flag", "doc"] {
+            assert_eq!(
+                rec.data.get(column),
+                Some(&serde_json::Value::Null),
+                "{how}: {column} must read back NULL (got {:?})",
+                rec.data.get(column)
+            );
+        }
+    };
+
+    // The same INSERT twice: a float amount, then an integral one.
+    svc.create("conf_typed", filled("t1", serde_json::json!(1.5)))
+        .await
+        .expect("create with a float amount");
+    svc.create("conf_typed", filled("t2", serde_json::json!(2)))
+        .await
+        .expect("create with an integral amount");
+    for (id, amount) in [("t1", 1.5), ("t2", 2.0)] {
+        let got = svc.get("conf_typed", id).await.expect("get typed row");
+        assert!(
+            (field_f64(&got, "amount") - amount).abs() < f64::EPSILON,
+            "{id}: amount must read back {amount} (got {:?})",
+            got.data.get("amount")
+        );
+        assert_eq!(field_i64(&got, "n"), 1);
+        assert_eq!(field_i64(&got, "big"), 2);
+        assert_eq!(got.data.get("doc"), Some(&serde_json::json!({ "a": 1 })));
+    }
+
+    // NULL into every typed column, through create and through update.
+    let mut created = nulls();
+    created.insert("id".to_string(), serde_json::json!("t3"));
+    svc.create("conf_typed", created)
+        .await
+        .expect("create with NULLs in typed columns");
+    let got = svc.get("conf_typed", "t3").await.expect("get t3");
+    assert_nulls(&got, "create");
+
+    let updated = svc
+        .update("conf_typed", "t1", nulls())
+        .await
+        .expect("update typed columns to NULL");
+    assert_nulls(&updated, "update");
+    assert_nulls(
+        &svc.get("conf_typed", "t1").await.expect("get t1"),
+        "update, re-read",
+    );
+
+    // The null-typed UPDATE again with values: its parameters take the
+    // columns' types, not the NULLs' first binding.
+    let mut refilled = filled("t1", serde_json::json!(3));
+    refilled.remove("id");
+    refilled.remove("amount");
+    let updated = svc
+        .update("conf_typed", "t1", refilled)
+        .await
+        .expect("update typed columns back to values");
+    assert_eq!(field_i64(&updated, "n"), 1);
+    assert_eq!(field_i64(&updated, "big"), 2);
     assert_eq!(
-        listed.records[0].data.get("declared_text"),
-        Some(&object),
-        "list must decode the same way get does"
+        updated.data.get("doc"),
+        Some(&serde_json::json!({ "a": 1 }))
     );
 }
 

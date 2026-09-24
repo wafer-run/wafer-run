@@ -614,37 +614,43 @@ fn is_preserved_db_error(msg: &str) -> bool {
 }
 
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
+    let code = e.code();
     match e {
-        DatabaseError::NotFound => WaferError::new(ErrorCode::NotFound, "record not found"),
+        DatabaseError::NotFound => WaferError::new(code, "record not found"),
         // The driver's message names the constraint and its columns, which is
         // schema, not the caller's concern; log it, answer with the code.
         DatabaseError::AlreadyExists(msg) => {
             tracing::debug!(error = %msg, "database unique constraint violated");
-            WaferError::new(
-                ErrorCode::AlreadyExists,
-                "a record with this key already exists",
-            )
+            WaferError::new(code, "a record with this key already exists")
         }
         // The executor's message names only what the caller sent (a table, a
         // column, a limit or offset), so it goes back to the caller as is.
-        DatabaseError::InvalidArgument(msg) => WaferError::new(ErrorCode::InvalidArgument, msg),
+        DatabaseError::InvalidArgument(msg) => WaferError::new(code, msg),
+        // Transient: the caller may retry (and the runtime retries a block
+        // Init that failed this way instead of caching the failure). The
+        // driver's message can name hosts and files, so it is logged, not
+        // returned.
+        DatabaseError::Unavailable(msg) => {
+            tracing::warn!(error = %msg, "database temporarily unavailable");
+            WaferError::new(code, "database temporarily unavailable")
+        }
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {
                 tracing::warn!(error = %msg, "database structured error (preserved)");
-                WaferError::new(ErrorCode::Internal, msg)
+                WaferError::new(code, msg)
             } else {
                 tracing::error!(error = %msg, "database internal error");
-                WaferError::new(ErrorCode::Internal, "internal database error")
+                WaferError::new(code, "internal database error")
             }
         }
         DatabaseError::Other(err) => {
             let msg = err.to_string();
             if is_preserved_db_error(&msg) {
                 tracing::warn!(error = %msg, "database structured error (preserved)");
-                WaferError::new(ErrorCode::Internal, msg)
+                WaferError::new(code, msg)
             } else {
                 tracing::error!(error = %msg, "database error");
-                WaferError::new(ErrorCode::Internal, "internal database error")
+                WaferError::new(code, "internal database error")
             }
         }
     }
@@ -1521,9 +1527,12 @@ pub async fn handle_lifecycle(
         if tables.is_empty() {
             tracing::debug!("no schema tables configured — skipping migration");
         } else {
-            service.ensure_schema_tables(tables).await.map_err(|e| {
-                WaferError::new(ErrorCode::Internal, format!("schema migration failed: {e}"))
-            })?;
+            // A transient fault keeps its `Unavailable` code, so the runtime
+            // retries this Init rather than caching the failure.
+            service
+                .ensure_schema_tables(tables)
+                .await
+                .map_err(|e| WaferError::new(e.code(), format!("schema migration failed: {e}")))?;
             tracing::info!(tables = tables.len(), "database schema migrations applied");
         }
     }
@@ -1566,6 +1575,15 @@ mod tests {
             "connection refused: tcp://10.0.0.5:5432".to_string(),
         ));
         assert_eq!(w.message, "internal database error");
+    }
+
+    #[test]
+    fn unavailable_is_transient_and_scrubbed() {
+        let w = db_error_to_wafer(DatabaseError::Unavailable(
+            "connect to db.internal:5432: connection refused".into(),
+        ));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.message, "database temporarily unavailable");
     }
 
     #[test]
