@@ -263,13 +263,42 @@ fn webmcp_view(blocks: &[BlockInfo]) -> serde_json::Value {
 /// What a sensitive config value is replaced with in every inspector view.
 const REDACTED: &str = "[redacted]";
 
-/// Whether a config key names a secret: it ends in `_SECRET` or `_KEY`
-/// (compared case-insensitively, so a lower-case flow-config key such as
-/// `api_key` counts), or some registered block declares it as a
-/// [`InputType::Password`] variable.
+/// Key suffixes (compared case-insensitively) that name a secret.
+const SENSITIVE_SUFFIXES: &[&str] = &["_SECRET", "_KEY", "_TOKEN", "_PASSWORD"];
+
+/// Whole keys (compared case-insensitively) that name a secret.
+const SENSITIVE_KEYS: &[&str] = &["SECRET", "KEY", "TOKEN", "PASSWORD"];
+
+/// Whether a config key names a secret: it is or ends in one of
+/// [`SENSITIVE_KEYS`] / [`SENSITIVE_SUFFIXES`] (compared case-insensitively,
+/// so a lower-case flow-config key such as `api_key` or `password` counts),
+/// or some registered block declares it as a [`InputType::Password`]
+/// variable.
 fn is_sensitive_key(key: &str, declared: &std::collections::HashSet<&str>) -> bool {
     let upper = key.to_ascii_uppercase();
-    upper.ends_with("_SECRET") || upper.ends_with("_KEY") || declared.contains(key)
+    SENSITIVE_KEYS.contains(&upper.as_str())
+        || SENSITIVE_SUFFIXES.iter().any(|s| upper.ends_with(s))
+        || declared.contains(key)
+}
+
+/// What a URL's username and password are replaced with.
+const REDACTED_USERINFO: &str = "redacted";
+
+/// `value` with the userinfo of a URL masked (`postgres://u:p@db/x` →
+/// `postgres://redacted:redacted@db/x`), or `None` when it is not a URL
+/// carrying credentials. A connection string under an innocuous key
+/// (`database_url`) is how a password most often reaches a config.
+fn masked_url_credentials(value: &str) -> Option<String> {
+    let mut url = url::Url::parse(value).ok()?;
+    let has_password = url.password().is_some();
+    if url.username().is_empty() && !has_password {
+        return None;
+    }
+    url.set_username(REDACTED_USERINFO).ok()?;
+    if has_password {
+        url.set_password(Some(REDACTED_USERINFO)).ok()?;
+    }
+    Some(url.to_string())
 }
 
 /// Every config key a registered block declares as sensitive
@@ -285,7 +314,8 @@ fn declared_sensitive_keys(blocks: &[BlockInfo]) -> std::collections::HashSet<&s
 
 /// A copy of `value` with every sensitive key's value — at any depth, since
 /// block configs nest and flow definitions carry per-step `config` objects —
-/// replaced by [`REDACTED`]. See [`is_sensitive_key`].
+/// replaced by [`REDACTED`] (see [`is_sensitive_key`]), and the credentials
+/// of any other string that is a URL masked (see [`masked_url_credentials`]).
 fn redacted(
     value: &serde_json::Value,
     declared: &std::collections::HashSet<&str>,
@@ -305,6 +335,9 @@ fn redacted(
         ),
         serde_json::Value::Array(items) => {
             serde_json::Value::Array(items.iter().map(|v| redacted(v, declared)).collect())
+        }
+        serde_json::Value::String(s) => {
+            masked_url_credentials(s).map_or_else(|| value.clone(), serde_json::Value::String)
         }
         other => other.clone(),
     }
@@ -1049,7 +1082,10 @@ mod redaction_tests {
             serde_json::json!({
                 "X_SECRET": "s3cr3t",
                 "TEST_ORG__VAULT__PASSPHRASE": "hunter2",
-                "nested": { "db_key": "k3y" },
+                "nested": { "db_key": "k3y", "GITHUB_TOKEN": "gh0tok", "password": "pw0rd" },
+                "SMTP_PASSWORD": "smtpp4ss",
+                "database_url": "postgres://dbuser:dbp4ss@db.internal:5432/app",
+                "git_remote": "https://gh0user@github.com/o/r.git",
                 "plain": "visible-value"
             }),
         );
@@ -1059,7 +1095,10 @@ mod redaction_tests {
         let app = get(&wafer, "/_inspector/app").await;
         let flow = get(&wafer, "/_inspector/flows/test-flow").await;
         for body in [&app, &flow] {
-            for secret in ["s3cr3t", "hunter2", "k3y", "fl0wk3y"] {
+            for secret in [
+                "s3cr3t", "hunter2", "k3y", "fl0wk3y", "gh0tok", "pw0rd", "smtpp4ss", "dbuser",
+                "dbp4ss", "gh0user",
+            ] {
                 assert!(!body.contains(secret), "{secret} leaked: {body}");
             }
         }
@@ -1070,6 +1109,10 @@ mod redaction_tests {
         assert!(
             app.contains("X_SECRET"),
             "the key stays, only its value goes: {app}"
+        );
+        assert!(
+            app.contains("postgres://redacted:redacted@db.internal:5432/app"),
+            "a URL keeps everything but its credentials: {app}"
         );
         assert!(
             flow.contains("\"mode\":\"plain\""),

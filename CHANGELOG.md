@@ -39,9 +39,12 @@
   path not under it is `NotFound` (it used to be served from the folder
   root, and `/docs` stripped `/docsecret.txt` to `ecret.txt`); a prefix
   without a leading `/` fails Init. `wafer-run/inspector`: `/app` and
-  `/flows/{id}` replace the value of every config key ending in `_SECRET`
-  or `_KEY` (case-insensitive) or declared `InputType::Password` with
-  `"[redacted]"`, at any depth of block configs and flow step configs.
+  `/flows/{id}` replace with `"[redacted]"` the value of every config key
+  that is or ends in `SECRET`, `KEY`, `TOKEN` or `PASSWORD` (as `_SECRET`
+  etc., case-insensitive) or is declared `InputType::Password`, and mask
+  the userinfo of any other value that is a URL with credentials
+  (`postgres://redacted:redacted@db/x`), at any depth of block configs and
+  flow step configs.
 - Flow config is typed and a flow is validated wherever it is added.
   `wafer_flow::FlowConfig` fields are `on_error: Option<OnError>` (`Stop` /
   `Continue`), `timeout: Option<FlowTimeout>`, `timeout_ms:

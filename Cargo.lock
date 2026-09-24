@@ -6252,6 +6252,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
  "wafer-block",
  "wafer-block-macro",
  "wafer-core",
