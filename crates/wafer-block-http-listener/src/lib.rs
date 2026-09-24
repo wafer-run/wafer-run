@@ -12,8 +12,11 @@
 //! router).
 
 use std::{
+    future::Future,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     sync::{Arc, OnceLock},
+    task::Poll,
     time::Duration,
 };
 
@@ -27,8 +30,10 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use ipnet::IpNet;
 use parking_lot::Mutex;
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore},
+    task::{JoinHandle, JoinSet},
 };
 use tower::ServiceExt;
 use wafer_block::{
@@ -168,7 +173,15 @@ const DEFAULT_BODY_READ_TIMEOUT_SECS: u64 = 120;
 /// Default cap on concurrently open client connections.
 const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
 
-/// Upper bound for both read timeouts — one day. Larger values are refused
+/// Default time a response write may make no progress — 60 s. A client that
+/// stops reading its response is dropped after this, freeing its slot.
+const DEFAULT_WRITE_TIMEOUT_SECS: u64 = 60;
+
+/// Default time a stopping listener gives open connections to finish their
+/// in-flight request — 10 s. Connections still open after it are aborted.
+const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
+
+/// Upper bound for every timeout knob — one day. Larger values are refused
 /// at Init: they bound nothing a real client needs, and a deadline of
 /// `now + u64::MAX` seconds overflows `Instant`.
 const MAX_TIMEOUT_SECS: u64 = 24 * 60 * 60;
@@ -211,7 +224,8 @@ fn bounded_config_int(
 /// SEC-07: parse the `trusted_proxies` config — comma-separated exact IPs
 /// (`10.0.0.1`, `::1`) and/or CIDR ranges (`10.0.0.0/8`, `2001:db8::/32`) —
 /// into a list of [`IpNet`]s. Exact IPs become full-length prefixes
-/// (`/32` for IPv4, `/128` for IPv6).
+/// (`/32` for IPv4, `/128` for IPv6); an IPv4-mapped IPv6 address
+/// (`::ffff:10.0.0.1`) is stored as the IPv4 address it maps.
 ///
 /// Blank entries (leading/trailing/double commas) are skipped; any other
 /// unparseable entry is a **configuration error** naming the entry. Absent
@@ -225,7 +239,7 @@ fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>, String> {
         .filter(|e| !e.is_empty())
         .map(|e| {
             e.parse::<IpAddr>()
-                .map(IpNet::from)
+                .map(|ip| IpNet::from(ip.to_canonical()))
                 .or_else(|_| e.parse::<IpNet>())
                 .map_err(|_| {
                     format!(
@@ -262,6 +276,11 @@ fn is_trusted_proxy(ip: IpAddr, trusted_proxies: &[IpNet]) -> bool {
 /// the left of garbage is attacker-suppliable (any hop controls what appears
 /// left of itself), so none of it may be trusted.
 ///
+/// The peer and every entry are compared in canonical form
+/// ([`IpAddr::to_canonical`]): a listener bound to `[::]` sees IPv4 peers as
+/// IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`), which must still match a
+/// trusted `10.0.0.1`, and the recorded client IP is the plain IPv4 address.
+///
 /// Net effect: a directly-connected client can never spoof its identity
 /// (used for IP rate limiting and audit) via the header, and a client behind
 /// trusted proxies cannot smuggle a fake hop past them.
@@ -270,6 +289,7 @@ fn resolve_client_ip<'a>(
     xff_lines: impl DoubleEndedIterator<Item = Option<&'a str>>,
     trusted_proxies: &[IpNet],
 ) -> String {
+    let peer = peer.map(|ip| ip.to_canonical());
     let peer_str = || peer.map_or_else(|| "unknown".to_string(), |ip| ip.to_string());
     // Fail-safe: peer unknown or not a trusted proxy → the peer identity
     // stands and X-Forwarded-For is ignored entirely.
@@ -286,7 +306,7 @@ fn resolve_client_ip<'a>(
             return peer_str();
         };
         for entry in line.rsplit(',').map(str::trim) {
-            match entry.parse::<IpAddr>() {
+            match entry.parse::<IpAddr>().map(|ip| ip.to_canonical()) {
                 Ok(ip) if is_trusted_proxy(ip, trusted_proxies) => leftmost_trusted = Some(ip),
                 Ok(ip) => return ip.to_string(),
                 // Malformed hop (including empty segments and empty lines):
@@ -311,6 +331,11 @@ struct RequestLimits {
     /// Concurrently open client connections; at the cap the listener stops
     /// accepting and further clients queue in the kernel's accept backlog.
     max_connections: usize,
+    /// Time a response write may make no progress before the connection is
+    /// dropped.
+    write_timeout: Duration,
+    /// Time a stopping listener waits for open connections to finish.
+    shutdown_grace: Duration,
 }
 
 /// Everything Init resolves from the listener's config. Built only when every
@@ -356,6 +381,18 @@ impl ListenerSettings {
             DEFAULT_MAX_CONNECTIONS,
             Semaphore::MAX_PERMITS as u64,
         )?;
+        let write_timeout = bounded_config_int(
+            config,
+            "write_timeout_secs",
+            DEFAULT_WRITE_TIMEOUT_SECS,
+            MAX_TIMEOUT_SECS,
+        )?;
+        let shutdown_grace = bounded_config_int(
+            config,
+            "shutdown_grace_secs",
+            DEFAULT_SHUTDOWN_GRACE_SECS,
+            MAX_TIMEOUT_SECS,
+        )?;
         let usize_of = |key: &str, n: u64| {
             usize::try_from(n).map_err(|_| {
                 WaferError::new(
@@ -373,6 +410,8 @@ impl ListenerSettings {
                 header_read_timeout: Duration::from_secs(header_read_timeout),
                 body_read_timeout: Duration::from_secs(body_read_timeout),
                 max_connections: usize_of("max_connections", max_connections)?,
+                write_timeout: Duration::from_secs(write_timeout),
+                shutdown_grace: Duration::from_secs(shutdown_grace),
             },
         })
     }
@@ -456,7 +495,8 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
 }
 
 /// Accept connections until `shutdown` fires, never holding more than
-/// `limits.max_connections` open at once.
+/// `limits.max_connections` open at once; then drain the open connections
+/// for up to `limits.shutdown_grace` and abort whatever is left.
 async fn serve(
     listener: TcpListener,
     app: axum::Router,
@@ -467,39 +507,57 @@ async fn serve(
     // Dropped when the accept loop ends; every connection task sees that as
     // the signal to finish its in-flight request and close.
     let (closing_tx, closing_rx) = watch::channel(());
+    let mut connections = JoinSet::new();
     loop {
-        // Take a connection slot BEFORE accepting: at the cap the listener
-        // stops calling accept(), so further clients wait in the kernel
-        // backlog instead of each holding a task and a socket here.
-        let slot = tokio::select! {
+        tokio::select! {
             _ = &mut shutdown => break,
-            slot = slots.clone().acquire_owned() => match slot {
-                Ok(slot) => slot,
-                // `slots` is never closed; stop serving if it ever is.
-                Err(_) => break,
-            },
-        };
-        let (stream, peer) = tokio::select! {
-            _ = &mut shutdown => break,
-            accepted = listener.accept() => match accepted {
-                Ok(accepted) => accepted,
-                Err(e) => {
-                    handle_accept_error(&e).await;
-                    continue;
+            // Reap finished connection tasks so the set holds only live ones.
+            Some(_) = connections.join_next() => {}
+            accepted = accept_within_cap(&listener, &slots) => match accepted {
+                Ok((stream, peer, slot)) => {
+                    connections.spawn(serve_connection(
+                        stream,
+                        peer,
+                        app.clone(),
+                        limits,
+                        closing_rx.clone(),
+                        slot,
+                    ));
                 }
+                Err(e) => handle_accept_error(&e).await,
             },
-        };
-        tokio::spawn(serve_connection(
-            stream,
-            peer,
-            app.clone(),
-            limits.header_read_timeout,
-            closing_rx.clone(),
-            slot,
-        ));
+        }
     }
     drop(listener);
     drop(closing_tx);
+    let drained = tokio::time::timeout(limits.shutdown_grace, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            open = connections.len(),
+            grace_secs = limits.shutdown_grace.as_secs(),
+            "wafer-run/http-listener connections still open after shutdown_grace_secs; aborting them"
+        );
+        connections.shutdown().await;
+    }
+}
+
+/// Take a connection slot, then accept. The slot comes first: at the cap the
+/// listener stops calling accept(), so further clients wait in the kernel
+/// backlog instead of each holding a task and a socket here.
+async fn accept_within_cap(
+    listener: &TcpListener,
+    slots: &Arc<Semaphore>,
+) -> std::io::Result<(TcpStream, SocketAddr, OwnedSemaphorePermit)> {
+    let slot = slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| std::io::Error::other("connection slots closed"))?;
+    let (stream, peer) = listener.accept().await?;
+    Ok((stream, peer, slot))
 }
 
 /// A per-connection accept failure (the client reset before we got to it) is
@@ -517,6 +575,105 @@ async fn handle_accept_error(e: &std::io::Error) {
     tokio::time::sleep(Duration::from_secs(1)).await;
 }
 
+/// A TCP stream whose writes fail with `TimedOut` once they have made no
+/// progress for `timeout`, so a client that stops reading its response
+/// cannot hold the connection (and its slot) open. The clock runs only while
+/// a write, flush or shutdown is blocked on a full socket buffer; any
+/// progress resets it, so a slow but reading client is never cut off.
+struct WriteStallTimeout {
+    stream: TcpStream,
+    timeout: Duration,
+    stalled: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl WriteStallTimeout {
+    fn new(stream: TcpStream, timeout: Duration) -> Self {
+        Self {
+            stream,
+            timeout,
+            stalled: None,
+        }
+    }
+
+    /// Pass a write-side result through, arming the stall clock on
+    /// `Pending` and failing once it runs out.
+    fn bound<T>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        result: Poll<std::io::Result<T>>,
+    ) -> Poll<std::io::Result<T>> {
+        if result.is_ready() {
+            self.stalled = None;
+            return result;
+        }
+        let timeout = self.timeout;
+        let stalled = self
+            .stalled
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+        match stalled.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response write made no progress within write_timeout_secs",
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncRead for WriteStallTimeout {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for WriteStallTimeout {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.stream).poll_write(cx, buf);
+        this.bound(cx, result)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.stream).poll_write_vectored(cx, bufs);
+        this.bound(cx, result)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.stream).poll_flush(cx);
+        this.bound(cx, result)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.stream).poll_shutdown(cx);
+        this.bound(cx, result)
+    }
+}
+
 /// Serve one HTTP/1.1 connection. The connection's slot is released when this
 /// returns.
 ///
@@ -527,7 +684,7 @@ async fn serve_connection(
     stream: TcpStream,
     peer: SocketAddr,
     app: axum::Router,
-    header_read_timeout: Duration,
+    limits: RequestLimits,
     mut closing: watch::Receiver<()>,
     _slot: OwnedSemaphorePermit,
 ) {
@@ -539,8 +696,9 @@ async fn serve_connection(
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
-        .header_read_timeout(header_read_timeout);
-    let conn = builder.serve_connection(TokioIo::new(stream), service);
+        .header_read_timeout(limits.header_read_timeout);
+    let io = WriteStallTimeout::new(stream, limits.write_timeout);
+    let conn = builder.serve_connection(TokioIo::new(io), service);
     tokio::pin!(conn);
     let result = tokio::select! {
         result = conn.as_mut() => result,
@@ -561,8 +719,9 @@ async fn serve_connection(
 /// `LifecycleType::Init` it resolves and caches its [`ListenerSettings`]
 /// (listen address, dispatch target, trusted proxies, request limits). The
 /// actual TCP bind and HTTP/1.1 server are spawned in [`Block::bind`] once the
-/// runtime hands over a `RuntimeHandle`, and are shut down via a
-/// `tokio::sync::oneshot` channel on `LifecycleType::Stop`.
+/// runtime hands over a `RuntimeHandle`. `LifecycleType::Stop` signals the
+/// server through a `tokio::sync::oneshot` channel and returns once it has
+/// drained its connections (bounded by `shutdown_grace_secs`).
 ///
 /// The `handle` method itself only returns `OutputStream::continue_with(msg)`;
 /// real request handling happens inside the spawned server task, not in the
@@ -570,6 +729,9 @@ async fn serve_connection(
 pub(crate) struct HttpListenerBlock {
     settings: OnceLock<ListenerSettings>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// The server task `bind` spawned; `Stop` awaits it so the listener has
+    /// drained (or aborted) its connections when `Stop` returns.
+    server: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Default for HttpListenerBlock {
@@ -586,6 +748,7 @@ impl HttpListenerBlock {
         Self {
             settings: OnceLock::new(),
             shutdown_tx: Mutex::new(None),
+            server: Mutex::new(None),
         }
     }
 }
@@ -648,6 +811,22 @@ impl Block for HttpListenerBlock {
             )
             .name("Max Connections"),
             ConfigVar::new(
+                "write_timeout_secs",
+                "Seconds a response write may make no progress (the client is \
+                 not reading) before the connection is dropped. A slow client \
+                 that keeps reading is not affected. 1 to 86400.",
+                &DEFAULT_WRITE_TIMEOUT_SECS.to_string(),
+            )
+            .name("Write Timeout (s)"),
+            ConfigVar::new(
+                "shutdown_grace_secs",
+                "Seconds a stopping listener gives open connections to finish \
+                 their in-flight request; connections still open after it are \
+                 aborted. Stop returns once they are gone. 1 to 86400.",
+                &DEFAULT_SHUTDOWN_GRACE_SECS.to_string(),
+            )
+            .name("Shutdown Grace (s)"),
+            ConfigVar::new(
                 "trusted_proxies",
                 "Comma-separated trusted reverse proxies: exact IPs (10.0.0.1, \
                  ::1) and/or CIDR ranges (10.0.0.0/8, 2001:db8::/32). \
@@ -690,6 +869,13 @@ impl Block for HttpListenerBlock {
             if let Some(tx) = self.shutdown_tx.lock().take() {
                 let _ = tx.send(());
             }
+            // Bounded by `shutdown_grace_secs` inside the task.
+            let server = self.server.lock().take();
+            if let Some(server) = server {
+                if let Err(e) = server.await {
+                    tracing::error!(error = %e, "wafer-run/http-listener server task failed");
+                }
+            }
         }
         Ok(())
     }
@@ -719,7 +905,7 @@ impl Block for HttpListenerBlock {
         let (tx, rx) = oneshot::channel();
         *self.shutdown_tx.lock() = Some(tx);
 
-        tokio::spawn(async move {
+        let server = tokio::spawn(async move {
             let handler = axum::routing::any(move |req: Request| dispatch_request(cx.clone(), req));
             let app = axum::Router::new()
                 .route("/{*rest}", handler.clone())
@@ -747,6 +933,7 @@ impl Block for HttpListenerBlock {
 
             serve(listener, app, limits, rx).await;
         });
+        *self.server.lock() = Some(server);
     }
 }
 
@@ -887,6 +1074,38 @@ mod tests {
     /// Test helper: resolve with at most one `X-Forwarded-For` line.
     fn resolve(peer: Option<IpAddr>, xff: Option<&str>, trusted: &[IpNet]) -> String {
         resolve_client_ip(peer, xff.into_iter().map(Some), trusted)
+    }
+
+    #[test]
+    fn ipv4_mapped_addresses_are_compared_and_recorded_as_ipv4() {
+        // A listener on `[::]` sees an IPv4 proxy as `::ffff:10.0.0.1`; it
+        // must still be the trusted `10.0.0.1`, or every client collapses
+        // into the proxy's address.
+        let mapped_peer = Some("::ffff:10.0.0.1".parse().unwrap());
+        assert_eq!(
+            resolve(mapped_peer, Some("198.51.100.7"), &proxies("10.0.0.1")),
+            "198.51.100.7"
+        );
+        assert_eq!(
+            resolve(mapped_peer, Some("198.51.100.7"), &proxies("10.0.0.0/8")),
+            "198.51.100.7"
+        );
+        // A mapped trusted entry means its IPv4 address.
+        assert_eq!(
+            proxies("::ffff:10.0.0.1"),
+            vec!["10.0.0.1/32".parse::<IpNet>().unwrap()]
+        );
+        // Mapped XFF entries are peeled as trusted hops and recorded as IPv4.
+        assert_eq!(
+            resolve(
+                mapped_peer,
+                Some("::ffff:198.51.100.7, ::ffff:10.0.0.2"),
+                &proxies("10.0.0.0/24")
+            ),
+            "198.51.100.7"
+        );
+        // The peer itself is recorded as IPv4 when XFF is not trusted.
+        assert_eq!(resolve(mapped_peer, None, &[]), "10.0.0.1");
     }
 
     #[test]
@@ -1170,6 +1389,8 @@ mod tests {
                 header_read_timeout: Duration::from_secs(30),
                 body_read_timeout: Duration::from_secs(120),
                 max_connections: 1024,
+                write_timeout: Duration::from_secs(60),
+                shutdown_grace: Duration::from_secs(10),
             }
         );
     }
@@ -1186,6 +1407,8 @@ mod tests {
             "header_read_timeout_secs": "5",
             "body_read_timeout_secs": 7,
             "max_connections": "3",
+            "write_timeout_secs": 11,
+            "shutdown_grace_secs": "13",
         }));
         block
             .lifecycle(&NoopCtx, event)
@@ -1198,6 +1421,8 @@ mod tests {
                 header_read_timeout: Duration::from_secs(5),
                 body_read_timeout: Duration::from_secs(7),
                 max_connections: 3,
+                write_timeout: Duration::from_secs(11),
+                shutdown_grace: Duration::from_secs(13),
             }
         );
     }
@@ -1214,6 +1439,8 @@ mod tests {
             ("body_read_timeout_secs", serde_json::json!("soon")),
             ("body_read_timeout_secs", serde_json::json!(true)),
             ("max_body_bytes", serde_json::json!(0)),
+            ("write_timeout_secs", serde_json::json!(0)),
+            ("shutdown_grace_secs", serde_json::json!(86_401)),
         ] {
             let block = HttpListenerBlock::new();
             let mut config = serde_json::json!({ "listen": "127.0.0.1:0", "flow": "some-flow" });

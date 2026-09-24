@@ -15,12 +15,16 @@
   that does not finish its request head in time, or an idle keep-alive
   connection, is closed), `body_read_timeout_secs` (default 120; a body
   that does not arrive in time gets `408 Request Timeout` and the
-  connection closes) and `max_connections` (default 1024; at the cap the
-  listener stops accepting and further clients wait in the kernel backlog).
-  There were no timeouts and no cap: a client could hold a connection and
-  its task open forever by sending a request head or body one byte at a
-  time (slowloris), and graceful shutdown waited on such connections
-  forever. Slow clients that took longer than the defaults are now cut
+  connection closes), `write_timeout_secs` (default 60; a response write
+  that makes no progress that long — the client stopped reading — drops the
+  connection), `max_connections` (default 1024; at the cap the listener
+  stops accepting and further clients wait in the kernel backlog) and
+  `shutdown_grace_secs` (default 10; `Stop` lets open connections finish
+  their in-flight request for that long, aborts the rest, and returns once
+  they are gone). There were no timeouts and no cap: a client could hold a
+  connection and its task open forever by sending a request head or body
+  one byte at a time, or by never reading its response (slowloris), and
+  graceful shutdown waited on such connections in a task nothing awaited. Slow clients that took longer than the defaults are now cut
   off; raise the knobs if you serve them. The knobs and `max_body_bytes`
   accept a JSON number or a decimal string in `1..=max` (timeouts at most
   86400); `0`, fractions and anything else fail Init with
@@ -1099,7 +1103,11 @@
   line (HAProxy `option forwardfor`) the client-written first line became
   the client IP used for rate limiting and audit. The lines are now one
   list in wire order, walked right to left as before; a line that is not
-  text is a malformed hop and stops the walk at the peer address.
+  text is a malformed hop and stops the walk at the peer address. The peer,
+  every entry and every exact `trusted_proxies` entry are compared in
+  canonical form, so a listener on `[::]` that sees an IPv4 proxy as
+  `::ffff:10.0.0.1` still trusts `10.0.0.1` (every client collapsed into the
+  proxy's address before), and the recorded client IP is plain IPv4.
 
 - The SQLite `VectorService` (`wafer-block-sqlite`, `vectors` feature)
   returns the top `top_k` entries that match a metadata filter. The filter
