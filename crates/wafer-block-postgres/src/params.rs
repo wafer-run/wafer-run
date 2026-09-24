@@ -239,9 +239,15 @@ fn integer(value: &serde_json::Value) -> Result<i64, BindError> {
             }
         }
         serde_json::Value::Bool(b) => Ok(i64::from(*b)),
-        serde_json::Value::String(s) => s
-            .parse()
-            .map_err(|_| BindError::Mismatch(format!("expected an integer, got the string {s:?}"))),
+        serde_json::Value::String(s) => {
+            s.parse()
+                .map_err(|e: std::num::ParseIntError| match e.kind() {
+                    std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow => {
+                        out_of_range()
+                    }
+                    _ => BindError::Mismatch(format!("expected an integer, got the string {s:?}")),
+                })
+        }
         other => Err(mismatch(other, "an integer")),
     }
 }
@@ -280,5 +286,32 @@ impl sqlx::Encode<'_, Postgres> for TypedNull {
 
     fn produces(&self) -> Option<PgTypeInfo> {
         Some(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{integer, BindError};
+
+    fn message(value: serde_json::Value) -> String {
+        match integer(&value) {
+            Err(BindError::Mismatch(msg)) => msg,
+            other => panic!("expected a mismatch for {value}, got {:?}", other.ok()),
+        }
+    }
+
+    #[test]
+    fn a_string_binds_to_an_integer_only_when_it_spells_one() {
+        assert_eq!(integer(&serde_json::json!("42")).ok(), Some(42));
+        assert_eq!(integer(&serde_json::json!("-7")).ok(), Some(-7));
+        assert!(message(serde_json::json!("4.2")).contains("expected an integer"));
+        assert!(message(serde_json::json!("abc")).contains("expected an integer"));
+    }
+
+    #[test]
+    fn an_integer_string_past_i64_is_out_of_range() {
+        for s in ["9223372036854775808", "-9223372036854775809"] {
+            assert_eq!(message(serde_json::json!(s)), "integer out of range", "{s}");
+        }
     }
 }

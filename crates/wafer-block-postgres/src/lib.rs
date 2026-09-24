@@ -20,7 +20,7 @@ use std::{
 };
 
 use service::PostgresDatabaseService;
-use wafer_block::{BlockConfig, ConfigVar, ErrorCode, LifecycleType, WaferError};
+use wafer_block::{BlockConfig, ConfigVar, ErrorCode, InputType, LifecycleType, WaferError};
 use wafer_core::interfaces::database::{handler, service::DatabaseService};
 use wafer_schema::{
     manifest::{collections_to_tables, CollectionDef},
@@ -58,7 +58,10 @@ wafer_core::service_block! {
          Required.",
         "",
     )
-    .name("Database URL")]),
+    .name("Database URL")
+    // A URL carries `user:password@`, so it is masked wherever config is
+    // served back (admin API responses).
+    .input_type(InputType::Password)]),
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
     },
@@ -261,5 +264,20 @@ mod tests {
             assert_eq!(err.code, ErrorCode::FailedPrecondition);
             assert!(err.message.contains(DATABASE_URL_ENV), "{}", err.message);
         }
+    }
+
+    /// The URL holds the database password (`postgres://user:pass@host/db`),
+    /// so the declared var is sensitive: served config masks it.
+    #[test]
+    fn the_database_url_is_declared_sensitive() {
+        use wafer_block::Block as _;
+
+        let info = PostgresDatabaseBlock::new().info();
+        let var = info
+            .config_keys
+            .iter()
+            .find(|v| v.key == DATABASE_URL_ENV)
+            .expect("the URL var is declared");
+        assert!(var.is_sensitive(), "{var:?}");
     }
 }
