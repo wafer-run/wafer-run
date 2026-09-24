@@ -91,7 +91,8 @@ mod bindings {
 
         /// Finalize runtime configuration (composite config expansion, capability
         /// resolution, snapshot finalization). Block `Init` is dispatched lazily
-        /// on first request. See [`wafer_run::Wafer::seal`].
+        /// on first request. A runtime is sealed once: a second `resolve()`
+        /// fails. See [`wafer_run::Wafer::seal`].
         #[napi]
         pub async fn resolve(&self) -> Result<()> {
             self.inner
@@ -113,12 +114,14 @@ mod bindings {
         /// [`wafer_run::Wafer::seal`].
         #[napi]
         pub async fn start(&self) -> Result<()> {
-            self.inner
-                .write()
-                .await
-                .seal()
-                .await
-                .map_err(|e| Error::from_reason(e.to_string()))?;
+            let mut inner = self.inner.write().await;
+            if !inner.is_sealed() {
+                inner
+                    .seal()
+                    .await
+                    .map_err(|e| Error::from_reason(e.to_string()))?;
+            }
+            drop(inner);
             self.started.store(true, Ordering::Relaxed);
             Ok(())
         }

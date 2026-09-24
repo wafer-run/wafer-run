@@ -75,10 +75,15 @@ pub trait Block: crate::compat::MaybeSend + crate::compat::MaybeSync + 'static {
 
     /// Update the block's runtime-enforcement capabilities atomically.
     ///
-    /// Called by the runtime after `resolve()` computes effective caps
+    /// Called by the runtime's `seal()` with the effective caps it computed
     /// (`declared ∩ config`). Native blocks ignore this call (default no-op);
     /// WASM blocks override to update their interior-mutable caps field so
-    /// every subsequent host-import check uses the effective set.
+    /// every subsequent host-import check uses the effective set. A block
+    /// constructed with an upper bound — a WASM block its embedder loaded with
+    /// explicit capabilities — enforces `bound ∩ new`: this call narrows such
+    /// a block but never widens it past its bound, and
+    /// [`block_capabilities`](Self::block_capabilities) reports the set it
+    /// enforces.
     fn runtime_capabilities_mut(&self, _new: BlockCapabilities) {
         // Default: no-op. Native blocks are trusted and do not enforce caps.
     }

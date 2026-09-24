@@ -184,7 +184,7 @@ pub const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
 /// declares it here, in its `BlockInfo::capabilities`, so the need is visible
 /// wherever the block's `BlockInfo` is shown and operators can narrow it
 /// through the `capabilities` block-config subkey.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderPolicy {
     /// Sensitive inbound headers the block may READ.
     /// Example: `["authorization"]`.
@@ -206,7 +206,7 @@ pub struct HeaderPolicy {
 }
 
 /// BlockCapabilities declares what platform services a WASM block may access.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockCapabilities {
     /// Allowed database collections: `None` = none, `Any` = all, `Only([...])`
     /// = exactly these (empty `Only` = none). Replaces the old `HashSet` where

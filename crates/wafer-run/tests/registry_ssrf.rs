@@ -26,28 +26,28 @@ fn new_wafer() -> Wafer {
     Wafer::new(cfg).expect("Wafer::new")
 }
 
-/// Serve a well-formed registry for `acme/widget@1.0.0` whose wasm artifact
-/// is the echo-block test fixture.
+/// Serve a well-formed registry for `example/echo@1.0.0` whose wasm artifact
+/// is the echo-block test fixture (which reports itself as `example/echo`).
 async fn mock_registry() -> MockServer {
     let server = MockServer::start().await;
     let manifest = json!({
-        "name": "acme/widget",
+        "name": "example/echo",
         "latest": "1.0.0",
         "versions": {
             "1.0.0": {
                 "abi": wafer_run::ABI_VERSION,
-                "wasm_url": format!("{}/acme/widget/1.0.0/block.wasm", server.uri()),
+                "wasm_url": format!("{}/example/echo/1.0.0/block.wasm", server.uri()),
                 "flow_url": null,
             }
         }
     });
     Mock::given(method("GET"))
-        .and(path("/acme/widget/manifest.json"))
+        .and(path("/example/echo/manifest.json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&manifest))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/acme/widget/1.0.0/block.wasm"))
+        .and(path("/example/echo/1.0.0/block.wasm"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_bytes(include_bytes!("../testdata/echo_block.wasm").to_vec()),
@@ -76,7 +76,7 @@ async fn registry_on_private_address_is_refused() {
     // Phase 1: loopback IP literal.
     std::env::set_var(REGISTRY_BASE_URL_KEY, server.uri());
     let mut wafer = new_wafer();
-    wafer.add_block_config("acme/widget@1.0.0", json!({}));
+    wafer.add_block_config("example/echo@1.0.0", json!({}));
     let err = wafer
         .seal()
         .await
@@ -99,7 +99,7 @@ async fn registry_on_private_address_is_refused() {
     let localhost_base = server.uri().replace("127.0.0.1", "localhost");
     std::env::set_var(REGISTRY_BASE_URL_KEY, &localhost_base);
     let mut wafer = new_wafer();
-    wafer.add_block_config("acme/widget@1.0.0", json!({}));
+    wafer.add_block_config("example/echo@1.0.0", json!({}));
     let err = wafer
         .seal()
         .await
@@ -112,7 +112,7 @@ async fn registry_on_private_address_is_refused() {
     // Phase 3: present-but-invalid override is a loud error naming the var.
     std::env::set_var(REGISTRY_BASE_URL_KEY, "not a url");
     let mut wafer = new_wafer();
-    wafer.add_block_config("acme/widget@1.0.0", json!({}));
+    wafer.add_block_config("example/echo@1.0.0", json!({}));
     let err = wafer
         .seal()
         .await
@@ -127,7 +127,8 @@ async fn registry_on_private_address_is_refused() {
 }
 
 /// `allow-private-network` build: the same local wiremock registry serves
-/// manifest + wasm end-to-end — seal succeeds and the block is registered.
+/// manifest + wasm end-to-end — seal succeeds and the block is registered
+/// under its unversioned name, with the versioned reference as an alias.
 /// Proves the escape hatch works and exercises the full download pipeline
 /// (manifest fetch → version select → ABI check → wasm download → load).
 #[cfg(feature = "allow-private-network")]
@@ -137,14 +138,15 @@ async fn local_registry_works_under_escape_hatch() {
 
     std::env::set_var(REGISTRY_BASE_URL_KEY, server.uri());
     let mut wafer = new_wafer();
-    wafer.add_block_config("acme/widget@1.0.0", json!({}));
+    wafer.add_block_config("example/echo@1.0.0", json!({}));
     let result = wafer.seal().await;
     std::env::remove_var(REGISTRY_BASE_URL_KEY);
 
     result.expect("seal must resolve the block from the local registry");
     assert!(
-        wafer.block_names().iter().any(|n| n == "acme/widget@1.0.0"),
+        wafer.block_names().iter().any(|n| n == "example/echo"),
         "downloaded block must be registered; got {:?}",
         wafer.block_names()
     );
+    assert_eq!(wafer.canonicalize("example/echo@1.0.0"), "example/echo");
 }

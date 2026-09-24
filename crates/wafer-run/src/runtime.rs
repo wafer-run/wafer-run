@@ -149,6 +149,8 @@ pub struct Wafer {
     /// every consumer falls back to the uncompiled path on a miss.
     /// See [`SealedPlan`](crate::runtime::exec_plan::SealedPlan).
     pub(crate) plan: crate::runtime::exec_plan::SealedPlan,
+    /// Set by the first [`Wafer::seal`] call; a second call is refused.
+    pub(crate) sealed: bool,
 }
 
 impl Wafer {
@@ -191,6 +193,7 @@ impl Wafer {
             wasm: crate::runtime::wasm_state::WasmState::new(),
             config: crate::runtime::config_source::ConfigState::default_static(),
             plan: crate::runtime::exec_plan::SealedPlan::empty(),
+            sealed: false,
         }
     }
 
@@ -316,12 +319,11 @@ impl Wafer {
     ///
     /// Sorted by registration name for deterministic order across processes
     /// (independent of HashMap's SipHash randomisation). Each entry's `name`
-    /// is the block's registration name: `register_block` refuses a block
-    /// whose `info().name` differs ([`RuntimeError::BlockNameMismatch`]). A
-    /// block `seal()` downloaded from the registry is the exception —
-    /// `register_remote_block` skips that check, so its entry carries whatever
-    /// name it reports. The returned list is a snapshot — later registrations
-    /// are not reflected.
+    /// is the block's registration name: registration refuses a block whose
+    /// `info().name` differs ([`RuntimeError::BlockNameMismatch`]), including
+    /// a block `seal()` downloads from the registry, which is registered under
+    /// its unversioned `{org}/{block}`. The returned list is a snapshot —
+    /// later registrations are not reflected.
     pub fn block_infos(&self) -> Vec<wafer_block::BlockInfo> {
         lifecycle::sorted_snapshot(&self.registration.blocks)
     }
@@ -370,9 +372,10 @@ impl Wafer {
         self.wasm.fuel
     }
 
-    /// Look up the effective (declared ∩ config ∩ host) capabilities for a
-    /// registered block. Returns `None` if the block did not declare and no
-    /// config/host caps were provided.
+    /// Look up the effective capabilities `seal()` computed for a registered
+    /// block: declared ∩ config, within the bound a WASM block was loaded
+    /// with — the set the block enforces. `None` before `seal()`, and for a
+    /// name `seal()` did not see registered.
     pub fn effective_capabilities(
         &self,
         block_name: &str,
@@ -722,15 +725,6 @@ pub(crate) async fn run_init_pipeline(
 // BlockRegistry implementation
 // ---------------------------------------------------------------------------
 
-/// Convert a block name like `my-org/auth` to its config variable prefix `MY_ORG__AUTH__`.
-///
-/// Convention: `-` → `_`, `/` → `__`, uppercase, trailing `__`.
-fn block_name_to_var_prefix(name: &str) -> String {
-    let mut prefix = name.to_uppercase().replace('/', "__").replace('-', "_");
-    prefix.push_str("__");
-    prefix
-}
-
 /// Longest block name, in bytes. A block owns the tables named
 /// `{org}__{block}__{table}`, whose prefix is the name plus three bytes (`/`
 /// becomes `__`, and a `__` terminator follows). With at least one byte of
@@ -947,6 +941,7 @@ mod tests {
     /// this, concurrent first-callers each construct their own slot and
     /// both run `lifecycle(Init)` — breaking the once-only-success
     /// guarantee for stateful inits (migrations, idempotent setup).
+    #[cfg(feature = "wasm")]
     #[test]
     fn register_remote_block_pairs_blocks_and_slot() {
         let mut wafer = Wafer::builder()
@@ -1020,19 +1015,6 @@ mod tests {
         assert_eq!(
             wafer.resolve_block_requires_uncached("x/attacker"),
             Some(Arc::new(vec!["x/helper".to_string()]))
-        );
-    }
-
-    #[test]
-    fn test_block_name_to_var_prefix() {
-        assert_eq!(block_name_to_var_prefix("my-org/auth"), "MY_ORG__AUTH__");
-        assert_eq!(
-            block_name_to_var_prefix("wafer-run/web"),
-            "WAFER_RUN__WEB__"
-        );
-        assert_eq!(
-            block_name_to_var_prefix("my-org/products"),
-            "MY_ORG__PRODUCTS__"
         );
     }
 

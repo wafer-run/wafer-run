@@ -148,6 +148,17 @@ pub fn parse_unversioned_block(name: &str) -> Option<RemoteBlockRef> {
     })
 }
 
+/// The identity of the block a registry reference names: the unversioned
+/// `{org}/{block}` of a `{org}/{block}`, `{org}/{block}@latest` or
+/// `{org}/{block}@{version}` reference. `None` when `reference` is none of
+/// those. See `RegistrationCore::register_remote_block` for why the version
+/// is not part of the identity.
+pub(crate) fn remote_block_identity(reference: &str) -> Option<String> {
+    parse_versioned_block(reference)
+        .or_else(|| parse_unversioned_block(reference))
+        .map(|r| format!("{}/{}", r.org, r.block))
+}
+
 /// Registry manifest format for resolving remote blocks.
 #[derive(serde::Deserialize)]
 pub(crate) struct RegistryManifest {
@@ -255,7 +266,7 @@ impl Wafer {
             .keys()
             .filter(|name| name.contains('/'))
             .filter(|name| !self.flows.contains_key(name.as_str()))
-            .filter(|name| !self.registration.blocks.contains_key(name.as_str()))
+            .filter(|name| !self.is_registered(name))
             .filter(|name| {
                 parse_unversioned_block(name).is_some() || parse_versioned_block(name).is_some()
             })
@@ -294,7 +305,7 @@ impl Wafer {
                 FetchedCandidate::Flow(flow) => {
                     if let Some(blocks) = flow.blocks.as_ref() {
                         for block_name in blocks {
-                            if !self.registration.blocks.contains_key(block_name.as_str())
+                            if !self.is_registered(block_name)
                                 && dep_seen.insert(block_name.clone())
                             {
                                 deps.push((block_name.clone(), name.clone()));
@@ -312,7 +323,7 @@ impl Wafer {
         }
 
         // A dependency may itself have been a candidate registered above.
-        deps.retain(|(block_name, _)| !self.registration.blocks.contains_key(block_name.as_str()));
+        deps.retain(|(block_name, _)| !self.is_registered(block_name));
         if deps.is_empty() {
             return Ok(());
         }
@@ -360,6 +371,15 @@ impl Wafer {
         Ok(())
     }
 
+    /// Whether `reference` names a registered block, directly or through an
+    /// alias — a versioned reference `seal()` already downloaded is an alias
+    /// of the block's identity.
+    fn is_registered(&self, reference: &str) -> bool {
+        self.registration
+            .blocks
+            .contains_key(self.registration.canonicalize(reference))
+    }
+
     /// Instantiate downloaded `.wasm` bytes as a block against the shared
     /// engine.
     ///
@@ -372,17 +392,10 @@ impl Wafer {
         bytes: &[u8],
         name: &str,
     ) -> Result<Arc<dyn Block>, RuntimeError> {
-        use crate::wasm::{capabilities::BlockCapabilities, WasmiBlock};
-
         let limits = self.wasm.resource_limits();
         let engine = self.wasm_engine()?.clone();
-        let block = WasmiBlock::load_with_engine_and_limits(
-            &engine,
-            bytes,
-            BlockCapabilities::none(),
-            limits,
-        )
-        .map_err(|e| RuntimeError::Wasm(format!("failed to load remote block {name}: {e}")))?;
+        let block = crate::wasm::WasmiBlock::load_downloaded(&engine, bytes, limits)
+            .map_err(|e| RuntimeError::Wasm(format!("failed to load remote block {name}: {e}")))?;
 
         Ok(Arc::new(block))
     }

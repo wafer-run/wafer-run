@@ -56,6 +56,24 @@ pub enum BlockInfoError {
         key: String,
     },
 
+    /// A block declared a `config_keys` entry outside its own
+    /// `{ORG}__{BLOCK}__` namespace (see [`BlockInfo::config_var_prefix`]).
+    /// A declared key is resolved from the runtime's config source and handed
+    /// to the block in its `Init` payload, so a key under another block's
+    /// prefix — or an unprefixed infrastructure key — would deliver that
+    /// value to a block that does not own it.
+    #[error(
+        "block '{block}' declares config var '{key}', which is outside its own prefix '{prefix}'"
+    )]
+    ConfigVarPrefix {
+        /// The name the block is registered under.
+        block: String,
+        /// The declared config key.
+        key: String,
+        /// The `{ORG}__{BLOCK}__` prefix every declared key must start with.
+        prefix: String,
+    },
+
     /// An endpoint's [`AgentTool`] name is not a legal MCP tool name — see
     /// [`AgentTool::is_valid_name`]. Caught at registration because the
     /// alternative is silence: an MCP client rejects the name inside the
@@ -111,7 +129,8 @@ pub struct BlockInfo {
     pub collections: Vec<CollectionSchema>,
     /// Process env-var-style config variables declared by this block.
     /// **Keys must be SCREAMING_SNAKE with the block's `{ORG}__{BLOCK}__`
-    /// prefix** (e.g., `WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`). Read by
+    /// prefix** (e.g., `WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES`); registration
+    /// refuses any other key ([`BlockInfoError::ConfigVarPrefix`]). Read by
     /// blocks via `std::env::var(KEY)`.
     ///
     /// For per-flow-step JSON config (snake_case keys read via
@@ -222,7 +241,20 @@ impl BlockInfo {
         }
     }
 
-    /// Validate declared config keys and agent-tool names.
+    /// The config-variable prefix owned by the block named `block_name`:
+    /// uppercase, `-` → `_`, `/` → `__`, with a trailing `__` — so
+    /// `my-org/auth` owns `MY_ORG__AUTH__*`.
+    pub fn config_var_prefix(block_name: &str) -> String {
+        let mut prefix = block_name
+            .to_uppercase()
+            .replace('/', "__")
+            .replace('-', "_");
+        prefix.push_str("__");
+        prefix
+    }
+
+    /// Validate declared config keys and agent-tool names for a block
+    /// registered as `registered_name`.
     ///
     /// A block may not *declare* a `config_keys` or `flow_config` entry whose
     /// name starts with [`WAFER_RUN_SHARED_PREFIX`]. That prefix is owned by the
@@ -230,15 +262,20 @@ impl BlockInfo {
     /// [`ConfigVar::is_deletable`] and `wafer_block::wrap::check_access`), so a
     /// block declaring one would create a key it cannot legitimately own.
     ///
+    /// Every `config_keys` entry must start with the registration name's
+    /// [`config_var_prefix`](Self::config_var_prefix): the runtime resolves
+    /// each declared key from its config source and hands the value to the
+    /// block, so declaring a key is reading it.
+    ///
     /// An endpoint's [`AgentTool`] name must be a legal MCP tool name — see
     /// [`AgentTool::is_valid_name`] for the rule and for what goes wrong
     /// downstream when it is not.
     ///
-    /// Called at block registration time by the runtime; returns the first
+    /// Called by the runtime on every block it registers; returns the first
     /// offending declaration as a typed [`BlockInfoError`] so boot fails
     /// loudly and callers can match on the failure rather than parse a
     /// string.
-    pub fn validate(&self) -> Result<(), BlockInfoError> {
+    pub fn validate(&self, registered_name: &str) -> Result<(), BlockInfoError> {
         for var in self.config_keys.iter().chain(self.flow_config.iter()) {
             if var.key.starts_with(WAFER_RUN_SHARED_PREFIX) {
                 return Err(BlockInfoError::ReservedConfigKey {
@@ -246,6 +283,18 @@ impl BlockInfo {
                     key: var.key.clone(),
                 });
             }
+        }
+        let prefix = Self::config_var_prefix(registered_name);
+        if let Some(var) = self
+            .config_keys
+            .iter()
+            .find(|var| !var.key.starts_with(&prefix))
+        {
+            return Err(BlockInfoError::ConfigVarPrefix {
+                block: registered_name.to_string(),
+                key: var.key.clone(),
+                prefix,
+            });
         }
         for ep in &self.endpoints {
             let Some(tool) = ep.agent_tool.as_ref() else {
@@ -426,7 +475,55 @@ mod block_info_tests {
     fn validate_accepts_block_with_no_reserved_keys() {
         let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
             .config_keys(vec![ConfigVar::new("ORG__B__SOMETHING", "desc", "")]);
-        assert!(info.validate().is_ok());
+        assert!(info.validate("org/b").is_ok());
+    }
+
+    #[test]
+    fn config_var_prefix_maps_the_block_name() {
+        assert_eq!(
+            BlockInfo::config_var_prefix("my-org/auth"),
+            "MY_ORG__AUTH__"
+        );
+        assert_eq!(
+            BlockInfo::config_var_prefix("wafer-run/web"),
+            "WAFER_RUN__WEB__"
+        );
+        assert_eq!(
+            BlockInfo::config_var_prefix("my-org/products"),
+            "MY_ORG__PRODUCTS__"
+        );
+    }
+
+    /// Declaring a key is reading it: the runtime resolves every declared key
+    /// and hands the value to the block, so a key outside the block's own
+    /// prefix — another block's secret, an unprefixed infrastructure key — is
+    /// refused.
+    #[test]
+    fn validate_rejects_a_config_key_outside_the_block_prefix() {
+        for key in ["MY_ORG__AUTH__JWT_SECRET", "DATABASE_URL", "ORG__BX__KEY"] {
+            let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
+                .config_keys(vec![ConfigVar::new(key, "desc", "")]);
+            assert_eq!(
+                info.validate("org/b"),
+                Err(BlockInfoError::ConfigVarPrefix {
+                    block: "org/b".to_string(),
+                    key: key.to_string(),
+                    prefix: "ORG__B__".to_string(),
+                })
+            );
+        }
+    }
+
+    /// The prefix comes from the name the block is registered under, not the
+    /// name its `BlockInfo` carries.
+    #[test]
+    fn validate_derives_the_prefix_from_the_registration_name() {
+        let info = BlockInfo::new("a/victim", "0.1.0", "iface@v1", "summary")
+            .config_keys(vec![ConfigVar::new("A__VICTIM__SECRET", "desc", "")]);
+        assert!(matches!(
+            info.validate("x/attacker"),
+            Err(BlockInfoError::ConfigVarPrefix { .. })
+        ));
     }
 
     #[test]
@@ -435,7 +532,7 @@ mod block_info_tests {
         let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
             .config_keys(vec![ConfigVar::new(&key, "desc", "")]);
         let err = info
-            .validate()
+            .validate("org/b")
             .expect_err("reserved prefix must be rejected");
         assert_eq!(
             err,
@@ -460,7 +557,7 @@ mod block_info_tests {
                 "",
             ),
         ]);
-        assert!(info.validate().is_err());
+        assert!(info.validate("org/b").is_err());
     }
 
     #[test]
@@ -468,7 +565,7 @@ mod block_info_tests {
         let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").endpoints(vec![
             BlockEndpoint::get("/b/b/thing").agent_tool("get_thing-v2", "Fetch the thing."),
         ]);
-        assert!(info.validate().is_ok());
+        assert!(info.validate("org/b").is_ok());
     }
 
     /// An MCP client rejects a name outside `[A-Za-z0-9_-]`, and the
@@ -488,7 +585,7 @@ mod block_info_tests {
             let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary").endpoints(vec![
                 BlockEndpoint::get("/b/b/thing").agent_tool(name, "Fetch the thing."),
             ]);
-            let Err(err) = info.validate() else {
+            let Err(err) = info.validate("org/b") else {
                 panic!("name {name:?} must be rejected");
             };
             assert_eq!(
@@ -511,7 +608,7 @@ mod block_info_tests {
     fn validate_ignores_endpoints_that_did_not_opt_in() {
         let info = BlockInfo::new("org/b", "0.1.0", "iface@v1", "summary")
             .endpoints(vec![BlockEndpoint::get("/b/b/thing").summary("no tool")]);
-        assert!(info.validate().is_ok());
+        assert!(info.validate("org/b").is_ok());
     }
 
     #[test]

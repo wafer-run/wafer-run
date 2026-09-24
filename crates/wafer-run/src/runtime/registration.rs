@@ -23,8 +23,8 @@ pub(crate) struct WrapState {
     pub(crate) grants_external: Vec<wafer_block::types::ResourceGrant>,
     /// The block ID granted admin privileges (exact match).
     pub(crate) admin_block: Arc<String>,
-    /// Effective capabilities per block after declared ∩ config ∩ host
-    /// intersection. Computed at `resolve()` time.
+    /// Effective capabilities per block: declared ∩ config, within the
+    /// bound a WASM block was loaded with. Computed by `seal()`.
     pub(crate) effective_capabilities: Arc<HashMap<String, wafer_block::BlockCapabilities>>,
     /// Accumulator for grant-validation failures; drained + checked by
     /// `Wafer::start()`, which fails boot with `RuntimeError::GrantsRejected`
@@ -234,23 +234,38 @@ impl RegistrationCore {
         Ok(())
     }
 
-    /// Refuse a block whose `info()` names it anything other than `name`, the
-    /// name it is being registered under.
+    /// The checks every registration path runs before a block is inserted
+    /// under `name`: the name is free and well-formed, the block reports it
+    /// as its own name, and its declarations pass
+    /// [`BlockInfo::validate`](wafer_block::BlockInfo::validate) — reserved
+    /// and foreign config keys, agent-tool names. Returns the `BlockInfo` it
+    /// checked.
     ///
     /// A block's identity is its registration name: `check_access` attributes
-    /// calls to it, and grant ownership, the admin-block match and `requires`
-    /// are keyed on it. The reported name is block-supplied data — for a WASM
-    /// guest, bytes the guest wrote — so a mismatch is refused rather than
-    /// resolved in either direction.
-    fn check_reported_name(name: &str, info: &wafer_block::BlockInfo) -> Result<(), RuntimeError> {
-        if info.name == name {
-            Ok(())
-        } else {
-            Err(RuntimeError::BlockNameMismatch {
+    /// calls to it, and grant ownership, the admin-block match, `requires` and
+    /// the config-key prefix are keyed on it. The reported name is
+    /// block-supplied data — for a WASM guest, bytes the guest wrote — so a
+    /// mismatch is refused rather than resolved in either direction.
+    fn admit(
+        &self,
+        name: &str,
+        block: &Arc<dyn Block>,
+    ) -> Result<wafer_block::BlockInfo, RuntimeError> {
+        if self.blocks.contains_key(name) {
+            return Err(RuntimeError::DuplicateBlock {
+                name: name.to_string(),
+            });
+        }
+        crate::runtime::validate_block_name(name)?;
+        let info = block.info();
+        if info.name != name {
+            return Err(RuntimeError::BlockNameMismatch {
                 registered: name.to_string(),
                 reported: info.name.clone(),
-            })
+            });
         }
+        info.validate(name)?;
+        Ok(info)
     }
 
     /// Shared registration tail used by both
@@ -301,39 +316,7 @@ impl RegistrationCore {
         block: Arc<dyn Block>,
         asset_loader: &Arc<dyn crate::asset_loader::LoadAssetCallback>,
     ) -> Result<(), RuntimeError> {
-        if self.blocks.contains_key(name) {
-            return Err(RuntimeError::DuplicateBlock {
-                name: name.to_string(),
-            });
-        }
-
-        // Validate block name format.
-        crate::runtime::validate_block_name(name)?;
-
-        let info = block.info();
-        Self::check_reported_name(name, &info)?;
-
-        // Reject declared config keys under platform-reserved prefixes
-        // (e.g. WAFER_RUN_SHARED__): those keys are platform-owned, not
-        // block-owned. Also rejects an agent-tool name an MCP client would
-        // refuse, which would otherwise vanish silently inside a consumer's
-        // per-tool try/catch. Fails boot loudly rather than accepting either.
-        info.validate()?;
-
-        // Validate that all config_keys use the block's own prefix.
-        // Block "my-org/auth" may only declare keys starting with "MY_ORG__AUTH__".
-        if !info.config_keys.is_empty() {
-            let expected_prefix = crate::runtime::block_name_to_var_prefix(name);
-            for var in &info.config_keys {
-                if !var.key.starts_with(&expected_prefix) {
-                    return Err(RuntimeError::ConfigVarPrefix {
-                        name: name.to_string(),
-                        var: var.key.clone(),
-                        prefix: expected_prefix,
-                    });
-                }
-            }
-        }
+        let info = self.admit(name, &block)?;
 
         // Propagate the current asset loader to the block before inserting.
         // Only WasmiBlock instances override `as_any()`, so native blocks are
@@ -350,30 +333,69 @@ impl RegistrationCore {
         Ok(())
     }
 
-    /// Insert a block downloaded by `seal()`'s remote-resolution path while
-    /// running the same WRAP grant validation + slot allocation that
-    /// [`register_block_inner`](Self::register_block_inner) performs for
-    /// code-registered blocks.
+    /// Register a block `seal()` downloaded from the registry for
+    /// `reference` — `{org}/{block}`, `{org}/{block}@latest` or
+    /// `{org}/{block}@{version}` — through the same checks as a
+    /// code-registered block.
     ///
-    /// Block-name and config-key-prefix validation are intentionally skipped:
-    /// remote blocks come in under names the user already declared, and
-    /// re-validating would reject blocks already accepted by their config.
-    /// Duplicate-registration is not checked because every remote-path call
-    /// site filters `blocks.contains_key(name)` before invoking this helper.
+    /// The block's identity is the unversioned `{org}/{block}`. A version
+    /// selects which artifact is fetched; it does not make a different
+    /// block. Everything WRAP keys on is the unversioned name: the block owns
+    /// `{org}__{block}__*` tables and `{ORG}__{BLOCK}__*` config keys whatever
+    /// version runs, and a guest reports `name` and `version` as separate
+    /// `BlockInfo` fields. So the block is admitted and registered under its
+    /// identity, and one runtime holds at most one version of a block — a
+    /// second reference to the same identity at another version is refused
+    /// as a duplicate.
+    ///
+    /// A versioned `reference` becomes an alias of the identity, so flow
+    /// steps and routes that name it still resolve; aliases that targeted
+    /// the reference are retargeted to the identity (aliases stay one hop);
+    /// and config registered under the reference becomes the identity's
+    /// config, where `seal()` reads its `capabilities` narrowing and `Init`
+    /// its payload. Config under both names is refused as ambiguous.
+    #[cfg(feature = "wasm")]
     pub(crate) fn register_remote_block(
         &mut self,
-        name: &str,
+        reference: &str,
         block: Arc<dyn Block>,
     ) -> Result<(), RuntimeError> {
-        let info = block.info();
-        // Reserved-prefix declaration is a platform-ownership invariant, not a
-        // naming-convention nicety, so it applies to remote blocks too (unlike
-        // the block-name / config-prefix checks this helper skips). The same
-        // goes for agent-tool names: a remote block's tool is published from
-        // the same manifest as a local one's.
-        info.validate()?;
+        let identity =
+            crate::runtime::remote::remote_block_identity(reference).ok_or_else(|| {
+                RuntimeError::InvalidBlockName {
+                    name: reference.to_string(),
+                    reason: "not a registry reference {org}/{block}[@{version}]".to_string(),
+                }
+            })?;
+        let info = self.admit(&identity, &block)?;
 
-        self.insert_block_with_grants(name, block, &info);
+        if reference != identity {
+            if self.aliases.contains_key(&identity) {
+                return Err(RuntimeError::Config(format!(
+                    "remote block {reference}: its name {identity} is already an alias"
+                )));
+            }
+            if self.block_configs.contains_key(reference)
+                && self.block_configs.contains_key(&identity)
+            {
+                return Err(RuntimeError::Config(format!(
+                    "remote block {identity} has config under both {identity} and {reference}; \
+                     keep one"
+                )));
+            }
+            if let Some(config) = self.block_configs.remove(reference) {
+                self.block_configs.insert(identity.clone(), config);
+            }
+            let aliases = Arc::make_mut(&mut self.aliases);
+            for target in aliases.values_mut() {
+                if target == reference {
+                    *target = identity.clone();
+                }
+            }
+            aliases.insert(reference.to_string(), identity.clone());
+        }
+
+        self.insert_block_with_grants(&identity, block, &info);
         Ok(())
     }
 
