@@ -4,8 +4,10 @@ export type { RequestOptions } from './client';
 export type { WaferConfig } from './types/config';
 export type { WaferMessage, WaferMeta } from './types/message';
 export type { WaferResult, WaferResponse } from './types/result';
-export { WaferError } from './types/error';
-export type { WaferErrorCode } from './types/error';
+export { WaferError, isWaferServerErrorCode } from './types/error';
+export type { WaferErrorCode, WaferClientErrorCode } from './types/error';
+export { WAFER_SERVER_ERROR_CODES } from './types/error-codes';
+export type { WaferServerErrorCode } from './types/error-codes';
 
 export {
   META_REQ_ACTION,
