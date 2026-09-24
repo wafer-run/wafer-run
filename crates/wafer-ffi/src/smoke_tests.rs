@@ -62,10 +62,17 @@ impl Pending {
             .cast()
     }
 
+    /// Blocks until the callback fires. On a timeout the callback may still
+    /// fire later, so the sender it points at and the receiver it sends to
+    /// are leaked rather than freed before the test panics.
     fn wait(self) -> Option<String> {
-        self.rx
-            .recv_timeout(CALLBACK_TIMEOUT)
-            .expect("wafer_done_cb never fired")
+        match self.rx.recv_timeout(CALLBACK_TIMEOUT) {
+            Ok(result) => result,
+            Err(e) => {
+                std::mem::forget(self);
+                panic!("wafer_done_cb did not fire within {CALLBACK_TIMEOUT:?}: {e}");
+            }
+        }
     }
 }
 
