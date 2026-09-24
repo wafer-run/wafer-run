@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The example/echo guest (examples/wasmi-block), built into
@@ -128,4 +129,34 @@ func TestRegisterBlockTakesACapabilityBound(t *testing.T) {
 	if res := w.Run("smoke", NewMessage("smoke.kind")); !res.IsRespond() {
 		t.Fatalf("expected a respond result, got %+v (error %+v)", res, res.Error)
 	}
+}
+
+// A call the FFI refuses (here a NULL completion callback) returns an error
+// instead of waiting forever for a callback that will never fire; the
+// runtime is untouched and still resolves afterwards.
+func TestARefusedCallReturnsAnErrorInsteadOfWaiting(t *testing.T) {
+	w := New()
+	defer w.Close()
+	if err := w.Register("example/echo", echoWasm); err != nil {
+		t.Fatalf("register block: %v", err)
+	}
+	if err := w.Register("smoke", echoFlow); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- w.resolveWith(nil) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("a NULL callback must be refused with an error, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("resolveWith(nil) is still waiting for a callback that never fires")
+	}
+
+	if err := w.Resolve(); err != nil {
+		t.Fatalf("the refused call must leave the runtime resolvable: %v", err)
+	}
+	w.Stop()
 }
