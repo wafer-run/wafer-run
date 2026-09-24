@@ -774,7 +774,7 @@ fn database_op_body(op: &str) -> Vec<u8> {
             collection: "my_org__auth__users".into(),
             filters: vec![],
             sort: vec![],
-            limit: 10,
+            limit: Some(10),
             offset: 0,
             skip_count: false,
             columns: None,

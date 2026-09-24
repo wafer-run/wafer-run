@@ -138,6 +138,10 @@ impl crate::Message {
 
     /// Parse pagination query parameters (page, page_size, offset).
     ///
+    /// `page_size` is always in `1..=100`: an absent, unparsable or `0`
+    /// `?page_size=` takes `default_page_size`, and the result is clamped to
+    /// that range, so a page is never unbounded.
+    ///
     /// `page` is an unbounded, externally-supplied query value, so the offset is
     /// computed with saturating arithmetic: a hostile `?page=<huge>` clamps the
     /// offset to `usize::MAX` (yielding an empty page) instead of overflowing —
@@ -147,8 +151,10 @@ impl crate::Message {
         let page_size: usize = self
             .query("page_size")
             .parse()
+            .ok()
+            .filter(|&n| n > 0)
             .unwrap_or(default_page_size)
-            .min(100);
+            .clamp(1, 100);
         let offset = page.saturating_sub(1).saturating_mul(page_size);
         (page, page_size, offset)
     }
@@ -349,6 +355,23 @@ mod pagination_tests {
         );
         let (_, page_size, _) = m.pagination_params(20);
         assert_eq!(page_size, 100);
+    }
+
+    /// A `0` page size is not a request for every row: it falls back to the
+    /// default, like an unparsable one.
+    #[test]
+    fn zero_page_size_takes_the_default() {
+        let m = msg_with_query("page_size", "0");
+        assert_eq!(m.pagination_params(20), (1, 20, 0));
+    }
+
+    /// A caller's default outside `1..=100` is clamped too, so no default
+    /// reintroduces an unbounded page.
+    #[test]
+    fn the_default_page_size_is_clamped() {
+        let m = crate::Message::new("test");
+        assert_eq!(m.pagination_params(0).1, 1);
+        assert_eq!(m.pagination_params(500).1, 100);
     }
 
     #[test]

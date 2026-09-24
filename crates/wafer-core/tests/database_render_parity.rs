@@ -186,7 +186,7 @@ fn list_projection_parity(backend: Backend) {
             field: "name".to_string(),
             desc: false,
         }],
-        limit: 25,
+        limit: Some(25),
         offset: 50,
         skip_count: false,
         filter_tree: Some(tree_direct.clone()),
@@ -200,7 +200,8 @@ fn list_projection_parity(backend: Backend) {
         extra_direct,
         &["id"],
         backend,
-    );
+    )
+    .expect("renders");
 
     // (b) VIA WIRE — mirror the `DATABASE_LIST` handler arm: filters flow only
     //     through `filter_tree` (flat `opts.filters` stays empty), rendered as
@@ -227,7 +228,7 @@ fn list_projection_parity(backend: Backend) {
             field: "name".to_string(),
             desc: false,
         }],
-        limit: 25,
+        limit: Some(25),
         offset: 50,
         skip_count: false,
         columns: Some(columns.clone()),
@@ -257,7 +258,8 @@ fn list_projection_parity(backend: Backend) {
         extra_wire,
         &["id"],
         backend,
-    );
+    )
+    .expect("renders");
 
     assert_stmt_parity(&direct, &via, "list_projection");
 }

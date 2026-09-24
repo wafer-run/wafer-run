@@ -625,8 +625,8 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
                 "a record with this key already exists",
             )
         }
-        // The executor's message names only the table and the column the
-        // caller sent, so it goes back to the caller as is.
+        // The executor's message names only what the caller sent (a table, a
+        // column, a limit or offset), so it goes back to the caller as is.
         DatabaseError::InvalidArgument(msg) => WaferError::new(ErrorCode::InvalidArgument, msg),
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {

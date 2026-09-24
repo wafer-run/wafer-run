@@ -4,6 +4,24 @@
 
 ### Breaking changes
 
+- A list page is never unbounded by accident. `ListOptions::limit` and the
+  wire `ListRequest::limit` are `Option<u32>`: `None` (absent on the wire)
+  returns every matching row, as `0` silently did while the docs called it
+  "backend default". `Some(0)`, and a positive `offset` with no `limit`
+  (which SQLite and D1 cannot render — it was a syntax error surfacing as
+  `Internal`), are `InvalidArgument` on every backend, checked before the
+  table probe (`wafer_sql_utils::query::check_pagination`). An encoder from
+  before this change always sent `limit: 0`, so an unrebuilt guest's lists
+  now fail loudly instead of returning everything; rebuild it. The select
+  builders (`build_select`, `build_select_with_condition`,
+  `build_select_columns`) and `apply_pagination` return
+  `Result<_, SqlBuildError>` (new variants `ZeroLimit`,
+  `OffsetWithoutLimit`). `Message::pagination_params` keeps `page_size` in
+  `1..=100`: an absent, unparsable or `0` `?page_size=` takes the default,
+  where `0` used to pass through and list the whole table.
+  `clients::database::paginated_list` refuses a `page_size` above `u32::MAX`.
+  Migration: `limit: 0` → `limit: None` (or `..Default::default()`),
+  `limit: n` → `limit: Some(n)`.
 - The public `wafer_run::runtime::init_stack` module (`InitStack`,
   `InitGuard`) is gone. Init cycles are refused by a runtime-wide wait-for
   graph of in-flight inits instead (see Fixed: "A failed Init is retried when

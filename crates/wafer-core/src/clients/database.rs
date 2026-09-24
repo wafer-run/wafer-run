@@ -475,7 +475,7 @@ dual_api! {
                     operator: FilterOp::Equal,
                     value,
                 }],
-                limit: 1,
+                limit: Some(1),
                 ..Default::default()
             }
         ))?;
@@ -579,7 +579,7 @@ dual_api! {
             collection,
             &ListOptions {
                 filters,
-                limit: 10_000,
+                limit: Some(10_000),
                 skip_count: true,
                 ..Default::default()
             }
@@ -606,7 +606,7 @@ dual_api! {
             &ListOptions {
                 filters,
                 sort,
-                limit: 10_000,
+                limit: Some(10_000),
                 skip_count: true,
                 ..Default::default()
             }
@@ -615,7 +615,8 @@ dual_api! {
     }
 
     /// Page through `collection` returning page `page` of `page_size` rows plus `total_count`.
-    /// `page` and `page_size` are clamped to a minimum of 1 / 20 respectively.
+    /// A `page` below 1 is page 1 and a `page_size` below 1 is 20; a
+    /// `page_size` above `u32::MAX` is `InvalidArgument`.
     pub fn paginated_list(
         ctx,
         collection: &str,
@@ -626,12 +627,18 @@ dual_api! {
     ) -> Result<RecordList, WaferError> {
         let page = if page < 1 { 1 } else { page };
         let page_size = if page_size < 1 { 20 } else { page_size };
+        let limit = u32::try_from(page_size).map_err(|_| {
+            WaferError::new(
+                ErrorCode::InvalidArgument,
+                format!("page_size {page_size} is larger than a list can return"),
+            )
+        })?;
         svc_fn!(ctx, list(
             collection,
             &ListOptions {
                 filters,
                 sort,
-                limit: page_size,
+                limit: Some(limit),
                 offset: (page - 1).saturating_mul(page_size),
                 skip_count: false,
                 filter_tree: None,

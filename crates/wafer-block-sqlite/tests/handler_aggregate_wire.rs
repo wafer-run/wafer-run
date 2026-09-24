@@ -1,5 +1,6 @@
 //! The `database.aggregate` and `database.list` wire additions — aggregate
-//! `cast_as`, `SumWhere`, and column-to-column filters — driven end to end:
+//! `cast_as`, `SumWhere`, column-to-column filters, and list pagination —
+//! driven end to end:
 //! request bytes encoded from a plain JSON-shaped value (what any peer puts on
 //! the wire, independent of this build's Rust types) → the shared database
 //! handler → the real SQLite service → the decoded response.
@@ -331,6 +332,57 @@ async fn list_ids(
         "total_count must honour the same filters"
     );
     Ok(list.records.into_iter().map(|r| r.id).collect())
+}
+
+/// A list page as the wire carries it: `limit`/`offset` are whatever JSON the
+/// peer sends, absent when `None`.
+async fn list_page(
+    svc: &SQLiteDatabaseService,
+    page: serde_json::Value,
+) -> Result<Vec<String>, WaferError> {
+    let mut request = serde_json::json!({
+        "collection": TABLE,
+        "sort": [{ "field": "id" }],
+    });
+    request
+        .as_object_mut()
+        .expect("object")
+        .extend(page.as_object().expect("page object").clone());
+    let body = dispatch(svc, ServiceOp::DATABASE_LIST, &request).await?;
+    let list: wire::RecordList = codec::decode(&body).expect("decode record list");
+    Ok(list.records.into_iter().map(|r| r.id).collect())
+}
+
+#[tokio::test]
+async fn list_pagination_over_the_wire() {
+    let svc = seeded().await;
+    assert_eq!(
+        list_page(&svc, serde_json::json!({}))
+            .await
+            .expect("no limit"),
+        ["o1", "o2", "o3"],
+        "an absent limit returns every row"
+    );
+    assert_eq!(
+        list_page(&svc, serde_json::json!({ "limit": 1, "offset": 1 }))
+            .await
+            .expect("one page"),
+        ["o2"]
+    );
+    // SQLite cannot render OFFSET without LIMIT: refused, not a syntax error
+    // surfacing as INTERNAL.
+    expect_invalid(
+        list_page(&svc, serde_json::json!({ "offset": 1 })).await,
+        "an offset with no limit",
+    )
+    .await;
+    // What an encoder from before `limit` became optional sends for "no
+    // limit": refused, not an empty page.
+    expect_invalid(
+        list_page(&svc, serde_json::json!({ "limit": 0, "offset": 0 })).await,
+        "a zero limit",
+    )
+    .await;
 }
 
 #[tokio::test]

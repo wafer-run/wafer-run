@@ -829,8 +829,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `list`: table-exists guard → [`require_columns`](Self::require_columns)
-    /// → primary key → optional count → select.
+    /// Shared `list`: pagination check → table-exists guard →
+    /// [`require_columns`](Self::require_columns) → primary key → optional
+    /// count → select.
+    ///
+    /// A zero `limit`, or a positive `offset` with no `limit`, is
+    /// [`DatabaseError::InvalidArgument`] on every backend, table present or
+    /// not (see [`wafer_sql_utils::query::check_pagination`]).
     ///
     /// A sorted or paged select ends its `ORDER BY` with the table's primary
     /// key ([`get_primary_key`](Self::get_primary_key), passed to the builder
@@ -851,12 +856,13 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         opts: &ListOptions,
     ) -> Result<RecordList, DatabaseError> {
         let table = sql_name(collection)?;
+        wafer_sql_utils::query::check_pagination(opts.limit, opts.offset)?;
         if !self.table_present_for_op(table).await? {
             return Ok(RecordList {
                 records: Vec::new(),
                 total_count: 0,
                 page: 1,
-                page_size: if opts.limit > 0 { opts.limit } else { 0 },
+                page_size: opts.limit.map_or(0, i64::from),
             });
         }
 
@@ -915,7 +921,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                         extra_cond,
                         &unique_key,
                         Self::BACKEND,
-                    )
+                    )?
                 }
                 None => wafer_sql_utils::query::build_select_with_condition(
                     table,
@@ -923,7 +929,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     extra_cond,
                     &unique_key,
                     Self::BACKEND,
-                ),
+                )?,
             };
             (count_stmt, select_stmt)
         };
@@ -971,21 +977,15 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             }
         };
 
-        let page = if opts.limit > 0 {
-            (opts.offset / opts.limit) + 1
-        } else {
-            1
-        };
+        let page = opts
+            .limit
+            .map_or(1, |limit| (opts.offset / i64::from(limit)) + 1);
         let total_count = total_count.unwrap_or(records.len() as i64);
         Ok(RecordList {
             records,
             total_count,
             page,
-            page_size: if opts.limit > 0 {
-                opts.limit
-            } else {
-                total_count
-            },
+            page_size: opts.limit.map_or(total_count, i64::from),
         })
     }
 
@@ -2691,7 +2691,7 @@ mod tests {
         }
     }
 
-    fn newest_first(limit: i64, offset: i64) -> ListOptions {
+    fn newest_first(limit: Option<u32>, offset: i64) -> ListOptions {
         ListOptions {
             sort: vec![SortField {
                 field: "created_at".into(),
@@ -2711,7 +2711,7 @@ mod tests {
     async fn sorted_list_breaks_ties_on_the_introspected_primary_key_once_per_table() {
         let mock = KeyedMock::new(&["token_hash"]);
         for offset in [0, 2] {
-            DbExec::list(&mock, "sessions", &newest_first(2, offset))
+            DbExec::list(&mock, "sessions", &newest_first(Some(2), offset))
                 .await
                 .expect("list");
         }
@@ -2752,7 +2752,7 @@ mod tests {
         assert_eq!(mock.fetches(), vec![r#"SELECT * FROM "t""#.to_string()]);
 
         let keyless = KeyedMock::new(&[]);
-        DbExec::list(&keyless, "t", &newest_first(0, 0))
+        DbExec::list(&keyless, "t", &newest_first(None, 0))
             .await
             .expect("list");
         let fetches = keyless.fetches();
@@ -2771,7 +2771,7 @@ mod tests {
     async fn an_empty_key_is_cached_only_for_a_table_that_exists() {
         let mock = KeyedMock::new(&[]);
         *mock.exists.lock().unwrap() = false;
-        DbExec::list(&mock, "later", &newest_first(2, 0))
+        DbExec::list(&mock, "later", &newest_first(Some(2), 0))
             .await
             .expect("list before the migration");
         assert_eq!(mock.cache.primary_key("later"), None, "not cached");
@@ -2779,7 +2779,7 @@ mod tests {
         // The migration lands out of band: the table now exists with a key.
         *mock.exists.lock().unwrap() = true;
         *mock.key.lock().unwrap() = vec!["id"];
-        DbExec::list(&mock, "later", &newest_first(2, 0))
+        DbExec::list(&mock, "later", &newest_first(Some(2), 0))
             .await
             .expect("list after the migration");
         let select = mock.fetches().pop().expect("a select");
@@ -2790,7 +2790,7 @@ mod tests {
 
         let keyless = KeyedMock::new(&[]);
         for _ in 0..2 {
-            DbExec::list(&keyless, "keyless", &newest_first(2, 0))
+            DbExec::list(&keyless, "keyless", &newest_first(Some(2), 0))
                 .await
                 .expect("list keyless");
         }
@@ -2802,6 +2802,25 @@ mod tests {
             .filter(|sql| sql.contains("pk > 0"))
             .count();
         assert_eq!(key_probes, 1, "the empty key is served from the cache");
+    }
+
+    /// A page no backend can render is refused even when the table is
+    /// missing and no select would run, so the answer does not depend on
+    /// whether a migration has landed yet.
+    #[tokio::test]
+    async fn an_unrenderable_page_is_refused_before_the_table_probe() {
+        let mock = KeyedMock::new(&["id"]);
+        *mock.exists.lock().unwrap() = false;
+        for (limit, offset) in [(Some(0), 0), (None, 1)] {
+            let err = DbExec::list(&mock, "later", &newest_first(limit, offset))
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(err, DatabaseError::InvalidArgument(_)),
+                "limit {limit:?} offset {offset}: {err:?}"
+            );
+        }
+        assert_eq!(*mock.exists_probes.lock().unwrap(), 0, "no probe ran");
     }
 
     // -----------------------------------------------------------------------

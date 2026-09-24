@@ -690,7 +690,7 @@ async fn check_list(svc: &dyn DatabaseService) {
                 desc: false,
             },
         ],
-        limit: 10,
+        limit: Some(10),
         ..Default::default()
     };
     let listed = svc.list("conf_read", &opts).await.expect("list y");
@@ -714,7 +714,7 @@ async fn check_list(svc: &dyn DatabaseService) {
                     field: "score".into(),
                     desc: true,
                 }],
-                limit: 2,
+                limit: Some(2),
                 ..Default::default()
             },
         )
@@ -737,7 +737,7 @@ async fn check_list(svc: &dyn DatabaseService) {
                     field: "score".into(),
                     desc: true,
                 }],
-                limit: 2,
+                limit: Some(2),
                 offset: 1,
                 ..Default::default()
             },
@@ -750,6 +750,34 @@ async fn check_list(svc: &dyn DatabaseService) {
         .map(|r| field_i64(r, "score"))
         .collect();
     assert_eq!(page2_scores, vec![20, 10], "offset=1 skips the top row");
+
+    // No limit returns every row; a zero limit, or an offset with no limit
+    // (which SQLite/D1 cannot render), is refused on every backend.
+    let everything = svc
+        .list("conf_read", &ListOptions::default())
+        .await
+        .expect("list with no limit");
+    assert_eq!(everything.records.len(), 5, "no limit returns every row");
+    for (limit, offset, what) in [
+        (Some(0), 0, "a zero limit"),
+        (None, 1, "an offset with no limit"),
+    ] {
+        let err = svc
+            .list(
+                "conf_read",
+                &ListOptions {
+                    limit,
+                    offset,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err(what);
+        assert!(
+            matches!(err, DatabaseError::InvalidArgument(_)),
+            "{what} must be InvalidArgument, got {err:?}"
+        );
+    }
 
     // Column projection: only the requested columns come back.
     let projected = svc
@@ -836,7 +864,7 @@ async fn pages(
                             desc: *desc,
                         })
                         .collect(),
-                    limit: 2,
+                    limit: Some(2),
                     offset,
                     ..Default::default()
                 },
