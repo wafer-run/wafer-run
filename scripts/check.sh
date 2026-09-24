@@ -37,6 +37,12 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 run_fixtures() {
+    # The fixtures' own Cargo.locks are resolved separately from the root
+    # one; this fails when a crate they share resolves to a version the root
+    # lock does not pin (see the script's header).
+    echo "==> Fixture lockfiles match the root Cargo.lock"
+    ./scripts/fixture-locks.sh check
+
     echo "==> Build wasm test fixtures"
     ./scripts/build-fixtures.sh
 }
