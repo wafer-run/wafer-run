@@ -235,7 +235,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `cast_as` output cast, `SumWhere`, and column-to-column predicates in both
 /// an aggregate `when` and a `list` filter); `query_raw`/`exec_raw`; and the
 /// structured-value round trip that every backend's row decoder must agree on
-/// (see [`check_json_value_round_trip`]).
+/// (see [`check_json_value_round_trip`]); and that a name is never rewritten
+/// and a read never adds a column (see
+/// [`check_names_are_verbatim_and_reads_never_reshape`]).
 pub async fn run_conformance(svc: &dyn DatabaseService) {
     // Exercise the (sync, default-no-op) strict-schema toggle and pin the
     // service into non-strict mode so the suite's explicit schemas drive the
@@ -261,6 +263,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
     check_json_value_round_trip(svc).await;
+    check_names_are_verbatim_and_reads_never_reshape(svc).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -2650,4 +2653,125 @@ async fn check_schema_management(svc: &dyn DatabaseService) {
     svc.schema_drop_table("conf_schema_b")
         .await
         .expect("drop b");
+}
+
+// ---------------------------------------------------------------------------
+// Names are used verbatim; reads never reshape a table
+// ---------------------------------------------------------------------------
+
+/// Assert `result` is [`DatabaseError::InvalidArgument`]; `what` labels it.
+fn assert_invalid_argument<T: std::fmt::Debug>(result: Result<T, DatabaseError>, what: &str) {
+    match result {
+        Err(DatabaseError::InvalidArgument(_)) => {}
+        other => panic!("{what}: expected InvalidArgument, got {other:?}"),
+    }
+}
+
+/// A table or column name that is not a plain identifier is refused, never
+/// rewritten into another name; and a filter, sort, projection or guard
+/// naming a column the table lacks is refused without adding it.
+///
+/// `conf_a-b` is the name that, stripped of its `-`, is the existing table
+/// `conf_ab`: an executor that rewrote names would answer with `conf_ab`'s
+/// rows.
+async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseService) {
+    let t = "conf_ab";
+    reset(svc, &crud_table(t)).await;
+    svc.create(
+        t,
+        row([("id", serde_json::json!("r1")), ("name", serde_json::json!("a"))]),
+    )
+    .await
+    .expect("seed conf_ab");
+    let columns = svc.schema_columns(t).await.expect("schema_columns");
+
+    let twin = "conf_a-b";
+    assert_invalid_argument(svc.list(twin, &ListOptions::default()).await, "list conf_a-b");
+    assert_invalid_argument(svc.count(twin, &[]).await, "count conf_a-b");
+    assert_invalid_argument(svc.get(twin, "r1").await, "get conf_a-b");
+    assert_invalid_argument(
+        svc.create(twin, row([("name", serde_json::json!("b"))])).await,
+        "create conf_a-b",
+    );
+    assert_invalid_argument(svc.delete(twin, "r1").await, "delete conf_a-b");
+    assert_invalid_argument(
+        svc.create(t, row([("no-te", serde_json::json!("x"))])).await,
+        "create with a non-identifier data key",
+    );
+
+    let unknown = || vec![eq("zz", serde_json::json!("x"))];
+    assert_invalid_argument(
+        svc.list(
+            t,
+            &ListOptions {
+                sort: vec![SortField {
+                    field: "zz".to_string(),
+                    desc: false,
+                }],
+                ..ListOptions::default()
+            },
+        )
+        .await,
+        "list sorted on an unknown column",
+    );
+    assert_invalid_argument(
+        svc.list(
+            t,
+            &ListOptions {
+                filters: unknown(),
+                ..ListOptions::default()
+            },
+        )
+        .await,
+        "list filtered on an unknown column",
+    );
+    assert_invalid_argument(
+        svc.list(
+            t,
+            &ListOptions {
+                columns: Some(vec!["zz".to_string()]),
+                ..ListOptions::default()
+            },
+        )
+        .await,
+        "list projecting an unknown column",
+    );
+    assert_invalid_argument(svc.count(t, &unknown()).await, "count on an unknown column");
+    assert_invalid_argument(
+        svc.take_where(t, &unknown()).await,
+        "take_where on an unknown column",
+    );
+    assert_invalid_argument(
+        svc.delete_where_count(t, &unknown()).await,
+        "delete_where_count on an unknown column",
+    );
+    assert_invalid_argument(
+        svc.update_where_count(t, &unknown(), row([("note", serde_json::json!("n"))]))
+            .await,
+        "update_where_count on an unknown column",
+    );
+    assert_invalid_argument(
+        svc.insert_guarded(
+            t,
+            row([("name", serde_json::json!("g"))]),
+            &[CapGuard::CountBelow {
+                filters: unknown(),
+                cap: 10,
+            }],
+        )
+        .await,
+        "insert_guarded with a guard on an unknown column",
+    );
+
+    assert_eq!(
+        svc.schema_columns(t).await.expect("schema_columns"),
+        columns,
+        "no refused request added a column"
+    );
+    let rows = svc
+        .list(t, &ListOptions::default())
+        .await
+        .expect("list conf_ab");
+    let ids: Vec<&str> = rows.records.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["r1"], "no refused request changed a row");
 }
