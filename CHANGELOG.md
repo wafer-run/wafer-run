@@ -41,9 +41,13 @@
   s3 block read them from `std::env` and the postgres block from the
   embedder's config snapshot, so a source other than the process
   environment configured neither. An embedder that set these only as env
-  vars needs a `ConfigSource` that reads the environment or holds them. `WAFER_RUN__S3__ENDPOINT` is now
-  optional: empty means AWS, and a source without it no longer fails the
-  block's Init with a missing required key.
+  vars needs a `ConfigSource` that reads the environment or holds them.
+  Both read these once, at Init: a changed value applies after a restart.
+  `WAFER_RUN__S3__ENDPOINT` is now optional: empty means AWS, and a source
+  without it no longer fails the block's Init with a missing required key.
+  With an empty endpoint the block uses the AWS SDK's default config, so
+  its region comes from the AWS environment or profile, not from
+  `WAFER_RUN__S3__REGION` (which applies only with an endpoint).
 
 - `NotFound` only ever comes from a service saying the thing a request
   names does not exist; the runtime no longer answers `NotFound` for "no
@@ -1542,9 +1546,11 @@
   `ipv6_prefix` flow config, 1 to 128) instead of per address, which a host
   rotating its own interface id used to get a fresh budget per request;
   an IPv4-mapped address (`::ffff:a.b.c.d`) is charged as the IPv4 address
-  it carries. When a new client finds its shard full, the block drops
-  expired buckets, then the cheapest live ones (under budget before
-  throttled, lower count, older window). It used to drop the oldest
+  it carries. A client's count is kept per (budget, window) pair, so a
+  request through one flow step no longer resets its window on another
+  step with different limits. When a new bucket finds its shard full, the
+  block drops expired buckets, then trims to 90% of capacity cheapest first
+  (under budget before throttled, lower count, older window). It used to drop the oldest
   windows, which after the expiry sweep are the live clients closest to
   their limit, and judged expiry by the triggering request's window.
 
