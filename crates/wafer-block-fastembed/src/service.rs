@@ -11,7 +11,8 @@ use crate::batcher::EmbedBatcher;
 /// Native ONNX-based [`EmbeddingService`] backed by fastembed-rs.
 ///
 /// Model weights are downloaded on first use and cached under the directory
-/// given by `WAFER_RUN__FASTEMBED__CACHE_DIR` (default: `data/models`).
+/// the embedder passes to [`new`](Self::new) — its own configured value, since
+/// this service reads no environment.
 ///
 /// The model is owned by a dedicated worker thread behind an
 /// [`EmbedBatcher`] (PERF-05): `TextEmbedding::embed` takes `&mut self`, so
@@ -36,13 +37,14 @@ pub struct FastembedService {
 }
 
 impl FastembedService {
-    /// Load the model identified by `model_id` from the catalog.
+    /// Load the model identified by `model_id` from the catalog, caching its
+    /// weights under `cache_dir` (downloaded there on first use).
     ///
     /// Recognized ids (see [`wafer_core::interfaces::vector::catalog`]):
     /// - `bge-m3` (1024 dims)
     /// - `multilingual-e5-small` (384 dims)
     /// - `paraphrase-multilingual-MiniLM-L12-v2` (384 dims)
-    pub fn new(model_id: &str) -> Result<Self, VectorError> {
+    pub fn new(model_id: &str, cache_dir: impl Into<PathBuf>) -> Result<Self, VectorError> {
         let (fb_model, dims) = match model_id {
             "bge-m3" => (EmbeddingModel::BGEM3, 1024u32),
             "multilingual-e5-small" => (EmbeddingModel::MultilingualE5Small, 384u32),
@@ -51,10 +53,8 @@ impl FastembedService {
             }
             other => return Err(VectorError::UnknownModel(other.to_string())),
         };
-        let cache_dir = std::env::var("WAFER_RUN__FASTEMBED__CACHE_DIR")
-            .map_or_else(|_| PathBuf::from("data/models"), PathBuf::from);
         let mut embedding =
-            TextEmbedding::try_new(TextInitOptions::new(fb_model).with_cache_dir(cache_dir))
+            TextEmbedding::try_new(TextInitOptions::new(fb_model).with_cache_dir(cache_dir.into()))
                 .map_err(|e| VectorError::Internal(format!("fastembed init: {e}")))?;
         let tokenizer = embedding.tokenizer.clone();
         // The ONNX forward pass is synchronous and CPU-heavy (hundreds of
@@ -73,9 +73,10 @@ impl FastembedService {
         })
     }
 
-    /// Convenience constructor for the catalog's default model.
-    pub fn default_model() -> Result<Self, VectorError> {
-        Self::new(DEFAULT_MODEL)
+    /// Convenience constructor for the catalog's default model, cached under
+    /// `cache_dir`.
+    pub fn default_model(cache_dir: impl Into<PathBuf>) -> Result<Self, VectorError> {
+        Self::new(DEFAULT_MODEL, cache_dir)
     }
 }
 
@@ -124,7 +125,8 @@ mod tests {
         if std::env::var("WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS").is_err() {
             return;
         }
-        let svc = FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap();
+        let svc =
+            FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2", "data/models").unwrap();
         assert_eq!(svc.dimensions(), 384);
         let vecs = svc
             .embed(vec!["hello world".into(), "goodbye".into()])
@@ -145,7 +147,7 @@ mod tests {
             return;
         }
         let svc = std::sync::Arc::new(
-            FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap(),
+            FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2", "data/models").unwrap(),
         );
         let tasks: Vec<_> = (0..8)
             .map(|i| {
@@ -162,7 +164,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_model_errors() {
-        match FastembedService::new("nope-not-real") {
+        match FastembedService::new("nope-not-real", "data/models") {
             Err(VectorError::UnknownModel(name)) => assert_eq!(name, "nope-not-real"),
             Err(other) => panic!("expected UnknownModel, got {other:?}"),
             Ok(_) => panic!("expected UnknownModel error, got Ok"),
@@ -177,7 +179,8 @@ mod tests {
         if std::env::var("WAFER_RUN__FASTEMBED__RUN_INTEGRATION_TESTS").is_err() {
             return;
         }
-        let svc = FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2").unwrap();
+        let svc =
+            FastembedService::new("paraphrase-multilingual-MiniLM-L12-v2", "data/models").unwrap();
         // English: BPE token count usually exceeds the whitespace-word count
         // by ~20–40% because of sub-word splits plus the [CLS]/[SEP] specials
         // the tokenizer adds. Assert both that we get a non-zero count and

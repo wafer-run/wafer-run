@@ -31,8 +31,9 @@ crate::service_block! {
     handle: |this, ctx, msg, body| {
         handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
-    lifecycle: |this, ctx, event| {
-        handler::handle_lifecycle(this.service.as_ref(), &this.tables, ctx, &event).await
+    lifecycle: |this, _ctx, event| {
+        let strict = handler::strict_schema_from(&event, handler::STRICT_SCHEMA_CONFIG_KEY);
+        handler::handle_lifecycle(this.service.as_ref(), &this.tables, strict, &event).await
     },
 }
 

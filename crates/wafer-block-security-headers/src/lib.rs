@@ -5,6 +5,13 @@
 //! [`ConfigVar`] but the operator-supplied directives are merged on top of
 //! a restrictive baseline (see [`merge_csp`]) so they can only widen the
 //! policy in safe ways.
+//!
+//! These are defaults for the flow's response, not a floor: under the flow
+//! executor's precedence rule, a later step's own value for one of these
+//! headers replaces this block's. Every header this block sets is in
+//! [`capabilities::DEFAULT_SENSITIVE_HEADERS`](wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS),
+//! so a WASM step can replace one only when its capabilities' `writable`
+//! list names it.
 
 #![warn(missing_docs)]
 
@@ -966,5 +973,41 @@ mod tests {
             msg.get_meta("resp.header.Permissions-Policy"),
             "camera=(), microphone=(), geolocation=()"
         );
+    }
+
+    /// Every header this block can set is one a WASM guest may not write
+    /// without a grant, so the documented rule — a guest replaces one only
+    /// with a `writable` grant — holds for all of them, including one a later
+    /// change adds.
+    #[tokio::test]
+    async fn every_header_it_sets_is_sensitive_to_guests() {
+        let block = SecurityHeadersBlock::new();
+        // Cross-origin isolation on, so every conditional header is emitted.
+        block
+            .lifecycle(
+                &NoopCtx,
+                init_event(r#"{"cross_origin_isolation":"require-corp"}"#),
+            )
+            .await
+            .unwrap();
+        let msg = block
+            .handle(&NoopCtx, Message::new("retrieve:/"), InputStream::empty())
+            .await
+            .into_continue_message()
+            .await
+            .expect("middleware continues");
+        let set: Vec<String> = msg
+            .meta
+            .iter()
+            .filter_map(|e| e.key.strip_prefix("resp.header."))
+            .map(str::to_ascii_lowercase)
+            .collect();
+        assert!(set.len() >= 8, "expected every header, got {set:?}");
+        for name in set {
+            assert!(
+                wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS.contains(&name.as_str()),
+                "`{name}` is set by this block but a WASM guest may write it without a grant"
+            );
+        }
     }
 }

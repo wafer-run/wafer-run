@@ -134,7 +134,7 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
     }];
-    let err = handle_lifecycle(&svc, &tags, &AllowCtx, &init)
+    let err = handle_lifecycle(&svc, &tags, false, &init)
         .await
         .expect_err("the Init migration cannot take the lock");
     assert_eq!(
@@ -147,7 +147,7 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
     create(&svc, "n1")
         .await
         .expect("the same write succeeds once the lock is released");
-    handle_lifecycle(&svc, &tags, &AllowCtx, &init)
+    handle_lifecycle(&svc, &tags, false, &init)
         .await
         .expect("the same Init migration succeeds once the lock is released");
 

@@ -18,6 +18,18 @@
 //!   producers' keys can still collide for unrelated cookies;
 //! - any other key is identified by the key itself (a content type too,
 //!   under either of its keys: the HTTP codec renders the later one).
+//!
+//! Precedence: where two producers set the same header, the later one's
+//! value stands. Security headers are no exception — a responding or
+//! failing step's own `X-Frame-Options` or `Content-Security-Policy`
+//! replaces the one the security-headers middleware set, on a `next`
+//! transfer as within one flow. That is the per-route override (an embed
+//! endpoint answering `SAMEORIGIN` under a site-wide `DENY`), and only a
+//! block the host trusts can make it: those headers are in
+//! [`wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS`], so a WASM
+//! step emits one only when its capabilities' `HeaderPolicy::writable`
+//! names it — a grant the operator can narrow — and a native block is host
+//! code.
 
 use std::collections::HashMap;
 

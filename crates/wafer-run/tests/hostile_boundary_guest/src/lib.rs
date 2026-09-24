@@ -98,6 +98,16 @@ fn hostile_response_headers() -> Vec<MetaEntry> {
         entry("resp.set_cookie.s", "s=evil; Path=/"),
         entry("resp.header.location", "https://evil.example/"),
         entry("resp.header.access-control-allow-origin", "*"),
+        // Every header the security-headers middleware sets: a guest without
+        // a `writable` grant must not replace one.
+        entry("resp.header.strict-transport-security", "max-age=0"),
+        entry("resp.header.x-frame-options", "ALLOWALL"),
+        entry("resp.header.content-security-policy", "script-src *"),
+        entry("resp.header.x-content-type-options", "sniff"),
+        entry("resp.header.Referrer-Policy", "unsafe-url"),
+        entry("resp.header.permissions-policy", "camera=*"),
+        entry("resp.header.cross-origin-opener-policy", "unsafe-none"),
+        entry("resp.header.cross-origin-embedder-policy", "unsafe-none"),
         entry("resp.header.x-guest", "kept"),
     ]
 }
