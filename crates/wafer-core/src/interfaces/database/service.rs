@@ -700,65 +700,30 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(n)
     }
 
-    /// Atomically select and delete all records matching filters, returning the
-    /// deleted rows.
+    /// Atomically select and delete all records matching filters, returning
+    /// every deleted row.
     ///
-    /// Default impl: list then delete-by-id. Not atomic — concurrent writes to
-    /// matching rows may race between the list and the deletes. Native
-    /// sqlite/postgres impls override with `DELETE … WHERE … RETURNING *` (one
-    /// statement, atomic).
+    /// No default: a list-then-delete fallback is neither atomic nor able to
+    /// reach every matching row in one read. The SQL backends render one
+    /// `DELETE … WHERE … RETURNING *` statement through
+    /// [`DbExec::take_where`](super::exec::DbExec::take_where).
     async fn take_where(
         &self,
         collection: &str,
         filters: &[Filter],
-    ) -> Result<Vec<Record>, DatabaseError> {
-        let listed = self
-            .list(
-                collection,
-                &ListOptions {
-                    filters: filters.to_vec(),
-                    limit: Some(10_000),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let ids: Vec<_> = listed.records.iter().map(|r| r.id.clone()).collect();
-        for id in &ids {
-            self.delete(collection, id).await?;
-        }
-        Ok(listed.records)
-    }
+    ) -> Result<Vec<Record>, DatabaseError>;
 
     /// Bulk-update all records matching filters in a single query.
+    ///
+    /// No default, for the same reason as [`take_where`](Self::take_where):
+    /// the SQL backends render one `UPDATE … WHERE …` statement through
+    /// [`DbExec::update_where`](super::exec::DbExec::update_where).
     async fn update_where(
         &self,
         collection: &str,
         filters: &[Filter],
         data: HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        // Default implementation falls back to record-by-record updates.
-        let records = self
-            .list(
-                collection,
-                &ListOptions {
-                    filters: filters.to_vec(),
-                    limit: Some(10_000),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-        let mut ids: Vec<String> = records.records.into_iter().map(|r| r.id).collect();
-        if let Some(last_id) = ids.pop() {
-            // Clone data for all but the last record.
-            for id in &ids {
-                self.update(collection, id, data.clone()).await?;
-            }
-            // Move data into the final update to avoid an extra clone.
-            self.update(collection, &last_id, data).await?;
-        }
-        Ok(())
-    }
+    ) -> Result<(), DatabaseError>;
 
     /// Bulk-update all records matching filters and return the number of updated rows.
     ///
