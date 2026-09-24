@@ -82,11 +82,17 @@ pub struct RuntimeContext {
     /// by `lookup_attachment`. Empty for top-level calls and for `call_block`
     /// (without attachments).
     pub current_attachments: Arc<BTreeMap<String, Attachment>>,
-    /// Per-top-level-dispatch init breadcrumbs for cycle detection.
-    /// Fresh stack at each `Wafer::run`; nested dispatches inherit via clone
-    /// of the inner `Arc<Mutex<Vec<String>>>`, so all frames share state.
-    /// Used by `Wafer::init_block` to surface `InitError::Cycle`.
-    pub(crate) init_breadcrumbs: crate::runtime::init_stack::InitStack,
+    /// The runtime-wide wait-for graph of in-flight inits, `Arc`-shared with
+    /// the [`Wafer`](crate::Wafer) that produced this context. Consulted by
+    /// the init pipeline to refuse a wait that would close an init cycle
+    /// (`InitError::Cycle`).
+    pub(crate) init_waits: Arc<crate::runtime::init_waits::InitWaits>,
+    /// The `lifecycle(Init)` run this context executes on behalf of: set on
+    /// a block's Init context and inherited by every `call_block`
+    /// sub-context derived from it; `None` outside every Init. A block init
+    /// reached from such a context is a wait of this attempt in
+    /// [`Self::init_waits`].
+    pub(crate) init_attempt: Option<crate::runtime::init_waits::InitAttempt>,
     /// Snapshot of the runtime's per-block init slots. Shared via `Arc` with
     /// [`Wafer::slots`]; consulted by [`RuntimeContext::dispatch_call`] to
     /// drive lazy init on `call_block` callees. Empty (default) when the
@@ -110,6 +116,41 @@ fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
 }
 
 impl RuntimeContext {
+    /// The context `block`'s `lifecycle(Init)` runs on, for the init run
+    /// `attempt`. The one constructor every init path uses (`Wafer::init_block`,
+    /// top-level and flow-step dispatch, and `call_block`), so they cannot
+    /// drift.
+    ///
+    /// `self` supplies only the runtime-wide state every context shares
+    /// (blocks, snapshots, WRAP state, slots, config source, hooks, the
+    /// wait-for graph). Nothing of the dispatch that happened to reach the
+    /// block first carries over: Init is the block's own operation, so it
+    /// gets a fresh cancellation flag, no deadline, call depth 0, no caller,
+    /// no per-call config or attachments, and the block's own `requires`
+    /// allowlist (SEC-04). Whether a block initializes therefore does not
+    /// depend on who touched it first.
+    pub(crate) fn for_init(
+        &self,
+        block_name: &str,
+        block: &dyn Block,
+        attempt: crate::runtime::init_waits::InitAttempt,
+    ) -> Self {
+        let requires = block.info().requires;
+        Self {
+            flow_id: "init".to_string(),
+            node_id: block_name.to_string(),
+            config: Arc::default(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: None,
+            call_depth: 0,
+            caller_requires: (!requires.is_empty()).then(|| Arc::new(requires)),
+            caller_id: None,
+            current_attachments: Arc::default(),
+            init_attempt: Some(attempt),
+            ..self.clone()
+        }
+    }
+
     /// Resolve `name` through the alias map, single-hop. Mirrors
     /// [`crate::Wafer::canonicalize`]. Single-hop is sufficient because
     /// [`crate::Wafer::add_alias`] rejects chained registrations.
@@ -286,10 +327,11 @@ impl RuntimeContext {
             att_arc.clone().unwrap_or_else(|| Arc::new(BTreeMap::new()))
         };
 
-        // The sub-context is a clone of this frame with only the four
-        // caller/callee-identity fields overridden — every shared snapshot
-        // (config, blocks, slots, WRAP state, breadcrumbs, ...) is inherited
-        // via `RuntimeContext::clone` (cheap: Arc/Copy/String fields only):
+        // The sub-context is a clone of this frame with only the
+        // caller/callee-identity fields below overridden — every shared
+        // snapshot (config, blocks, slots, WRAP state, the init wait graph,
+        // the init attempt this frame runs under, ...) is inherited via
+        // `RuntimeContext::clone` (cheap: Arc/Copy/String fields only):
         //   - node_id: the callee's identity for downstream WRAP attribution
         //     (resource owner is `{org}/{block}`). It must be the resolved
         //     canonical name, not the raw alias the caller wrote — otherwise
@@ -310,10 +352,14 @@ impl RuntimeContext {
 
         // Lazy init + observability bracket via the shared dispatch scaffold
         // (`run_resolved`, shared with `Wafer::run_block` and the flow
-        // executor). Init inherits `self.init_breadcrumbs` so a cycle
-        // (block A.init -> A.handle -> call_block(B) where B.init -> ... -> A)
-        // is detected; the init pipeline pushes `resolved_block_name` onto
-        // the stack inside `run_init_pipeline`.
+        // executor). The callee's Init runs on its own context
+        // (`RuntimeContext::for_init`), not on `sub_ctx`: this frame's
+        // deadline, cancellation, depth and identity are the caller's
+        // budget, not the callee's. `self` is the init template, so its
+        // `init_attempt` makes this call a wait of the Init it runs under,
+        // and a wait that would close an init cycle (A.init -> call_block(B),
+        // B.init -> ... -> A, in this dispatch or a concurrent one) is
+        // refused instead of deadlocking.
         //
         // Every registered block has a paired slot (`register_block_inner` /
         // `register_remote_block`). A missing entry here means
@@ -326,8 +372,8 @@ impl RuntimeContext {
             .get(resolved_block_name)
             .cloned()
             .expect("slot must exist for any registered block");
+        // `invoke` below takes `block` by move; init borrows its own handle.
         let init_block = block.clone();
-        let init_ctx = sub_ctx.clone();
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in
@@ -338,8 +384,6 @@ impl RuntimeContext {
         // Because sub_ctx holds an *empty* Arc (not a clone of att_arc), the
         // Arc::try_unwrap below succeeds without a deep clone — att_arc is the
         // sole holder of the BTreeMap at this point.
-        //
-        // _depth_guard drops after this, decrementing counter.
         crate::runtime::runner::run_resolved(
             &self.hooks,
             crate::runtime::runner::DispatchObs {
@@ -351,11 +395,9 @@ impl RuntimeContext {
                 resolved: resolved_block_name,
                 slot: &slot,
             },
-            move || crate::runtime::runner::DispatchInit {
-                block: init_block,
-                config_source: self.config_source.clone(),
-                init_ctx,
-                stack: &self.init_breadcrumbs,
+            crate::runtime::runner::DispatchInit {
+                block: &init_block,
+                template: self,
             },
             msg,
             input,
@@ -750,7 +792,6 @@ mod tests {
             Arc::new(std::collections::HashMap::new()),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             None,
-            crate::runtime::init_stack::InitStack::new(),
         )
     }
 

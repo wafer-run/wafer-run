@@ -7,7 +7,7 @@ use std::sync::{
     Arc,
 };
 
-use wafer_run::runtime::slot::{BlockSlot, InitError, InitializedState};
+use wafer_run::runtime::slot::{BlockSlot, InitError, InitializedState, TRANSIENT_RETRY_BASE};
 
 #[tokio::test]
 async fn get_or_init_runs_init_once() {
@@ -75,7 +75,33 @@ async fn transient_init_error_is_not_cached() {
         assert!(matches!(result, Err(InitError::Transient(_))));
     }
 
-    // Second call: succeeds
+    // Inside the retry backoff: the failure comes back, init does not run.
+    {
+        let calls = calls.clone();
+        let result = slot
+            .get_or_init(|| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, InitError>(InitializedState::new())
+            })
+            .await;
+        assert!(
+            matches!(result, Err(InitError::Transient(_))),
+            "inside the backoff the transient failure is returned: {result:?}"
+        );
+        assert!(
+            matches!(slot.try_cached(), Some(Err(InitError::Transient(_)))),
+            "the fast path also answers inside the backoff"
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no retry inside the backoff"
+    );
+
+    tokio::time::sleep(TRANSIENT_RETRY_BASE + TRANSIENT_RETRY_BASE / 2).await;
+
+    // After the backoff: init runs again and succeeds
     {
         let calls = calls.clone();
         let result = slot
@@ -90,7 +116,7 @@ async fn transient_init_error_is_not_cached() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         2,
-        "transient must not be cached; second call retries"
+        "transient must not be cached; the call after the backoff retries"
     );
 
     // Third call: succeeds without re-running (cached now that init succeeded)
