@@ -224,6 +224,26 @@
 
 ### Added
 
+- CI runs on every pull request and every push to `main`; the path filters
+  that let a `rust-toolchain.toml`-, `rustfmt.toml`- or `.cargo/`-only change
+  merge unbuilt are gone. A `ci-ok` job (`ci / ci-ok`) passes only when every
+  other CI job succeeded — a failed, cancelled or skipped job turns it red —
+  so it is the single check branch protection requires. Shellcheck moved
+  into the same job set, and a `Workflow Lint` job runs actionlint plus
+  `scripts/lint-workflows.sh`, which rejects any action not pinned by full
+  commit SHA and any job missing from `ci-ok`'s `needs`. `cargo audit` also
+  runs weekly on its own schedule (`audit.yml`) with a pinned cargo-audit,
+  and Dependabot keeps the pinned actions and `Cargo.lock` current. Every
+  advisory ignored in `.cargo/audit.toml` must carry a `REASON:` and a
+  `REMOVE WHEN:` line (checked by the same lint script); the
+  RUSTSEC-2026-0097 ignore is dropped instead, because `rand` 0.8.6 and
+  0.9.3 fix it and `Cargo.lock` now uses them. The
+  pre-commit hook formats with nightly rustfmt, as CI checks. The
+  `release.yml` workflow is removed: it had never run, could not pass (its
+  `cargo test --workspace` skipped the fixture build), and pushed manifests
+  to a `wafer-run/registry` repository that does not exist, with a token
+  that was never configured. `RELEASE.md` describes the manual release.
+
 - The embedder wire format's `error` action carries a top-level `meta`
   beside `error`: the error's response-meta projection, the same keys every
   other action carries. An embedding host can now emit the `Retry-After` /

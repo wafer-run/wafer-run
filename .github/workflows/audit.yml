@@ -1,0 +1,43 @@
+# RustSec advisory check of Cargo.lock (scripts/check.sh audit).
+#
+# Runs in two ways:
+# - called by ci-jobs.yml on every pull request and push to main, where
+#   it is one of the jobs `ci-ok` requires;
+# - weekly on its own schedule (and on demand), because advisories are
+#   published against crates already in the lockfile — a lockfile that
+#   no PR touches would otherwise never be re-checked.
+name: Security Audit
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      # A pinned cargo-audit release; install-action checks the prebuilt
+      # binary against the checksum in its own (SHA-pinned) manifest.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: Run audit
+        run: ./scripts/check.sh audit

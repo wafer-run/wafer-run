@@ -1,0 +1,21 @@
+# Keeps the SHA-pinned actions in .github/workflows and the root
+# Cargo.lock current. scripts/lint-workflows.sh requires every action to
+# be pinned by commit SHA; Dependabot updates the SHA and its `# vX.Y.Z`
+# comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor-and-patch:
+        update-types: [minor, patch]

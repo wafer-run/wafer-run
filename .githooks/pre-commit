@@ -7,8 +7,15 @@ set -e
 # ── Rust: fmt + clippy on staged .rs files ──────────────────────────
 RS_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
 if [ -n "$RS_FILES" ]; then
-  echo "Running cargo fmt..."
-  cargo fmt --all
+  # Nightly, as in CI (`check.sh fmt`): rustfmt.toml sets
+  # `imports_granularity` and `group_imports`, which stable rustfmt
+  # ignores with a warning, so a stable format does not pass CI's check.
+  echo "Running cargo +nightly fmt..."
+  cargo +nightly fmt --all
+  for fixture in wasm_static_blocks wasm_local_input_stream; do
+    cargo +nightly fmt --all \
+      --manifest-path "crates/wafer-block/tests/$fixture/Cargo.toml"
+  done
   # shellcheck disable=SC2086  # RS_FILES is newline-separated; word-splitting is intentional
   git add $RS_FILES
 

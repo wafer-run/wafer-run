@@ -15,13 +15,17 @@ Before tagging a release, verify:
 - [ ] `main` branch CI is green (check the [Actions tab](../../actions))
 - [ ] Update `version` in `Cargo.toml` workspace section to match the intended release
 - [ ] No known critical bugs (check [open issues](../../issues))
-- [ ] Run tests locally:
+- [ ] Run the full suite locally, with `WAFER_CONFORMANCE_POSTGRES_URL` set
+      so it includes the PostgreSQL step (see the header of `scripts/check.sh`):
   ```bash
-  cargo test --workspace
+  ./scripts/check.sh
   ```
 - [ ] If this release changes block APIs or service traits, update the docs
 
 ## Creating a Release
+
+There is no release workflow: a tag and its GitHub Release are made by
+hand, and nothing is published to a registry.
 
 ```bash
 # 1. Make sure you're on main and up to date
@@ -31,19 +35,16 @@ git pull
 # 2. Tag the release
 git tag v0.2.0
 
-# 3. Push the tag — this triggers the release workflow
+# 3. Push the tag
 git push origin v0.2.0
-```
 
-The [Release workflow](../../actions/workflows/release.yml) will automatically:
-1. Run the full test suite
-2. Create a GitHub Release
-3. Update block manifests in the [wafer-run/registry](https://github.com/wafer-run/registry) repo
+# 4. Create the GitHub Release, with the CHANGELOG section as its notes
+gh release create v0.2.0 --title v0.2.0 --notes-file <notes.md>
+```
 
 ## After Release
 
 - [ ] Verify the [GitHub Release](../../releases) was created
-- [ ] Verify the [registry repo](https://github.com/wafer-run/registry) was updated with new manifests
 - [ ] Update downstream consumers' wafer-run dependency if needed
 
 ## Hotfix Process
@@ -61,10 +62,11 @@ git push -u origin hotfix/v0.2.1
 # 3. Open a PR — CI must pass, 1 approval required
 gh pr create --title "fix: critical bug description"
 
-# 4. After merge, tag the patch release
+# 4. After merge, tag and release the patch as in "Creating a Release"
 git checkout main && git pull
 git tag v0.2.1
 git push origin v0.2.1
+gh release create v0.2.1 --title v0.2.1 --notes-file <notes.md>
 ```
 
 ## Undoing a Release
@@ -77,4 +79,4 @@ git tag -d v0.2.0
 git push origin --delete v0.2.0
 ```
 
-Then delete the GitHub Release from the [Releases page](../../releases). Note: the registry manifests will still reference the deleted version — manually revert that commit in `wafer-run/registry` if needed.
+Then delete the GitHub Release from the [Releases page](../../releases).

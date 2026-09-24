@@ -94,7 +94,7 @@ go/                      Go bindings.
 
 ## Code style
 
-- **Format with stable for local, nightly before push.** The pre-commit hook runs `cargo fmt` (stable). CI's Format & Lint runs `cargo +nightly fmt --all -- --check`. **Run `cargo +nightly fmt --all` before every push** or CI fails.
+- **Format with nightly rustfmt.** `rustfmt.toml` uses nightly-only options (`imports_granularity`, `group_imports`) that stable rustfmt ignores. CI's Format & Lint runs `cargo +nightly fmt --all -- --check`, and the pre-commit hook runs `cargo +nightly fmt --all`, so install it once: `rustup toolchain install nightly --component rustfmt`.
 - **Clippy clean:** `./scripts/check.sh clippy` (`cargo clippy --workspace --all-targets -- -D warnings`, the CI command; the pre-commit hook runs the same lint set with `--fix`). `--all-targets` compiles the integration tests, so it needs the fixtures — see the gotcha above.
 - **No sync bridges.** No `poll_once`, no `block_on`. If something is async, callers must remain async. (See `CLAUDE.md`.)
 - **No raw SQL in block code.** Use `wafer-sql-utils` builders (`query::*`, `aggregate::*`, `upsert::*`, `ddl::*`, `introspect::*`). If a builder is missing for what you need, add it to `wafer-sql-utils` — don't fall back to `exec_raw`/`query_raw`. Exceptions: the admin SQL explorer (user-typed query), migration-file runners, and test-fixture setup.
@@ -112,7 +112,7 @@ go/                      Go bindings.
 
 2. Use conventional commit prefixes: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `ci:`. The PR title mirrors the leading commit's prefix.
 
-3. The pre-commit hook runs `cargo fmt` + `cargo clippy --all-targets --fix`. Don't bypass with `--no-verify`. If the hook fails, fix the underlying issue.
+3. The pre-commit hook runs `cargo +nightly fmt` + `cargo clippy --all-targets --fix`. Don't bypass with `--no-verify`. If the hook fails, fix the underlying issue.
 
 4. Before pushing:
    ```
@@ -121,7 +121,36 @@ go/                      Go bindings.
    ```
    With no arguments `check.sh` runs every step, skipping `postgres` (loudly) when `WAFER_CONFORMANCE_POSTGRES_URL` is unset.
 
-5. Open the PR. CI must pass before merge. Squash-merge is the default.
+5. Open the PR. CI must pass before merge: the `ci / ci-ok` check is green only when every job in `.github/workflows/ci-jobs.yml` succeeded. A new CI job goes in that file and in `ci-ok`'s `needs` (`scripts/lint-workflows.sh` fails the build otherwise), and every action is pinned by full commit SHA. Squash-merge is the default.
+
+## Security advisories
+
+The `audit` job (`scripts/check.sh audit`, part of `ci / ci-ok`) runs
+`cargo audit` against the RustSec database as it is **at run time**, not as
+it was when a branch was cut. When an advisory is published against a crate
+already in `Cargo.lock`, every open PR and every push to `main` turns red at
+once, including PRs that touch nothing near that crate, until someone
+handles the advisory on `main`. The weekly scheduled run of
+`.github/workflows/audit.yml` reports it even when no PR is open.
+
+To handle one, in a PR of its own:
+
+1. Run `cargo audit` locally to see the advisory, the affected versions, and
+   the `patched` range. `cargo tree --locked -i <crate>@<version>` shows
+   who pulls the crate in.
+2. If a patched version is semver-compatible, update just that crate
+   (`cargo update -p <crate>@<old> --precise <new>`) and commit
+   `Cargo.lock`. This is the normal case.
+3. If the fix needs a newer major of a direct dependency, bump it in the
+   owning crate's `Cargo.toml` and fix what breaks.
+4. Only when no fix is reachable (no patched release, or a transitive
+   dependency pins the vulnerable line), add the id to
+   `.cargo/audit.toml`'s `ignore` list: on its own line, directly below a
+   comment block with a `REASON:` line (why it cannot be fixed now and
+   where the crate comes from, including whether it reaches a production
+   artifact) and a `REMOVE WHEN:` line (the concrete condition that retires
+   the ignore). `scripts/lint-workflows.sh` fails CI when either line is
+   missing. Remove the entry as soon as its condition is met.
 
 ## Worktrees for parallel work
 
