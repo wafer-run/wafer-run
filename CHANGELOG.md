@@ -15,7 +15,10 @@
   `ErrorCode::Unimplemented` (HTTP 501), as a service answers an operation
   it does not have; a `call_block` action outside the target's declared
   interface is `Unimplemented` too (was `InvalidArgument`), and so is an
-  unknown `llm.*` / `image.*` operation. A wasm guest passing an unknown
+  unknown `llm.*` / `image.*` operation. Over HTTP that check answers 501
+  where it answered 400: `OPTIONS`, `TRACE` and `CONNECT` map to the
+  `execute` action, which `http-handler@v1` does not declare, so such a
+  request routed to an `http-handler@v1` block gets 501. A wasm guest passing an unknown
   stream handle to a `__wafer_host_stream_*` import gets `InvalidArgument`
   (was `NotFound`). `seal()` refuses to boot with
   `RuntimeError::BlocksNotFound` when a registered block's `requires` names
