@@ -144,6 +144,25 @@ fn path_prefix_covers(entry: &str, resource: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Whether the network allow entry's URL path `pattern` covers the request
+/// path `target` (both already normalized by `url::Url`): they are equal, or
+/// `pattern` ends in `/` and prefixes `target`, or `target` continues past
+/// `pattern` with a `/`. So `/v1/` and `/v1` both admit `/v1/charges`, and
+/// `/v1/public` never admits the sibling `/v1/public-admin`.
+///
+/// Unlike [`path_prefix_covers`] (storage resources, which are named without
+/// a trailing separator), a trailing `/` here is meaningful: every URL path
+/// starts with one, and `https://a.com` parses to the path `/`.
+fn url_path_covers(pattern: &str, target: &str) -> bool {
+    if pattern.ends_with('/') {
+        return target.starts_with(pattern);
+    }
+    target == pattern
+        || target
+            .strip_prefix(pattern)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// The HTTP headers (lowercase) a WASM guest may neither read nor write
 /// unless its [`HeaderPolicy`] names them: credentials, and the response
 /// headers that steer the browser's security model — including the ones that
@@ -380,18 +399,22 @@ impl BlockCapabilities {
     /// - [`Allowlist::None`] → denied (network disabled).
     /// - [`Allowlist::Any`] → allowed.
     /// - [`Allowlist::Only`] → allowed iff `url` matches an allow entry by
-    ///   exact scheme + host + port with a path prefix.
+    ///   exact scheme + host + port, and the entry's path covers the target's
+    ///   path on a `/` segment boundary (see [`url_path_covers`]):
+    ///   `https://a.com/v1/public` admits `/v1/public` and `/v1/public/x`,
+    ///   never `/v1/public-admin` or `/v1/publicity`.
     pub fn allows_network_url(&self, url: &str) -> bool {
         let allow = match &self.network {
             Allowlist::None => return false,
             Allowlist::Any => return true,
             Allowlist::Only(set) => set,
         };
-        // A raw `starts_with` prefix test does not bound the hostname, so
-        // `https://a.com` would match `https://a.com.evil.net/...`. Parse both
-        // and require an exact scheme + host + effective port, then a path
-        // prefix — closing the hostname-boundary bypass (SEC-007 class) while
-        // preserving the documented URL-prefix semantics for the path.
+        // A raw `starts_with` prefix test bounds neither the hostname
+        // (`https://a.com` would match `https://a.com.evil.net/...`) nor the
+        // last path segment (`/v1/public` would match `/v1/public-admin`).
+        // Parse both, require an exact scheme + host + effective port, then a
+        // segment-bounded path prefix. Parsing normalizes dot segments, so
+        // `/v1/public/../admin` is compared as `/v1/admin`.
         // (The parameter shadows the `url` crate, so use `::url::Url`.)
         let Ok(target) = ::url::Url::parse(url) else {
             return false;
@@ -403,7 +426,7 @@ impl BlockCapabilities {
             pat.scheme() == target.scheme()
                 && pat.host_str() == target.host_str()
                 && pat.port_or_known_default() == target.port_or_known_default()
-                && target.path().starts_with(pat.path())
+                && url_path_covers(pat.path(), target.path())
         })
     }
 
@@ -1061,6 +1084,25 @@ mod tests {
         // `/v1/../v2/secret` normalizes to `/v2/secret`, which is not under /v1/.
         let c = caps_allowing(&["https://api.stripe.com/v1/"]);
         assert!(!c.allows_network_url("https://api.stripe.com/v1/../v2/secret"));
+    }
+
+    #[test]
+    fn network_allow_path_prefix_is_segment_bounded() {
+        let c = caps_allowing(&["https://a.com/v1/public"]);
+        assert!(c.allows_network_url("https://a.com/v1/public"));
+        assert!(c.allows_network_url("https://a.com/v1/public/x"));
+        assert!(c.allows_network_url("https://a.com/v1/public?q=1"));
+        assert!(!c.allows_network_url("https://a.com/v1/publicity"));
+        assert!(!c.allows_network_url("https://a.com/v1/public-admin/x"));
+        assert!(!c.allows_network_url("https://a.com/v1/public%2Fadmin"));
+        assert!(!c.allows_network_url("https://a.com/v1/"));
+        // A trailing `/` on the entry is a directory prefix.
+        let dir = caps_allowing(&["https://a.com/v1/public/"]);
+        assert!(dir.allows_network_url("https://a.com/v1/public/x"));
+        assert!(!dir.allows_network_url("https://a.com/v1/public-admin/x"));
+        // A bare origin parses to the path `/` and admits the whole host.
+        let origin = caps_allowing(&["https://a.com"]);
+        assert!(origin.allows_network_url("https://a.com/anything/at/all"));
     }
 
     #[test]

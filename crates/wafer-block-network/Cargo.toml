@@ -31,7 +31,7 @@ default = []
 allow-private-network = ["wafer-net-security/allow-private-network"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 wiremock = "0.6"
 
 [lints]
