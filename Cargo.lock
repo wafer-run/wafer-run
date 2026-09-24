@@ -6255,6 +6255,7 @@ dependencies = [
  "wafer-block",
  "wafer-block-macro",
  "wafer-core",
+ "wafer-run",
 ]
 
 [[package]]
@@ -6310,8 +6311,11 @@ dependencies = [
  "async-trait",
  "parking_lot",
  "serde_json",
+ "tokio",
  "wafer-block",
  "wafer-block-macro",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]
@@ -6373,9 +6377,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
+ "tokio",
  "tracing",
  "wafer-block",
  "wafer-block-macro",
+ "wafer-run",
+ "wafer-test-support",
 ]
 
 [[package]]

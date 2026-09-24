@@ -86,7 +86,8 @@ impl InspectorBlock {
 /// nothing mounts the inspector there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route<'a> {
-    /// `{mount}/app` — flows, configs, blocks, and interfaces in one payload.
+    /// `{mount}/app` — flows, configs, blocks, and interfaces in one payload,
+    /// with sensitive config values redacted (see [`redacted`]).
     App,
     /// `{mount}/blocks` — every registered block.
     Blocks,
@@ -94,7 +95,8 @@ enum Route<'a> {
     Block(&'a str),
     /// `{mount}/flows` — every flow.
     Flows,
-    /// `{mount}/flows/{id}` — one flow definition, by id.
+    /// `{mount}/flows/{id}` — one flow definition, by id, with sensitive
+    /// step-config values redacted.
     Flow(&'a str),
     /// `{mount}/interfaces` — every interface spec.
     Interfaces,
@@ -258,6 +260,56 @@ fn webmcp_view(blocks: &[BlockInfo]) -> serde_json::Value {
     })
 }
 
+/// What a sensitive config value is replaced with in every inspector view.
+const REDACTED: &str = "[redacted]";
+
+/// Whether a config key names a secret: it ends in `_SECRET` or `_KEY`
+/// (compared case-insensitively, so a lower-case flow-config key such as
+/// `api_key` counts), or some registered block declares it as a
+/// [`InputType::Password`] variable.
+fn is_sensitive_key(key: &str, declared: &std::collections::HashSet<&str>) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.ends_with("_SECRET") || upper.ends_with("_KEY") || declared.contains(key)
+}
+
+/// Every config key a registered block declares as sensitive
+/// ([`ConfigVar::is_sensitive`]), in either `config_keys` or `flow_config`.
+fn declared_sensitive_keys(blocks: &[BlockInfo]) -> std::collections::HashSet<&str> {
+    blocks
+        .iter()
+        .flat_map(|b| b.config_keys.iter().chain(b.flow_config.iter()))
+        .filter(|var| var.is_sensitive())
+        .map(|var| var.key.as_str())
+        .collect()
+}
+
+/// A copy of `value` with every sensitive key's value — at any depth, since
+/// block configs nest and flow definitions carry per-step `config` objects —
+/// replaced by [`REDACTED`]. See [`is_sensitive_key`].
+fn redacted(
+    value: &serde_json::Value,
+    declared: &std::collections::HashSet<&str>,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    let v = if is_sensitive_key(k, declared) {
+                        serde_json::Value::String(REDACTED.to_string())
+                    } else {
+                        redacted(v, declared)
+                    };
+                    (k.clone(), v)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(|v| redacted(v, declared)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// Build an HTML OutputStream response.
 fn html_respond(html: Vec<u8>) -> OutputStream {
     OutputStream::respond_with_meta(
@@ -353,9 +405,18 @@ impl Block for InspectorBlock {
                 let Some(intro) = ctx.flow_introspection() else {
                     return no_flow_introspection();
                 };
-                let flows = intro.flow_defs_json();
-                let configs = ctx.block_configs();
                 let blocks = ctx.registered_blocks();
+                let declared = declared_sensitive_keys(blocks);
+                let flows: Vec<_> = intro
+                    .flow_defs_json()
+                    .iter()
+                    .map(|def| redacted(def, &declared))
+                    .collect();
+                let configs: serde_json::Map<_, _> = ctx
+                    .block_configs()
+                    .iter()
+                    .map(|(name, cfg)| (name.clone(), redacted(cfg, &declared)))
+                    .collect();
                 let interfaces = ctx.interface_specs();
                 ok_json(&serde_json::json!({
                     "flows": flows,
@@ -401,7 +462,10 @@ impl Block for InspectorBlock {
                     .into_iter()
                     .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(decoded.as_str()))
                 {
-                    Some(def) => ok_json(&def),
+                    Some(def) => ok_json(&redacted(
+                        &def,
+                        &declared_sensitive_keys(ctx.registered_blocks()),
+                    )),
                     None => OutputStream::error(WaferError {
                         code: ErrorCode::NotFound,
                         message: format!("flow '{decoded}' not found"),
@@ -906,5 +970,110 @@ mod webmcp_tests {
             Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::Unauthenticated),
             other => panic!("the webmcp view must not answer an unauthenticated caller: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    //! `/app` and `/flows/{id}` serve block configs and flow definitions as
+    //! the runtime holds them; a secret an operator put in either must not
+    //! reach the page. Driven through a real `Wafer`, so the configs and the
+    //! flow definitions are the runtime's own snapshot, not a mock's.
+
+    use std::sync::Arc;
+
+    use wafer_block::{streams::input::InputStream, *};
+    use wafer_block_macro::wafer_async_trait;
+
+    use super::InspectorBlock;
+
+    /// Declares one `Password`-typed variable whose key matches neither
+    /// suffix rule, so only the declaration can mark it sensitive.
+    struct Vault;
+
+    #[wafer_async_trait]
+    impl Block for Vault {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test-org/vault", "0.0.1", "http-handler@v1", "test").config_keys(vec![
+                ConfigVar::new("TEST_ORG__VAULT__PASSPHRASE", "passphrase", "")
+                    .input_type(InputType::Password),
+            ])
+        }
+
+        async fn handle(&self, _ctx: &dyn Context, msg: Message, _: InputStream) -> OutputStream {
+            OutputStream::continue_with(msg)
+        }
+    }
+
+    const FLOW: &str = r#"{
+        "id": "test-flow",
+        "name": "Test",
+        "version": "0.1.0",
+        "steps": [
+            { "id": "vault", "block": "test-org/vault", "config": { "api_key": "fl0wk3y", "mode": "plain" } }
+        ]
+    }"#;
+
+    async fn get(wafer: &wafer_run::Wafer, path: &str) -> String {
+        let mut msg = Message::new(format!("GET:{path}"));
+        msg.set_meta(META_REQ_ACTION, "retrieve");
+        msg.set_meta(META_REQ_RESOURCE, path);
+        let resp = wafer
+            .run_block("wafer-run/inspector", msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+            .expect("inspector answers");
+        String::from_utf8(resp.body).expect("utf-8 JSON")
+    }
+
+    #[tokio::test]
+    async fn app_and_flow_views_redact_sensitive_config_values() {
+        let mut wafer = wafer_run::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer");
+        wafer
+            .register_block("wafer-run/inspector", Arc::new(InspectorBlock::new()))
+            .expect("register inspector");
+        wafer
+            .register_block("test-org/vault", Arc::new(Vault))
+            .expect("register vault");
+        wafer.add_block_config(
+            "wafer-run/inspector",
+            serde_json::json!({ "allow_anonymous": true }),
+        );
+        wafer.add_block_config(
+            "test-org/vault",
+            serde_json::json!({
+                "X_SECRET": "s3cr3t",
+                "TEST_ORG__VAULT__PASSPHRASE": "hunter2",
+                "nested": { "db_key": "k3y" },
+                "plain": "visible-value"
+            }),
+        );
+        wafer.add_flow_json(FLOW).expect("flow");
+        let wafer = wafer.start().await.expect("start");
+
+        let app = get(&wafer, "/_inspector/app").await;
+        let flow = get(&wafer, "/_inspector/flows/test-flow").await;
+        for body in [&app, &flow] {
+            for secret in ["s3cr3t", "hunter2", "k3y", "fl0wk3y"] {
+                assert!(!body.contains(secret), "{secret} leaked: {body}");
+            }
+        }
+        assert!(
+            app.contains("visible-value"),
+            "non-secret config is still shown: {app}"
+        );
+        assert!(
+            app.contains("X_SECRET"),
+            "the key stays, only its value goes: {app}"
+        );
+        assert!(
+            flow.contains("\"mode\":\"plain\""),
+            "non-secret step config stays: {flow}"
+        );
     }
 }
