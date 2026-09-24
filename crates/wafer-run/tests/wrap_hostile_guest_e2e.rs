@@ -84,7 +84,8 @@ async fn build_wafer_with_real_db() -> (Arc<Wafer>, Arc<SQLiteDatabaseService>) 
         .expect("register real wafer-run/database block");
 
     let wasm = hostile_db_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load hostile-db-guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load hostile-db-guest wasm");
     wafer
         .register_block("test/hostile-db-guest", Arc::new(block))
         .expect("register hostile-db-guest");

@@ -90,7 +90,8 @@ async fn kill_switch_and_invalid_values() {
     // Phase 1: explicit off — declared mode is not honored; every call is
     // a fresh instance and nothing is pooled.
     std::env::set_var(WASM_POOLING_ENV, "off");
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load with pooling off");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load with pooling off");
     assert_eq!(count_call(&block).await, "1");
     assert_eq!(
         count_call(&block).await,
@@ -102,7 +103,9 @@ async fn kill_switch_and_invalid_values() {
     // Phase 2: invalid value — load must fail loud, never silently pick a
     // behavior.
     std::env::set_var(WASM_POOLING_ENV, "sometimes");
-    let Err(err) = WasmiBlock::load_from_bytes(&wasm) else {
+    let Err(err) =
+        WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+    else {
         panic!("invalid kill-switch value must fail WasmiBlock load");
     };
     let msg = err.to_string();
@@ -131,7 +134,8 @@ async fn kill_switch_and_invalid_values() {
     // Phase 4: unset — back to the default: pooling enabled for blocks
     // that declared a state-retaining InstanceMode.
     std::env::remove_var(WASM_POOLING_ENV);
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load with default pooling");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load with default pooling");
     assert_eq!(count_call(&block).await, "1");
     assert_eq!(
         count_call(&block).await,

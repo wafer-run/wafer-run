@@ -103,7 +103,11 @@ async fn call(block: &WasmiBlock, kind: &str) -> Result<String, WaferError> {
 /// between calls.
 #[tokio::test]
 async fn singleton_guest_reuses_instance_across_sequential_calls() {
-    let block = WasmiBlock::load_from_bytes(&pool_guest_wasm("singleton")).expect("load");
+    let block = WasmiBlock::load_approving_declaration(
+        &pool_guest_wasm("singleton"),
+        wafer_run::ResourceLimits::default(),
+    )
+    .expect("load");
 
     assert_eq!(call(&block, "pool.count").await.unwrap(), "1");
     assert_eq!(
@@ -124,7 +128,11 @@ async fn singleton_guest_reuses_instance_across_sequential_calls() {
 /// sees a fresh instance (counter always 1) and nothing is ever pooled.
 #[tokio::test]
 async fn percall_guest_gets_a_fresh_instance_every_call() {
-    let block = WasmiBlock::load_from_bytes(&pool_guest_wasm("percall")).expect("load");
+    let block = WasmiBlock::load_approving_declaration(
+        &pool_guest_wasm("percall"),
+        wafer_run::ResourceLimits::default(),
+    )
+    .expect("load");
 
     assert_eq!(call(&block, "pool.count").await.unwrap(), "1");
     assert_eq!(
@@ -147,7 +155,11 @@ async fn percall_guest_gets_a_fresh_instance_every_call() {
 /// back to 1) instead of resuming a possibly-corrupted instance.
 #[tokio::test]
 async fn trap_drops_the_instance_and_next_call_starts_fresh() {
-    let block = WasmiBlock::load_from_bytes(&pool_guest_wasm("singleton")).expect("load");
+    let block = WasmiBlock::load_approving_declaration(
+        &pool_guest_wasm("singleton"),
+        wafer_run::ResourceLimits::default(),
+    )
+    .expect("load");
 
     assert_eq!(call(&block, "pool.count").await.unwrap(), "1");
     assert_eq!(block.pooled_instance_count(), 1);
@@ -181,7 +193,11 @@ async fn trap_drops_the_instance_and_next_call_starts_fresh() {
 /// by a fresh instance.
 #[tokio::test]
 async fn leaked_stream_handles_are_drained_on_checkin() {
-    let block = WasmiBlock::load_from_bytes(&pool_guest_wasm("singleton")).expect("load");
+    let block = WasmiBlock::load_approving_declaration(
+        &pool_guest_wasm("singleton"),
+        wafer_run::ResourceLimits::default(),
+    )
+    .expect("load");
 
     assert_eq!(call(&block, "pool.leak_stream").await.unwrap(), "1:1");
     assert_eq!(
@@ -203,7 +219,7 @@ async fn leaked_stream_handles_are_drained_on_checkin() {
 #[tokio::test]
 async fn memory_grown_to_cap_recycles_the_instance() {
     // Small memory cap so the grow loop is quick and cheap on fuel.
-    let block = WasmiBlock::load_from_bytes_with_limits(
+    let block = WasmiBlock::load_approving_declaration(
         &pool_guest_wasm("singleton"),
         ResourceLimits {
             memory_pages: 64, // 4 MiB
@@ -270,8 +286,13 @@ async fn gated_runtime(barrier: Arc<tokio::sync::Barrier>) -> (Arc<Wafer>, Arc<W
         .expect("Wafer::build");
     w.register_block("test/pool-gate", Arc::new(GateBlock { barrier }))
         .expect("register gate");
-    let guest =
-        Arc::new(WasmiBlock::load_from_bytes(&pool_guest_wasm("singleton")).expect("load guest"));
+    let guest = Arc::new(
+        WasmiBlock::load_approving_declaration(
+            &pool_guest_wasm("singleton"),
+            wafer_run::ResourceLimits::default(),
+        )
+        .expect("load guest"),
+    );
     w.register_block("test/pool-guest", guest.clone())
         .expect("register pool guest");
     let wafer = w.start().await.expect("start runtime");

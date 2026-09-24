@@ -422,11 +422,19 @@ impl Wafer {
                     }));
                 }
                 // Honour the builder's `fuel_per_call` / `max_wasm_memory_pages`
-                // selection for blocks auto-loaded from the lockfile.
-                let block = WasmiBlock::load_from_bytes_with_limits(
-                    &wasm_bytes,
-                    self.wasm.resource_limits(),
-                )
+                // selection for blocks auto-loaded from the lockfile. The
+                // entry's `capabilities` is the operator's bound; without one
+                // the block is bounded at `seal()` by its `capabilities`
+                // block config, `none()` when absent.
+                let limits = self.wasm.resource_limits();
+                let block = match &pkg.capabilities {
+                    Some(bound) => WasmiBlock::load_with_capabilities_and_limits(
+                        &wasm_bytes,
+                        bound.clone(),
+                        limits,
+                    ),
+                    None => WasmiBlock::load_from_bytes_with_limits(&wasm_bytes, limits),
+                }
                 .map_err(|source| {
                     RuntimeError::from(LockLoaderError::WasmLoadFailed {
                         name: pkg.name.clone(),
@@ -505,6 +513,7 @@ mod tests {
             // check; tests exercising a mismatch override this field.
             wasm_sha256: wafer_block::lockfile::sha256_hex(&block_wasm(name)),
             source: source.into(),
+            capabilities: None,
         }
     }
 
@@ -673,6 +682,58 @@ source = "registry+https://wafer.run"
     }
 
     #[cfg(feature = "wasmi")]
+    /// A lockfile entry's `capabilities` is the operator's bound: the guest
+    /// declares far more (every collection, a credential header) and runs
+    /// under the entry ∩ its declaration.
+    #[cfg(feature = "wasmi")]
+    #[tokio::test]
+    async fn a_lockfile_entry_bounds_the_block_it_loads() {
+        let info = r#"{"name":"acme/widget","version":"0.1.0","interface":"handler@v1","summary":"","capabilities":{"collections":"Any","headers":{"readable":["authorization"]}}}"#;
+        let packed = (64u64 << 32) | info.len() as u64;
+        let wasm = wat::parse_str(format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 64) "{}")
+                (func (export "__wafer_info") (result i64) (i64.const {packed})))"#,
+            info.replace('"', "\\\"")
+        ))
+        .expect("WAT parses");
+
+        let tmp = tempdir().unwrap();
+        seed_cache(tmp.path(), "acme", "widget", "0.1.0");
+        let cached = tmp.path().join("acme/widget/0.1.0/widget.wasm");
+        fs::write(&cached, &wasm).unwrap();
+        let lock_body = format!(
+            r#"version = 2
+
+[[package]]
+name = "acme/widget"
+version = "0.1.0"
+sha256 = "abc"
+wasm_sha256 = "{}"
+source = "registry+https://wafer.run"
+
+[package.capabilities]
+collections = {{ Only = ["acme__widget__items"] }}
+"#,
+            wafer_block::lockfile::sha256_hex(&wasm)
+        );
+        let lock_path = tmp.path().join("wafer.lock");
+        fs::write(&lock_path, lock_body).unwrap();
+
+        let mut w = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("empty wafer build is infallible");
+        w.load_lockfile_with_cache(&lock_path, tmp.path()).unwrap();
+        w.seal().await.expect("seal");
+
+        let mut expected = wafer_block::BlockCapabilities::none();
+        expected.collections = wafer_block::Allowlist::Only(["acme__widget__items".into()].into());
+        assert_eq!(w.effective_capabilities("acme/widget"), Some(&expected));
+    }
+
     #[test]
     fn load_lockfile_happy_path_registers_block() {
         let tmp = tempdir().unwrap();

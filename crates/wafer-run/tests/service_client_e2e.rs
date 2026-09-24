@@ -120,7 +120,8 @@ async fn wasm_guest_calls_wafer_core_config_client() {
         .expect("register fake config");
 
     let wasm = service_client_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load service-client guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load service-client guest wasm");
     wafer
         .register_block("test/service-client-guest", Arc::new(block))
         .expect("register service-client-guest");

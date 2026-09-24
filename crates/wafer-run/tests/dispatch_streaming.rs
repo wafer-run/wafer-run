@@ -201,7 +201,8 @@ async fn dispatch(kind: &str, url: &str) -> Result<Vec<u8>, WaferError> {
         .expect("register fake network");
 
     let wasm = dispatch_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load dispatch_guest wasm");
     wafer
         .register_block("test/dispatch-guest", Arc::new(block))
         .expect("register dispatch-guest");
@@ -257,7 +258,8 @@ async fn guest_cannot_forge_host_owned_identity_metadata() {
         .build()
         .expect("Wafer::build");
     let wasm = dispatch_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load dispatch_guest wasm");
     wafer
         .register_block("test/dispatch-guest", Arc::new(block))
         .expect("register dispatch-guest");
@@ -306,7 +308,8 @@ async fn guest_cannot_forge_identity_on_continue() {
         .build()
         .expect("Wafer::build");
     let wasm = dispatch_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load dispatch_guest wasm");
     wafer
         .register_block("test/dispatch-guest", Arc::new(block))
         .expect("register dispatch-guest");
@@ -364,7 +367,8 @@ async fn guest_cannot_forge_identity_on_nested_call() {
         .register_block("test/recorder", Arc::new(RecorderBlock))
         .expect("register recorder");
     let wasm = dispatch_guest_wasm();
-    let block = WasmiBlock::load_from_bytes(&wasm).expect("load dispatch_guest wasm");
+    let block = WasmiBlock::load_approving_declaration(&wasm, wafer_run::ResourceLimits::default())
+        .expect("load dispatch_guest wasm");
     wafer
         .register_block("test/dispatch-guest", Arc::new(block))
         .expect("register dispatch-guest");

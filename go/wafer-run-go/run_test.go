@@ -11,6 +11,9 @@ import (
 const (
 	echoWasm = "../../crates/wafer-run/testdata/echo_block.wasm"
 	echoFlow = "../../crates/wafer-ffi/testdata/echo-flow.json"
+	// A flow whose one step names a block nobody registers, so resolving
+	// it fails.
+	brokenFlow = "../../crates/wafer-ffi/testdata/missing-block-flow.json"
 )
 
 // A flow that succeeds comes back through libwafer_ffi and the callback
@@ -44,5 +47,26 @@ func TestRunRespondsThroughARegisteredFlow(t *testing.T) {
 	}
 	if !body.Echo || body.Kind != "smoke.kind" {
 		t.Fatalf("unexpected echo body: %s", res.Body)
+	}
+}
+
+// Start after a failed Resolve reports that failure again: the runtime never
+// finished sealing, so it must not start as if it had.
+func TestStartReportsAFailedResolve(t *testing.T) {
+	w := New()
+	defer w.Close()
+	if err := w.Register("broken", brokenFlow); err != nil {
+		t.Fatalf("register flow: %v", err)
+	}
+	resolveErr := w.Resolve()
+	if resolveErr == nil {
+		t.Fatal("resolve must fail: the flow names an unregistered block")
+	}
+	startErr := w.Start()
+	if startErr == nil {
+		t.Fatal("start after a failed resolve must fail")
+	}
+	if startErr.Error() != resolveErr.Error() {
+		t.Fatalf("start must re-report the resolve failure: resolve %q, start %q", resolveErr, startErr)
 	}
 }

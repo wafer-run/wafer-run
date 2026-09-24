@@ -22,11 +22,11 @@ const FLOW = {
   steps: [{ id: 'root', block: 'example/echo' }],
 };
 
-function writeFlow(t) {
+function writeFlow(t, flow = FLOW) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wafer-run-node-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'flow.json');
-  fs.writeFileSync(file, JSON.stringify(FLOW));
+  fs.writeFileSync(file, JSON.stringify(flow));
   return file;
 }
 
@@ -66,4 +66,18 @@ test('register, resolve, run and stop round-trip through the addon', async (t) =
 test('run rejects a message that is not the runtime Message shape', async () => {
   const w = new WaferRuntime();
   await assert.rejects(w.run('smoke', '{"kind":"x"}'), /invalid Message JSON/);
+});
+
+test('start after a failed resolve rejects with the same failure', async (t) => {
+  const w = new WaferRuntime();
+  // The one step names a block nobody registers, so resolving fails.
+  await w.register(
+    'broken',
+    writeFlow(t, { ...FLOW, id: 'broken', steps: [{ id: 'root', block: 'missing' }] }),
+  );
+  const resolveErr = await w.resolve().then(
+    () => assert.fail('resolve must fail'),
+    (e) => e,
+  );
+  await assert.rejects(w.start(), (e) => e.message === resolveErr.message);
 });

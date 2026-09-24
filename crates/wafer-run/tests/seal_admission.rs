@@ -121,18 +121,57 @@ async fn a_guest_runs_under_the_bound_intersected_with_its_declaration() {
     );
 }
 
-/// Guard (passes before the fix by design): a guest loaded without a bound
-/// runs under exactly its declaration, header opt-ins included — which
-/// `BlockCapabilities::unrestricted()`, what such a guest runs under before
-/// `seal()`, does not carry.
+/// A guest no embedder bounded gets what the operator states in its
+/// `capabilities` config, ∩ its declaration — and with no statement,
+/// nothing: its declaration is a request, not a grant.
 #[tokio::test]
-async fn an_unbounded_guest_runs_under_its_declaration() {
+async fn an_unbounded_guest_gets_only_what_the_operator_states() {
+    let mut declared = BlockCapabilities::unrestricted();
+    declared.headers.readable = vec!["authorization".to_string(), "cookie".to_string()];
+    let bytes = guest(&widget_info().capabilities(declared));
+
+    let mut w = wafer();
+    w.register_block(
+        WIDGET,
+        Arc::new(WasmiBlock::load_from_bytes(&bytes).expect("loads")),
+    )
+    .expect("registers");
+    w.seal().await.expect("seal");
+    let none = BlockCapabilities::none();
+    assert_eq!(caps_of(&w, WIDGET), (Some(none.clone()), Some(none)));
+
+    let mut w = wafer();
+    w.register_block(
+        WIDGET,
+        Arc::new(WasmiBlock::load_from_bytes(&bytes).expect("loads")),
+    )
+    .expect("registers");
+    w.add_block_config(
+        WIDGET,
+        json!({ "capabilities": {
+            "collections": { "Only": ["acme__widget__a"] },
+            "headers": { "readable": ["authorization"] },
+        } }),
+    );
+    w.seal().await.expect("seal");
+    let mut stated = BlockCapabilities::none();
+    stated.collections = only(&["acme__widget__a"]);
+    stated.headers.readable = vec!["authorization".to_string()];
+    assert_eq!(caps_of(&w, WIDGET), (Some(stated.clone()), Some(stated)));
+}
+
+/// An embedder that vetted a guest approves exactly its declaration, header
+/// opt-ins included.
+#[tokio::test]
+async fn an_embedder_can_approve_the_declaration() {
     let mut declared = BlockCapabilities::none();
     declared.collections = only(&["acme__widget__a"]);
     declared.headers.readable = vec!["authorization".to_string()];
     let bytes = guest(&widget_info().capabilities(declared.clone()));
 
-    let block = WasmiBlock::load_from_bytes(&bytes).expect("guest loads");
+    let block =
+        WasmiBlock::load_approving_declaration(&bytes, wafer_run::ResourceLimits::default())
+            .expect("guest loads");
     let mut w = wafer();
     w.register_block(WIDGET, Arc::new(block))
         .expect("registers");
@@ -165,7 +204,7 @@ async fn a_second_seal_is_refused_and_keeps_the_narrowing() {
         json!({ "capabilities": { "collections": { "Only": ["acme__widget__a"] } } }),
     );
     w.seal().await.expect("first seal");
-    assert!(w.is_sealed());
+    assert_eq!(w.seal_state(), &wafer_run::SealState::Sealed);
 
     let mut narrowed = BlockCapabilities::none();
     narrowed.collections = only(&["acme__widget__a"]);
@@ -222,11 +261,14 @@ async fn a_seal_that_refused_boot_cannot_be_retried_into_success() {
     )
     .expect("registers; the grant is judged at seal");
 
-    assert!(matches!(
-        w.seal().await,
-        Err(RuntimeError::GrantsRejected(_))
-    ));
+    let first = w.seal().await;
+    assert!(matches!(first, Err(RuntimeError::GrantsRejected(_))));
     assert!(matches!(w.seal().await, Err(RuntimeError::AlreadySealed)));
+    assert_eq!(
+        w.seal_state(),
+        &wafer_run::SealState::Failed(first.unwrap_err().to_string()),
+        "the failure is kept for an embedder's start() to re-report"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -389,26 +431,93 @@ mod downloaded {
         }
     }
 
-    /// A step-referenced download gets its effective capabilities computed
-    /// like any other block.
+    /// A block fetched because a flow named it is bounded by what the
+    /// operator stated — here nothing — so whatever it declares (raw SQL,
+    /// any network, a credential header) it runs with none.
     #[tokio::test]
     #[serial]
-    async fn a_step_referenced_download_gets_its_declared_capabilities() {
-        let mut declared = BlockCapabilities::none();
-        declared.collections = only(&["acme__widget__items"]);
-        let server = registry(&[(
-            "1.0.0",
-            guest(&widget_info().capabilities(declared.clone())),
-        )])
-        .await;
+    async fn a_step_referenced_download_gets_only_what_the_operator_states() {
+        let mut declared = BlockCapabilities::unrestricted();
+        declared.headers.readable = vec!["authorization".to_string()];
+        let server = registry(&[("1.0.0", guest(&widget_info().capabilities(declared)))]).await;
         let mut w = wafer();
         w.add_flow(flow_naming("acme/widget@1.0.0"));
 
         seal_against(&server, &mut w).await.expect("seal");
-        assert_eq!(
-            caps_of(&w, WIDGET),
-            (Some(declared.clone()), Some(declared))
+        let none = BlockCapabilities::none();
+        assert_eq!(caps_of(&w, WIDGET), (Some(none.clone()), Some(none)));
+    }
+
+    /// The admin block is the one identity WRAP trusts with typed
+    /// Network/Crypto grants; a reference naming it is never fetched.
+    #[tokio::test]
+    #[serial]
+    async fn the_admin_block_is_never_downloaded() {
+        let server = registry(&[("1.0.0", guest(&widget_info()))]).await;
+        let mut w = wafer();
+        w.set_admin_block(WIDGET);
+        w.add_flow(flow_naming("acme/widget@1.0.0"));
+
+        let err = error_of(seal_against(&server, &mut w).await);
+        assert!(
+            matches!(&err, RuntimeError::Config(m) if m.contains("admin block")),
+            "expected the admin-block refusal, got {err}"
         );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty(),
+            "nothing is fetched for the admin block"
+        );
+    }
+
+    /// A versioned reference to a block the embedder registered is refused
+    /// before anything is fetched: one identity, one block.
+    #[tokio::test]
+    #[serial]
+    async fn a_versioned_reference_to_a_local_block_is_refused_before_fetching() {
+        let server = registry(&[("1.0.0", guest(&widget_info()))]).await;
+        let mut w = wafer();
+        w.register_block(
+            WIDGET,
+            Arc::new(WasmiBlock::load_from_bytes(&guest(&widget_info())).expect("loads")),
+        )
+        .expect("registers");
+        w.add_flow(flow_naming("acme/widget@1.0.0"));
+
+        match error_of(seal_against(&server, &mut w).await) {
+            RuntimeError::DuplicateBlock { name } => assert_eq!(name, WIDGET),
+            other => panic!("expected DuplicateBlock, got {other}"),
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty(),
+            "the registry is not contacted"
+        );
+    }
+
+    /// Registering a versioned download adds the reference as an alias; an
+    /// operator alias already under that name is refused, not overwritten.
+    #[tokio::test]
+    #[serial]
+    async fn an_operator_alias_is_never_overwritten() {
+        let server = registry(&[("1.0.0", guest(&widget_info()))]).await;
+        let mut w = wafer();
+        w.add_alias("acme/widget@1.0.0", "x/elsewhere")
+            .expect("operator alias");
+        w.add_block_config("acme/widget@1.0.0", json!({}));
+
+        let err = error_of(seal_against(&server, &mut w).await);
+        assert!(
+            matches!(&err, RuntimeError::Config(m) if m.contains("already an alias")),
+            "expected the alias conflict, got {err}"
+        );
+        assert_eq!(w.canonicalize("acme/widget@1.0.0"), "x/elsewhere");
     }
 
     /// A versioned reference is registered under the block's unversioned
