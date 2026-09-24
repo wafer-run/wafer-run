@@ -1690,6 +1690,12 @@
 
 ### Fixed
 
+- A `#[wafer_block]` guest handed a `__wafer_handle` or `__wafer_lifecycle`
+  frame it cannot decode answers with an `Internal` error naming the frame
+  type and the decode cause, which the host surfaces as the call's error.
+  It used to return an empty packet, so the host reported only an EOF while
+  decoding the guest's result. Guests pick this up when rebuilt.
+
 - `wafer-run/network` starts when `WAFER_RUN__NETWORK__STREAM_TIMEOUT_SECS`
   is unset. The key was declared with an empty default and without
   `.optional()`, which the config resolver reads as required, so every

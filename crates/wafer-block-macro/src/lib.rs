@@ -549,7 +549,8 @@ pub fn wafer_async_trait(
 ///
 /// Generates core ABI exports (`__wafer_info`, `__wafer_handle`,
 /// `__wafer_lifecycle`) as `#[no_mangle] pub extern "C"` functions that
-/// serialize/deserialize via JSON using the wasmi-based ABI convention.
+/// exchange MessagePack frames with the host (core ABI v2, see
+/// `wafer_block::abi`).
 ///
 /// The generated exports use `wafer_sdk::core_abi::pack_ptr_len` to pack
 /// `(ptr, len)` pairs into an `i64` return value. The consuming crate must
@@ -881,8 +882,9 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
         pub extern "C" fn __wafer_info() -> i64 {
             // FFI boundary: serialization failures cannot panic across the
             // WASM trap-vs-trap boundary cleanly, so on failure we return
-            // a zero (ptr, len) packet. The host decodes that as "no info
-            // available" rather than receiving a wasm trap.
+            // a zero (ptr, len) packet. The host reads that as an empty
+            // BlockInfo frame and fails the load with a decode error rather
+            // than a wasm trap.
             let info = <#struct_ty>::block_info();
             let bytes = match wafer_block::codec::encode(&info) {
                 Ok(b) => b,
@@ -907,13 +909,15 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
                 ::std::slice::from_raw_parts(msg_ptr as *const u8, msg_len as usize)
             };
             // ABI v2 frame: MessagePack [Message, bin body] (see wafer_block::abi).
-            let frame: wafer_block::abi::CallFrame =
-                match wafer_block::codec::decode(msg_bytes) {
-                    Ok(parsed) => parsed,
-                    Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+            // The host encoded this frame, so one this guest cannot decode
+            // means host and guest disagree on the ABI: answer with an
+            // `Internal` error carrying the decode cause, which the host
+            // surfaces as the call's error.
+            let result: wafer_sdk::core_abi::GuestResult =
+                match wafer_block::codec::decode::<wafer_block::abi::CallFrame>(msg_bytes) {
+                    Ok(frame) => <#struct_ty>::handle(frame.0, frame.1.into_vec()),
+                    Err(e) => wafer_sdk::core_abi::GuestResult::error(e.internal()),
                 };
-            let (msg, body) = (frame.0, frame.1.into_vec());
-            let result: wafer_sdk::core_abi::GuestResult = <#struct_ty>::handle(msg, body);
             let result_bytes = match wafer_block::codec::encode(&result) {
                 Ok(b) => b,
                 Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
@@ -936,12 +940,13 @@ fn wafer_block_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenSt
             let evt_bytes = unsafe {
                 ::std::slice::from_raw_parts(evt_ptr as *const u8, evt_len as usize)
             };
-            let event: wafer_block::LifecycleEvent =
-                match wafer_block::codec::decode(evt_bytes) {
-                    Ok(e) => e,
-                    Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
+            // As in `__wafer_handle`: an event frame this guest cannot decode
+            // is answered with an `Internal` error carrying the decode cause.
+            let result: ::std::result::Result<(), wafer_block::WaferError> =
+                match wafer_block::codec::decode::<wafer_block::LifecycleEvent>(evt_bytes) {
+                    Ok(event) => <#struct_ty>::lifecycle(event),
+                    Err(e) => Err(e.internal()),
                 };
-            let result = <#struct_ty>::lifecycle(event);
             let result_bytes = match wafer_block::codec::encode(&result) {
                 Ok(b) => b,
                 Err(_) => return wafer_sdk::core_abi::pack_ptr_len(0, 0),
