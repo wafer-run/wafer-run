@@ -936,3 +936,67 @@ async fn identity_keys_number_rows_and_a_plain_integer_key_is_the_callers() {
         .await
         .expect("drop");
 }
+
+/// A string column default reads back as exactly its value on a session with
+/// `standard_conforming_strings` off, through both DDL paths
+/// (`ensure_schema_table` and `schema_add_column`). With the setting off, a
+/// backslash in a plain `'…'` literal is an escape, so a default holding a
+/// quote and backslashes must be written in a form whose meaning does not
+/// depend on the session. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is
+/// set.
+#[tokio::test]
+async fn a_string_default_round_trips_with_standard_conforming_strings_off() {
+    use std::{collections::HashMap, str::FromStr as _};
+
+    use sqlx::postgres::{PgConnectOptions, PgPool};
+    use wafer_core::interfaces::database::service::{
+        default_string, pk, Column, DataType, DatabaseService, Table,
+    };
+
+    const VALUE: &str = r"it's a back\slash, ending in \";
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres string-default check: set {URL_ENV} to run");
+        return;
+    };
+    let options = PgConnectOptions::from_str(&url)
+        .expect("parse the conformance URL")
+        .options([("standard_conforming_strings", "off")]);
+    let pool = PgPool::connect_with(options).await.expect("connect");
+    let setting: String = sqlx::query_scalar("SHOW standard_conforming_strings")
+        .fetch_one(&pool)
+        .await
+        .expect("read the setting");
+    assert_eq!(setting, "off", "the session must run with the setting off");
+    let svc = PostgresDatabaseService::from_pool(pool).expect("service");
+
+    let table = Table {
+        name: "conf_string_default".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("created_note", DataType::Text).def(default_string(VALUE)),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    svc.schema_drop_table(&table.name).await.expect("drop");
+    svc.ensure_schema_table(&table)
+        .await
+        .expect("create the table with a string default");
+    svc.schema_add_column(
+        &table.name,
+        &Column::new("added_note", DataType::Text).def(default_string(VALUE)),
+    )
+    .await
+    .expect("add a column with a string default");
+
+    let row: HashMap<String, serde_json::Value> = [("id".to_string(), serde_json::json!("r1"))]
+        .into_iter()
+        .collect();
+    svc.create(&table.name, row).await.expect("insert");
+    let got = svc.get(&table.name, "r1").await.expect("get");
+    for column in ["created_note", "added_note"] {
+        assert_eq!(got.data[column], serde_json::json!(VALUE), "{column}");
+    }
+    svc.schema_drop_table(&table.name).await.expect("drop");
+}

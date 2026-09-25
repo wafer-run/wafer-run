@@ -66,26 +66,70 @@ fn data_type_to_sql(dt: DataType, backend: Backend) -> &'static str {
     }
 }
 
-fn default_to_sql(d: &DefaultValue, backend: Backend) -> String {
-    if d.is_null {
-        return "NULL".to_string();
-    }
-    if d.is_raw {
-        return match (backend, d.raw.as_str()) {
-            (Backend::Postgres, "CURRENT_TIMESTAMP") => "NOW()".to_string(),
-            _ => d.raw.clone(),
-        };
-    }
-    match &d.value {
-        Some(DefaultVal::String(s)) => format!("'{}'", s.replace('\'', "''")),
-        Some(DefaultVal::Int(i)) => i.to_string(),
-        Some(DefaultVal::Float(f)) => f.to_string(),
-        Some(DefaultVal::Bool(b)) => match backend {
+/// `d` as the dialect SQL of a column's `DEFAULT` clause.
+///
+/// DDL takes no bound parameters, so a literal default is written into the
+/// statement text; [`string_literal`] is what keeps a string's content from
+/// being read as SQL. `Err` for a default no literal can express (see
+/// [`SqlBuildError::InvalidDefault`]).
+fn default_to_sql(d: &DefaultValue, backend: Backend) -> Result<String, SqlBuildError> {
+    let value = match d {
+        DefaultValue::Null => return Ok("NULL".to_string()),
+        DefaultValue::Now => {
+            return Ok(match backend {
+                Backend::Sqlite => "CURRENT_TIMESTAMP",
+                Backend::Postgres => "NOW()",
+            }
+            .to_string())
+        }
+        DefaultValue::Value(value) => value,
+    };
+    Ok(match value {
+        DefaultVal::String(s) => string_literal(s, backend)?,
+        DefaultVal::Int(i) => i.to_string(),
+        DefaultVal::Float(f) if f.is_finite() => f.to_string(),
+        DefaultVal::Float(f) => {
+            return Err(SqlBuildError::InvalidDefault {
+                reason: format!("{f} has no SQL literal"),
+            })
+        }
+        DefaultVal::Bool(b) => match backend {
             Backend::Sqlite => if *b { "1" } else { "0" }.to_string(),
             Backend::Postgres => if *b { "TRUE" } else { "FALSE" }.to_string(),
         },
-        None => "NULL".to_string(),
+    })
+}
+
+/// `s` as a string literal that reads back as exactly `s`.
+///
+/// - SQLite: `'…'` with each `'` doubled. SQLite string literals have no
+///   other escape; a backslash is an ordinary character.
+/// - PostgreSQL: an escape string `E'…'` with each `\` and each `'` doubled.
+///   A plain `'…'` literal is not safe here: whether a backslash in it is an
+///   ordinary character or an escape depends on the session's
+///   `standard_conforming_strings`, which a server's configuration or a
+///   connection option can turn off, and with it off a `\` before the closing
+///   quote escapes that quote. An escape string always treats `\` as an
+///   escape, so with every backslash doubled no escape sequence remains and
+///   the literal reads the same whatever `standard_conforming_strings` and
+///   `backslash_quote` are set to. That holds while the session's
+///   `client_encoding` is UTF8, which sqlx sets in its startup message: in a
+///   client encoding such as SJIS, where the second byte of a multibyte
+///   character can be `\`, the server reads the SQL text as different
+///   characters from the UTF-8 this function wrote.
+///
+/// A NUL character is refused ([`SqlBuildError::InvalidDefault`]): PostgreSQL
+/// text cannot hold one, and SQL text cannot carry one inside a literal.
+fn string_literal(s: &str, backend: Backend) -> Result<String, SqlBuildError> {
+    if s.contains('\0') {
+        return Err(SqlBuildError::InvalidDefault {
+            reason: "a string default cannot contain a NUL character".to_string(),
+        });
     }
+    Ok(match backend {
+        Backend::Sqlite => format!("'{}'", s.replace('\'', "''")),
+        Backend::Postgres => format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''")),
+    })
 }
 
 fn column_to_sql(col: &Column, backend: Backend) -> Result<String, SqlBuildError> {
@@ -102,11 +146,7 @@ fn column_to_sql(col: &Column, backend: Backend) -> Result<String, SqlBuildError
             Backend::Postgres => {
                 let s = format!("{qname} SERIAL PRIMARY KEY");
                 if let Some(ref default) = col.default {
-                    return Ok(format!(
-                        "{} DEFAULT {}",
-                        s,
-                        default_to_sql(default, backend)
-                    ));
+                    return Ok(format!("{s} DEFAULT {}", default_to_sql(default, backend)?));
                 }
                 return Ok(s);
             }
@@ -123,7 +163,7 @@ fn column_to_sql(col: &Column, backend: Backend) -> Result<String, SqlBuildError
 
     if let Some(ref default) = col.default {
         sql.push_str(" DEFAULT ");
-        sql.push_str(&default_to_sql(default, backend));
+        sql.push_str(&default_to_sql(default, backend)?);
     }
 
     Ok(sql)
@@ -132,9 +172,10 @@ fn column_to_sql(col: &Column, backend: Backend) -> Result<String, SqlBuildError
 /// Generate a CREATE TABLE IF NOT EXISTS statement from a schema Table definition.
 ///
 /// Returns `Err` if any column's foreign-key referential action is outside the
-/// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT), or if
+/// allowed set (CASCADE / SET NULL / SET DEFAULT / NO ACTION / RESTRICT), if
 /// any table or column name it quotes is not a plain identifier
-/// ([`validate_ident`]).
+/// ([`validate_ident`]), or if a column default has no SQL literal
+/// ([`SqlBuildError::InvalidDefault`]).
 pub fn build_create_table(
     table: &Table,
     backend: Backend,
@@ -272,7 +313,8 @@ pub fn build_fk_indexes(
 }
 
 /// Generate an ALTER TABLE ADD COLUMN statement. `Err` when the table or
-/// column name is not a plain identifier ([`validate_ident`]).
+/// column name is not a plain identifier ([`validate_ident`]), or the
+/// column's default has no SQL literal ([`SqlBuildError::InvalidDefault`]).
 pub fn build_add_column(
     table_name: &str,
     col: &Column,
@@ -289,15 +331,10 @@ pub fn build_add_column(
 /// Generate an `ALTER TABLE <table> ADD COLUMN <column> <type_sql>` statement.
 ///
 /// Both `table_name` and `column_name` are quoted as identifiers, and must be
-/// plain identifiers ([`validate_ident`]) or the call is `Err`. `type_sql`
-/// is a dialect column type produced by `data_type_to_sql` (or, for the
-/// write path's lazy column-add, which maps from a `serde_json::Value`, the
-/// column type the backend chose); it is spliced verbatim and must therefore
-/// be a trusted type literal, never untrusted input.
-///
-/// This is the primitive behind [`build_add_column_for_value`], for a caller
-/// that knows only a column name and a target type — not a full [`Column`]
-/// (which [`build_add_column`] requires).
+/// plain identifiers ([`validate_ident`]) or the call is `Err`. `type_sql` is
+/// spliced verbatim, so this stays private: its one caller,
+/// [`build_add_column_for_value`], passes a fixed type from
+/// [`column_type_for_value`].
 ///
 /// Postgres emits `ADD COLUMN IF NOT EXISTS` for idempotency: the lazy
 /// column-add path may legitimately re-attempt the same add (two concurrent
@@ -306,10 +343,10 @@ pub fn build_add_column(
 /// `ADD COLUMN` as a hard error. SQLite does **not** support `IF NOT EXISTS` on
 /// `ADD COLUMN`, so its callers guard with an existence check and swallow the
 /// duplicate-column error instead.
-pub fn build_add_column_with_type(
+fn build_add_column_with_type(
     table_name: &str,
     column_name: &str,
-    type_sql: &str,
+    type_sql: &'static str,
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
     let if_not_exists = match backend {
@@ -737,5 +774,93 @@ mod tests {
         let err = build_create_index("users", &idx, Backend::Sqlite)
             .expect_err("non-identifier column in synthesised name must be rejected");
         assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+    }
+
+    const QUOTE_AND_BACKSLASHES: &str = r"it's a back\slash, ending in \";
+
+    fn text_with_default(default: DefaultValue) -> Table {
+        Table {
+            name: "notes".into(),
+            columns: vec![pk("id"), Column::new("note", DataType::Text).def(default)],
+            indexes: vec![],
+            primary_key: vec![],
+            unique_keys: vec![],
+        }
+    }
+
+    #[test]
+    fn test_string_default_postgres_is_an_escape_string() {
+        let sql = build_create_table(
+            &text_with_default(wafer_schema::default_string(QUOTE_AND_BACKSLASHES)),
+            Backend::Postgres,
+        )
+        .expect("valid")
+        .sql;
+        assert!(
+            sql.contains(r#""note" TEXT NOT NULL DEFAULT E'it''s a back\\slash, ending in \\'"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_string_default_round_trips_on_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let create = build_create_table(
+            &text_with_default(wafer_schema::default_string(QUOTE_AND_BACKSLASHES)),
+            Backend::Sqlite,
+        )
+        .expect("valid");
+        conn.execute(&create.sql, []).expect(&create.sql);
+        let add = build_add_column(
+            "notes",
+            &Column::new("added", DataType::Text)
+                .def(wafer_schema::default_string(QUOTE_AND_BACKSLASHES)),
+            Backend::Sqlite,
+        )
+        .expect("valid");
+        conn.execute(&add.sql, []).expect(&add.sql);
+        conn.execute("INSERT INTO notes (id) VALUES ('r1')", [])
+            .unwrap();
+        let (note, added): (String, String) = conn
+            .query_row("SELECT note, added FROM notes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(note, QUOTE_AND_BACKSLASHES);
+        assert_eq!(added, QUOTE_AND_BACKSLASHES);
+    }
+
+    #[test]
+    fn test_default_without_a_literal_is_refused() {
+        for (default, backend) in [
+            (wafer_schema::default_string("a\0b"), Backend::Sqlite),
+            (wafer_schema::default_string("a\0b"), Backend::Postgres),
+            (
+                DefaultValue::Value(DefaultVal::Float(f64::NAN)),
+                Backend::Sqlite,
+            ),
+            (
+                DefaultValue::Value(DefaultVal::Float(f64::INFINITY)),
+                Backend::Postgres,
+            ),
+        ] {
+            let err = build_create_table(&text_with_default(default.clone()), backend)
+                .expect_err("no SQL literal expresses this default");
+            assert!(
+                matches!(err, SqlBuildError::InvalidDefault { .. }),
+                "{default:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_now_default_per_dialect() {
+        let sql = |backend| {
+            build_create_table(&text_with_default(wafer_schema::default_now()), backend)
+                .expect("valid")
+                .sql
+        };
+        assert!(sql(Backend::Sqlite).contains("DEFAULT CURRENT_TIMESTAMP"));
+        assert!(sql(Backend::Postgres).contains("DEFAULT NOW()"));
     }
 }

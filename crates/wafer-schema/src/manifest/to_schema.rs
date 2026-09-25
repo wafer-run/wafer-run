@@ -157,12 +157,7 @@ fn to_default_value(
             if matches!(data_type, DataType::Int | DataType::Int64) {
                 default_int(n.as_i64().ok_or_else(bad_default)?)
             } else {
-                DefaultValue {
-                    raw: String::new(),
-                    value: Some(DefaultVal::Float(n.as_f64().ok_or_else(bad_default)?)),
-                    is_raw: false,
-                    is_null: false,
-                }
+                DefaultValue::Value(DefaultVal::Float(n.as_f64().ok_or_else(bad_default)?))
             }
         }
         serde_json::Value::String(s) => {

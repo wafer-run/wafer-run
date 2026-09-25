@@ -42,14 +42,10 @@ use crate::errors::sqlx_error;
 /// - a `wafer-sql-utils` query or mutation: identifiers quoted, every value a
 ///   `$n` parameter bound separately (see [`bind`]);
 /// - `wafer-sql-utils` DDL (`ddl::build_*`), which takes no parameters, so a
-///   column default is written into the text. A default arriving through
-///   the `database.ensure_table`/`add_column` wire ops is `null`, `now`, or a
-///   string, number or boolean literal, and a string is quoted with each `'`
-///   doubled. That quoting holds only while the session's
-///   `standard_conforming_strings` is `on` (PostgreSQL's default; neither
-///   sqlx nor this backend sets it). A verbatim SQL default
-///   (`DefaultValue::is_raw`) has no wire form and is built only by host Rust
-///   code;
+///   column default is written into the text. A default is `NULL`, `NOW()`,
+///   or a typed string, number or boolean literal; a string is written as an
+///   `E'…'` escape string that reads back as exactly the value whatever the
+///   session's `standard_conforming_strings`;
 /// - a caller's own statement handed through `query_raw`/`exec_raw`, whose
 ///   text is exactly what the caller wrote and whose values are bound as
 ///   parameters.

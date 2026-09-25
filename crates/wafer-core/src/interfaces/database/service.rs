@@ -72,7 +72,8 @@ impl DatabaseError {
 
 /// A statement a builder refused to render is the caller's mistake: a name
 /// that is not a plain identifier, a foreign-key action off the allowlist, a
-/// limit/offset pair no backend can render, or one column named for two roles.
+/// limit/offset pair no backend can render, one column named for two roles,
+/// or a column default no SQL literal can express.
 impl From<wafer_sql_utils::SqlBuildError> for DatabaseError {
     fn from(e: wafer_sql_utils::SqlBuildError) -> Self {
         Self::InvalidArgument(e.to_string())
