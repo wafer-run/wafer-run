@@ -39,27 +39,30 @@ impl fmt::Display for DataType {
     }
 }
 
-/// DefaultValue represents a column default value.
-#[derive(Debug, Clone)]
-pub struct DefaultValue {
-    /// Raw SQL expression to splice as-is when `is_raw` is true (e.g. `CURRENT_TIMESTAMP`).
-    pub raw: String,
-    /// Typed literal value when `is_raw` is false and `is_null` is false.
-    pub value: Option<DefaultVal>,
-    /// Treat `raw` as a verbatim SQL expression instead of binding a literal.
-    pub is_raw: bool,
-    /// Encode `DEFAULT NULL` regardless of the other fields.
-    pub is_null: bool,
+/// A column default.
+///
+/// Every variant is data: the DDL builders render it as a dialect literal or
+/// the dialect's current-time function, never as SQL text taken from here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefaultValue {
+    /// `DEFAULT NULL`.
+    Null,
+    /// The current time at insert (`CURRENT_TIMESTAMP` on SQLite, `NOW()` on
+    /// PostgreSQL).
+    Now,
+    /// A typed literal.
+    Value(DefaultVal),
 }
 
 /// Typed literal carried inside a [`DefaultValue`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DefaultVal {
     /// String literal default.
     String(String),
     /// Integer literal default.
     Int(i64),
-    /// Floating-point literal default.
+    /// Floating-point literal default. Must be finite: SQL has no literal
+    /// for NaN or an infinity.
     Float(f64),
     /// Boolean literal default.
     Bool(bool),
@@ -68,82 +71,42 @@ pub enum DefaultVal {
 // Default helpers
 /// `DEFAULT CURRENT_TIMESTAMP` — current time at insert.
 pub fn default_now() -> DefaultValue {
-    DefaultValue {
-        raw: "CURRENT_TIMESTAMP".to_string(),
-        value: None,
-        is_raw: true,
-        is_null: false,
-    }
+    DefaultValue::Now
 }
 
 /// `DEFAULT NULL` — explicit NULL default.
 pub fn default_null() -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: None,
-        is_raw: false,
-        is_null: true,
-    }
+    DefaultValue::Null
 }
 
 /// `DEFAULT 0` — integer zero default.
 pub fn default_zero() -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: Some(DefaultVal::Int(0)),
-        is_raw: false,
-        is_null: false,
-    }
+    DefaultValue::Value(DefaultVal::Int(0))
 }
 
 /// `DEFAULT ''` — empty-string default.
 pub fn default_empty() -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: Some(DefaultVal::String(String::new())),
-        is_raw: false,
-        is_null: false,
-    }
+    DefaultValue::Value(DefaultVal::String(String::new()))
 }
 
 /// `DEFAULT false` — boolean false default.
 pub fn default_false() -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: Some(DefaultVal::Bool(false)),
-        is_raw: false,
-        is_null: false,
-    }
+    DefaultValue::Value(DefaultVal::Bool(false))
 }
 
 /// `DEFAULT true` — boolean true default.
 pub fn default_true() -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: Some(DefaultVal::Bool(true)),
-        is_raw: false,
-        is_null: false,
-    }
+    DefaultValue::Value(DefaultVal::Bool(true))
 }
 
 /// `DEFAULT v` — integer literal default.
 pub fn default_int(v: i64) -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: Some(DefaultVal::Int(v)),
-        is_raw: false,
-        is_null: false,
-    }
+    DefaultValue::Value(DefaultVal::Int(v))
 }
 
 /// `DEFAULT 'v'` — string literal default.
 pub fn default_string(v: impl Into<String>) -> DefaultValue {
-    DefaultValue {
-        raw: String::new(),
-        value: Some(DefaultVal::String(v.into())),
-        is_raw: false,
-        is_null: false,
-    }
+    DefaultValue::Value(DefaultVal::String(v.into()))
 }
 
 /// Reference defines a foreign key reference.

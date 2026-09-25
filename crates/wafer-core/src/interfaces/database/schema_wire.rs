@@ -45,18 +45,7 @@ fn default_from_def(def: &wire::DefaultDef) -> Result<DefaultValue, WaferError> 
                 serde_json::Value::Number(n) => DefaultVal::Float(n.as_f64().unwrap_or_default()),
                 other => return Err(invalid(format!("unsupported default value {other}"))),
             };
-            let raw = match &value {
-                DefaultVal::String(s) => s.clone(),
-                DefaultVal::Int(i) => i.to_string(),
-                DefaultVal::Float(f) => f.to_string(),
-                DefaultVal::Bool(b) => b.to_string(),
-            };
-            Ok(DefaultValue {
-                raw,
-                value: Some(value),
-                is_raw: false,
-                is_null: false,
-            })
+            Ok(DefaultValue::Value(value))
         }
         other => Err(invalid(format!("unknown default kind `{other}`"))),
     }

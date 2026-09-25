@@ -102,6 +102,13 @@ pub enum SqlBuildError {
         /// The rejected identifier, as supplied by the caller.
         value: String,
     },
+    /// A column default no SQL literal can express: a non-finite float, or
+    /// a string holding a NUL character.
+    #[error("invalid column default: {reason}")]
+    InvalidDefault {
+        /// Why the default was refused.
+        reason: String,
+    },
     /// A select asked for `LIMIT 0`. No caller wants an empty page; a `0` is
     /// a page size that was never set, and "every row" is spelled `None`.
     #[error("limit must be at least 1; omit it to return every row")]

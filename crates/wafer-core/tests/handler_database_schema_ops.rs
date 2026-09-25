@@ -352,10 +352,10 @@ fn table_from_def_maps_every_kind_and_default() {
     assert_eq!(table.columns[0].data_type, wafer_schema::DataType::String);
     assert!(table.columns[0].primary_key);
     assert_eq!(table.columns[1].data_type, wafer_schema::DataType::DateTime);
-    assert!(table.columns[1]
-        .default
-        .as_ref()
-        .is_some_and(|d| d.raw.contains("CURRENT_TIMESTAMP") || d.is_raw));
+    assert_eq!(
+        table.columns[1].default,
+        Some(wafer_schema::DefaultValue::Now)
+    );
     assert_eq!(table.indexes.len(), 1);
     assert_eq!(table.indexes[0].columns, vec!["created_at"]);
 }
