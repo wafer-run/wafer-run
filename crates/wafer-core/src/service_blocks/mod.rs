@@ -30,7 +30,7 @@ pub mod logger;
 pub mod network;
 /// Native storage service block wrapping an `Arc<dyn StorageService>`.
 pub mod storage;
-/// Native vector service block wrapping a vector + embedding service pair.
+/// Native vector service block wrapping an `Arc<dyn VectorService>`.
 pub mod vector;
 
 /// Support module re-exporting every item the [`service_block!`](crate::service_block)

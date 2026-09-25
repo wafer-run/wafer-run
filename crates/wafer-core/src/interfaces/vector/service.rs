@@ -182,6 +182,11 @@ pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 }
 
 /// Embedding model interface — convert text into fixed-dimensional vectors.
+///
+/// Served by an `embedding@v1` block that hands each message to
+/// [`handle_embedding_message`](super::handler::handle_embedding_message).
+/// That block declares, in its own `BlockInfo::grants`, which blocks may
+/// call it.
 #[wafer_async_trait]
 pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Identifier of the underlying embedding model.
@@ -193,7 +198,7 @@ pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Count the number of model-native tokens in `text`.
     ///
-    /// Used by the vector block's chunker to size chunks accurately for
+    /// Used by callers that chunk text before embedding it, to size chunks accurately for
     /// multilingual content where whitespace-word count diverges from BPE
     /// token count (CJK, heavy punctuation, agglutinative languages).
     ///
@@ -202,20 +207,6 @@ pub trait EmbeddingService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// a real tokenizer should override.
     fn count_tokens(&self, text: &str) -> usize {
         text.split_whitespace().count()
-    }
-
-    /// WRAP grants the block serving this service declares for other blocks.
-    ///
-    /// The embedding handler authorizes each op for `Read` against
-    /// [`op_resource`](wafer_block::wrap::op_resource) in the serving
-    /// block's own namespace (`wafer_run__vector__embed` and
-    /// `wafer_run__vector__count_tokens` for `wafer-run/vector`).
-    /// `VectorBlock::info()` embeds these grants into its
-    /// `BlockInfo::grants`, and the runtime rejects a grant on any resource
-    /// outside that namespace. Default empty: no block but the admin block
-    /// may call the service.
-    fn grants(&self) -> Vec<wafer_block::types::ResourceGrant> {
-        Vec::new()
     }
 }
 

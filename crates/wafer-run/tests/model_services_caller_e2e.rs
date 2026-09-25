@@ -4,10 +4,10 @@
 //! an embedding block serving the shared embedding handler, whose handlers
 //! authorize the caller the REAL `RuntimeContext` names.
 //!
-//! The grants are declared the way an embedder declares them — on the
-//! services (`MultiBackendLlmService::grant`, `EmbeddingService::grants`),
-//! embedded in each block's info — so the runtime's grant registration and
-//! its namespace-ownership check are on the path too.
+//! The grants are declared the way an embedder declares them — on the llm
+//! service (`MultiBackendLlmService::grant`), embedded in the llm block's
+//! info, and in the embedding block's own info — so the runtime's grant
+//! registration and its namespace-ownership check are on the path too.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -75,7 +75,7 @@ impl LlmService for Provider {
     }
 }
 
-/// Counts embeddings; grants `embed` to [`GRANTED`].
+/// Counts embeddings.
 #[derive(Default)]
 struct Embedder {
     embeds: AtomicUsize,
@@ -93,14 +93,11 @@ impl EmbeddingService for Embedder {
         self.embeds.fetch_add(1, Ordering::SeqCst);
         Ok(texts.iter().map(|_| vec![0.0]).collect())
     }
-    fn grants(&self) -> Vec<ResourceGrant> {
-        vec![ResourceGrant::read(GRANTED, "acme__embedder__embed").typed(ResourceType::Embedding)]
-    }
 }
 
 /// An embedding block like an embedder's own (`embedding@v1`): it serves
 /// [`Embedder`] through the shared embedding handler under its registered
-/// name, and declares its service's grants.
+/// name, and grants `embed` to [`GRANTED`].
 struct EmbeddingBlock(Arc<Embedder>);
 
 impl EmbeddingBlock {
@@ -110,7 +107,9 @@ impl EmbeddingBlock {
 #[async_trait]
 impl Block for EmbeddingBlock {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new(Self::NAME, "0.1.0", "embedding@v1", "embeds text").grants(self.0.grants())
+        BlockInfo::new(Self::NAME, "0.1.0", "embedding@v1", "embeds text")
+            .grants(vec![ResourceGrant::read(GRANTED, "acme__embedder__embed")
+                .typed(ResourceType::Embedding)])
     }
     async fn lifecycle(&self, _ctx: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
         Ok(())

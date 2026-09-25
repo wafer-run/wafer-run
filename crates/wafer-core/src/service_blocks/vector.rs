@@ -1,37 +1,22 @@
 use std::sync::Arc;
 
-use wafer_block::common::ServiceOp;
-
-use crate::interfaces::vector::{
-    handler,
-    service::{EmbeddingService, VectorService},
-};
+use crate::interfaces::vector::{handler, service::VectorService};
 
 crate::service_block! {
-    /// Unified vector block. Wraps a `VectorService` + `EmbeddingService` pair
-    /// and dispatches messages to the appropriate handler based on op kind.
+    /// Unified vector block. Wraps any `VectorService` implementation.
+    ///
+    /// It stores and searches vectors; it does not embed text. Embedding is
+    /// served by `embedding@v1` blocks through
+    /// [`handle_embedding_message`](handler::handle_embedding_message),
+    /// which callers reach by name (`clients::vector::embed`).
     block: pub VectorBlock,
     name: "wafer-run/vector",
     version: "0.0.1",
     interface: "vector@v1",
-    description: "Vector search and embedding generation",
+    description: "Vector index search and maintenance",
     category: Service,
-    fields: {
-        vector: Arc<dyn VectorService>,
-        embedding: Arc<dyn EmbeddingService>,
-    },
-    info_extras: |this, info| info.grants(this.embedding.grants()),
-    handle: |this, ctx, msg, body| match msg.kind.as_str() {
-        ServiceOp::EMBEDDING_EMBED | ServiceOp::EMBEDDING_COUNT_TOKENS => {
-            handler::handle_embedding_message(
-                this.embedding.as_ref(),
-                ctx,
-                VectorBlock::NAME,
-                &msg,
-                &body,
-            )
-            .await
-        }
-        _ => handler::handle_message(this.vector.as_ref(), ctx, &msg, &body).await,
+    fields: { service: Arc<dyn VectorService> },
+    handle: |this, ctx, msg, body| {
+        handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
 }

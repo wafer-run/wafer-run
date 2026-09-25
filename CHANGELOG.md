@@ -35,6 +35,22 @@
   None of the four is `#[non_exhaustive]`, so an exhaustive `match` on one
   outside this workspace needs the new arm. A `DatabaseService` that
   forwards `batch` to `DbExec::batch` needs no change.
+- The `wafer-run/vector` block no longer carries an embedding service.
+  `VectorBlock::new` and `service_blocks::vector::register_with` take only
+  an `Arc<dyn VectorService>`, and the block's info no longer declares
+  embedding grants. Its `embedding.embed` and `embedding.count_tokens`
+  arms could not be reached: the block declares `vector@v1`, whose actions
+  are the `vector.*` ops, so `call_block` refused every `embedding.*` call
+  to it as `Unimplemented`. Embedding is served by an `embedding@v1` block
+  through `interfaces::vector::handler::handle_embedding_message`, and
+  callers name that block (`clients::vector::embed(ctx, block, texts)`).
+  A host that registered the vector block with an embedding model no
+  longer needs to load one for it: drop the second argument, and register
+  an embedding block where it serves embeddings.
+- `EmbeddingService::grants` is removed. Its only reader was the vector
+  block's info. The `embedding@v1` block serving the service declares, in
+  its own `BlockInfo::grants`, which blocks may call it; move any override
+  of `grants()` there.
 - A flow step can no longer loosen a security header an earlier step set.
   Where a responding or failing step (in the same flow or in a `next`
   transfer's target) sets its own value for one of these headers, the flow
