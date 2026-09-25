@@ -197,16 +197,20 @@ impl Wafer {
     ///
     /// `BlockInfo::validate` sees one block at a time, so two blocks that both
     /// declare `GET /api/items` each pass it. Only one handler can answer such
-    /// a request, and the discovery documents describe it as one operation:
-    /// `wafer_core::discovery::generate_openapi` keys operations by method and
-    /// path, so one claimant would replace the other in the document with
-    /// nothing reported. The collision is refused here instead, aggregated
-    /// like [`Self::fail_on_duplicate_tool_names`].
+    /// a request, and the discovery documents cannot describe the pair
+    /// truthfully: `wafer_core::discovery::generate_openapi` keys operations
+    /// by method and path, so of two identical paths the later replaces the
+    /// earlier, and two paths differing only in placeholder names are
+    /// published under two keys for one route — either way with nothing
+    /// reported. The collision is refused here instead, aggregated like
+    /// [`Self::fail_on_duplicate_tool_names`].
     ///
     /// Routes are compared by [`wafer_block::route_shape`]: placeholders
     /// match regardless of their names, so `/items/{id}` and
-    /// `/items/{item_id}` collide. Every declared endpoint counts, with or
-    /// without a schema — a route is claimed by being declared.
+    /// `/items/{item_id}` collide, while a rest placeholder (`{key...}`)
+    /// stays distinct from a single-segment one. Every declared endpoint
+    /// counts, with or without a schema — a route is claimed by being
+    /// declared.
     fn fail_on_duplicate_endpoint_routes(&self) -> Result<(), RuntimeError> {
         // BTreeMap so the aggregated message is sorted and stable across
         // boots; `registration.blocks` is a HashMap. Keyed by the method's
@@ -1074,6 +1078,34 @@ mod endpoint_uniqueness_tests {
         ] {
             assert!(msg.contains(expected), "message: {msg}");
         }
+    }
+
+    #[test]
+    fn a_rest_placeholder_and_a_single_segment_one_are_different_routes() {
+        let wafer = wafer_with(vec![
+            items("test/items", vec![BlockEndpoint::get("/api/files/{id}")]),
+            items(
+                "test/more-items",
+                vec![BlockEndpoint::get("/api/files/{key...}")],
+            ),
+        ]);
+        assert!(wafer.fail_on_duplicate_endpoint_routes().is_ok());
+
+        let wafer = wafer_with(vec![
+            items("test/items", vec![BlockEndpoint::get("/api/files/{a...}")]),
+            items(
+                "test/more-items",
+                vec![BlockEndpoint::get("/api/files/{b...}")],
+            ),
+        ]);
+        let err = wafer
+            .fail_on_duplicate_endpoint_routes()
+            .expect_err("two rest placeholders match the same paths");
+        assert!(
+            err.to_string()
+                .contains("GET /api/files/{...} declared by 2 endpoints"),
+            "message: {err}"
+        );
     }
 
     #[test]

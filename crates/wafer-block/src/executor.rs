@@ -113,28 +113,40 @@ pub fn match_path(pattern: &str, path: &str) -> bool {
 }
 
 /// The part of a route pattern that decides which request paths it matches:
-/// the pattern with every `{name}` placeholder segment written as `{}`.
+/// the pattern with every `{name}` placeholder segment written as `{}` and
+/// every `{name...}` rest placeholder written as `{...}`.
 ///
 /// A placeholder's name only decides which `req.param.*` meta a match sets,
-/// so two patterns with the same shape are matched by [`match_path`] against
-/// exactly the same set of paths — `/items/{id}` and `/items/{item_id}` are
-/// one route. A pattern ending in `/**` is its own shape: `match_path`
-/// compares everything before the `/**` byte for byte, braces included.
+/// so two patterns with the same shape match exactly the same set of paths —
+/// `/items/{id}` and `/items/{item_id}` are one route, as are `/f/{a...}`
+/// and `/f/{b...}`.
+///
+/// The `...` marker is kept because it changes what matches. It is a
+/// convention of the block that serves an endpoint's route, not of
+/// [`match_path`] (which reads `{key...}` as one segment): the block binds a
+/// rest placeholder to one or more segments, so `/f/{key...}` also answers
+/// `/f/a/b`, which `/f/{id}` never does. They are different routes.
+///
+/// A pattern ending in `/**` is its own shape: `match_path` compares
+/// everything before the `/**` byte for byte, braces included.
 pub fn route_shape(pattern: &str) -> Cow<'_, str> {
-    let is_placeholder = |segment: &str| segment.starts_with('{') && segment.ends_with('}');
-    if pattern.ends_with("/**") || !pattern.split('/').any(|s| is_placeholder(s) && s != "{}") {
+    fn shape_of(segment: &str) -> &str {
+        match segment
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+        {
+            Some(inner) if inner.len() > 3 && inner.ends_with("...") => "{...}",
+            Some(_) => "{}",
+            None => segment,
+        }
+    }
+    if pattern.ends_with("/**") || pattern.split('/').all(|s| shape_of(s) == s) {
         return Cow::Borrowed(pattern);
     }
     Cow::Owned(
         pattern
             .split('/')
-            .map(|segment| {
-                if is_placeholder(segment) {
-                    "{}"
-                } else {
-                    segment
-                }
-            })
+            .map(shape_of)
             .collect::<Vec<_>>()
             .join("/"),
     )
@@ -165,7 +177,11 @@ mod tests {
     fn route_shape_erases_placeholder_names_only() {
         assert_eq!(route_shape("/items/{id}"), route_shape("/items/{item_id}"));
         assert_eq!(route_shape("/items/{id}/tags/{tag}"), "/items/{}/tags/{}");
-        assert_eq!(route_shape("/items/{key...}"), "/items/{}");
+        assert_eq!(route_shape("/items/{key...}"), "/items/{...}");
+        assert_eq!(route_shape("/items/{a...}"), route_shape("/items/{b...}"));
+        // A rest placeholder answers `/items/a/b` in the block that serves
+        // it; a single one never does, so they are different routes.
+        assert_ne!(route_shape("/items/{id}"), route_shape("/items/{key...}"));
         assert_eq!(route_shape("/items"), "/items");
         assert_ne!(route_shape("/items/{id}"), route_shape("/items/new"));
         // An infix brace is a literal to `match_path`, so it stays.

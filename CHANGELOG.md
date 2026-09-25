@@ -1260,13 +1260,16 @@
   `RuntimeError::DuplicateEndpointRoutes` when two endpoints, in one block
   or across blocks, declare the same method on the same route. Routes are
   compared by the new `wafer_block::route_shape`, which writes every
-  `{name}` placeholder segment as `{}`, so `GET /items/{id}` and
-  `GET /items/{item_id}` collide; a pattern ending in `/**` is compared
-  as written. The error lists every collision with each claimant's block
-  and declared path (`DuplicateEndpointRouteError`, `RouteClaimant`).
-  Such a pair used to boot, and `generate_openapi` kept only the later
-  one with nothing reported. A `match` over `RuntimeError` needs an arm
-  for the new variant.
+  `{name}` placeholder segment as `{}` and every `{name...}` rest
+  placeholder as `{...}`, so `GET /items/{id}` and `GET /items/{item_id}`
+  collide while `GET /items/{id}` and `GET /items/{key...}` do not; a
+  pattern ending in `/**` is compared as written. The error lists every
+  collision with each claimant's block and declared path
+  (`DuplicateEndpointRouteError`, `RouteClaimant`). Such a pair used to
+  boot with nothing reported: `generate_openapi` kept only the later of
+  two identical paths, and published a pair differing only in placeholder
+  names under two path keys that describe one route. A `match` over
+  `RuntimeError` needs an arm for the new variant.
 
 ### Added
 

@@ -3611,6 +3611,39 @@ mod tests {
     }
 
     #[test]
+    fn openapi_keeps_an_above_caller_endpoints_defs_out_of_components() {
+        // `components.schemas` is filled as a side effect of walking each
+        // endpoint's schemas, so a filter placed after that walk would leak
+        // an admin-only type's name and body into the anonymous document.
+        let blocks = [
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/admin/offers")
+                    .auth(AuthLevel::Admin)
+                    .input_schema(json!({
+                        "type": "object",
+                        "properties": { "secret": { "$ref": "#/$defs/AdminOnlySecret" } },
+                        "$defs": { "AdminOnlySecret": { "type": "string" } }
+                    })),
+                BlockEndpoint::post("/b/test/offers")
+                    .auth(AuthLevel::Public)
+                    .input_schema(json!({ "type": "object" })),
+            ]),
+        ];
+
+        let public = generate_openapi(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
+        assert!(public["components"].get("schemas").is_none(), "{public}");
+        assert!(!public.to_string().contains("AdminOnlySecret"), "{public}");
+
+        let admin = generate_openapi(&blocks, AuthLevel::Admin, |_, ep| ep.auth, "P", "", "u");
+        assert!(
+            admin["components"]["schemas"]
+                .get("AdminOnlySecret")
+                .is_some(),
+            "{admin}"
+        );
+    }
+
+    #[test]
     fn agent_card_omits_endpoints_above_the_caller() {
         let blocks = [test_block()];
         let public = generate_agent_card(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
