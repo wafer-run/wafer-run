@@ -31,9 +31,11 @@
 //!   token verification breaks; [`derive_block_key`] carries a pinned
 //!   known-answer test guarding the format.
 //! - **The JWT payload is canonical JSON**: object keys in sorted order at
-//!   every depth, no insignificant whitespace. Equal claims therefore sign
-//!   to equal bytes whatever order the caller built them in, and claims
-//!   that differ always sign to different bytes. See [`jwt_sign`].
+//!   every depth, no insignificant whitespace. The payload is therefore a
+//!   function of the claim set as signed (the caller's claims with `iat`
+//!   and `exp` stamped over them): whatever order the caller built them
+//!   in, equal claim sets encode to equal bytes and different claim sets
+//!   to different bytes. See [`jwt_sign`] for when two whole tokens match.
 //! - **JWT secrets should be at least [`MIN_JWT_SECRET_LEN`] bytes.** The
 //!   primitives themselves accept any key length (HMAC does); enforcing
 //!   the minimum is a construction-time policy for service wrappers.
@@ -136,10 +138,13 @@ pub enum JwtExpPolicy {
 /// the two timestamp claims; callers typically build a fresh map per token.
 /// Caller-supplied `iat`/`exp` entries are overwritten.
 ///
-/// The payload is canonical: keys sorted at every depth. Two calls with
-/// equal claims in the same second return byte-identical tokens, so a
-/// caller that needs two tokens to differ must put something that differs
-/// in the claims (a random `jti`), never rely on the encoding to vary.
+/// The payload is canonical: keys sorted at every depth. Two calls in the
+/// same second with equal claims, the same `expiry` and the same `secret`
+/// (for a per-block service, the same calling block's derived key) return
+/// byte-identical tokens. Claims that differ only in `iat`/`exp` count as
+/// equal, since both are overwritten. A caller that needs two tokens to
+/// differ must put something that differs in the claims (a random `jti`),
+/// never rely on the encoding to vary.
 ///
 /// Errors when `now + expiry` is not a representable date (chrono's
 /// calendar ends in year 262143) — a misconfigured expiry must neither

@@ -16,7 +16,9 @@
   `verify_for`, `wafer_core::clients::crypto::sign` / `verify`, and
   `wafer_block_crypto::primitives::jwt_sign` / `jwt_verify`. The signer now
   encodes the payload as canonical JSON, keys sorted at every depth, so
-  equal claims minted in the same second sign to byte-identical tokens.
+  equal claims signed in the same second with the same expiry by the same
+  calling block (the same derived key) give byte-identical tokens;
+  caller-supplied `iat`/`exp` do not count, as the signer overwrites both.
   Before, the payload followed a `HashMap`'s randomised iteration order:
   equal claims usually signed to different bytes and occasionally to the
   same bytes, so a caller that told tokens apart by their bytes worked by
