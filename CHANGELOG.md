@@ -4,6 +4,20 @@
 
 ### Breaking changes
 
+- The 500 that answers a terminal holding unsendable response meta now
+  keeps the terminal's security headers. `http_codec::unsendable_response`
+  takes the terminal's meta: `unsendable_response(meta, invalid)`, `meta`
+  being the slice `invalid` came from. Its 500 carries every header of that
+  meta the codec can send (`Content-Security-Policy`, `X-Frame-Options`,
+  `X-Content-Type-Options`, CORS headers, …), one per case-insensitive name,
+  skipping the refused entries and the terminal's status, content type and
+  `Set-Cookie` directives. The new `http_codec::unsendable_kept_meta(meta)`
+  names those entries, and the embedder wire format's `Internal` error for
+  such a terminal carries them as its `meta`. Before, the 500 carried only
+  `Content-Type`, so a terminal that did not come through a flow — where the
+  executor refuses the bad step and keeps the middleware's headers — was
+  answered with no CSP, no `X-Frame-Options` and no `nosniff`. An adapter
+  that calls `unsendable_response` itself passes the meta it classified.
 - The fixed cap on `database.create_many` rows and `database.batch` ops is
   gone: `wire::database::MAX_BATCH_WRITES` (1000) is removed, and each
   backend now reports its own budget. `DatabaseService` and `DbExec` gain a
@@ -625,10 +639,11 @@
   `Upgrade`). A transport-owned header is dropped with a `warn` log. An
   unsendable entry fails the response closed: `response_meta_parts` and
   `response_meta_entries` now return a `Result`, and every buffered path
-  answers `unsendable_response` — a 500 with the JSON `Internal` error body
-  and none of the terminal's headers, logged by key — rather than serve the
-  page without, say, its `Content-Security-Policy`. The embedder wire format
-  encodes such a terminal as an `Internal` error with empty meta. The flow
+  answers `unsendable_response` — a 500 with the JSON `Internal` error body,
+  logged by key — rather than serve the page without, say, its
+  `Content-Security-Policy`. The embedder wire format encodes such a
+  terminal as an `Internal` error. (Which headers that 500 keeps: see the
+  `unsendable_response(meta, invalid)` entry above.) The flow
   executor fails a step whose output carries an unsendable entry with
   `Internal` (whatever `on_error` says) before laying any of it over the
   flow message, so a malformed value never displaces a middleware's valid

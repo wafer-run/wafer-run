@@ -13,22 +13,46 @@
 use wafer_block::{
     core_types::MetaEntry,
     http_codec::{
-        classify_response_meta, response_meta_entries, InvalidResponseMeta, ResponseMetaPart,
+        classify_response_meta, response_meta_entries, unsendable_kept_meta, InvalidResponseMeta,
+        ResponseMetaPart,
     },
     streams::output::{BufferedResponse, TerminalNotResponse},
 };
 
 use crate::OutputStream;
 
-/// Project a terminal's meta onto the response entries a host may emit, as a
-/// JSON object of string values. See [`output_to_json`] for the contract.
-/// `Err` for an unsendable entry (see [`output_to_json`]).
-fn response_meta_to_json(meta: &[MetaEntry]) -> Result<serde_json::Value, InvalidResponseMeta> {
-    Ok(response_meta_entries(meta)?
+/// A terminal whose meta holds an entry no transport can send: the first
+/// refused entry, and the `meta` object its `Internal` error carries.
+struct Unsendable {
+    invalid: InvalidResponseMeta,
+    kept: serde_json::Value,
+}
+
+impl Unsendable {
+    fn new(meta: &[MetaEntry], invalid: InvalidResponseMeta) -> Self {
+        Self {
+            invalid,
+            kept: entries_to_json(unsendable_kept_meta(meta)),
+        }
+    }
+}
+
+/// Entries as a JSON object of string values, keyed by meta key.
+fn entries_to_json<'a>(entries: impl IntoIterator<Item = &'a MetaEntry>) -> serde_json::Value {
+    entries
         .into_iter()
         .map(|e| (e.key.clone(), serde_json::Value::String(e.value.clone())))
         .collect::<serde_json::Map<_, _>>()
-        .into())
+        .into()
+}
+
+/// Project a terminal's meta onto the response entries a host may emit, as a
+/// JSON object of string values. See [`output_to_json`] for the contract.
+/// `Err` for an unsendable entry (see [`output_to_json`]).
+fn response_meta_to_json(meta: &[MetaEntry]) -> Result<serde_json::Value, Unsendable> {
+    Ok(entries_to_json(
+        response_meta_entries(meta).map_err(|invalid| Unsendable::new(meta, invalid))?,
+    ))
 }
 
 /// Collect an [`OutputStream`] and encode its terminal as the embedder JSON
@@ -86,21 +110,23 @@ fn response_meta_to_json(meta: &[MetaEntry]) -> Result<serde_json::Value, Invali
 ///   to forward it, and the flow's in-flight message is not a response.
 /// - A stream that ends without a terminal event encodes as an `error` with
 ///   code `Internal` and empty `meta`.
-/// - So does a terminal whose meta holds an entry no transport can send
-///   ([`wafer_block::http_codec::InvalidResponseMetaKind::Unsendable`]) —
-///   the native HTTP boundary answers the same terminal with a 500 — logged
-///   at `error` with the refused key.
+/// - A terminal whose meta holds an entry no transport can send
+///   ([`wafer_block::http_codec::InvalidResponseMetaKind::Unsendable`])
+///   encodes as an `error` with code `Internal` whose `meta` holds
+///   [`wafer_block::http_codec::unsendable_kept_meta`] — the headers the
+///   native HTTP boundary's 500 for the same terminal carries — logged at
+///   `error` with the refused key.
 pub async fn output_to_json(output: OutputStream) -> String {
-    encode_terminal(output.collect_buffered().await).unwrap_or_else(|invalid| {
+    encode_terminal(output.collect_buffered().await).unwrap_or_else(|unsendable| {
         tracing::error!(
-            key = %invalid.key,
-            reason = invalid.reason,
+            key = %unsendable.invalid.key,
+            reason = unsendable.invalid.reason,
             "embedder boundary: response meta cannot be sent; encoding an Internal error"
         );
         serde_json::json!({
             "action": "error",
             "error": { "code": "Internal", "message": "internal server error" },
-            "meta": {},
+            "meta": unsendable.kept,
         })
         .to_string()
     })
@@ -109,7 +135,7 @@ pub async fn output_to_json(output: OutputStream) -> String {
 /// [`output_to_json`] for a collected terminal; `Err` for unsendable meta.
 fn encode_terminal(
     collected: Result<BufferedResponse, TerminalNotResponse>,
-) -> Result<String, InvalidResponseMeta> {
+) -> Result<String, Unsendable> {
     Ok(match collected {
         Ok(buf) => {
             let meta_obj = response_meta_to_json(&buf.meta)?;
@@ -148,7 +174,8 @@ fn encode_terminal(
             .to_string()
         }
         Err(TerminalNotResponse::Drop { meta }) => {
-            let headers_and_cookies: Vec<MetaEntry> = response_meta_entries(&meta)?
+            let headers_and_cookies: Vec<MetaEntry> = response_meta_entries(&meta)
+                .map_err(|invalid| Unsendable::new(&meta, invalid))?
                 .into_iter()
                 .filter(|e| {
                     matches!(
@@ -330,8 +357,8 @@ mod tests {
     }
 
     /// Meta no transport can send fails the terminal closed, as the HTTP
-    /// codec's 500 does: an Internal error with no meta, not a respond
-    /// missing its CSP.
+    /// codec's 500 does: an Internal error keeping the headers that 500
+    /// keeps, not a respond missing its CSP.
     #[tokio::test]
     async fn unsendable_meta_encodes_as_an_internal_error() {
         let out = OutputStream::respond_with_meta(
@@ -340,6 +367,10 @@ mod tests {
                 MetaEntry {
                     key: "resp.header.X-Frame-Options".into(),
                     value: "DENY".into(),
+                },
+                MetaEntry {
+                    key: "resp.set_cookie.sid".into(),
+                    value: "sid=abc".into(),
                 },
                 MetaEntry {
                     key: "resp.header.Content-Security-Policy".into(),
@@ -353,7 +384,7 @@ mod tests {
             serde_json::json!({
                 "action": "error",
                 "error": { "code": "Internal", "message": "internal server error" },
-                "meta": {},
+                "meta": { "resp.header.X-Frame-Options": "DENY" },
             })
         );
     }
