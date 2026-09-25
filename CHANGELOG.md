@@ -1994,6 +1994,14 @@
   plus `[registries.<name>]`) keeps working and is rewritten in the new
   layout the next time `wafer login` or `wafer logout` changes it. An
   older `wafer` binary does not read the new layout.
+- A registry URL that names its scheme's default port
+  (`https://wafer.run:443`, `http://host:80`, or an empty `host:`) is the
+  same registry as the URL without it: `Registry::new` drops the default
+  port and renders any other port as its number (`:08080` is `:8080`). A
+  `wafer login --registry https://wafer.run:443` used to store a second
+  token beside the one for `https://wafer.run`, which `wafer publish`
+  against the other spelling did not find. Entries already on disk under
+  both spellings load as one.
 - `wafer test` answers a guest's `lookup_attachment` with the runtime's
   `NotFound` sentinel, which the Rust SDK reads as `Ok(None)`. The stub
   returned 0, which the SDK unpacked as a null buffer and passed to

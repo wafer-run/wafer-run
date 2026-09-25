@@ -95,16 +95,20 @@ pub struct VersionDetail {
 // ---- Registry base URL ----------------------------------------------------
 
 /// A registry base URL, normalized exactly once at construction (trailing
-/// slashes trimmed, scheme and host lowercased). Every endpoint URL is built via [`Registry::join`] and
-/// the `Display` impl renders the normalized base, so no consumer ever
-/// needs to re-normalize.
+/// slashes trimmed, scheme and host lowercased, the scheme's default port
+/// dropped). Every endpoint URL is built via [`Registry::join`] and the
+/// `Display` impl renders the normalized base, so no consumer ever needs to
+/// re-normalize, and two spellings of one registry are one
+/// credentials-file key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registry(String);
 
 impl Registry {
     /// Wrap and normalize a raw base URL. Scheme and host are
     /// case-insensitive, so they are lowercased; userinfo and path keep
-    /// their case.
+    /// their case. A port renders as its number, and is dropped when it is
+    /// the scheme's default (`80` for `http`, `443` for `https`) or empty,
+    /// so `https://wafer.run:443` is `https://wafer.run`.
     pub fn new(raw: impl AsRef<str>) -> Self {
         let trimmed = raw.as_ref().trim_end_matches('/');
         let Some((scheme, rest)) = trimmed.split_once("://") else {
@@ -116,13 +120,31 @@ impl Registry {
             Some((userinfo, host)) => (Some(userinfo), host),
             None => (None, authority),
         };
-        let mut normalized = scheme.to_ascii_lowercase();
+        let scheme = scheme.to_ascii_lowercase();
+        let mut normalized = scheme.clone();
         normalized.push_str("://");
         if let Some(userinfo) = userinfo {
             normalized.push_str(userinfo);
             normalized.push('@');
         }
+        let (host, port) = split_port(host);
         normalized.push_str(&host.to_ascii_lowercase());
+        let default_port = match scheme.as_str() {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        };
+        match port {
+            Some(Port::Number(port)) if Some(port) != default_port => {
+                normalized.push(':');
+                normalized.push_str(&port.to_string());
+            }
+            Some(Port::Number(_)) | Some(Port::Empty) | None => {}
+            Some(Port::Other(port)) => {
+                normalized.push(':');
+                normalized.push_str(port);
+            }
+        }
         normalized.push_str(tail);
         Self(normalized)
     }
@@ -157,6 +179,35 @@ impl Registry {
             .await
             .with_context(|| format!("decode {what} from {url}"))
     }
+}
+
+/// The port of an authority's host part.
+enum Port<'a> {
+    /// `host:` — the scheme's default, as the URL standard reads it.
+    Empty,
+    /// A decimal port.
+    Number(u16),
+    /// Anything else after the colon, kept verbatim.
+    Other(&'a str),
+}
+
+/// Split `host[:port]` (userinfo already removed). The colons inside an
+/// IPv6 literal (`[::1]`) are not a port separator.
+fn split_port(host_port: &str) -> (&str, Option<Port<'_>>) {
+    let Some((host, port)) = host_port.rsplit_once(':') else {
+        return (host_port, None);
+    };
+    if host_port.starts_with('[') && !host.ends_with(']') {
+        return (host_port, None);
+    }
+    let port = if port.is_empty() {
+        Port::Empty
+    } else if port.bytes().all(|b| b.is_ascii_digit()) {
+        port.parse().map_or(Port::Other(port), Port::Number)
+    } else {
+        Port::Other(port)
+    };
+    (host, Some(port))
 }
 
 impl std::fmt::Display for Registry {
@@ -355,6 +406,44 @@ mod tests {
             "http://User:PW@staging.example:8080/Base"
         );
         assert_eq!(Registry::new("not-a-url/").as_str(), "not-a-url");
+    }
+
+    #[test]
+    fn registry_drops_the_default_port() {
+        for raw in [
+            "https://wafer.run:443",
+            "HTTPS://Wafer.run:443/",
+            "https://wafer.run:0443",
+            "https://wafer.run:",
+        ] {
+            assert_eq!(
+                Registry::new(raw),
+                Registry::new("https://wafer.run"),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            Registry::new("http://Localhost:80/api").as_str(),
+            "http://localhost/api"
+        );
+        assert_eq!(
+            Registry::new("http://[::1]:80").as_str(),
+            Registry::new("http://[::1]").as_str()
+        );
+        // Not a default for its scheme: kept, as a number.
+        assert_eq!(
+            Registry::new("http://wafer.run:443").as_str(),
+            "http://wafer.run:443"
+        );
+        assert_eq!(
+            Registry::new("https://wafer.run:08080").as_str(),
+            "https://wafer.run:8080"
+        );
+        assert_eq!(Registry::new("http://[::1]").as_str(), "http://[::1]");
+        assert_eq!(
+            Registry::new("http://[::1]:8080").as_str(),
+            "http://[::1]:8080"
+        );
     }
 
     #[test]

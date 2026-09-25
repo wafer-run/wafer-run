@@ -254,6 +254,29 @@ mod tests {
         assert_eq!(cf.token(&Registry::new(WAFER)), Some("second"));
     }
 
+    /// Spellings of one registry that differ only by an explicit default
+    /// port are one entry, whether written now or loaded from disk.
+    #[test]
+    fn default_port_variants_of_a_registry_share_one_token() {
+        let mut cf = CredentialsFile::default();
+        cf.set_token(&Registry::new("https://wafer.run:443"), "first".into());
+        cf.set_token(&Registry::new(WAFER), "second".into());
+        assert_eq!(cf.tokens.len(), 1);
+        assert_eq!(
+            cf.token(&Registry::new("https://wafer.run:443/")),
+            Some("second")
+        );
+
+        let _g = env_guard();
+        let _home = fake_home();
+        write_raw(
+            "[tokens]\n\"https://wafer.run:443\" = \"PORTED\"\n\"https://wafer.run\" = \"PLAIN\"\n",
+        );
+        let loaded = load().unwrap();
+        assert_eq!(loaded.tokens.len(), 1);
+        assert!(loaded.token(&Registry::new(WAFER)).is_some());
+    }
+
     #[test]
     fn token_is_none_when_url_not_present() {
         let mut cf = CredentialsFile::default();
