@@ -4,6 +4,27 @@
 
 ### Breaking changes
 
+- A block's init now has a time limit. One attempt — loading the block's
+  config from the `ConfigSource` and its `lifecycle(Init)` — that has not
+  finished after the runtime's `InitTimeout` is dropped and fails as
+  `InitError::Transient` naming the block and the limit
+  (``block `org/name` init did not finish within the init timeout (30s)``),
+  so a later dispatch retries it after the backoff. Before, an Init that
+  never finished hung `Wafer::start`, `init_all_blocks`, `init_block` and
+  every request that reached the block. The default is
+  `InitTimeout::Limited(DEFAULT_INIT_TIMEOUT)` (30 s);
+  `WaferBuilder::init_timeout` sets another limit or
+  `InitTimeout::Unlimited`. While the attempt runs, its Init context
+  carries the deadline: `is_cancelled()` turns true and `call_block`
+  answers `DeadlineExceeded` once it passes. Waiting for another caller's
+  attempt at the same block is not counted. The timer is tokio's on native
+  hosts, which must poll the runtime on a tokio runtime with its time
+  driver enabled (`#[tokio::main]`, `#[tokio::test]` and
+  `Runtime::new` do), and the host's global `setTimeout` on wasm32 (a
+  browser, a Cloudflare Workers isolate): `wafer-run` gains `wasm-bindgen`,
+  `js-sys` and `wasm-bindgen-futures` on wasm32, and tokio's `time` feature
+  on native targets. An Init that legitimately runs longer than 30 s needs
+  a larger limit.
 - The 500 that answers a terminal holding unsendable response meta now
   keeps the terminal's security headers. `http_codec::unsendable_response`
   takes the terminal's meta: `unsendable_response(meta, invalid)`, `meta`

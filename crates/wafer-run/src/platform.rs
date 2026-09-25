@@ -54,3 +54,57 @@ pub type ConfigExpanderFn =
 /// configs (wasm32 — single-threaded, no `Send + Sync` bound).
 #[cfg(target_arch = "wasm32")]
 pub type ConfigExpanderFn = Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_json::Value)>>;
+
+// ---------------------------------------------------------------------------
+// Timer
+// ---------------------------------------------------------------------------
+
+/// Wait `duration` without blocking the thread. The runtime's one timer:
+/// the init timeout races a block's Init against it.
+///
+/// Native: [`tokio::time::sleep`], so it is polled on a tokio runtime with
+/// its time driver enabled (`#[tokio::main]`, `#[tokio::test]` and
+/// `tokio::runtime::Runtime::new` all enable it).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+/// Wait `duration` without blocking the thread. The runtime's one timer:
+/// the init timeout races a block's Init against it.
+///
+/// wasm32: the host's global `setTimeout`, which a browser, a Cloudflare
+/// Workers isolate and Node.js all provide. Dropping the future before it
+/// fires clears the timeout. A delay longer than `setTimeout` accepts
+/// (`i32::MAX` ms, about 24.8 days) is clamped to it, where the host would
+/// otherwise fire at once.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_name = setTimeout)]
+        fn set_timeout(handler: &js_sys::Function, delay_ms: i32) -> JsValue;
+        #[wasm_bindgen(js_name = clearTimeout)]
+        fn clear_timeout(id: &JsValue);
+    }
+
+    /// Clears the pending timeout when the sleep is dropped unfired.
+    struct ClearOnDrop(JsValue);
+
+    impl Drop for ClearOnDrop {
+        fn drop(&mut self) {
+            clear_timeout(&self.0);
+        }
+    }
+
+    let delay_ms = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    let mut id = JsValue::UNDEFINED;
+    let fired = js_sys::Promise::new(&mut |resolve, _reject| {
+        id = set_timeout(&resolve, delay_ms);
+    });
+    let _clear = ClearOnDrop(id);
+    // The promise only ever resolves (with `undefined`).
+    let _ = wasm_bindgen_futures::JsFuture::from(fired).await;
+}

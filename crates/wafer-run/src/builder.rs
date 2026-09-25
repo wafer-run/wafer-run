@@ -23,6 +23,7 @@ use wafer_block::error::RuntimeError;
 
 use crate::runtime::{
     config_source::{ConfigSource, StaticConfigSource},
+    slot::InitTimeout,
     wasm_state::{FuelLimit, DEFAULT_MAX_WASM_MEMORY_PAGES},
     Wafer,
 };
@@ -54,6 +55,7 @@ pub struct WaferBuilder {
     config_source: Arc<dyn ConfigSource>,
     fuel: FuelLimit,
     max_wasm_memory_pages: u32,
+    init_timeout: InitTimeout,
 }
 
 impl Default for WaferBuilder {
@@ -64,6 +66,7 @@ impl Default for WaferBuilder {
             config_source: Arc::new(StaticConfigSource::default()),
             fuel: FuelLimit::default(),
             max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
+            init_timeout: InitTimeout::default(),
         }
     }
 }
@@ -136,12 +139,28 @@ impl WaferBuilder {
         self
     }
 
+    /// Set how long one attempt at a block's init may run: loading its
+    /// config and its `lifecycle(Init)`.
+    ///
+    /// Defaults to [`InitTimeout::default`] —
+    /// [`Limited(DEFAULT_INIT_TIMEOUT)`](InitTimeout::Limited), 30 s — so an
+    /// Init that never finishes fails its block instead of hanging boot and
+    /// every request that reaches the block. An attempt over the limit fails
+    /// as a transient init error and is retried after the backoff. Raise it
+    /// for a block whose Init is legitimately slow (a long migration), or
+    /// pass [`InitTimeout::Unlimited`] to run without one.
+    pub fn init_timeout(mut self, timeout: InitTimeout) -> Self {
+        self.init_timeout = timeout;
+        self
+    }
+
     /// Construct the `Wafer`. Runs Path A first, then Path B.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         let mut w = Wafer::empty();
         w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
         w.wasm.fuel = self.fuel;
         w.wasm.max_wasm_memory_pages = self.max_wasm_memory_pages;
+        w.init_timeout = self.init_timeout;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

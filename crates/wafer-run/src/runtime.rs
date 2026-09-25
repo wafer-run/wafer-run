@@ -160,6 +160,11 @@ pub struct Wafer {
     /// directory. `seal()` refuses a lockfile entry naming the admin block
     /// and downloads the deferred ones.
     pub(crate) locked_blocks: Vec<crate::registry_loader::LockedBlock>,
+    /// How long one attempt at a block's init may run. Set by
+    /// [`WaferBuilder::init_timeout`](crate::WaferBuilder::init_timeout);
+    /// copied into every [`RuntimeContext`] so each init path reads the same
+    /// limit.
+    pub(crate) init_timeout: crate::runtime::slot::InitTimeout,
 }
 
 /// The outcome of [`Wafer::seal`], which runs once per runtime.
@@ -224,6 +229,7 @@ impl Wafer {
             seal_state: SealState::Unsealed,
             init_waits: Arc::default(),
             locked_blocks: Vec::new(),
+            init_timeout: crate::runtime::slot::InitTimeout::default(),
         }
     }
 
@@ -453,6 +459,7 @@ impl Wafer {
             current_attachments: Arc::new(std::collections::BTreeMap::new()),
             init_waits: self.init_waits.clone(),
             init_attempt: None,
+            init_timeout: self.init_timeout,
             slots: self.registration.slots.clone(),
             config_source: self.config.source.clone(),
             hooks: self.hooks.clone(),
@@ -626,14 +633,20 @@ pub(crate) fn init_error_to_wafer_error(
 /// Init itself runs on [`RuntimeContext::for_init`], owned by a fresh
 /// attempt, with a panic caught (native) and reported as
 /// [`InitError::Permanent`]; a lifecycle error is classified by
-/// [`InitError::from_lifecycle_error`].
+/// [`InitError::from_lifecycle_error`]. The attempt — config load and
+/// `lifecycle(Init)` — is bounded by the template's
+/// [`InitTimeout`](crate::runtime::slot::InitTimeout): one still running
+/// when it passes is dropped and fails as [`InitError::Transient`].
 pub(crate) async fn run_init_pipeline(
     name: &str,
     block: &Arc<dyn Block>,
     slot: &crate::runtime::slot::BlockSlot,
     template: &RuntimeContext,
 ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
-    use crate::runtime::{config_source::ConfigError, slot::InitError};
+    use crate::runtime::{
+        config_source::ConfigError,
+        slot::{InitError, InitTimeout},
+    };
 
     let _wait = template
         .init_attempt
@@ -654,43 +667,66 @@ pub(crate) async fn run_init_pipeline(
     // `init_merges_block_config`.
     let block_configs_snapshot = template.snapshot.block_configs.clone();
 
+    let init_timeout = template.init_timeout;
+
     slot.get_or_init(|| async move {
         // Owner of `name` for as long as its init runs, which is while the
         // slot lock is held.
         let _owner = init_waits.own(&attempt);
-        let info = block.info();
-        let env_cfg = config_source
-            .load_for_block(name, &info.config_keys)
-            .await
-            .map_err(|e| match e {
-                ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
-                    "block `{block}` missing required config key `{key}`"
-                )),
-                ConfigError::Transient { source, .. } => {
-                    InitError::Transient(format!("config fetch failed: {source}"))
-                }
-            })?;
+        let limit = match init_timeout {
+            InitTimeout::Limited(limit) => Some(limit),
+            InitTimeout::Unlimited => None,
+        };
+        // The attempt's deadline, counted from when it takes the slot: the
+        // Init context reports it (`is_cancelled`, `call_block`).
+        let mut init_ctx = init_ctx;
+        init_ctx.deadline = limit.and_then(|limit| Instant::now().checked_add(limit));
+        let attempt = async {
+            let info = block.info();
+            let env_cfg = config_source
+                .load_for_block(name, &info.config_keys)
+                .await
+                .map_err(|e| match e {
+                    ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
+                        "block `{block}` missing required config key `{key}`"
+                    )),
+                    ConfigError::Transient { source, .. } => {
+                        InitError::Transient(format!("config fetch failed: {source}"))
+                    }
+                })?;
 
-        // Build the lifecycle(Init).data payload: start from the JSON config
-        // the caller registered via `Wafer::add_block_config` (if any), then
-        // overlay the values the ConfigSource resolved for the block's
-        // declared keys. Those win — operators can override JSON config
-        // through the ConfigSource.
-        //
-        // Blocks parse this via `BlockConfig::from_event`, which does
-        // `serde_json::from_slice` on `event.data`.
-        let mut merged: serde_json::Map<String, serde_json::Value> = block_configs_snapshot
-            .get(name)
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-        for (k, v) in env_cfg.into_inner() {
-            merged.insert(k, serde_json::Value::String(v));
+            // Build the lifecycle(Init).data payload: start from the JSON
+            // config the caller registered via `Wafer::add_block_config` (if
+            // any), then overlay the values the ConfigSource resolved for the
+            // block's declared keys. Those win — operators can override JSON
+            // config through the ConfigSource.
+            //
+            // Blocks parse this via `BlockConfig::from_event`, which does
+            // `serde_json::from_slice` on `event.data`.
+            let mut merged: serde_json::Map<String, serde_json::Value> = block_configs_snapshot
+                .get(name)
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            for (k, v) in env_cfg.into_inner() {
+                merged.insert(k, serde_json::Value::String(v));
+            }
+            let data = serde_json::to_vec(&serde_json::Value::Object(merged))
+                .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
+
+            run_init_lifecycle(block.as_ref(), &init_ctx, data).await?;
+            Ok(crate::runtime::slot::InitializedState::new())
+        };
+        let Some(limit) = limit else {
+            return attempt.await;
+        };
+        let timer = crate::platform::sleep(limit);
+        futures::pin_mut!(attempt, timer);
+        match futures::future::select(attempt, timer).await {
+            futures::future::Either::Left((outcome, _)) => outcome,
+            futures::future::Either::Right(((), _)) => Err(InitError::Transient(format!(
+                "block `{name}` init did not finish within the init timeout ({limit:?})"
+            ))),
         }
-        let data = serde_json::to_vec(&serde_json::Value::Object(merged))
-            .map_err(|e| InitError::Permanent(format!("serialize block config: {e}")))?;
-
-        run_init_lifecycle(block.as_ref(), &init_ctx, data).await?;
-        Ok(crate::runtime::slot::InitializedState::new())
     })
     .await
 }

@@ -46,6 +46,41 @@ pub const TRANSIENT_RETRY_BASE: Duration = Duration::from_millis(100);
 /// Longest delay between retries after consecutive transient init failures.
 pub const TRANSIENT_RETRY_MAX: Duration = Duration::from_secs(30);
 
+/// The init timeout a runtime gets unless its builder sets another
+/// (see [`InitTimeout`]).
+pub const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long one attempt at a block's init may run: loading its config from
+/// the [`ConfigSource`](crate::ConfigSource) and its `lifecycle(Init)`.
+///
+/// An attempt that has not finished when the limit passes is abandoned — its
+/// future dropped, so it stops at its next `.await` — and fails as
+/// [`InitError::Transient`] naming the block and the limit, so a later
+/// dispatch retries it after the backoff. Until then the Init context
+/// reports the deadline too: `is_cancelled()` turns true and `call_block`
+/// answers `DeadlineExceeded` once it passes. Waiting for another caller's
+/// attempt of the same block is not counted; that attempt has a limit of
+/// its own.
+///
+/// Selected on the builder via
+/// [`WaferBuilder::init_timeout`](crate::WaferBuilder::init_timeout); the
+/// default is [`Limited(DEFAULT_INIT_TIMEOUT)`](InitTimeout::Limited).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitTimeout {
+    /// Abandon an init attempt that runs longer than this.
+    Limited(Duration),
+    /// Let an init attempt run for as long as it takes. A block whose Init
+    /// never finishes then holds every caller of that block, and a boot
+    /// that initializes it, forever.
+    Unlimited,
+}
+
+impl Default for InitTimeout {
+    fn default() -> Self {
+        InitTimeout::Limited(DEFAULT_INIT_TIMEOUT)
+    }
+}
+
 /// Error returned by a block's init closure, or by the slot itself.
 #[derive(Debug, Clone, Error)]
 pub enum InitError {
