@@ -95,10 +95,10 @@ pub struct RuntimeContext {
     /// reached from such a context is a wait of this attempt in
     /// [`Self::init_waits`].
     pub(crate) init_attempt: Option<crate::runtime::init_waits::InitAttempt>,
-    /// How long one attempt at a block's init may run, from the
+    /// The embedder's cap on one attempt at any block's init, from the
     /// [`Wafer`](crate::Wafer) that produced this context. Read by the init
     /// pipeline whichever dispatch path reaches a block's init first.
-    pub(crate) init_timeout: crate::runtime::slot::InitTimeout,
+    pub(crate) init_timeout_cap: Option<std::time::Duration>,
     /// Snapshot of the runtime's per-block init slots. Shared via `Arc` with
     /// [`Wafer::slots`]; consulted by [`RuntimeContext::dispatch_call`] to
     /// drive lazy init on `call_block` callees. Empty (default) when the
@@ -137,7 +137,7 @@ impl RuntimeContext {
     /// wait-for graph). Nothing of the dispatch that happened to reach the
     /// block first carries over: Init is the block's own operation, so it
     /// gets a fresh cancellation flag, none of the dispatch's deadline (the
-    /// init pipeline sets the init timeout's when the attempt starts), call
+    /// init pipeline sets the init budget's when the attempt starts), call
     /// depth 0, no caller,
     /// no per-call config or attachments, and the block's own `requires`
     /// allowlist (SEC-04). Whether a block initializes therefore does not
@@ -204,8 +204,19 @@ impl RuntimeContext {
             );
         }
 
-        // Cancellation check
-        if self.is_cancelled() {
+        // Deadline, then cancellation. A passed deadline is its own code:
+        // the caller ran out of time, nobody cancelled it.
+        if let Some(deadline) = self.deadline {
+            if Instant::now() >= deadline {
+                self.cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return err_output(
+                    ErrorCode::DeadlineExceeded,
+                    format!("deadline exceeded before calling '{block_name}'"),
+                );
+            }
+        }
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return err_output(ErrorCode::Cancelled, "execution cancelled");
         }
 

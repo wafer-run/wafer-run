@@ -207,6 +207,13 @@ pub struct BlockInfo {
     /// Heavy external WASM/JS assets the host must load lazily before this block runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_assets: Vec<ExternalAsset>,
+
+    /// The longest one attempt at this block's init may run, in
+    /// milliseconds; `None` for no limit of its own. Set with
+    /// [`BlockInfo::init_timeout`], which documents what the runtime does
+    /// with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_timeout_ms: Option<u64>,
 }
 
 impl Default for BlockInfo {
@@ -246,6 +253,7 @@ impl BlockInfo {
             capabilities: None,
             tool: None,
             external_assets: Vec::new(),
+            init_timeout_ms: None,
         }
     }
 
@@ -318,6 +326,27 @@ impl BlockInfo {
             }
         }
         Ok(())
+    }
+
+    /// Declare the longest one attempt at this block's init may run: loading
+    /// its declared config and its `lifecycle(Init)`. Without one the block
+    /// has no limit of its own; an embedder's runtime-wide cap (the
+    /// `wafer-run` builder's `init_timeout`) still applies, and the smaller
+    /// of the two is the budget.
+    ///
+    /// Only the block knows how long its Init may legitimately take — a
+    /// migration over a large table can take minutes — so it declares the
+    /// budget, rather than the runtime guessing one. An attempt still
+    /// running when its budget passes is abandoned (its future dropped at
+    /// the next `.await`) and fails transiently, to be retried after the
+    /// init backoff, so a budget must cover the slowest Init that should
+    /// succeed: a retry starts the Init again from the beginning. Work the
+    /// abandoned attempt started outside the runtime (a database statement,
+    /// an outbound request) is not cancelled by dropping it and may still be
+    /// running. Stored in milliseconds, saturating.
+    pub fn init_timeout(mut self, budget: std::time::Duration) -> Self {
+        self.init_timeout_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
+        self
     }
 
     /// Set the declared [`crate::InstanceMode`] (default: `PerNode`).

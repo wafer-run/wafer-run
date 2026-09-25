@@ -73,10 +73,12 @@ url = { workspace = true, optional = true }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 
-# The init timeout's timer (`platform::sleep`): tokio's on native hosts,
-# the host's global `setTimeout` on wasm32 (browser, Cloudflare Workers).
+# The init budget's timer (`platform::sleep`): futures-timer's own timer
+# thread on native hosts, so it needs no particular executor (no tokio time
+# driver), and the host's global `setTimeout` on wasm32 (browser, Cloudflare
+# Workers).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", default-features = false, features = ["time"] }
+futures-timer = "3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

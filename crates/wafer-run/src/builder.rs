@@ -23,7 +23,6 @@ use wafer_block::error::RuntimeError;
 
 use crate::runtime::{
     config_source::{ConfigSource, StaticConfigSource},
-    slot::InitTimeout,
     wasm_state::{FuelLimit, DEFAULT_MAX_WASM_MEMORY_PAGES},
     Wafer,
 };
@@ -55,7 +54,7 @@ pub struct WaferBuilder {
     config_source: Arc<dyn ConfigSource>,
     fuel: FuelLimit,
     max_wasm_memory_pages: u32,
-    init_timeout: InitTimeout,
+    init_timeout_cap: Option<std::time::Duration>,
 }
 
 impl Default for WaferBuilder {
@@ -66,7 +65,7 @@ impl Default for WaferBuilder {
             config_source: Arc::new(StaticConfigSource::default()),
             fuel: FuelLimit::default(),
             max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
-            init_timeout: InitTimeout::default(),
+            init_timeout_cap: None,
         }
     }
 }
@@ -139,18 +138,21 @@ impl WaferBuilder {
         self
     }
 
-    /// Set how long one attempt at a block's init may run: loading its
+    /// Cap how long one attempt at any block's init may run: loading its
     /// config and its `lifecycle(Init)`.
     ///
-    /// Defaults to [`InitTimeout::default`] —
-    /// [`Limited(DEFAULT_INIT_TIMEOUT)`](InitTimeout::Limited), 30 s — so an
-    /// Init that never finishes fails its block instead of hanging boot and
-    /// every request that reaches the block. An attempt over the limit fails
-    /// as a transient init error and is retried after the backoff. Raise it
-    /// for a block whose Init is legitimately slow (a long migration), or
-    /// pass [`InitTimeout::Unlimited`] to run without one.
-    pub fn init_timeout(mut self, timeout: InitTimeout) -> Self {
-        self.init_timeout = timeout;
+    /// Without a cap (the default) a block's init is limited only by the
+    /// budget it declares itself
+    /// ([`BlockInfo::init_timeout`](wafer_block::BlockInfo::init_timeout)),
+    /// and a block that declares none has no limit. With one, each block's
+    /// budget is the smaller of its declared budget and this cap. An attempt
+    /// over its budget is abandoned and fails transiently, and is retried
+    /// from the beginning after the init backoff — so a cap below the
+    /// slowest legitimate Init (a long migration) keeps that block from ever
+    /// initializing. Set it to bound boot when an Init that hangs is worse
+    /// than one that fails.
+    pub fn init_timeout(mut self, cap: std::time::Duration) -> Self {
+        self.init_timeout_cap = Some(cap);
         self
     }
 
@@ -160,7 +162,7 @@ impl WaferBuilder {
         w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
         w.wasm.fuel = self.fuel;
         w.wasm.max_wasm_memory_pages = self.max_wasm_memory_pages;
-        w.init_timeout = self.init_timeout;
+        w.init_timeout_cap = self.init_timeout_cap;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

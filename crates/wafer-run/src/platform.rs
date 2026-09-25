@@ -60,18 +60,18 @@ pub type ConfigExpanderFn = Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_
 // ---------------------------------------------------------------------------
 
 /// Wait `duration` without blocking the thread. The runtime's one timer:
-/// the init timeout races a block's Init against it.
+/// the init budget races a block's Init against it.
 ///
-/// Native: [`tokio::time::sleep`], so it is polled on a tokio runtime with
-/// its time driver enabled (`#[tokio::main]`, `#[tokio::test]` and
-/// `tokio::runtime::Runtime::new` all enable it).
+/// Native: a [`futures_timer::Delay`], driven by that crate's own timer
+/// thread, so it works under any executor — no tokio time driver needed,
+/// and nothing to panic without one. Dropping it unfired cancels it.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn sleep(duration: std::time::Duration) {
-    tokio::time::sleep(duration).await;
+    futures_timer::Delay::new(duration).await;
 }
 
 /// Wait `duration` without blocking the thread. The runtime's one timer:
-/// the init timeout races a block's Init against it.
+/// the init budget races a block's Init against it.
 ///
 /// wasm32: the host's global `setTimeout`, which a browser, a Cloudflare
 /// Workers isolate and Node.js all provide. Dropping the future before it

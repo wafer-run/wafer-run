@@ -4,27 +4,32 @@
 
 ### Breaking changes
 
-- A block's init now has a time limit. One attempt — loading the block's
-  config from the `ConfigSource` and its `lifecycle(Init)` — that has not
-  finished after the runtime's `InitTimeout` is dropped and fails as
-  `InitError::Transient` naming the block and the limit
-  (``block `org/name` init did not finish within the init timeout (30s)``),
-  so a later dispatch retries it after the backoff. Before, an Init that
-  never finished hung `Wafer::start`, `init_all_blocks`, `init_block` and
-  every request that reached the block. The default is
-  `InitTimeout::Limited(DEFAULT_INIT_TIMEOUT)` (30 s);
-  `WaferBuilder::init_timeout` sets another limit or
-  `InitTimeout::Unlimited`. While the attempt runs, its Init context
-  carries the deadline: `is_cancelled()` turns true and `call_block`
-  answers `DeadlineExceeded` once it passes. Waiting for another caller's
-  attempt at the same block is not counted. The timer is tokio's on native
-  hosts, which must poll the runtime on a tokio runtime with its time
-  driver enabled (`#[tokio::main]`, `#[tokio::test]` and
-  `Runtime::new` do), and the host's global `setTimeout` on wasm32 (a
-  browser, a Cloudflare Workers isolate): `wafer-run` gains `wasm-bindgen`,
-  `js-sys` and `wasm-bindgen-futures` on wasm32, and tokio's `time` feature
-  on native targets. An Init that legitimately runs longer than 30 s needs
-  a larger limit.
+- A block's init can have a time limit, which the block declares. The new
+  `BlockInfo::init_timeout(Duration)` (field `init_timeout_ms`) sets the
+  longest one attempt at the block's init — loading its declared config and
+  its `lifecycle(Init)` — may run; `WaferBuilder::init_timeout(Duration)`
+  lets an embedder cap every block's budget (the smaller of the two
+  applies). Neither is set by default, so an Init without a declared budget
+  in a runtime without a cap still runs as long as it takes: only the block
+  knows how long its Init may legitimately take (a migration over a large
+  table), and an attempt cut short is retried from the beginning. An
+  attempt still running when its budget passes is dropped, and one that
+  fails after its deadline has passed (whatever error it returns) failed
+  because of it; either way the outcome is `InitError::Transient` naming
+  the block, the budget and who set it, and noting that work the attempt
+  started outside the runtime (a database statement, an outbound request)
+  may still be running. It is retried after the init backoff. The Init
+  context carries the attempt's deadline, and the time of a callee's Init
+  that runs inside the attempt counts against it; a callee attempt dropped
+  with it records no outcome. The timer is `futures-timer` on native hosts
+  (any executor) and the host's global `setTimeout` on wasm32 (a browser, a
+  Cloudflare Workers isolate): `wafer-run` gains `futures-timer` on native
+  and `wasm-bindgen`, `js-sys` and `wasm-bindgen-futures` on wasm32.
+  `BlockInfo` is not `#[non_exhaustive]`, so a struct literal outside this
+  workspace needs the new field (`BlockInfo::new` does not).
+- `call_block` from a context whose deadline has passed answers
+  `DeadlineExceeded` (it answered `Cancelled`, the code for a cancelled
+  flow). A context whose flag was cancelled still answers `Cancelled`.
 - The 500 that answers a terminal holding unsendable response meta now
   keeps the terminal's security headers. `http_codec::unsendable_response`
   takes the terminal's meta: `unsendable_response(meta, invalid)`, `meta`
