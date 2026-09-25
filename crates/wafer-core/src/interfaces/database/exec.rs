@@ -3821,6 +3821,52 @@ mod tests {
         assert!(probes.iter().all(JsonColumns::is_empty), "{probes:?}");
     }
 
+    /// A guarded write is one transaction too (lock preamble, probe, write,
+    /// probe), admitted against what the invocation has left after its
+    /// planning ran: one statement short, `insert_guarded` and
+    /// `update_guarded` are `ResourceExhausted` and send no transaction;
+    /// given exactly enough, each runs.
+    #[tokio::test]
+    async fn guarded_writes_are_refused_when_their_transaction_overflows_the_remaining_budget() {
+        let guards: &[CapGuard] = &[CapGuard::CountBelow {
+            filters: Vec::new(),
+            cap: 3,
+        }];
+        let row = || HashMap::from([("name".to_string(), serde_json::json!("a"))]);
+        let insert = |mock: BatchMock| async move {
+            let outcome = DbExec::insert_guarded(&mock, "widgets", row(), guards).await;
+            (mock, outcome.map(|_| ()))
+        };
+        let update = |mock: BatchMock| async move {
+            let outcome = DbExec::update_guarded(&mock, "widgets", &[], row(), guards).await;
+            (mock, outcome.map(|_| ()))
+        };
+
+        let (mock, outcome) = insert(BatchMock::new(0)).await;
+        outcome.expect("insert_guarded succeeds unlimited");
+        let needed = mock.issued();
+        let (short, outcome) = insert(BatchMock::limited(needed - 1)).await;
+        assert!(
+            matches!(outcome, Err(DatabaseError::ResourceExhausted(_))),
+            "insert_guarded one short: {outcome:?}"
+        );
+        assert!(short.tx_calls.lock().unwrap().is_empty());
+        let (_, outcome) = insert(BatchMock::limited(needed)).await;
+        outcome.expect("insert_guarded with exactly enough");
+
+        let (mock, outcome) = update(BatchMock::new(0)).await;
+        outcome.expect("update_guarded succeeds unlimited");
+        let needed = mock.issued();
+        let (short, outcome) = update(BatchMock::limited(needed - 1)).await;
+        assert!(
+            matches!(outcome, Err(DatabaseError::ResourceExhausted(_))),
+            "update_guarded one short: {outcome:?}"
+        );
+        assert!(short.tx_calls.lock().unwrap().is_empty());
+        let (_, outcome) = update(BatchMock::limited(needed)).await;
+        outcome.expect("update_guarded with exactly enough");
+    }
+
     /// Every read of stored rows is decoded with the JSON columns the table
     /// declares; raw SQL and aggregate rows, which have no single source
     /// table, are decoded with none. A read that dropped the table's JSON
