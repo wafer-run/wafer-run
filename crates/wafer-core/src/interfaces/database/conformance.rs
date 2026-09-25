@@ -216,7 +216,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `update_where_count`; `delete`/`delete_where`/`delete_where_count`/
 /// `take_where`; `create_many` (a hundred sparse rows land; a failing row
 /// lands none) and `batch` (mixed ops across collections apply in order and
-/// report per-op outcomes; one failing op rolls every op back);
+/// report per-op outcomes; one failing op rolls every op back; a filtered
+/// delete and the creates that replace the rows it removed are one
+/// transaction);
 /// `insert_guarded`/`update_guarded` (count and sum caps, landing exactly on
 /// a sum cap, the refusing guard named, a replaced row excluded by a filter,
 /// no match told apart from a refusal, a taken key as `AlreadyExists`, and ten
@@ -252,6 +254,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_take_where(svc).await;
     check_create_many(svc).await;
     check_batch(svc).await;
+    check_batch_delete_where(svc).await;
     check_guarded_writes(svc).await;
     check_increment(svc).await;
     check_upsert_set_columns(svc).await;
@@ -2070,6 +2073,125 @@ async fn check_batch(svc: &dyn DatabaseService) {
         .expect("the op beside it committed");
 }
 
+/// `batch` with a `DeleteWhere`: the replace-a-table shape — delete the rows
+/// a filter matches, then create their replacements — is ONE transaction, so
+/// a replacement that fails leaves the original rows in place.
+async fn check_batch_delete_where(svc: &dyn DatabaseService) {
+    let t = "conf_batch_replace";
+    reset(svc, &crud_table(t)).await;
+    for (id, category) in [("r1", "a"), ("r2", "a"), ("r3", "b")] {
+        svc.create(
+            t,
+            row([
+                ("id", serde_json::json!(id)),
+                ("category", serde_json::json!(category)),
+                ("name", serde_json::json!("orig")),
+            ]),
+        )
+        .await
+        .expect("seed conf_batch_replace");
+    }
+    let create = |id: &str| WriteOp::Create {
+        collection: t.into(),
+        data: row([
+            ("id", serde_json::json!(id)),
+            ("category", serde_json::json!("a")),
+            ("name", serde_json::json!("new")),
+        ]),
+    };
+    let ids = |records: Vec<Record>| {
+        let mut ids: Vec<String> = records.into_iter().map(|r| r.id).collect();
+        ids.sort();
+        ids
+    };
+    let all_ids = || async {
+        ids(svc
+            .list(t, &ListOptions::default())
+            .await
+            .expect("list conf_batch_replace")
+            .records)
+    };
+
+    // A filtered delete reports how many rows it removed, and a create after
+    // it may reuse a removed row's id: the delete ran first, in the same
+    // transaction.
+    let outcomes = svc
+        .batch(vec![
+            WriteOp::DeleteWhere {
+                collection: t.into(),
+                filters: vec![eq("category", serde_json::json!("a"))],
+            },
+            create("r1"),
+            create("r4"),
+        ])
+        .await
+        .expect("delete-where then create");
+    assert!(
+        matches!(outcomes[0], WriteOutcome::DeletedWhere { rows_affected: 2 }),
+        "op 0: {:?}",
+        outcomes[0]
+    );
+    assert_eq!(all_ids().await, ["r1", "r3", "r4"]);
+    assert_eq!(
+        svc.get(t, "r1").await.expect("r1").data["name"],
+        serde_json::json!("new"),
+        "r1 is the replacement, not the original"
+    );
+    assert_eq!(
+        svc.get(t, "r3").await.expect("r3").data["name"],
+        serde_json::json!("orig"),
+        "a row the filter did not match stays"
+    );
+
+    // Replace the whole table (no filters), with the last replacement
+    // failing on a key an earlier one took: nothing is deleted and nothing
+    // is created.
+    let err = svc
+        .batch(vec![
+            WriteOp::DeleteWhere {
+                collection: t.into(),
+                filters: Vec::new(),
+            },
+            create("r5"),
+            create("r6"),
+            create("r5"),
+        ])
+        .await;
+    assert!(
+        err.is_err(),
+        "a duplicate key fails the replacement: {err:?}"
+    );
+    assert_eq!(
+        all_ids().await,
+        ["r1", "r3", "r4"],
+        "the failed replacement left the original rows in place"
+    );
+
+    // A `DeleteWhere` against a missing table matches nothing, as the single
+    // `delete_where_count` does: it does not abort the batch around it.
+    svc.schema_drop_table("conf_batch_replace_missing")
+        .await
+        .expect("drop (idempotent)");
+    let outcomes = svc
+        .batch(vec![
+            WriteOp::DeleteWhere {
+                collection: "conf_batch_replace_missing".into(),
+                filters: Vec::new(),
+            },
+            create("beside_missing"),
+        ])
+        .await
+        .expect("a delete-where on a missing table does not fail the batch");
+    assert!(
+        matches!(outcomes[0], WriteOutcome::DeletedWhere { rows_affected: 0 }),
+        "{:?}",
+        outcomes[0]
+    );
+    svc.get(t, "beside_missing")
+        .await
+        .expect("the op beside it committed");
+}
+
 // ---------------------------------------------------------------------------
 // insert_guarded / update_guarded (the check and the write are one step)
 // ---------------------------------------------------------------------------
@@ -3351,6 +3473,14 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
         svc.update_where_count(t, &unknown(), row([("note", serde_json::json!("n"))]))
             .await,
         "update_where_count on an unknown column",
+    );
+    assert_invalid_argument(
+        svc.batch(vec![WriteOp::DeleteWhere {
+            collection: t.to_string(),
+            filters: unknown(),
+        }])
+        .await,
+        "batch delete-where on an unknown column",
     );
     assert_invalid_argument(
         svc.insert_guarded(

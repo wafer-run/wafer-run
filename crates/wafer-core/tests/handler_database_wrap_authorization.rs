@@ -880,6 +880,59 @@ async fn batch_is_authorized_as_a_write() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
+/// A filtered delete inside a batch is a write on its collection: a read-only
+/// grant does not authorize it, and a foreign collection's does not ride
+/// along behind an own-namespace create. Nothing runs.
+#[tokio::test]
+async fn batch_delete_where_is_authorized_as_a_write_on_its_collection() {
+    let delete_where = |collection: &str| wire::database::BatchWrite::DeleteWhere {
+        collection: collection.into(),
+        filters: Vec::new(),
+    };
+    let read_only = codec::encode(&wire::database::BatchRequest {
+        ops: vec![delete_where("my_org__auth__users")],
+    })
+    .unwrap();
+    let foreign = codec::encode(&wire::database::BatchRequest {
+        ops: vec![
+            wire::database::BatchWrite::Create {
+                collection: "my_org__auth__users".into(),
+                data: Default::default(),
+            },
+            delete_where("my_org__other_block__secrets"),
+        ],
+    })
+    .unwrap();
+
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    expect_permission_denied(
+        wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &ReadOnlyCtx,
+            &msg_without_wrap_meta(ServiceOp::DATABASE_BATCH),
+            &read_only,
+        )
+        .await,
+    )
+    .await;
+    expect_permission_denied(
+        wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &OwnNamespaceCtx,
+            &msg_without_wrap_meta(ServiceOp::DATABASE_BATCH),
+            &foreign,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a refused batch never reaches the service; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
 /// A batch confined to the caller's own collections reaches the service once.
 #[tokio::test]
 async fn batch_on_own_collections_reaches_service() {
