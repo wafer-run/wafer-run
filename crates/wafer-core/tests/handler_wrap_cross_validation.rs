@@ -319,7 +319,7 @@ async fn storage_create_folder_rejects_mismatched_name() {
 // ---------------------------------------------------------------------------
 
 mod crypto_fakes {
-    use std::{collections::HashMap, time::Duration};
+    use std::{collections::BTreeMap, time::Duration};
 
     use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 
@@ -335,7 +335,7 @@ mod crypto_fakes {
         fn sign_for(
             &self,
             _block_id: &str,
-            _claims: HashMap<String, serde_json::Value>,
+            _claims: BTreeMap<String, serde_json::Value>,
             _expiry: Duration,
         ) -> Result<String, CryptoError> {
             Ok("token".into())
@@ -344,8 +344,8 @@ mod crypto_fakes {
             &self,
             _block_id: &str,
             _token: &str,
-        ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-            Ok(HashMap::new())
+        ) -> Result<BTreeMap<String, serde_json::Value>, CryptoError> {
+            Ok(BTreeMap::new())
         }
         fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
             Ok(vec![0; n])
@@ -357,7 +357,7 @@ mod crypto_fakes {
 async fn crypto_sign_rejects_mismatched_op() {
     let svc = crypto_fakes::OkCrypto;
     let req = wire::crypto::SignRequest {
-        claims: HashMap::new(),
+        claims: std::collections::BTreeMap::new(),
         expiry_secs: 60,
     };
     let body = codec::encode(&req).unwrap();
@@ -373,7 +373,7 @@ async fn crypto_sign_rejects_mismatched_op() {
 async fn crypto_sign_accepts_matched_op() {
     let svc = crypto_fakes::OkCrypto;
     let req = wire::crypto::SignRequest {
-        claims: HashMap::new(),
+        claims: std::collections::BTreeMap::new(),
         expiry_secs: 60,
     };
     let body = codec::encode(&req).unwrap();

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 // Re-export the trait and error from wafer-core.
 pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
@@ -98,7 +98,7 @@ impl CryptoService for Argon2JwtCryptoService {
     fn sign_for(
         &self,
         block_id: &str,
-        claims: HashMap<String, serde_json::Value>,
+        claims: BTreeMap<String, serde_json::Value>,
         expiry: Duration,
     ) -> Result<String, CryptoError> {
         let derived = primitives::derive_block_key(self.jwt_secret.as_bytes(), block_id);
@@ -112,7 +112,7 @@ impl CryptoService for Argon2JwtCryptoService {
         &self,
         block_id: &str,
         token: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+    ) -> Result<BTreeMap<String, serde_json::Value>, CryptoError> {
         let derived = primitives::derive_block_key(self.jwt_secret.as_bytes(), block_id);
         primitives::jwt_verify(token, derived.as_bytes(), JwtExpPolicy::Required)
     }
@@ -134,8 +134,8 @@ mod tests {
         Argon2JwtCryptoService::new(TEST_SECRET.to_string()).expect("test secret is long enough")
     }
 
-    fn test_claims() -> HashMap<String, serde_json::Value> {
-        let mut m = HashMap::new();
+    fn test_claims() -> BTreeMap<String, serde_json::Value> {
+        let mut m = BTreeMap::new();
         m.insert("sub".to_string(), serde_json::json!("user-1"));
         m
     }
@@ -373,7 +373,7 @@ mod password_scheme_tests {
             iterations: PBKDF2_SHA256_MIN_ITERATIONS,
         });
 
-        let mut claims = HashMap::new();
+        let mut claims = BTreeMap::new();
         claims.insert("sub".to_string(), serde_json::json!("user-1"));
 
         let token = plain

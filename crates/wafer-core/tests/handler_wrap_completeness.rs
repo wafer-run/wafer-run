@@ -495,7 +495,7 @@ mod crypto_fakes {
         fn sign_for(
             &self,
             _block_id: &str,
-            _claims: std::collections::HashMap<String, serde_json::Value>,
+            _claims: std::collections::BTreeMap<String, serde_json::Value>,
             _expiry: std::time::Duration,
         ) -> Result<String, CryptoError> {
             self.record("sign");
@@ -505,7 +505,7 @@ mod crypto_fakes {
             &self,
             _block_id: &str,
             _token: &str,
-        ) -> Result<std::collections::HashMap<String, serde_json::Value>, CryptoError> {
+        ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, CryptoError> {
             self.record("verify");
             Ok(Default::default())
         }
@@ -1170,7 +1170,7 @@ fn crypto_op_body(op: &str) -> Vec<u8> {
             hash: "$argon2id$...".into(),
         }),
         ServiceOp::CRYPTO_SIGN => codec::encode(&wire::SignRequest {
-            claims: HashMap::new(),
+            claims: std::collections::BTreeMap::new(),
             expiry_secs: 3600,
         }),
         ServiceOp::CRYPTO_VERIFY => codec::encode(&wire::VerifyRequest {

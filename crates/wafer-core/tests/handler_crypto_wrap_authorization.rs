@@ -14,7 +14,7 @@
 //! with.
 
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 
@@ -67,7 +67,7 @@ mod crypto_fakes {
         fn sign_for(
             &self,
             _block_id: &str,
-            _claims: std::collections::HashMap<String, serde_json::Value>,
+            _claims: std::collections::BTreeMap<String, serde_json::Value>,
             _expiry: std::time::Duration,
         ) -> Result<String, CryptoError> {
             self.record("sign");
@@ -77,7 +77,7 @@ mod crypto_fakes {
             &self,
             _block_id: &str,
             _token: &str,
-        ) -> Result<std::collections::HashMap<String, serde_json::Value>, CryptoError> {
+        ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, CryptoError> {
             self.record("verify");
             Ok(Default::default())
         }
@@ -227,7 +227,7 @@ async fn sign_denied_never_reaches_service() {
     let calls = new_calls();
     let svc = crypto_fakes::RecordingCrypto::new(calls.clone());
     let req = wire::crypto::SignRequest {
-        claims: HashMap::from([("sub".to_string(), serde_json::json!("evil-user"))]),
+        claims: BTreeMap::from([("sub".to_string(), serde_json::json!("evil-user"))]),
         expiry_secs: 3600,
     };
     let body = codec::encode(&req).unwrap();
@@ -295,7 +295,7 @@ async fn granted_ctx_allows_sign_hash_and_random_bytes() {
     let svc = crypto_fakes::RecordingCrypto::new(calls.clone());
 
     let sign_body = codec::encode(&wire::crypto::SignRequest {
-        claims: HashMap::new(),
+        claims: BTreeMap::new(),
         expiry_secs: 3600,
     })
     .unwrap();
@@ -444,7 +444,7 @@ async fn granted_token_ops_without_a_caller_are_refused_before_the_service() {
     let svc = crypto_fakes::RecordingCrypto::new(calls.clone());
 
     let sign_body = codec::encode(&wire::crypto::SignRequest {
-        claims: HashMap::new(),
+        claims: BTreeMap::new(),
         expiry_secs: 3600,
     })
     .unwrap();
