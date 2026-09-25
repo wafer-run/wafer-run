@@ -70,6 +70,10 @@ impl From<StoredCredentials> for CredentialsFile {
         for entry in legacy {
             cf.set_token(&Registry::new(&entry.registry), entry.token);
         }
+        // Several stored spellings of one registry (`https://Wafer.run`,
+        // `https://wafer.run:443`) normalize to one key, and the last one
+        // in the file's key order — `tokens` is a sorted map, so the
+        // spelling that sorts last — wins.
         for (registry, token) in stored.tokens {
             cf.set_token(&Registry::new(&registry), token);
         }
@@ -81,6 +85,11 @@ pub fn path() -> Result<PathBuf> {
     Ok(wafer_home()?.join("credentials.toml"))
 }
 
+/// Read `~/.wafer/credentials.toml`; an absent file holds no tokens. Keys
+/// are re-normalized through [`Registry::new`], so spellings of one
+/// registry stored under several keys load as one entry, holding the token
+/// of the spelling that sorts last (`https://wafer.run:443` over
+/// `https://wafer.run`).
 pub fn load() -> Result<CredentialsFile> {
     let p = path()?;
     if !p.exists() {
@@ -252,6 +261,30 @@ mod tests {
         cf.set_token(&Registry::new("HTTPS://wafer.RUN/"), "second".into());
         assert_eq!(cf.tokens.len(), 1);
         assert_eq!(cf.token(&Registry::new(WAFER)), Some("second"));
+    }
+
+    /// Spellings of one registry that differ only by an explicit default
+    /// port are one entry, whether written now or loaded from disk.
+    #[test]
+    fn default_port_variants_of_a_registry_share_one_token() {
+        let mut cf = CredentialsFile::default();
+        cf.set_token(&Registry::new("https://wafer.run:443"), "first".into());
+        cf.set_token(&Registry::new(WAFER), "second".into());
+        assert_eq!(cf.tokens.len(), 1);
+        assert_eq!(
+            cf.token(&Registry::new("https://wafer.run:443/")),
+            Some("second")
+        );
+
+        let _g = env_guard();
+        let _home = fake_home();
+        write_raw(
+            "[tokens]\n\"https://wafer.run:443\" = \"PORTED\"\n\"https://wafer.run\" = \"PLAIN\"\n",
+        );
+        let loaded = load().unwrap();
+        assert_eq!(loaded.tokens.len(), 1);
+        // `https://wafer.run:443` sorts after `https://wafer.run`, so it wins.
+        assert_eq!(loaded.token(&Registry::new(WAFER)), Some("PORTED"));
     }
 
     #[test]
