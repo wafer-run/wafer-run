@@ -71,7 +71,9 @@
 //!
 //! A responding step's meta is laid over the flow message with the rules in
 //! [`super::response_meta`]: a header replaces the message's header of the
-//! same name (case-insensitively), `Vary` values are unioned, and a cookie
+//! same name (case-insensitively), `Vary` values are unioned, a security
+//! header such as `X-Frame-Options` or `Content-Security-Policy` keeps the
+//! stricter of the two values, and a cookie
 //! replaces the message's cookie of the same name, `Path` and `Domain` —
 //! never an unrelated cookie that happens to share its `resp.set_cookie.*`
 //! key.
@@ -114,7 +116,8 @@
 //! value never displaces a valid one.
 //!
 //! The terminal's own entries are laid over the carried ones with the same
-//! rules as a responding step's, so the terminal wins and `Vary` is unioned.
+//! rules as a responding step's, so the terminal wins, `Vary` is unioned and
+//! a security header keeps the stricter value.
 //! A flow transfer (`next` to another flow) hands the target the message and
 //! the record of what responding steps wrote, so the target's boundary
 //! applies the same rule; a transfer to an unknown flow errors with the

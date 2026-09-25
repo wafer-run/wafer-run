@@ -4,6 +4,34 @@
 
 ### Breaking changes
 
+- A flow step can no longer loosen a security header an earlier step set.
+  Where a responding or failing step (in the same flow or in a `next`
+  transfer's target) sets its own value for one of these headers, the flow
+  executor now sends a value at least as strict as each instead of the
+  later one: `Content-Security-Policy` sends both policies,
+  comma-separated, and a browser enforces each; `X-Frame-Options` keeps
+  `DENY` over `SAMEORIGIN` over anything else; `X-Content-Type-Options`
+  keeps `nosniff`; `Referrer-Policy` keeps the policy that sends less to
+  another origin; `Strict-Transport-Security` takes the longer `max-age`,
+  `includeSubDomains` if either value has it, and `preload` if a value with
+  `includeSubDomains` has it; `Permissions-Policy` takes, per feature, the
+  intersection of the two allowlists, a feature only one value names being
+  held to `(self)` (member parameters such as `;report-to` are dropped).
+  Before, the later value replaced the security-headers middleware's, so a
+  handler's `X-Frame-Options: SAMEORIGIN` turned the site-wide `DENY` off
+  for its response (a 401 across a flow transfer included). There is no
+  per-route escape hatch: the `wafer-run/security-headers` config is read
+  once at Init and applies site-wide, so a handler that relaxed framing or
+  the CSP for one route must relax it for the site (`frame_ancestors`,
+  `csp`) or not at all, and `Permissions-Policy`, `Referrer-Policy` and
+  HSTS have no config knob — a handler can no longer enable, say, the
+  camera for one route. Tightening still works: a handler's own sandboxing
+  `Content-Security-Policy` or `Referrer-Policy: no-referrer` applies on top
+  of the middleware's. Not combined, so the later value still replaces the
+  earlier: `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`
+  (cross-origin isolation is a page's opt-in that a route may relax, e.g.
+  to keep a handle on an OAuth or payment popup) and
+  `Content-Security-Policy-Report-Only` (which enforces nothing).
 - `wafer_core::security` is removed, and `wafer-core` no longer depends on
   `wafer-net-security`. The module only re-exported `is_blocked_ip`,
   `is_blocked_ipv4`, `is_blocked_ipv6` and `is_blocked_url` from
