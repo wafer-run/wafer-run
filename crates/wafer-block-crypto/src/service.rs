@@ -53,12 +53,15 @@ impl Argon2JwtCryptoService {
     /// Choose the algorithm this service uses when it **writes** a new
     /// password hash.
     ///
-    /// This exists because argon2id's default cost does not fit every target
-    /// this runtime ships to — about 17-35 ms of CPU per hash in wasm32
-    /// under V8, over a Cloudflare Worker's 10 ms per-request budget on the
-    /// Free plan — so the deployment, not the library, has to pick. It
-    /// changes nothing else: JWT signing, per-block key derivation and
-    /// randomness are unaffected.
+    /// This exists because no one scheme fits every target this runtime
+    /// ships to, so the deployment, not the library, has to pick. Measured
+    /// CPU per hash in wasm32 under V8: argon2id at [`Argon2Cost::Default`]
+    /// about 17-35 ms, at [`Argon2Cost::Constrained`] about 3-8 ms, PBKDF2 at
+    /// [`crate::primitives::PBKDF2_SHA256_RECOMMENDED_ITERATIONS`] about
+    /// 180 ms. Under a CPU budget such as a Cloudflare Worker's 10 ms on the
+    /// Free plan only `Argon2(Constrained)` fits. The choice changes nothing
+    /// else: JWT signing, per-block key derivation and randomness are
+    /// unaffected.
     ///
     /// # It does not invalidate stored credentials
     ///

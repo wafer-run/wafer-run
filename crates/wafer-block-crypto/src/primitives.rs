@@ -410,10 +410,11 @@ const ARGON2_SALT_LEN: usize = 16;
 /// 128 MB limit also holds the compiled module, the JS heap and the rest of
 /// the application. Every derivation runs in a buffer of one of the
 /// [`ARGON2_MEMORY_CLASSES`], so the argon2 share of wasm32 linear memory is
-/// their sum, 69 MiB (69.25 MiB measured with allocator overhead), whatever
-/// sequence of stored hashes an isolate verifies. Hashes written elsewhere with more memory — RFC 9106's
-/// 64 MiB option, which is argon2-cffi's default — are refused; re-hash
-/// them within the ceiling before importing them.
+/// at most their sum, 69 MiB (69.25 MiB measured with allocator overhead),
+/// whatever sequence of stored hashes an isolate verifies. Hashes written
+/// elsewhere with more memory — RFC 9106's 64 MiB option, which is
+/// argon2-cffi's default — are refused; re-hash them within the ceiling
+/// before importing them.
 pub const ARGON2_MAX_M_COST: u32 = 46 * 1024;
 
 /// Highest argon2 time cost (passes) [`verify_password`] will run: ten
@@ -454,8 +455,11 @@ impl Argon2Memory {
 
     /// Run `argon2` over the smallest class buffer that holds its
     /// `block_count`, allocating that buffer if this is its first use. The
-    /// derivation reads only the blocks it writes first, so a buffer reused
-    /// from an earlier derivation needs no clearing.
+    /// derivation reads only the blocks it writes first, so a reused buffer
+    /// gives the same output as fresh memory. The blocks it wrote are
+    /// zeroised afterwards, whether it succeeded or not: on wasm32 the buffer
+    /// lives as long as the instance, and would otherwise keep the last
+    /// derivation's state, which is a function of the password.
     fn derive(
         &mut self,
         argon2: &argon2::Argon2<'_>,
@@ -471,7 +475,12 @@ impl Argon2Memory {
         let buffer = self.classes[class].get_or_insert_with(|| {
             vec![argon2::Block::default(); ARGON2_MEMORY_CLASSES[class] as usize]
         });
-        argon2.hash_password_into_with_memory(password, salt, out, buffer.as_mut_slice())
+        let result =
+            argon2.hash_password_into_with_memory(password, salt, out, buffer.as_mut_slice());
+        for block in buffer.iter_mut().take(blocks) {
+            zeroize::Zeroize::zeroize(block.as_mut());
+        }
+        result
     }
 }
 
@@ -568,9 +577,9 @@ const PBKDF2_DK_LEN: usize = 32;
 /// Cheat Sheet, 2023).
 ///
 /// This is the value to pass unless you have measured a reason not to.
-/// It runs in roughly a second of single-threaded wasm, which is acceptable
-/// for a login or password change — the only operations that hash a
-/// password — and is not acceptable per request.
+/// It runs in about 180 ms of wasm32 under V8 (measured), which is
+/// acceptable for a login or password change — the only operations that
+/// hash a password — and is not acceptable per request.
 pub const PBKDF2_SHA256_RECOMMENDED_ITERATIONS: u32 = 600_000;
 
 /// Lowest iteration count [`pbkdf2_hash`] will *write*. NIST SP 800-132 §5.2
@@ -737,8 +746,11 @@ fn pbkdf2_derive(
 /// The choice is a deployment property, not a security level: both schemes
 /// here are accepted password-storage algorithms, and the reason to pick one
 /// is the runtime it has to run in. Argon2id is the better function and the
-/// default; PBKDF2 is for a runtime an embedder does not want to spend
-/// argon2id's memory in (it needs almost none).
+/// default. PBKDF2 needs almost no memory, for a runtime an embedder does
+/// not want to spend argon2id's in; it is not cheaper in CPU (about 180 ms
+/// per hash at [`PBKDF2_SHA256_RECOMMENDED_ITERATIONS`] in wasm32 under V8,
+/// against about 3-8 ms for [`Argon2Cost::Constrained`]), so under a tight
+/// CPU budget choose `Argon2(Argon2Cost::Constrained)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasswordScheme {
     /// argon2id at the given cost preset. The default.
@@ -1238,6 +1250,28 @@ mod tests {
         }
         // Seven derivations of six sizes, three buffers.
         assert!(memory.classes.iter().all(Option::is_some));
+    }
+
+    /// A kept buffer holds nothing of the derivation that used it.
+    #[test]
+    fn a_class_buffer_is_zeroised_after_each_derivation() {
+        let mut memory = Argon2Memory::new();
+        for m in [4096, 20000, 19456] {
+            let params = argon2::Params::new(m, 1, 1, None).expect("params");
+            let argon2 =
+                argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+            memory
+                .derive(&argon2, b"pw", &[7u8; 16], &mut [0u8; 32])
+                .expect("derive");
+            for (class, buffer) in memory.classes.iter().enumerate() {
+                if let Some(buffer) = buffer {
+                    assert!(
+                        buffer.iter().all(|b| b.as_ref().iter().all(|&w| w == 0)),
+                        "class {class} holds derivation state after m={m}"
+                    );
+                }
+            }
+        }
     }
 
     /// Each derivation takes the smallest class that holds it.

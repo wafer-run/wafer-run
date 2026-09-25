@@ -1291,7 +1291,9 @@
   that holds it; on wasm32 each is allocated once and kept, so the argon2
   share of linear memory is at most their sum, 69 MiB (69.25 MiB measured
   with allocator overhead), whatever hashes an isolate verifies.
-  `scripts/check.sh wasm` measures this under node. A derivation smaller
+  `scripts/check.sh wasm` measures this under node. The blocks a
+  derivation used are zeroised when it returns, so a kept buffer holds no
+  password-derived state between logins. A derivation smaller
   than a class takes that class's whole buffer: on native targets, where
   the buffer is freed after each call, a hash at m=20000 briefly holds
   46 MiB. Both presets `hash_password` writes (19 MiB and 4 MiB) are under
@@ -1766,8 +1768,10 @@
   verify_password_any_scheme}` with
   `PBKDF2_SHA256_RECOMMENDED_ITERATIONS` (600,000, OWASP 2023) and
   `PBKDF2_SHA256_MIN_ITERATIONS` (10,000, NIST SP 800-132 §5.2). PBKDF2
-  is for a runtime an embedder does not want to spend argon2id's memory
-  in.
+  needs almost no memory; it is not cheaper in CPU (about 180 ms per hash
+  at the recommended count in wasm32, against about 3-8 ms for
+  `Argon2Cost::Constrained`), so under a tight CPU budget such as a Workers
+  Free plan choose `Argon2(Constrained)`.
 
   **What this changes for a stored credential: nothing.** The scheme selects
   what `CryptoService::hash` *writes*; `compare_hash` dispatches on the PHC

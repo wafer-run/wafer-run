@@ -97,6 +97,7 @@ sha2 = "0.11"
 hkdf = "0.13"
 base64ct = { version = "1", features = ["alloc"] }
 subtle = "2"
+zeroize = "1"
 # default-features off: the default `hmac` feature only adds the
 # `pbkdf2_hmac*` helpers (wafer-block-crypto calls the generic
 # `pbkdf2::pbkdf2` with its own `Hmac<Sha256>`), and the optional `phc`/`mcf`

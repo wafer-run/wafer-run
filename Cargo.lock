@@ -6090,6 +6090,7 @@ dependencies = [
  "tracing",
  "wafer-block",
  "wafer-core",
+ "zeroize",
 ]
 
 [[package]]
