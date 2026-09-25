@@ -778,4 +778,86 @@ mod tests {
             .expect_err("non-identifier column in synthesised name must be rejected");
         assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
     }
+
+    const QUOTE_AND_BACKSLASHES: &str = r"it's a back\slash, ending in \";
+
+    fn text_with_default(default: DefaultValue) -> Table {
+        Table {
+            name: "notes".into(),
+            columns: vec![pk("id"), Column::new("note", DataType::Text).def(default)],
+            indexes: vec![],
+            primary_key: vec![],
+            unique_keys: vec![],
+        }
+    }
+
+    #[test]
+    fn test_string_default_postgres_is_an_escape_string() {
+        let sql = build_create_table(
+            &text_with_default(wafer_schema::default_string(QUOTE_AND_BACKSLASHES)),
+            Backend::Postgres,
+        )
+        .expect("valid")
+        .sql;
+        assert!(
+            sql.contains(r#""note" TEXT NOT NULL DEFAULT E'it''s a back\\slash, ending in \\'"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn test_string_default_round_trips_on_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let create = build_create_table(
+            &text_with_default(wafer_schema::default_string(QUOTE_AND_BACKSLASHES)),
+            Backend::Sqlite,
+        )
+        .expect("valid");
+        conn.execute(&create.sql, []).expect(&create.sql);
+        let add = build_add_column(
+            "notes",
+            &Column::new("added", DataType::Text)
+                .def(wafer_schema::default_string(QUOTE_AND_BACKSLASHES)),
+            Backend::Sqlite,
+        )
+        .expect("valid");
+        conn.execute(&add.sql, []).expect(&add.sql);
+        conn.execute("INSERT INTO notes (id) VALUES ('r1')", [])
+            .unwrap();
+        let (note, added): (String, String) = conn
+            .query_row("SELECT note, added FROM notes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(note, QUOTE_AND_BACKSLASHES);
+        assert_eq!(added, QUOTE_AND_BACKSLASHES);
+    }
+
+    #[test]
+    fn test_default_without_a_literal_is_refused() {
+        for (default, backend) in [
+            (wafer_schema::default_string("a\0b"), Backend::Sqlite),
+            (wafer_schema::default_string("a\0b"), Backend::Postgres),
+            (DefaultValue::Value(DefaultVal::Float(f64::NAN)), Backend::Sqlite),
+            (DefaultValue::Value(DefaultVal::Float(f64::INFINITY)), Backend::Postgres),
+        ] {
+            let err = build_create_table(&text_with_default(default.clone()), backend)
+                .expect_err("no SQL literal expresses this default");
+            assert!(
+                matches!(err, SqlBuildError::InvalidDefault { .. }),
+                "{default:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_now_default_per_dialect() {
+        let sql = |backend| {
+            build_create_table(&text_with_default(wafer_schema::default_now()), backend)
+                .expect("valid")
+                .sql
+        };
+        assert!(sql(Backend::Sqlite).contains("DEFAULT CURRENT_TIMESTAMP"));
+        assert!(sql(Backend::Postgres).contains("DEFAULT NOW()"));
+    }
 }
