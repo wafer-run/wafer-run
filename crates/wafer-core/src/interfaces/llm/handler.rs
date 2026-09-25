@@ -156,7 +156,7 @@ fn chat(
                 return;
             }
         }
-        // Natural end of stream: auto-complete when sink drops.
+        let _ = sink.complete(vec![]).await;
     })
 }
 
@@ -209,6 +209,7 @@ fn load_model(
                 return;
             }
         }
+        let _ = sink.complete(vec![]).await;
     })
 }
 

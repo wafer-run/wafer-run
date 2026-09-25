@@ -4,6 +4,27 @@
 
 ### Breaking changes
 
+- An `OutputSink` dropped without an explicit terminal now ends its stream
+  with an `Error` terminal (`ErrorCode::Internal`, message `output stream
+  ended without a terminal event: …`, naming a panic when the drop happens
+  during one) instead of an automatic `Complete`. A producer that panicked,
+  was cancelled or aborted (a runtime shutting down drops its tasks) or
+  returned early mid-body used to hand every consumer a successful response
+  carrying a truncated body — a `200` at the HTTP listener, a
+  `{"action":"respond"}` through `output_to_json` (FFI, Node, Go). It now
+  surfaces as a `500` / `{"action":"error"}` / `Err`. The HTTP listener and
+  every embedder buffer the body before sending anything, so no response has
+  headers or bytes on the wire when the error arrives. A producer that
+  relied on the automatic `Complete` must end with
+  `sink.complete(meta).await`: every `OutputStream::from_producer` closure
+  and every `new_streaming` sink needs exactly one explicit terminal on each
+  success path.
+- `OutputStream::body_stream` is removed: it ended cleanly on an `Error`
+  terminal and on a stream with no terminal, so a truncated body read as a
+  whole one. Use `OutputStream::body_stream_or_error`, which now also yields
+  a final `Err` for a stream that ends with no terminal
+  (`TerminalNotResponse::Malformed`) and yields a `Halt` terminal's body
+  instead of discarding it.
 - `wafer_block::codec::decode` returns the new `codec::DecodeError`
   instead of a `WaferError` whose code was always `Internal`. The caller
   now picks the code by who sent the body: `DecodeError::invalid_argument`

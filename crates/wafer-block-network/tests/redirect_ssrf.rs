@@ -166,7 +166,13 @@ async fn redirect_inside_the_grant_is_followed_to_the_final_response() {
         &format!("{}/api/start", server.uri()),
     )
     .await;
-    let chunks: Vec<Vec<u8>> = out.body_stream().collect().await;
+    let chunks: Vec<Vec<u8>> = out
+        .body_stream_or_error()
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .expect("the body arrives whole");
     let header: ResponseHeader = codec::decode(&chunks[0]).expect("header frame");
     assert_eq!(
         header.status_code, 200,

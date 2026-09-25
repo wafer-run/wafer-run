@@ -53,19 +53,26 @@ impl From<SinkClosed> for SinkSendError {
 
 /// Producer handle paired with an OutputStream. The producing task holds this sink
 /// and calls send_chunk / send_meta for non-terminal events, then exactly one of
-/// complete / error / drop_request / continue_with as the terminal event.
+/// complete / error / drop_request / continue_with / halt as the terminal event.
+///
+/// Only an explicit terminal ends the stream successfully. A sink dropped
+/// without one — the producer panicked, its task was cancelled or aborted
+/// (runtime shutdown), or it returned without calling a terminal — delivers an
+/// `Error` terminal ([`ErrorCode::Internal`](crate::core_types::ErrorCode::Internal)),
+/// so every consumer sees a failed response rather than a truncated body that
+/// looks complete.
 ///
 /// Terminal delivery is guaranteed: construction reserves one dedicated channel
 /// slot (an [`mpsc::OwnedPermit`]) for the terminal event, so both the explicit
-/// terminal methods and the Drop auto-`Complete` safety net can always deliver
-/// their terminal even when the body channel is full. Body sends
+/// terminal methods and the dropped-sink `Error` can always deliver their
+/// terminal even when the body channel is full. Body sends
 /// (`send_chunk`/`send_meta`) still see exactly the requested capacity of
 /// backpressure; terminals never backpressure.
 pub struct OutputSink {
     tx: mpsc::Sender<StreamEvent>,
     /// Channel slot reserved at construction for the single terminal event.
     /// `Some` until a terminal is sent; taken by the explicit terminal
-    /// methods and, if still present, by `Drop`'s auto-`Complete` safety net
+    /// methods and, if still present, by `Drop`'s dropped-sink `Error`
     /// (which therefore cannot double-send after an explicit terminal).
     terminal_permit: Option<mpsc::OwnedPermit<StreamEvent>>,
     any_body_sent: std::sync::atomic::AtomicBool,
@@ -190,32 +197,36 @@ impl OutputSink {
 
 impl Drop for OutputSink {
     fn drop(&mut self) {
-        // Safety net: a producer dropped the sink without an explicit
-        // terminal. `from_producer` documents this as auto-`Complete`, so
-        // we keep the consumer's stream terminating — but for any other
-        // code path it usually means a forgotten terminal, so we warn to
-        // surface the case. If a body was streamed first, this is an
-        // empty-meta Complete, which is the intended close.
+        // The producer let go of the sink without an explicit terminal: it
+        // panicked (this runs during the unwind), its task was cancelled or
+        // aborted (a runtime shutting down drops its tasks), or it returned
+        // without calling one. Whatever body it sent may be a truncated
+        // prefix, and nothing here can tell a finished body from a cut one,
+        // so the stream ends in an `Error` — never in a `Complete` that would
+        // pass the prefix off as the whole response.
         //
         // The permit is `None` when an explicit terminal already consumed it,
         // so this can never double-send. Sending through the reserved permit
         // cannot fail on a full channel (Drop cannot `.await`, and
-        // `OwnedPermit::send` does not await) — previously a lossy `try_send`
-        // here silently dropped the auto-`Complete` when the body channel was
-        // full, turning a successful stream into a race-dependent
-        // `TerminalNotResponse::Malformed` → 500.
+        // `OwnedPermit::send` does not await), so the consumer always gets
+        // this terminal rather than a bare channel close.
         if let Some(permit) = self.terminal_permit.take() {
-            if self
+            let body_sent = self
                 .any_body_sent
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                tracing::debug!("OutputSink dropped after Chunk/Meta without explicit terminal; auto-completing");
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let cause = if std::thread::panicking() {
+                "the producer panicked"
             } else {
-                tracing::warn!(
-                    "OutputSink dropped without any event or terminal; auto-completing (likely a forgotten terminal)"
-                );
-            }
-            let _sender = permit.send(StreamEvent::Complete { meta: vec![] });
+                "the producer was cancelled or returned without a terminal"
+            };
+            tracing::warn!(
+                body_sent,
+                "OutputSink dropped without a terminal event ({cause}); ending the stream with an error"
+            );
+            let _sender = permit.send(StreamEvent::Error(Box::new(WaferError::new(
+                crate::core_types::ErrorCode::Internal,
+                format!("output stream ended without a terminal event: {cause}"),
+            ))));
         }
     }
 }
@@ -528,39 +539,40 @@ impl OutputStream {
         Err(TerminalNotResponse::Malformed)
     }
 
-    /// View the body-carrying chunks as a `Stream<Item = Vec<u8>>`, filtering Meta
-    /// events and stopping at the first terminal. Useful for piping one block's
-    /// output into another block's InputStream.
-    pub fn body_stream(self) -> impl Stream<Item = Vec<u8>> + Send + 'static {
-        use futures::StreamExt;
-        self.filter_map(|evt| async move {
-            match evt {
-                StreamEvent::Chunk(bytes) => Some(bytes),
-                _ => None,
-            }
-        })
-    }
-
-    /// Like [`body_stream`](Self::body_stream) but propagates `Error` terminals
-    /// as a final `Err` item instead of swallowing them.
+    /// View the body as a `Stream<Item = Result<Vec<u8>, WaferError>>` —
+    /// the item shape of an [`InputStream`](crate::streams::input::InputStream),
+    /// for piping one block's output into another block's input.
     ///
-    /// Yields `Ok(bytes)` for each `Chunk`, skips `Meta` events, and stops at
-    /// the first terminal. If the terminal is `Error(e)`, it is yielded as the
-    /// last item (`Err(e)`). `Complete`/`Drop`/`Continue` terminals end the
-    /// stream without an error item.
+    /// Yields `Ok(bytes)` for each `Chunk` and skips `Meta` events. A
+    /// `Complete`, `Drop` or `Continue` terminal ends the stream after the last
+    /// chunk. An `Error` terminal is yielded as a final `Err` item, and so is a
+    /// stream that ends with no terminal at all
+    /// ([`TerminalNotResponse::Malformed`]) — either way the chunks before it
+    /// are a truncated prefix, never a whole body. A `Halt` terminal carries
+    /// the whole response body (a producer never mixes it with chunks), which
+    /// is yielded as a final `Ok` item when non-empty.
     pub fn body_stream_or_error(
         self,
     ) -> impl Stream<Item = Result<Vec<u8>, WaferError>> + Send + 'static {
         use futures::StreamExt;
-        self.filter_map(|evt| async move {
-            match evt {
-                StreamEvent::Chunk(bytes) => Some(Ok(bytes)),
-                StreamEvent::Error(e) => Some(Err(*e)),
-                StreamEvent::Meta(_) => None,
-                StreamEvent::Complete { .. }
-                | StreamEvent::Drop { .. }
-                | StreamEvent::Continue(_)
-                | StreamEvent::Halt { .. } => None,
+        futures::stream::unfold(Some(self), |state| async move {
+            let mut out = state?;
+            loop {
+                match out.next().await {
+                    Some(StreamEvent::Chunk(bytes)) => return Some((Ok(bytes), Some(out))),
+                    Some(StreamEvent::Meta(_)) => {}
+                    Some(StreamEvent::Error(e)) => return Some((Err(*e), None)),
+                    Some(StreamEvent::Halt { body, .. }) if !body.is_empty() => {
+                        return Some((Ok(body), None))
+                    }
+                    Some(
+                        StreamEvent::Complete { .. }
+                        | StreamEvent::Drop { .. }
+                        | StreamEvent::Continue(_)
+                        | StreamEvent::Halt { .. },
+                    ) => return None,
+                    None => return Some((Err(TerminalNotResponse::Malformed.into()), None)),
+                }
             }
         })
     }
@@ -568,14 +580,12 @@ impl OutputStream {
     /// Creates a streaming `OutputStream` driven by a producer closure.
     ///
     /// The closure receives an [`OutputSink`] and a [`CancellationToken`]. It should
-    /// call `sink.send_chunk()` / `sink.send_meta()` for non-terminal events. When
-    /// the closure returns, the sink is dropped — if no terminal was explicitly sent
-    /// (via `sink.complete()`, `sink.error()`, etc.), an auto-`Complete { meta: vec![] }`
-    /// is emitted. The auto-`Complete` is delivered through a channel slot reserved
-    /// at construction, so it cannot be lost even if the body channel is full at
-    /// the moment the sink drops.
-    ///
-    /// For explicit error handling, call `sink.error(e).await` before returning.
+    /// call `sink.send_chunk()` / `sink.send_meta()` for non-terminal events and
+    /// must end with exactly one explicit terminal (`sink.complete()`,
+    /// `sink.error()`, …). A sink dropped without one — the closure returned
+    /// early, panicked, or its task was cancelled — ends the stream with an
+    /// `Error` terminal (see [`OutputSink`]), so the consumer never mistakes a
+    /// cut-off body for a complete one.
     ///
     /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser.
     /// Not available on wasm32-wasip1 (WASI) — use `GuestResult::respond` directly.
@@ -829,11 +839,11 @@ mod tests {
         sink.send_chunk(b"a".to_vec()).await.unwrap();
         // Don't assert blocking here (hard to time-sensitive-test) — just confirm
         // that send + drain still works with non-default capacity, and that the
-        // drop-auto-Complete terminal is delivered even though the body slot is
-        // full (the terminal has its own reserved slot).
-        drop(sink);
+        // explicit terminal is delivered even though the body slot is full (the
+        // terminal has its own reserved slot).
+        sink.complete(vec![]).await.unwrap();
         let events: Vec<_> = stream.collect().await;
-        assert_eq!(events.len(), 2, "Chunk + auto-Complete terminal");
+        assert_eq!(events.len(), 2, "Chunk + Complete terminal");
         assert_eq!(events[0], StreamEvent::Chunk(b"a".to_vec()));
         assert!(matches!(events[1], StreamEvent::Complete { .. }));
     }
@@ -911,7 +921,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn body_stream_yields_only_chunks() {
+    async fn body_stream_or_error_yields_only_chunks() {
         let (stream, sink, _cancel) = OutputStream::new_streaming();
         tokio::spawn(async move {
             sink.send_meta(MetaEntry {
@@ -924,8 +934,8 @@ mod tests {
             sink.send_chunk(b"def".to_vec()).await.unwrap();
             sink.complete(vec![]).await.unwrap();
         });
-        let chunks: Vec<Vec<u8>> = stream.body_stream().collect().await;
-        assert_eq!(chunks, vec![b"abc".to_vec(), b"def".to_vec()]);
+        let chunks: Vec<_> = stream.body_stream_or_error().collect().await;
+        assert_eq!(chunks, vec![Ok(b"abc".to_vec()), Ok(b"def".to_vec())]);
     }
 
     #[tokio::test]
@@ -937,13 +947,10 @@ mod tests {
             matches!(err, Err(SinkSendError::BodyAlreadySent("Drop"))),
             "Drop after a Chunk must be refused in all build profiles, got: {err:?}"
         );
-        // The Chunk flowed; no Drop event was emitted. When the refused sink is
-        // dropped, the safety-net auto-Complete closes the stream.
+        // The Chunk flowed; no Drop event was emitted. The refused sink is
+        // dropped without a terminal, so the stream ends in an error.
         assert_eq!(rx.recv().await.unwrap(), StreamEvent::Chunk(b"x".to_vec()));
-        assert!(matches!(
-            rx.recv().await.unwrap(),
-            StreamEvent::Complete { .. }
-        ));
+        assert!(matches!(rx.recv().await.unwrap(), StreamEvent::Error(_)));
     }
 
     #[tokio::test]
@@ -995,18 +1002,90 @@ mod tests {
         .unwrap();
     }
 
+    /// Asserts `event` is the `Error` terminal a dropped sink sends, naming
+    /// `cause`.
+    fn assert_dropped_sink_error(event: &StreamEvent, cause: &str) {
+        match event {
+            StreamEvent::Error(e) => {
+                assert_eq!(e.code, crate::core_types::ErrorCode::Internal);
+                assert!(
+                    e.message.contains("without a terminal event") && e.message.contains(cause),
+                    "unexpected dropped-sink error: {}",
+                    e.message
+                );
+            }
+            other => panic!("expected the dropped-sink Error terminal, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
-    async fn from_producer_streams_chunks_and_auto_completes() {
+    async fn from_producer_streams_chunks_then_its_explicit_terminal() {
         let stream = OutputStream::from_producer(|sink, _cancel| async move {
             sink.send_chunk(b"a".to_vec()).await.ok();
             sink.send_chunk(b"b".to_vec()).await.ok();
-            // No explicit terminal — auto-complete on drop.
+            sink.complete(vec![]).await.ok();
         });
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 3);
         assert_eq!(events[0], StreamEvent::Chunk(b"a".to_vec()));
         assert_eq!(events[1], StreamEvent::Chunk(b"b".to_vec()));
         assert!(matches!(events[2], StreamEvent::Complete { ref meta } if meta.is_empty()));
+    }
+
+    /// A producer that returns mid-body without a terminal must not look like
+    /// a complete response to any consumer.
+    #[tokio::test]
+    async fn from_producer_without_a_terminal_ends_in_an_error() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            sink.send_chunk(b"a".to_vec()).await.ok();
+            sink.send_chunk(b"b".to_vec()).await.ok();
+        });
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0], StreamEvent::Chunk(b"a".to_vec()));
+        assert_eq!(events[1], StreamEvent::Chunk(b"b".to_vec()));
+        assert_dropped_sink_error(&events[2], "returned without a terminal");
+    }
+
+    /// A producer that panics mid-body drops its sink during the unwind; the
+    /// consumer gets an error naming the panic, and the buffered collector
+    /// the embedders and the HTTP codec use refuses the truncated body.
+    #[tokio::test]
+    async fn a_producer_panic_mid_body_is_an_error_to_the_consumer() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            sink.send_chunk(b"partial".to_vec()).await.ok();
+            panic!("producer blew up mid-body");
+        });
+        match stream.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert!(e.message.contains("the producer panicked"), "{}", e.message)
+            }
+            other => panic!("expected an Error terminal, got {other:?}"),
+        }
+    }
+
+    /// A producer task that is aborted mid-body (what a runtime shutdown does
+    /// to every task it still holds) ends the stream in an error.
+    #[tokio::test]
+    async fn an_aborted_producer_task_is_an_error_to_the_consumer() {
+        let (mut stream, sink, _cancel) = OutputStream::new_streaming();
+        let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            sink.send_chunk(b"partial".to_vec()).await.unwrap();
+            sent_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+            sink.complete(vec![]).await.ok();
+        });
+        sent_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        assert_eq!(
+            stream.next().await,
+            Some(StreamEvent::Chunk(b"partial".to_vec()))
+        );
+        assert_dropped_sink_error(&stream.next().await.unwrap(), "cancelled");
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
@@ -1114,6 +1193,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn body_stream_or_error_yields_err_when_the_producer_drops_mid_body() {
+        let (stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_chunk(b"partial".to_vec()).await.unwrap();
+        drop(sink);
+        let items: Vec<_> = stream.body_stream_or_error().collect().await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], Ok(b"partial".to_vec()));
+        assert!(
+            items[1]
+                .as_ref()
+                .is_err_and(|e| e.message.contains("without a terminal event")),
+            "got {:?}",
+            items[1]
+        );
+    }
+
+    /// A stream that closes with no terminal at all (a buggy remote producer
+    /// decoded off the wire, not a sink) is an error too, not a clean end.
+    #[tokio::test]
+    async fn body_stream_or_error_yields_err_when_the_stream_has_no_terminal() {
+        let (tx, rx) = mpsc::channel(2);
+        tx.try_send(StreamEvent::Chunk(b"partial".to_vec()))
+            .unwrap();
+        drop(tx);
+        let items: Vec<_> = OutputStream::from_raw_receiver(rx)
+            .body_stream_or_error()
+            .collect()
+            .await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], Ok(b"partial".to_vec()));
+        assert!(
+            items[1]
+                .as_ref()
+                .is_err_and(|e| e.message.contains("without terminal event")),
+            "got {:?}",
+            items[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn body_stream_or_error_yields_a_halt_body() {
+        let items: Vec<_> = OutputStream::halt(b"whole".to_vec(), vec![])
+            .body_stream_or_error()
+            .collect()
+            .await;
+        assert_eq!(items, vec![Ok(b"whole".to_vec())]);
+        let items: Vec<_> = OutputStream::drop_request()
+            .body_stream_or_error()
+            .collect()
+            .await;
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
     async fn drop_delivers_terminal_even_when_channel_is_full() {
         // Capacity 1: the sole body slot is filled by send_chunk, forcing
         // the channel to be exactly full at the moment the sink is dropped
@@ -1122,19 +1255,16 @@ mod tests {
         // free slot, so "channel full at drop" is not a contrived scenario.
         let (mut rx, sink, _cancel) = new_streaming_channel(1);
         sink.send_chunk(b"last".to_vec()).await.unwrap();
-        drop(sink); // no explicit terminal — Drop's auto-Complete must still land
+        drop(sink); // no explicit terminal — Drop's Error terminal must still land
 
         let chunk = rx.recv().await.expect("chunk should have been delivered");
         assert_eq!(chunk, StreamEvent::Chunk(b"last".to_vec()));
 
         let terminal = rx.recv().await.expect(
             "a full channel at drop must still deliver a terminal event, not close silently \
-             (consumer would otherwise see TerminalNotResponse::Malformed -> a race-dependent 500)",
+             (the consumer would otherwise see a bare channel close)",
         );
-        assert!(
-            matches!(terminal, StreamEvent::Complete { ref meta } if meta.is_empty()),
-            "expected an auto-Complete terminal after Drop, got: {terminal:?}"
-        );
+        assert_dropped_sink_error(&terminal, "without a terminal");
         assert!(
             rx.recv().await.is_none(),
             "channel should close after the terminal"
@@ -1168,7 +1298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_auto_completes_on_drop() {
+    async fn a_sink_dropped_mid_body_ends_in_an_error() {
         let (stream, sink, _cancel) = OutputStream::new_streaming();
         // Send a chunk, then drop the sink without calling a terminal.
         sink.send_chunk(b"hello".to_vec()).await.unwrap();
@@ -1177,11 +1307,23 @@ mod tests {
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0], StreamEvent::Chunk(b"hello".to_vec()));
-        assert!(
-            matches!(events[1], StreamEvent::Complete { ref meta } if meta.is_empty()),
-            "sink should auto-complete on drop, got: {:?}",
-            events[1]
-        );
+        assert_dropped_sink_error(&events[1], "without a terminal");
+    }
+
+    #[tokio::test]
+    async fn a_sink_dropped_before_any_event_ends_in_an_error() {
+        let (stream, sink, _cancel) = OutputStream::new_streaming();
+        drop(sink);
+        match stream.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert!(
+                    e.message.contains("without a terminal event"),
+                    "{}",
+                    e.message
+                )
+            }
+            other => panic!("expected an Error terminal, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1196,7 +1338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sink_does_not_auto_complete_after_error() {
+    async fn sink_adds_no_terminal_after_an_explicit_error() {
         let (stream, sink, _cancel) = OutputStream::new_streaming();
         let err = crate::core_types::WaferError {
             code: crate::core_types::ErrorCode::Internal,

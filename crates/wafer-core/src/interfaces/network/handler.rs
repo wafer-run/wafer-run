@@ -427,7 +427,13 @@ mod tests {
             &do_request_body("http://example.com"),
         )
         .await;
-        let chunks: Vec<Vec<u8>> = out.body_stream().collect().await;
+        let chunks: Vec<Vec<u8>> = out
+            .body_stream_or_error()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("the body arrives whole");
         assert_eq!(
             chunks.len(),
             1,
@@ -448,7 +454,13 @@ mod tests {
             &do_request_body("http://example.com"),
         )
         .await;
-        let chunks: Vec<Vec<u8>> = out.body_stream().collect().await;
+        let chunks: Vec<Vec<u8>> = out
+            .body_stream_or_error()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("the body arrives whole");
         assert_eq!(
             chunks.len(),
             2,
@@ -638,7 +650,13 @@ mod tests {
             "https://api.example/v1/a",
         )
         .await;
-        let chunks: Vec<Vec<u8>> = out.body_stream().collect().await;
+        let chunks: Vec<Vec<u8>> = out
+            .body_stream_or_error()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .expect("the body arrives whole");
         let header: ResponseHeader = codec::decode(&chunks[0]).expect("header frame");
         assert_eq!(header.status_code, 200);
         assert_eq!(chunks[1], b"https://api.example/v1/c");
