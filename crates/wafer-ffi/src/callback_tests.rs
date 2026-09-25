@@ -32,7 +32,8 @@ const GATED_MSG: &str = r#"{"kind":"gated","meta":[]}"#;
 
 /// `test/gated`: responds with a body whose second chunk waits for `gate`,
 /// telling `entered` when a run reaches it — or, to a message of kind
-/// `quick`, at once. Counts its `lifecycle(Stop)`s,
+/// `quick`, at once; to a message of kind `panic-mid-body` its producer
+/// sends the first chunk and then panics. Counts its `lifecycle(Stop)`s,
 /// and panics in the first one when `panic_on_stop` is set.
 struct Gated {
     entered: SyncSender<()>,
@@ -50,6 +51,12 @@ impl Block for Gated {
     async fn handle(&self, _ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         if msg.kind == "quick" {
             return OutputStream::respond(b"quick".to_vec());
+        }
+        if msg.kind == "panic-mid-body" {
+            return OutputStream::from_producer(|sink, _cancel| async move {
+                let _ = sink.send_chunk(b"first ".to_vec()).await;
+                panic!("test/gated panics mid-body");
+            });
         }
         let _ = self.entered.try_send(());
         let gate = self.gate.clone();
@@ -305,6 +312,29 @@ fn a_second_stop_does_not_stop_the_blocks_again() {
             assert_eq!(stop.wait(), None, "wafer_stop reported an error");
         }
         assert_eq!(fx.stops.load(Ordering::SeqCst), 1);
+        wafer_free(fx.w);
+    }
+}
+
+/// A block whose body producer panics after its first chunk makes the run
+/// call back with an error — not with a `respond` carrying the truncated
+/// body as if it were the whole response. The run goes through the flow
+/// executor, which collects the body, and `output_to_json`.
+#[test]
+fn a_producer_panic_mid_body_calls_back_with_an_error() {
+    unsafe {
+        let fx = Fixture::new(false);
+        let run = Pending::new();
+        let msg = c(r#"{"kind":"panic-mid-body","meta":[]}"#);
+        assert_eq!(
+            wafer_run(fx.w, c("gated").as_ptr(), msg.as_ptr(), CB, run.user_data()),
+            WAFER_ACCEPTED
+        );
+        let out = json(run.wait());
+        assert_eq!(out["action"], "error", "{out}");
+        assert_eq!(out["error"]["code"], "Internal", "{out}");
+        let message = out["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("the producer panicked"), "{out}");
         wafer_free(fx.w);
     }
 }
