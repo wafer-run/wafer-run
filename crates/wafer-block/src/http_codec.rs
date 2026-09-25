@@ -467,14 +467,32 @@ pub fn response_meta_parts(
         .collect())
 }
 
+/// Response headers that describe a body (or a redirect to one): they
+/// belong to the body they were set with, so a response that replaces that
+/// body — a flow's short-circuit terminal, the 500 answering an unsendable
+/// terminal — never carries them. A content type (any case, either key) and
+/// `Content-Length` are not listed: neither classifies as a
+/// [`ResponseMetaPart::Header`] (the first is the
+/// [`ResponseMetaPart::ContentType`], the second is transport-owned).
+pub const BODY_RESPONSE_HEADERS: &[&str] = &[
+    "content-encoding",
+    "content-disposition",
+    "content-language",
+    "content-location",
+    "content-range",
+    "accept-ranges",
+    "etag",
+    "last-modified",
+    "location",
+];
+
 /// The uniform response for a terminal whose meta holds an unsendable entry
 /// (see [`InvalidResponseMetaKind::Unsendable`]): `500` with the
 /// [`error_to_http_response`] body of an [`ErrorCode::Internal`] error and
-/// the headers of [`unsendable_kept_meta`] — the terminal's
-/// `Content-Security-Policy`, `X-Frame-Options`, CORS headers and every
-/// other header it can send, one per case-insensitive name as on the
-/// response it replaces. Logs `invalid`, the first refused key and its
-/// reason, at `error`.
+/// the headers of [`unsendable_response_meta`] — the terminal's
+/// `Content-Security-Policy`, `X-Frame-Options`, CORS headers and other
+/// headers it can send, plus `Cache-Control: no-store`. Logs `invalid`, the
+/// first refused key and its reason, at `error`.
 ///
 /// `meta` is the terminal's whole meta, the slice `invalid` came from.
 pub fn unsendable_response(meta: &[MetaEntry], invalid: &InvalidResponseMeta) -> HttpResponseParts {
@@ -484,7 +502,7 @@ pub fn unsendable_response(meta: &[MetaEntry], invalid: &InvalidResponseMeta) ->
         "HTTP boundary: response meta cannot be sent; answering 500"
     );
     let mut headers = Vec::new();
-    for entry in unsendable_kept_meta(meta) {
+    for entry in &unsendable_response_meta(meta) {
         if let Ok(Some(ResponseMetaPart::Header { name, value })) = classify_response_meta(entry) {
             put_header(&mut headers, name, value);
         }
@@ -498,23 +516,46 @@ pub fn unsendable_response(meta: &[MetaEntry], invalid: &InvalidResponseMeta) ->
     parts
 }
 
-/// The entries of a terminal's meta that the 500 answering it for an
-/// unsendable entry still carries: every [`ResponseMetaPart::Header`] that
-/// can be sent, in order. The refused entries are skipped, and so are the
-/// terminal's status, content type (the 500's body is JSON) and
-/// `Set-Cookie` directives: the client is told the request failed, so it
-/// takes no cookie from the response that failed. Every boundary answering
-/// such a terminal — [`unsendable_response`], the embedder wire format —
-/// carries exactly these.
-pub fn unsendable_kept_meta(meta: &[MetaEntry]) -> Vec<&MetaEntry> {
-    meta.iter()
-        .filter(|entry| {
-            matches!(
-                classify_response_meta(entry),
-                Ok(Some(ResponseMetaPart::Header { .. }))
-            )
+/// The response meta of the 500 answering a terminal whose `meta` holds an
+/// unsendable entry. Every boundary answering such a terminal —
+/// [`unsendable_response`], the embedder wire format — carries exactly
+/// these entries.
+///
+/// They are the terminal's [`ResponseMetaPart::Header`] entries that can be
+/// sent, in order, then `resp.header.Cache-Control: no-store`. Skipped:
+/// - the refused entries. A refused entry displaces nothing, so for each
+///   header name the 500 carries the last value that can be sent — the
+///   middleware's `Content-Security-Policy` stands when a later one is
+///   malformed;
+/// - the terminal's status and content type (the 500's body is JSON);
+/// - its `Set-Cookie` directives: the client is told the request failed, so
+///   it takes no cookie from the response that failed;
+/// - [`BODY_RESPONSE_HEADERS`]: they describe the body the 500 replaces (a
+///   `Content-Encoding` the JSON does not have, a `Content-Disposition`
+///   that would save the error as a file);
+/// - its `Cache-Control` and `Expires`, replaced by `no-store`: they were
+///   the freshness of the response that failed, and an error must not be
+///   stored — not by a shared cache, which would serve it to every client,
+///   and not by the browser. `no-store` also keeps the protection of a
+///   terminal that set it itself.
+pub fn unsendable_response_meta(meta: &[MetaEntry]) -> Vec<MetaEntry> {
+    let mut kept: Vec<MetaEntry> = meta
+        .iter()
+        .filter(|entry| match classify_response_meta(entry) {
+            Ok(Some(ResponseMetaPart::Header { name, .. })) => {
+                !is_listed(BODY_RESPONSE_HEADERS, name)
+                    && !name.eq_ignore_ascii_case("cache-control")
+                    && !name.eq_ignore_ascii_case("expires")
+            }
+            _ => false,
         })
-        .collect()
+        .cloned()
+        .collect();
+    kept.push(MetaEntry {
+        key: format!("{META_RESP_HEADER_PREFIX}Cache-Control"),
+        value: "no-store".to_string(),
+    });
+    kept
 }
 
 /// The response-meta **projection**: the entries of a terminal's meta that
@@ -1397,9 +1438,9 @@ mod tests {
 
     /// An unsendable entry fails the response closed: a CSP with one smart
     /// quote must not ship the page with no CSP at all. The 500 still
-    /// carries every header the terminal can send — the middleware's
+    /// carries the terminal's security headers — the middleware's
     /// `X-Frame-Options` and CSP, a CORS header — but not its cookie, status
-    /// or content type.
+    /// or content type, and is `no-store`.
     #[tokio::test]
     async fn an_unsendable_entry_fails_every_terminal_closed() {
         let meta = || {
@@ -1424,6 +1465,7 @@ mod tests {
             ("X-Frame-Options", "DENY"),
             ("Content-Security-Policy", "default-src 'self'"),
             ("Access-Control-Allow-Origin", "https://a.example"),
+            ("Cache-Control", "no-store"),
         ];
         let ok = collect_http_response(OutputStream::respond_with_meta(b"<p>".to_vec(), meta()));
         assert_uniform_500(&ok.await, &kept);
@@ -1452,8 +1494,45 @@ mod tests {
                 body: Vec::new(),
                 meta: vec![entry("resp.header.X-Content-Type-Options", "nosniff"), bad],
             });
-            assert_uniform_500(&parts, &[("X-Content-Type-Options", "nosniff")]);
+            assert_uniform_500(
+                &parts,
+                &[
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("Cache-Control", "no-store"),
+                ],
+            );
         }
+    }
+
+    /// The 500 replaces the terminal's body, so it drops the headers that
+    /// describe that body and its freshness — a streamed download's
+    /// `Content-Encoding`, `Content-Disposition`, validators and caching —
+    /// and is `no-store` whatever the terminal said.
+    #[test]
+    fn the_unsendable_500_drops_body_and_cache_headers() {
+        let mut meta = vec![entry("resp.header.X-Frame-Options", "DENY")];
+        for name in BODY_RESPONSE_HEADERS {
+            meta.push(entry(&format!("resp.header.{name}"), "v"));
+        }
+        meta.extend([
+            entry("resp.header.Content-Encoding", "gzip"),
+            entry(
+                "resp.header.Content-Disposition",
+                "attachment; filename=\"a.zip\"",
+            ),
+            entry("resp.header.ETag", "\"abc\""),
+            entry("resp.header.Cache-Control", "public, max-age=31536000"),
+            entry("resp.header.expires", "Thu, 01 Jan 2099 00:00:00 GMT"),
+            entry("resp.header.X-Bad", "\u{2019}"),
+        ]);
+        let parts = buffered_to_http_response(BufferedResponse {
+            body: b"PK".to_vec(),
+            meta,
+        });
+        assert_uniform_500(
+            &parts,
+            &[("X-Frame-Options", "DENY"), ("Cache-Control", "no-store")],
+        );
     }
 
     #[test]

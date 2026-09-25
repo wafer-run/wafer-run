@@ -7,13 +7,19 @@
 - The 500 that answers a terminal holding unsendable response meta now
   keeps the terminal's security headers. `http_codec::unsendable_response`
   takes the terminal's meta: `unsendable_response(meta, invalid)`, `meta`
-  being the slice `invalid` came from. Its 500 carries every header of that
+  being the slice `invalid` came from. Its 500 carries the headers of that
   meta the codec can send (`Content-Security-Policy`, `X-Frame-Options`,
-  `X-Content-Type-Options`, CORS headers, …), one per case-insensitive name,
-  skipping the refused entries and the terminal's status, content type and
-  `Set-Cookie` directives. The new `http_codec::unsendable_kept_meta(meta)`
-  names those entries, and the embedder wire format's `Internal` error for
-  such a terminal carries them as its `meta`. Before, the 500 carried only
+  `X-Content-Type-Options`, CORS headers, …) — for each name the last
+  value that can be sent, a refused entry displacing nothing — plus
+  `Cache-Control: no-store`. It skips the terminal's status, content type,
+  `Set-Cookie` directives, `Cache-Control` and `Expires`, and the headers
+  describing the body it replaces: the new
+  `http_codec::BODY_RESPONSE_HEADERS` (`Content-Encoding`,
+  `Content-Disposition`, `ETag`, `Last-Modified`, `Location`, …), the set
+  the flow executor already kept off a short-circuit terminal, now shared.
+  The new `http_codec::unsendable_response_meta(meta)` returns those
+  entries, and the embedder wire format's `Internal` error for such a
+  terminal carries them as its `meta`. Before, the 500 carried only
   `Content-Type`, so a terminal that did not come through a flow — where the
   executor refuses the bad step and keeps the middleware's headers — was
   answered with no CSP, no `X-Frame-Options` and no `nosniff`. An adapter

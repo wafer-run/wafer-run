@@ -13,8 +13,8 @@
 use wafer_block::{
     core_types::MetaEntry,
     http_codec::{
-        classify_response_meta, response_meta_entries, unsendable_kept_meta, InvalidResponseMeta,
-        ResponseMetaPart,
+        classify_response_meta, response_meta_entries, unsendable_response_meta,
+        InvalidResponseMeta, ResponseMetaPart,
     },
     streams::output::{BufferedResponse, TerminalNotResponse},
 };
@@ -32,7 +32,7 @@ impl Unsendable {
     fn new(meta: &[MetaEntry], invalid: InvalidResponseMeta) -> Self {
         Self {
             invalid,
-            kept: entries_to_json(unsendable_kept_meta(meta)),
+            kept: entries_to_json(&unsendable_response_meta(meta)),
         }
     }
 }
@@ -113,7 +113,7 @@ fn response_meta_to_json(meta: &[MetaEntry]) -> Result<serde_json::Value, Unsend
 /// - A terminal whose meta holds an entry no transport can send
 ///   ([`wafer_block::http_codec::InvalidResponseMetaKind::Unsendable`])
 ///   encodes as an `error` with code `Internal` whose `meta` holds
-///   [`wafer_block::http_codec::unsendable_kept_meta`] — the headers the
+///   [`wafer_block::http_codec::unsendable_response_meta`] — the headers the
 ///   native HTTP boundary's 500 for the same terminal carries — logged at
 ///   `error` with the refused key.
 pub async fn output_to_json(output: OutputStream) -> String {
@@ -384,7 +384,10 @@ mod tests {
             serde_json::json!({
                 "action": "error",
                 "error": { "code": "Internal", "message": "internal server error" },
-                "meta": { "resp.header.X-Frame-Options": "DENY" },
+                "meta": {
+                    "resp.header.X-Frame-Options": "DENY",
+                    "resp.header.Cache-Control": "no-store",
+                },
             })
         );
     }

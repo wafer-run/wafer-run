@@ -34,30 +34,12 @@ use wafer_block::{
     core_types::MetaEntry,
     http_codec::{
         classify_response_meta, cookie_id, CookieId, InvalidResponseMeta, InvalidResponseMetaKind,
-        ResponseMetaPart,
+        ResponseMetaPart, BODY_RESPONSE_HEADERS,
     },
     meta::META_RESP_COOKIE_PREFIX,
 };
 
 use super::restrictive_headers;
-
-/// Headers that describe a body (or a redirect to one), never carried from
-/// the flow message onto a short-circuit terminal: the terminal has its own
-/// body. A content type (any case, either key) and `Content-Length` are not
-/// listed because they never classify as a header — the codec reads the
-/// first as its content type and refuses the second — so [`carried`] drops
-/// them as it drops every non-header entry.
-const BODY_HEADERS: &[&str] = &[
-    "content-encoding",
-    "content-disposition",
-    "content-language",
-    "content-location",
-    "content-range",
-    "accept-ranges",
-    "etag",
-    "last-modified",
-    "location",
-];
 
 /// List-valued headers whose values [`overlay`] unions instead of replacing.
 const UNION_HEADERS: &[&str] = &["vary"];
@@ -271,7 +253,8 @@ pub(super) fn apply_response(
 /// The entries of `flow_meta` a short-circuit terminal inherits: its response
 /// headers and cookies as the middleware left them — an entry a responding
 /// step wrote is replaced by the middleware entries it displaced (`record`)
-/// — except a body-describing header ([`BODY_HEADERS`]).
+/// — except a body-describing header ([`BODY_RESPONSE_HEADERS`]): the
+/// terminal has its own body.
 pub(super) fn carried(flow_meta: &[MetaEntry], record: &ResponderRecord) -> Vec<MetaEntry> {
     flow_meta
         .iter()
@@ -281,7 +264,7 @@ pub(super) fn carried(flow_meta: &[MetaEntry], record: &ResponderRecord) -> Vec<
         })
         .filter(|e| match kind(e) {
             Kind::Cookie => true,
-            Kind::Header { name } => !is_listed(BODY_HEADERS, &name),
+            Kind::Header { name } => !is_listed(BODY_RESPONSE_HEADERS, &name),
             Kind::Other => false,
         })
         .collect()
