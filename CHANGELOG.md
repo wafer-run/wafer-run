@@ -12,9 +12,13 @@
   returned early mid-body used to hand every consumer a successful response
   carrying a truncated body — a `200` at the HTTP listener, a
   `{"action":"respond"}` through `output_to_json` (FFI, Node, Go). It now
-  surfaces as a `500` / `{"action":"error"}` / `Err`. The HTTP listener and
-  every embedder buffer the body before sending anything, so no response has
-  headers or bytes on the wire when the error arrives. A producer that
+  surfaces as a `500` / `{"action":"error"}` / `Err`. wafer-run's own
+  transports (the HTTP listener, the FFI, Node and Go) buffer the body
+  before sending anything, so on them no headers or bytes are on the wire
+  when the error arrives. An embedder that streams the body after
+  committing headers (such as a `ReadableStream`-backed Cloudflare Workers
+  or browser adapter) now receives an `Error` terminal mid-body and must
+  abort the response body on it, never close it cleanly. A producer that
   relied on the automatic `Complete` must end with
   `sink.complete(meta).await`: every `OutputStream::from_producer` closure
   and every `new_streaming` sink needs exactly one explicit terminal on each
@@ -25,6 +29,14 @@
   a final `Err` for a stream that ends with no terminal
   (`TerminalNotResponse::Malformed`) and yields a `Halt` terminal's body
   instead of discarding it.
+- `OutputSink::halt` returns `Result<(), SinkSendError>` and refuses to
+  follow a `Chunk`/`Meta` event (`SinkSendError::BodyAlreadySent("Halt")`),
+  as `drop_request` and `continue_with` already did; the refused sink's drop
+  then ends the stream with an `Error`. A stream that carries a `Halt` after
+  body events anyway (a non-sink source) is an error to both
+  `collect_buffered` (`TerminalNotResponse::Error`; it used to discard the
+  streamed chunks and return the `Halt`) and `body_stream_or_error` (a final
+  `Err`).
 - `wafer_block::codec::decode` returns the new `codec::DecodeError`
   instead of a `WaferError` whose code was always `Internal`. The caller
   now picks the code by who sent the body: `DecodeError::invalid_argument`

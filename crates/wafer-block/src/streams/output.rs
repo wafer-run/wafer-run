@@ -24,23 +24,27 @@ use crate::{
 #[error("output sink closed: consumer dropped")]
 pub struct SinkClosed;
 
-/// Error returned by the body-free terminal methods
-/// ([`OutputSink::drop_request`], [`OutputSink::continue_with`]) when they
-/// cannot be applied.
+/// Error returned by the terminals that cannot follow body events
+/// ([`OutputSink::drop_request`], [`OutputSink::continue_with`],
+/// [`OutputSink::halt`]) when they cannot be applied.
 ///
-/// These terminals signal "no response body" (Drop) or "forward elsewhere"
-/// (Continue), so the protocol forbids them after any `Chunk`/`Meta` has
-/// already been emitted on the sink. The invariant is enforced in both debug
-/// and release builds: a violation refuses to send the terminal and returns
-/// [`SinkSendError::BodyAlreadySent`] rather than corrupting the stream.
+/// These terminals signal "no response body" (Drop), "forward elsewhere"
+/// (Continue) or "here is the whole response" (Halt), so the protocol forbids
+/// them after any `Chunk`/`Meta` has already been emitted on the sink. The
+/// invariant is enforced in both debug and release builds: a violation
+/// refuses to send the terminal and returns
+/// [`SinkSendError::BodyAlreadySent`] rather than corrupting the stream. The
+/// refused sink is consumed, so its drop then ends the stream with an `Error`
+/// terminal (see [`OutputSink`]).
 #[derive(Debug, thiserror::Error)]
 pub enum SinkSendError {
     /// The consumer dropped the stream before the terminal could be sent.
     #[error("output sink closed: consumer dropped")]
     Closed,
     /// A `Chunk` or `Meta` event was already emitted on this sink, so a
-    /// body-free terminal (`Drop`/`Continue`) would violate the stream
-    /// protocol. The terminal was refused; no event was sent.
+    /// `Drop`/`Continue`/`Halt` terminal would violate the stream protocol.
+    /// The terminal was refused; the dropped sink ends the stream with an
+    /// `Error` terminal instead.
     #[error("protocol violation: {0} terminal cannot follow Chunk or Meta events")]
     BodyAlreadySent(&'static str),
 }
@@ -140,8 +144,9 @@ impl OutputSink {
     ///
     /// Refused if a `Chunk`/`Meta` was already emitted on this sink: a `Drop`
     /// carries no body, so following body events with it is a protocol
-    /// violation. In that case no event is sent and
-    /// [`SinkSendError::BodyAlreadySent`] is returned.
+    /// violation. In that case the `Drop` is not sent,
+    /// [`SinkSendError::BodyAlreadySent`] is returned, and the consumed sink's
+    /// drop ends the stream with an `Error` terminal.
     pub async fn drop_request(self) -> Result<(), SinkSendError> {
         self.drop_request_with_meta(Vec::new()).await
     }
@@ -168,8 +173,9 @@ impl OutputSink {
     ///
     /// Refused if a `Chunk`/`Meta` was already emitted on this sink: a
     /// `Continue` forwards the request elsewhere and carries no body, so
-    /// following body events with it is a protocol violation. In that case no
-    /// event is sent and [`SinkSendError::BodyAlreadySent`] is returned.
+    /// following body events with it is a protocol violation. In that case the
+    /// `Continue` is not sent, [`SinkSendError::BodyAlreadySent`] is returned,
+    /// and the consumed sink's drop ends the stream with an `Error` terminal.
     pub async fn continue_with(mut self, msg: Message) -> Result<(), SinkSendError> {
         if self
             .any_body_sent
@@ -184,14 +190,27 @@ impl OutputSink {
 
     /// Terminal. Block produced a response AND requests short-circuit.
     /// HTTP boundary serves the supplied body+meta; flow executor halts the
-    /// step loop. The `body` parameter is the complete response body — do
-    /// not mix Halt with prior streamed Chunk events on the same sink.
+    /// step loop. The `body` parameter is the complete response body.
+    ///
+    /// Refused if a `Chunk`/`Meta` was already emitted on this sink: the
+    /// `Halt` would replace a body the consumer already received part of, so
+    /// following body events with it is a protocol violation. In that case
+    /// the `Halt` is not sent, [`SinkSendError::BodyAlreadySent`] is returned,
+    /// and the consumed sink's drop ends the stream with an `Error` terminal.
     pub async fn halt(
         mut self,
         body: Vec<u8>,
         meta: Vec<crate::core_types::MetaEntry>,
-    ) -> Result<(), SinkClosed> {
+    ) -> Result<(), SinkSendError> {
+        if self
+            .any_body_sent
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!("Halt terminal cannot follow Chunk or Meta events; refusing");
+            return Err(SinkSendError::BodyAlreadySent("Halt"));
+        }
         self.send_terminal(StreamEvent::Halt { body, meta })
+            .map_err(SinkSendError::from)
     }
 }
 
@@ -210,6 +229,11 @@ impl Drop for OutputSink {
         // cannot fail on a full channel (Drop cannot `.await`, and
         // `OwnedPermit::send` does not await), so the consumer always gets
         // this terminal rather than a bare channel close.
+        //
+        // A consumer that already went away (a client disconnecting
+        // mid-download) is the usual reason a producer stops early, and there
+        // is no one left to read the error, so that case logs at `debug`; a
+        // live consumer being handed an error is worth a `warn`.
         if let Some(permit) = self.terminal_permit.take() {
             let body_sent = self
                 .any_body_sent
@@ -219,10 +243,17 @@ impl Drop for OutputSink {
             } else {
                 "the producer was cancelled or returned without a terminal"
             };
-            tracing::warn!(
-                body_sent,
-                "OutputSink dropped without a terminal event ({cause}); ending the stream with an error"
-            );
+            if self.tx.is_closed() {
+                tracing::debug!(
+                    body_sent,
+                    "OutputSink dropped without a terminal event ({cause}) after its consumer went away"
+                );
+            } else {
+                tracing::warn!(
+                    body_sent,
+                    "OutputSink dropped without a terminal event ({cause}); ending the stream with an error"
+                );
+            }
             let _sender = permit.send(StreamEvent::Error(Box::new(WaferError::new(
                 crate::core_types::ErrorCode::Internal,
                 format!("output stream ended without a terminal event: {cause}"),
@@ -483,15 +514,33 @@ impl From<TerminalNotResponse> for WaferError {
     }
 }
 
+/// The error a consumer reports for a `Halt` terminal that follows
+/// `Chunk`/`Meta` events: the `Halt` claims to be the whole response, but the
+/// consumer has already been handed part of another one.
+/// [`OutputSink::halt`] refuses to produce this; it can still arrive from a
+/// non-sink source such as a buggy remote producer decoded off the wire.
+fn halt_after_body_error() -> WaferError {
+    WaferError::new(
+        crate::core_types::ErrorCode::Internal,
+        "Halt terminal followed Chunk or Meta events (protocol violation)",
+    )
+}
+
 impl OutputStream {
     /// Drains the stream, concatenates Chunk payloads into a body, accumulates
     /// Meta entries (mid-stream + trailing from Complete), and returns a
     /// `BufferedResponse` on success or a `TerminalNotResponse` on any non-Complete terminal.
+    /// A `Halt` that follows `Chunk`/`Meta` events is a protocol violation and
+    /// returns `TerminalNotResponse::Error`.
     pub async fn collect_buffered(mut self) -> Result<BufferedResponse, TerminalNotResponse> {
         use futures::StreamExt;
         let mut body = Vec::new();
         let mut meta = Vec::new();
+        let mut any_body_event = false;
         while let Some(evt) = self.next().await {
+            if matches!(evt, StreamEvent::Chunk(_) | StreamEvent::Meta(_)) {
+                any_body_event = true;
+            }
             match evt {
                 // Move the first chunk instead of copying it — single-chunk
                 // responses (`OutputStream::respond`) are the common case on
@@ -504,26 +553,13 @@ impl OutputStream {
                     meta.extend(trailing);
                     return Ok(BufferedResponse { body, meta });
                 }
+                StreamEvent::Halt { .. } if any_body_event => {
+                    return Err(TerminalNotResponse::Error(halt_after_body_error()));
+                }
                 StreamEvent::Halt {
                     body: halt_body,
                     meta: halt_meta,
                 } => {
-                    // Halt carries a complete response; any prior Chunk/Meta
-                    // events are replaced by Halt's payload (per the sink doc
-                    // contract — do not mix Halt with streamed chunks). If a
-                    // producer mixed them anyway, those bytes are dropped here,
-                    // which is a producer bug — surface it.
-                    if !body.is_empty() || !meta.is_empty() {
-                        tracing::warn!(
-                            discarded_body_bytes = body.len(),
-                            discarded_meta_entries = meta.len(),
-                            "Halt terminal arrived after Chunk/Meta; discarding prior streamed events (producer must not mix Halt with chunks)"
-                        );
-                        debug_assert!(
-                            body.is_empty() && meta.is_empty(),
-                            "Halt terminal must not follow Chunk/Meta events"
-                        );
-                    }
                     return Err(TerminalNotResponse::Halt(BufferedResponse {
                         body: halt_body,
                         meta: halt_meta,
@@ -549,19 +585,26 @@ impl OutputStream {
     /// stream that ends with no terminal at all
     /// ([`TerminalNotResponse::Malformed`]) — either way the chunks before it
     /// are a truncated prefix, never a whole body. A `Halt` terminal carries
-    /// the whole response body (a producer never mixes it with chunks), which
-    /// is yielded as a final `Ok` item when non-empty.
+    /// the whole response body, which is yielded as a final `Ok` item when
+    /// non-empty; a `Halt` that follows `Chunk`/`Meta` events is a protocol
+    /// violation and yields a final `Err`, as it fails
+    /// [`collect_buffered`](Self::collect_buffered).
     pub fn body_stream_or_error(
         self,
     ) -> impl Stream<Item = Result<Vec<u8>, WaferError>> + Send + 'static {
         use futures::StreamExt;
-        futures::stream::unfold(Some(self), |state| async move {
-            let mut out = state?;
+        // State: the stream still to read, and whether a Chunk/Meta event
+        // has been seen on it; `None` once a final item has been yielded.
+        futures::stream::unfold(Some((self, false)), |state| async move {
+            let (mut out, mut any_body_event) = state?;
             loop {
                 match out.next().await {
-                    Some(StreamEvent::Chunk(bytes)) => return Some((Ok(bytes), Some(out))),
-                    Some(StreamEvent::Meta(_)) => {}
+                    Some(StreamEvent::Chunk(bytes)) => return Some((Ok(bytes), Some((out, true)))),
+                    Some(StreamEvent::Meta(_)) => any_body_event = true,
                     Some(StreamEvent::Error(e)) => return Some((Err(*e), None)),
+                    Some(StreamEvent::Halt { .. }) if any_body_event => {
+                        return Some((Err(halt_after_body_error()), None))
+                    }
                     Some(StreamEvent::Halt { body, .. }) if !body.is_empty() => {
                         return Some((Ok(body), None))
                     }
@@ -1386,11 +1429,9 @@ mod tests {
         }
     }
 
-    /// Build a Chunk-then-Halt stream by feeding the raw channel directly.
-    /// `Halt` is a terminal carrying its own complete body, so the sink's
-    /// terminal methods don't gate it — a producer can only get here by
-    /// pre-sending Chunk/Meta, which is the protocol violation we want to
-    /// surface in `collect_buffered`.
+    /// Build a Chunk-then-Halt stream by feeding the raw channel directly:
+    /// [`OutputSink::halt`] refuses to follow a Chunk, so only a non-sink
+    /// source can produce this protocol violation.
     fn chunk_then_halt_stream() -> OutputStream {
         let (tx, rx) = mpsc::channel::<StreamEvent>(4);
         tx.try_send(StreamEvent::Chunk(b"streamed".to_vec()))
@@ -1409,26 +1450,48 @@ mod tests {
         }
     }
 
+    /// Both buffered and streamed consumers fail a Halt that follows a
+    /// Chunk, rather than one discarding the chunk and the other yielding it.
     #[tokio::test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "Halt terminal must not follow Chunk/Meta events")]
-    async fn collect_buffered_debug_asserts_on_halt_after_chunk() {
-        let stream = chunk_then_halt_stream();
-        let _ = stream.collect_buffered().await;
+    async fn a_halt_after_a_chunk_is_an_error_to_every_consumer() {
+        match chunk_then_halt_stream().collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => {
+                assert!(
+                    e.message.contains("Halt terminal followed"),
+                    "{}",
+                    e.message
+                )
+            }
+            other => panic!("expected an Error, got {other:?}"),
+        }
+        let items: Vec<_> = chunk_then_halt_stream()
+            .body_stream_or_error()
+            .collect()
+            .await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0], Ok(b"streamed".to_vec()));
+        assert!(
+            items[1]
+                .as_ref()
+                .is_err_and(|e| e.message.contains("Halt terminal followed")),
+            "{items:?}"
+        );
     }
 
+    /// The sink refuses a Halt after a Chunk, and the consumer then sees the
+    /// dropped sink's Error — never the Halt body spliced onto the chunk.
     #[tokio::test]
-    #[cfg(not(debug_assertions))]
-    async fn collect_buffered_halt_after_chunk_discards_prior_in_release() {
-        let stream = chunk_then_halt_stream();
-        match stream.collect_buffered().await {
-            Err(TerminalNotResponse::Halt(buf)) => {
-                // Halt's payload wins; the prior streamed Chunk is discarded.
-                assert_eq!(buf.body, b"halt-body");
-                assert_eq!(buf.meta.len(), 1);
-                assert_eq!(buf.meta[0].key, "resp.status");
-            }
-            other => panic!("expected Err(Halt), got {other:?}"),
-        }
+    async fn sink_halt_refused_after_chunk() {
+        let (stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_chunk(b"x".to_vec()).await.unwrap();
+        let err = sink.halt(b"whole".to_vec(), vec![]).await;
+        assert!(
+            matches!(err, Err(SinkSendError::BodyAlreadySent("Halt"))),
+            "Halt after a Chunk must be refused, got: {err:?}"
+        );
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0], StreamEvent::Chunk(b"x".to_vec()));
+        assert_dropped_sink_error(&events[1], "without a terminal");
     }
 }
