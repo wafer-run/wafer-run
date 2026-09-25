@@ -14,6 +14,21 @@
   HMAC, HKDF and PBKDF2 outputs are byte-identical (the SHA-256, RFC 4231
   HMAC, HKDF known-answer and PBKDF2 vector tests pass unchanged), so
   stored password hashes, tokens and derived keys stay valid.
+- sqlx 0.9 changes how `PostgresDatabaseService::connect(url)` reads two
+  connection settings, so an operator's existing configuration can mean
+  something different:
+  - A password read from a `.pgpass` file (or the file `PGPASSFILE` names)
+    is now backslash-unescaped, as libpq does: `\:` is `:` and `\\` is `\`
+    (sqlx #3993). A password containing a backslash that relied on sqlx
+    0.8 sending it literally now sends a different password; write each
+    literal `\` in the file as `\\`.
+  - A `options[key]=value` URL parameter's value is now escaped
+    automatically (a space becomes `\ ` and a backslash `\\`) before it is
+    sent as `-c key=value` (sqlx #3800). A value hand-escaped for sqlx 0.8,
+    such as `options[application_name]=my\ app`, is now escaped twice and
+    reaches the server with the backslash in it; write the plain value
+    (`my app`, URL-encoded as `my%20app`). The `PGOPTIONS` environment
+    variable is still passed through unescaped.
 - An `OutputSink` dropped without an explicit terminal now ends its stream
   with an `Error` terminal (`ErrorCode::Internal`, message `output stream
   ended without a terminal event: …`, naming a panic when the drop happens
