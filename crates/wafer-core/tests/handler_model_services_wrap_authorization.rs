@@ -293,7 +293,7 @@ async fn a_block_without_the_serving_blocks_grant_is_refused_every_op() {
     let svc = Arc::new(Recording::default());
     for op in ServiceOp::EMBEDDING_OPS {
         assert_eq!(
-            run(&svc, &ctx, "wafer-run/vector", op, "b").await,
+            run(&svc, &ctx, "acme/embedder", op, "b").await,
             Err(ErrorCode::PermissionDenied),
             "{op}"
         );
@@ -339,7 +339,7 @@ async fn the_admin_block_is_admitted_to_every_op() {
     for op in ServiceOp::EMBEDDING_OPS {
         let svc = Arc::new(Recording::default());
         assert_eq!(
-            run(&svc, &ctx, "wafer-run/vector", op, "b").await,
+            run(&svc, &ctx, "acme/embedder", op, "b").await,
             Ok(()),
             "{op}"
         );
@@ -415,7 +415,7 @@ async fn embedding_is_authorized_per_op_in_the_serving_blocks_namespace() {
         run(
             &svc,
             &ctx,
-            "wafer-run/vector",
+            "acme/other-embedder",
             ServiceOp::EMBEDDING_EMBED,
             ""
         )

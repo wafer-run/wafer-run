@@ -255,8 +255,8 @@ pub async fn handle_message(
 /// [`ResourceType::Embedding`] resource in `block`'s namespace
 /// ([`op_resource`]: `{org}__{block}__embed`, `{org}__{block}__count_tokens`)
 /// before the service is touched. The serving block and the admin block are
-/// admitted; any other caller needs a grant the serving block declares (see
-/// [`EmbeddingService::grants`]).
+/// admitted; any other caller needs a grant the serving block declares in
+/// its `BlockInfo::grants`.
 pub async fn handle_embedding_message(
     service: &dyn EmbeddingService,
     ctx: &dyn Context,
