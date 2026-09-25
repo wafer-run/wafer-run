@@ -68,7 +68,8 @@ run_fmt() {
     for fixture in \
         crates/wafer-block/tests/wasm_static_blocks \
         crates/wafer-block/tests/wasm_local_input_stream \
-        crates/wafer-block-crypto/tests/wasm32_consumer; do
+        crates/wafer-block-crypto/tests/wasm32_consumer \
+        crates/wafer-block-crypto/tests/wasm32_memory_bound; do
         cargo +nightly fmt --all --manifest-path "$fixture/Cargo.toml" -- --check
     done
 }
@@ -179,6 +180,23 @@ run_wasm() {
     echo "==> wafer-block-crypto on wasm32-unknown-unknown"
     cargo build --locked --target wasm32-unknown-unknown \
         --manifest-path crates/wafer-block-crypto/tests/wasm32_consumer/Cargo.toml
+
+    # A Workers isolate has 128 MB in all and wasm32 linear memory never
+    # shrinks, so the argon2 share of it is a property of the built wasm and
+    # its allocator that no native test can observe. The fixture verifies an
+    # adversarial sequence of stored hashes under node and fails when linear
+    # memory grows past the sum of `ARGON2_MEMORY_CLASSES`.
+    echo "==> argon2 memory bound on wasm32 (node)"
+    if ! command -v node >/dev/null; then
+        echo "error: node is required to run the argon2 memory-bound fixture" >&2
+        exit 1
+    fi
+    local bound_dir="${CARGO_TARGET_DIR:-$PWD/target}/wasm32-argon2-memory-bound"
+    cargo build --locked --release --target wasm32-unknown-unknown \
+        --target-dir "$bound_dir" \
+        --manifest-path crates/wafer-block-crypto/tests/wasm32_memory_bound/Cargo.toml
+    node crates/wafer-block-crypto/tests/wasm32_memory_bound/measure.mjs \
+        "$bound_dir/wasm32-unknown-unknown/release/wasm32_argon2_memory_bound_fixture.wasm"
 }
 
 run_bindings() {

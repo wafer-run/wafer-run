@@ -1,0 +1,31 @@
+# Runtime fixture: the argon2 share of wasm32 linear memory stays within
+# `ARGON2_MEMORY_CLASSES`' sum, whatever stored hashes are verified.
+#
+# Linear memory never shrinks, and a Cloudflare Workers isolate has 128 MB in
+# all, so the bound is a property of the built wasm and the allocator it
+# links, not of anything a native test can observe. `scripts/check.sh wasm`
+# builds this for wasm32-unknown-unknown and runs `measure.mjs` under node,
+# which verifies an adversarial sequence of stored hashes and fails when the
+# growth exceeds the bound. Excluded from the workspace (own `[workspace]`
+# table), like the other wasm fixtures.
+[workspace]
+
+[package]
+name = "wasm32-argon2-memory-bound-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+wafer-block-crypto = { path = "../.." }
+# See ../wasm32_consumer/Cargo.toml: the embedding binary picks uuid's
+# randomness source.
+uuid = { version = "1", features = ["js"] }
+
+[profile.release]
+# `measure.mjs` runs real derivations; keep them fast.
+opt-level = 3

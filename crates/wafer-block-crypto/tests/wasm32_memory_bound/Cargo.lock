@@ -1268,7 +1268,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm32-crypto-consumer-fixture"
+name = "wasm32-argon2-memory-bound-fixture"
 version = "0.0.0"
 dependencies = [
  "uuid",

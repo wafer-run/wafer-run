@@ -102,11 +102,8 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Generate `n` cryptographically-secure random bytes from the OS RNG.
 pub fn random_bytes(n: usize) -> Result<Vec<u8>, CryptoError> {
-    use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut buf = vec![0u8; n];
-    OsRng
-        .try_fill_bytes(&mut buf)
-        .map_err(|e| CryptoError::Other(format!("rng error: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| CryptoError::Other(format!("rng error: {e}")))?;
     Ok(buf)
 }
 
@@ -317,42 +314,90 @@ pub fn derive_block_key(master_secret: &[u8], block_id: &str) -> String {
 /// Cost parameters are baked into the produced PHC string, so
 /// [`verify_password`] handles hashes of either preset (and any other
 /// argon2 parameters up to [`ARGON2_MAX_M_COST`] and its siblings)
-/// transparently.
+/// transparently. The presets are the only argon2 costs this crate writes,
+/// and a compile-time assertion holds each under the verify ceilings, so it
+/// never writes a hash it would refuse to check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Argon2Cost {
-    /// `argon2` crate defaults (currently 19 MiB memory, 2 iterations,
-    /// 1 lane) — for native deployments.
+    /// `argon2` crate defaults: 19 MiB memory, 2 iterations, 1 lane —
+    /// OWASP's recommended argon2id configuration. For native deployments.
     Default,
-    /// Low-cost parameters (4 MiB memory, 2 iterations, 1 lane) for
-    /// CPU/memory-constrained environments such as Cloudflare Workers,
-    /// where the default memory cost exceeds runtime limits.
+    /// Low-cost parameters (4 MiB memory, 2 iterations, 1 lane) for runtimes
+    /// with a tight per-request CPU budget, such as Cloudflare Workers.
+    /// Below OWASP's minimum argon2id configuration (7 MiB at 5 iterations,
+    /// or an equivalent trade), and about a fifth of [`Self::Default`]'s
+    /// work. Memory is not the constraint: [`Self::Default`] grows wasm32
+    /// linear memory by 19 MiB, far inside a Worker isolate's 128 MB.
     Constrained,
 }
+
+impl Argon2Cost {
+    /// `(m_cost KiB, t_cost, p_cost)` of the preset.
+    const fn costs(self) -> (u32, u32, u32) {
+        match self {
+            Self::Default => (
+                argon2::Params::DEFAULT_M_COST,
+                argon2::Params::DEFAULT_T_COST,
+                argon2::Params::DEFAULT_P_COST,
+            ),
+            Self::Constrained => (4096, 2, 1),
+        }
+    }
+}
+
+// Every preset verifies on every target: none exceeds a ceiling.
+const _: () = {
+    let presets = [Argon2Cost::Default, Argon2Cost::Constrained];
+    let mut i = 0;
+    while i < presets.len() {
+        let (m, t, p) = presets[i].costs();
+        assert!(m <= ARGON2_MAX_M_COST && t <= ARGON2_MAX_T_COST && p <= ARGON2_MAX_P_COST);
+        i += 1;
+    }
+    // `Argon2Memory::derive` takes the first class that holds a derivation,
+    // which is the smallest only while the list ascends.
+    let mut c = 1;
+    while c < ARGON2_MEMORY_CLASSES.len() {
+        assert!(ARGON2_MEMORY_CLASSES[c - 1] < ARGON2_MEMORY_CLASSES[c]);
+        c += 1;
+    }
+};
 
 /// Hash a password with argon2id at the given cost, producing a PHC-format
 /// string (`$argon2id$...`) with a random 16-byte salt.
 pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoError> {
     use argon2::{
-        password_hash::{rand_core::OsRng, SaltString},
-        Argon2, PasswordHasher,
+        password_hash::phc::{Output, ParamsString, PasswordHash, Salt},
+        Algorithm, Argon2, Version,
     };
-    let argon2 = match cost {
-        Argon2Cost::Default => Argon2::default(),
-        Argon2Cost::Constrained => {
-            let params = argon2::Params::new(4096, 2, 1, None)
-                .map_err(|e| CryptoError::HashError(format!("argon2 params: {e}")))?;
-            Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
-        }
+    let hash_error = |e: &dyn core::fmt::Display| CryptoError::HashError(format!("argon2: {e}"));
+
+    let (m, t, p) = cost.costs();
+    let params = argon2::Params::new(m, t, p, None).map_err(|e| hash_error(&e))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let salt = random_bytes(ARGON2_SALT_LEN)?;
+    let mut out = [0u8; argon2::Params::DEFAULT_OUTPUT_LEN];
+    with_argon2_memory(|memory| memory.derive(&argon2, password.as_bytes(), &salt, &mut out))
+        .map_err(|e| hash_error(&e))?;
+
+    let phc = PasswordHash {
+        algorithm: Algorithm::Argon2id.ident(),
+        version: Some(Version::V0x13.into()),
+        params: ParamsString::try_from(argon2.params()).map_err(|e| hash_error(&e))?,
+        salt: Some(Salt::new(&salt).map_err(|e| hash_error(&e))?),
+        hash: Some(Output::new(&out).map_err(|e| hash_error(&e))?),
     };
-    let salt = SaltString::generate(&mut OsRng);
-    argon2
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| CryptoError::HashError(e.to_string()))
+    Ok(phc.to_string())
 }
 
-/// Highest argon2 memory cost (KiB) [`verify_password`] will run: ten times
-/// the strongest preset this crate writes ([`Argon2Cost::Default`]).
+/// Salt length in bytes for [`hash_password`]: the PHC string format's
+/// recommended 16.
+const ARGON2_SALT_LEN: usize = 16;
+
+/// Highest argon2 memory cost (KiB) [`verify_password`] will run: 46 MiB,
+/// the largest memory cost in OWASP's argon2id recommendations (46 MiB at
+/// 1 iteration). The same on every target, so a stored hash verifies on
+/// all of them or on none.
 ///
 /// The cost parameters of a stored hash come from the stored string, and
 /// the `argon2` crate accepts up to `u32::MAX` for each — one crafted hash
@@ -360,15 +405,103 @@ pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoE
 /// anything above these ceilings as [`CryptoError::MalformedHash`]. There is
 /// no floor: an old, cheap hash still verifies (see
 /// [`PBKDF2_SHA256_MIN_ITERATIONS`] for why).
-pub const ARGON2_MAX_M_COST: u32 = 10 * argon2::Params::DEFAULT_M_COST;
+///
+/// The memory ceiling is sized for a Cloudflare Workers isolate, whose
+/// 128 MB limit also holds the compiled module, the JS heap and the rest of
+/// the application. Every derivation runs in a buffer of one of the
+/// [`ARGON2_MEMORY_CLASSES`], so the argon2 share of wasm32 linear memory is
+/// at most their sum, 69 MiB (69.25 MiB measured with allocator overhead),
+/// whatever sequence of stored hashes an isolate verifies. Hashes written
+/// elsewhere with more memory — RFC 9106's 64 MiB option, which is
+/// argon2-cffi's default — are refused; re-hash them within the ceiling
+/// before importing them.
+pub const ARGON2_MAX_M_COST: u32 = 46 * 1024;
 
-/// Highest argon2 time cost (passes) [`verify_password`] will run; see
-/// [`ARGON2_MAX_M_COST`].
+/// Highest argon2 time cost (passes) [`verify_password`] will run: ten
+/// times [`Argon2Cost::Default`]'s; see [`ARGON2_MAX_M_COST`].
 pub const ARGON2_MAX_T_COST: u32 = 10 * argon2::Params::DEFAULT_T_COST;
 
-/// Highest argon2 parallelism (lanes) [`verify_password`] will run; see
-/// [`ARGON2_MAX_M_COST`].
+/// Highest argon2 parallelism (lanes) [`verify_password`] will run: ten
+/// times [`Argon2Cost::Default`]'s; see [`ARGON2_MAX_M_COST`].
 pub const ARGON2_MAX_P_COST: u32 = 10 * argon2::Params::DEFAULT_P_COST;
+
+/// Sizes (in 1 KiB argon2 blocks) of the working memory argon2 derivations
+/// run in: [`Argon2Cost::Constrained`]'s, [`Argon2Cost::Default`]'s and
+/// [`ARGON2_MAX_M_COST`]. A derivation takes the smallest that holds it.
+///
+/// On wasm32 each is allocated once per instance and kept. Linear memory
+/// never shrinks, and an allocator handed requests of arbitrary sizes may
+/// not reuse a freed block for a slightly larger one, so two stored hashes
+/// just under the ceiling could otherwise grow memory by twice the ceiling.
+/// Kept buffers of fixed sizes cap the growth at the sum of this list.
+pub const ARGON2_MEMORY_CLASSES: [u32; 3] = [
+    Argon2Cost::Constrained.costs().0,
+    Argon2Cost::Default.costs().0,
+    ARGON2_MAX_M_COST,
+];
+
+/// The working-memory buffers for argon2 derivations, one slot per entry of
+/// [`ARGON2_MEMORY_CLASSES`], each allocated on first use.
+struct Argon2Memory {
+    classes: [Option<Vec<argon2::Block>>; ARGON2_MEMORY_CLASSES.len()],
+}
+
+impl Argon2Memory {
+    const fn new() -> Self {
+        Self {
+            classes: [None, None, None],
+        }
+    }
+
+    /// Run `argon2` over the smallest class buffer that holds its
+    /// `block_count`, allocating that buffer if this is its first use. The
+    /// derivation reads only the blocks it writes first, so a reused buffer
+    /// gives the same output as fresh memory. The blocks it wrote are
+    /// zeroised afterwards, whether it succeeded or not: on wasm32 the buffer
+    /// lives as long as the instance, and would otherwise keep the last
+    /// derivation's state, which is a function of the password.
+    fn derive(
+        &mut self,
+        argon2: &argon2::Argon2<'_>,
+        password: &[u8],
+        salt: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), argon2::Error> {
+        let blocks = argon2.params().block_count();
+        let class = ARGON2_MEMORY_CLASSES
+            .iter()
+            .position(|&size| blocks <= size as usize)
+            .ok_or(argon2::Error::MemoryTooMuch)?;
+        let buffer = self.classes[class].get_or_insert_with(|| {
+            vec![argon2::Block::default(); ARGON2_MEMORY_CLASSES[class] as usize]
+        });
+        let result =
+            argon2.hash_password_into_with_memory(password, salt, out, buffer.as_mut_slice());
+        for block in buffer.iter_mut().take(blocks) {
+            zeroize::Zeroize::zeroize(block.as_mut());
+        }
+        result
+    }
+}
+
+/// Give `f` the argon2 working memory. On wasm32 it is one instance per
+/// thread, kept for the life of the module (see [`ARGON2_MEMORY_CLASSES`]).
+/// Elsewhere memory is returned to the system, and a thread pool would keep
+/// a set per thread, so each call gets its own, freed on return.
+fn with_argon2_memory<R>(f: impl FnOnce(&mut Argon2Memory) -> R) -> R {
+    #[cfg(target_arch = "wasm32")]
+    {
+        thread_local! {
+            static MEMORY: core::cell::RefCell<Argon2Memory> =
+                const { core::cell::RefCell::new(Argon2Memory::new()) };
+        }
+        MEMORY.with(|memory| f(&mut memory.borrow_mut()))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        f(&mut Argon2Memory::new())
+    }
+}
 
 /// Verify a password against a PHC-format argon2 hash. The parameters are
 /// read from the hash string itself, so any cost up to the
@@ -380,36 +513,47 @@ pub const ARGON2_MAX_P_COST: u32 = 10 * argon2::Params::DEFAULT_P_COST;
 /// a salt or an output, or carries parameters the `argon2` crate or the
 /// ceilings refuse.
 pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
-    use argon2::{
-        password_hash::{self, PasswordHash},
-        Argon2, PasswordVerifier,
-    };
-    let malformed = |what: String| CryptoError::MalformedHash(format!("argon2: {what}"));
+    use argon2::{password_hash::phc::PasswordHash, Algorithm, Argon2, Version};
+    let malformed =
+        |what: &dyn core::fmt::Display| CryptoError::MalformedHash(format!("argon2: {what}"));
 
-    let parsed = PasswordHash::new(hash).map_err(|e| malformed(e.to_string()))?;
-    // The verifier reports a missing salt or output as `Error::Password`,
-    // the same error as a wrong password; refuse both here so that error
-    // below can only mean a mismatch.
-    if parsed.salt.is_none() || parsed.hash.is_none() {
-        return Err(malformed("hash has no salt or no output".to_string()));
-    }
-    let params = argon2::Params::try_from(&parsed).map_err(|e| malformed(e.to_string()))?;
+    let parsed = PasswordHash::new(hash).map_err(|e| malformed(&e))?;
+    let (Some(salt), Some(expected)) = (&parsed.salt, &parsed.hash) else {
+        return Err(malformed(&"hash has no salt or no output"));
+    };
+    let params = argon2::Params::try_from(&parsed).map_err(|e| malformed(&e))?;
     for (name, value, max) in [
-        ("m", params.m_cost(), ARGON2_MAX_M_COST),
-        ("t", params.t_cost(), ARGON2_MAX_T_COST),
-        ("p", params.p_cost(), ARGON2_MAX_P_COST),
+        ("memory cost m", params.m_cost(), ARGON2_MAX_M_COST),
+        ("time cost t", params.t_cost(), ARGON2_MAX_T_COST),
+        ("parallelism p", params.p_cost(), ARGON2_MAX_P_COST),
     ] {
         if value > max {
-            return Err(malformed(format!(
-                "cost {name}={value} exceeds the ceiling of {max}"
+            return Err(malformed(&format!(
+                "{name}={value} exceeds the ceiling of {max} this runtime will run"
             )));
         }
     }
+    let algorithm = Algorithm::try_from(parsed.algorithm.as_str()).map_err(|e| malformed(&e))?;
+    // A PHC string without `v=` is version 0x13, as in the `argon2` crate's
+    // own verifier.
+    let version = parsed
+        .version
+        .map(Version::try_from)
+        .transpose()
+        .map_err(|e| malformed(&e))?
+        .unwrap_or_default();
 
-    match Argon2::default().verify_password(password.as_bytes(), &parsed) {
-        Ok(()) => Ok(()),
-        Err(password_hash::Error::Password) => Err(CryptoError::PasswordMismatch),
-        Err(e) => Err(malformed(e.to_string())),
+    let argon2 = Argon2::new(algorithm, version, params);
+    let mut computed = vec![0u8; expected.len()];
+    with_argon2_memory(|memory| {
+        memory.derive(&argon2, password.as_bytes(), salt.as_ref(), &mut computed)
+    })
+    .map_err(|e| malformed(&e))?;
+
+    if constant_time_eq(&computed, expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(CryptoError::PasswordMismatch)
     }
 }
 
@@ -433,9 +577,9 @@ const PBKDF2_DK_LEN: usize = 32;
 /// Cheat Sheet, 2023).
 ///
 /// This is the value to pass unless you have measured a reason not to.
-/// It runs in roughly a second of single-threaded wasm, which is acceptable
-/// for a login or password change — the only operations that hash a
-/// password — and is not acceptable per request.
+/// It runs in about 180 ms of wasm32 under V8 (measured), which is
+/// acceptable for a login or password change — the only operations that
+/// hash a password — and is not acceptable per request.
 pub const PBKDF2_SHA256_RECOMMENDED_ITERATIONS: u32 = 600_000;
 
 /// Lowest iteration count [`pbkdf2_hash`] will *write*. NIST SP 800-132 §5.2
@@ -602,8 +746,11 @@ fn pbkdf2_derive(
 /// The choice is a deployment property, not a security level: both schemes
 /// here are accepted password-storage algorithms, and the reason to pick one
 /// is the runtime it has to run in. Argon2id is the better function and the
-/// default; PBKDF2 exists because argon2id's memory cost is unaffordable in
-/// single-threaded wasm, where the default parameters take minutes.
+/// default. PBKDF2 needs almost no memory, for a runtime an embedder does
+/// not want to spend argon2id's in; it is not cheaper in CPU (about 180 ms
+/// per hash at [`PBKDF2_SHA256_RECOMMENDED_ITERATIONS`] in wasm32 under V8,
+/// against about 3-8 ms for [`Argon2Cost::Constrained`]), so under a tight
+/// CPU budget choose `Argon2(Argon2Cost::Constrained)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasswordScheme {
     /// argon2id at the given cost preset. The default.
@@ -1027,6 +1174,135 @@ mod tests {
                 other => panic!("{params}: expected MalformedHash, got {other:?}"),
             }
         }
+    }
+
+    /// argon2id known-answer vectors from an independent implementation
+    /// (the reference C library, through Python's argon2-cffi 25.1
+    /// `low_level.hash_secret`), all over the password below and salt bytes
+    /// `00..0f`, each standing in for a credential already stored.
+    const KAT_PASSWORD: &str = "correcthorsebatterystaple";
+    /// [`Argon2Cost::Default`]'s costs.
+    const KAT_DEFAULT: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAECAwQFBgcICQoLDA0ODw$7RmKhudBqFsX3LFSkYHsVYCSSV/j3hL/zZ9AjkvygIo";
+    /// [`Argon2Cost::Constrained`]'s costs.
+    const KAT_CONSTRAINED: &str = "$argon2id$v=19$m=4096,t=2,p=1$AAECAwQFBgcICQoLDA0ODw$DOJe9Dre1CKOGYGj/SicLaOiPXVXJ1Jame2jnwMAoGU";
+    /// Exactly at [`ARGON2_MAX_M_COST`]: OWASP's 46 MiB, 1-iteration option.
+    const KAT_AT_CEILING: &str = "$argon2id$v=19$m=47104,t=1,p=1$AAECAwQFBgcICQoLDA0ODw$xnXTdHV0WrguRO6PuHmv73XvW60GvsB6rAVhzZddIts";
+    /// argon2-cffi's `PasswordHasher` default (RFC 9106's 64 MiB option):
+    /// a well-formed, correct hash above the memory ceiling.
+    const KAT_OVER_CEILING: &str = "$argon2id$v=19$m=65536,t=3,p=4$AAECAwQFBgcICQoLDA0ODw$ig/1Ydv8lGLja+cEry2Q+/MeqvCw1xexf4oGjq9DiAQ";
+
+    #[test]
+    fn stored_hashes_within_the_ceilings_verify() {
+        for hash in [KAT_DEFAULT, KAT_CONSTRAINED, KAT_AT_CEILING] {
+            verify_password(KAT_PASSWORD, hash).unwrap_or_else(|e| panic!("{hash}: {e:?}"));
+            assert!(
+                matches!(
+                    verify_password("wrong", hash),
+                    Err(CryptoError::PasswordMismatch)
+                ),
+                "{hash}"
+            );
+        }
+    }
+
+    /// A correct password against a genuine hash whose memory cost is above
+    /// what a Workers isolate can run is refused, before deriving, with an
+    /// error that names the cost and the ceiling — not verified, and not
+    /// reported as a wrong password.
+    #[test]
+    fn a_genuine_hash_above_the_memory_ceiling_is_refused() {
+        match verify_password_any_scheme(KAT_PASSWORD, KAT_OVER_CEILING) {
+            Err(CryptoError::MalformedHash(m)) => assert_eq!(
+                m,
+                "argon2: memory cost m=65536 exceeds the ceiling of 47104 this runtime will run"
+            ),
+            other => panic!("expected MalformedHash, got {other:?}"),
+        }
+    }
+
+    /// A class buffer is reused dirty by derivations of other sizes; each
+    /// must still produce what the `argon2` crate computes in fresh memory.
+    #[test]
+    fn a_reused_class_buffer_derives_what_fresh_memory_does() {
+        let mut memory = Argon2Memory::new();
+        for (m, t, p) in [
+            (47104, 1, 1),
+            (20000, 2, 1),
+            (46000, 1, 2),
+            (19456, 2, 1),
+            (4096, 2, 1),
+            (3000, 3, 1),
+            (19456, 1, 4),
+        ] {
+            let params = argon2::Params::new(m, t, p, None).expect("params");
+            let argon2 =
+                argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+            let salt = [7u8; 16];
+            let mut pooled = [0u8; 32];
+            let mut fresh = [0u8; 32];
+            memory
+                .derive(&argon2, b"pw", &salt, &mut pooled)
+                .expect("pooled");
+            argon2
+                .hash_password_into(b"pw", &salt, &mut fresh)
+                .expect("fresh");
+            assert_eq!(pooled, fresh, "m={m} t={t} p={p}");
+        }
+        // Seven derivations of six sizes, three buffers.
+        assert!(memory.classes.iter().all(Option::is_some));
+    }
+
+    /// A kept buffer holds nothing of the derivation that used it.
+    #[test]
+    fn a_class_buffer_is_zeroised_after_each_derivation() {
+        let mut memory = Argon2Memory::new();
+        for m in [4096, 20000, 19456] {
+            let params = argon2::Params::new(m, 1, 1, None).expect("params");
+            let argon2 =
+                argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+            memory
+                .derive(&argon2, b"pw", &[7u8; 16], &mut [0u8; 32])
+                .expect("derive");
+            for (class, buffer) in memory.classes.iter().enumerate() {
+                if let Some(buffer) = buffer {
+                    assert!(
+                        buffer.iter().all(|b| b.as_ref().iter().all(|&w| w == 0)),
+                        "class {class} holds derivation state after m={m}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Each derivation takes the smallest class that holds it.
+    #[test]
+    fn a_derivation_takes_the_smallest_class_that_holds_it() {
+        for (m, class) in [
+            (3000, 0),
+            (4096, 0),
+            (4100, 1),
+            (19456, 1),
+            (20000, 2),
+            (47104, 2),
+        ] {
+            let mut memory = Argon2Memory::new();
+            let params = argon2::Params::new(m, 1, 1, None).expect("params");
+            let argon2 =
+                argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+            memory
+                .derive(&argon2, b"pw", &[7u8; 16], &mut [0u8; 32])
+                .expect("derive");
+            let used: Vec<usize> = (0..ARGON2_MEMORY_CLASSES.len())
+                .filter(|&i| memory.classes[i].is_some())
+                .collect();
+            assert_eq!(used, vec![class], "m={m}");
+        }
+    }
+
+    /// The memory ceiling is OWASP's largest argon2id memory cost, 46 MiB.
+    #[test]
+    fn the_memory_ceiling_is_46_mib() {
+        assert_eq!(ARGON2_MAX_M_COST, 47104);
     }
 
     /// The ceilings sit above everything this crate writes, so no hash it
