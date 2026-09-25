@@ -150,7 +150,8 @@ impl WaferBuilder {
     /// from the beginning after the init backoff — so a cap below the
     /// slowest legitimate Init (a long migration) keeps that block from ever
     /// initializing. Set it to bound boot when an Init that hangs is worse
-    /// than one that fails.
+    /// than one that fails. A zero cap would time every Init out at once, so
+    /// [`build`](Self::build) refuses it.
     pub fn init_timeout(mut self, cap: std::time::Duration) -> Self {
         self.init_timeout_cap = Some(cap);
         self
@@ -158,6 +159,11 @@ impl WaferBuilder {
 
     /// Construct the `Wafer`. Runs Path A first, then Path B.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
+        if self.init_timeout_cap == Some(std::time::Duration::ZERO) {
+            return Err(RuntimeError::Config(
+                "init_timeout cap is zero: every block's init would time out at once".to_string(),
+            ));
+        }
         let mut w = Wafer::empty();
         w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
         w.wasm.fuel = self.fuel;

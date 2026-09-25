@@ -25,8 +25,14 @@
   (any executor) and the host's global `setTimeout` on wasm32 (a browser, a
   Cloudflare Workers isolate): `wafer-run` gains `futures-timer` on native
   and `wasm-bindgen`, `js-sys` and `wasm-bindgen-futures` on wasm32.
+  The budget runs from when the attempt starts, so an Init that blocks its
+  thread before its first `.await` is still cut off on time. A declared
+  budget under 1 ms is refused at registration with the new
+  `BlockInfoError::ZeroInitTimeout`, and a zero cap by
+  `WaferBuilder::build`: either would time every Init out at once.
   `BlockInfo` is not `#[non_exhaustive]`, so a struct literal outside this
-  workspace needs the new field (`BlockInfo::new` does not).
+  workspace needs the new field (`BlockInfo::new` does not), and an
+  exhaustive `match` on `BlockInfoError` needs the new arm.
 - `call_block` from a context whose deadline has passed answers
   `DeadlineExceeded` (it answered `Cancelled`, the code for a cancelled
   flow). A context whose flag was cancelled still answers `Cancelled`.

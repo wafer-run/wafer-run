@@ -137,9 +137,9 @@ impl RuntimeContext {
     /// wait-for graph). Nothing of the dispatch that happened to reach the
     /// block first carries over: Init is the block's own operation, so it
     /// gets a fresh cancellation flag, none of the dispatch's deadline (the
-    /// init pipeline sets the init budget's when the attempt starts), call
-    /// depth 0, no caller,
-    /// no per-call config or attachments, and the block's own `requires`
+    /// init pipeline sets the init budget's deadline when the attempt
+    /// starts), call depth 0, no caller, no per-call config or attachments,
+    /// and the block's own `requires`
     /// allowlist (SEC-04). Whether a block initializes therefore does not
     /// depend on who touched it first.
     pub(crate) fn for_init(

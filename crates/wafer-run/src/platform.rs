@@ -59,19 +59,25 @@ pub type ConfigExpanderFn = Box<dyn Fn(serde_json::Value) -> Vec<(String, serde_
 // Timer
 // ---------------------------------------------------------------------------
 
-/// Wait `duration` without blocking the thread. The runtime's one timer:
-/// the init budget races a block's Init against it.
+/// A future that completes `duration` after this call, without blocking the
+/// thread. The runtime's one timer: the init budget races a block's Init
+/// against it.
+///
+/// The timer starts here, not when the future is first polled, so a race
+/// that polls something else first (an Init that blocks its thread before
+/// its first `.await`) still ends on time.
 ///
 /// Native: a [`futures_timer::Delay`], driven by that crate's own timer
 /// thread, so it works under any executor — no tokio time driver needed,
 /// and nothing to panic without one. Dropping it unfired cancels it.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) async fn sleep(duration: std::time::Duration) {
-    futures_timer::Delay::new(duration).await;
+pub(crate) fn sleep(duration: std::time::Duration) -> impl std::future::Future<Output = ()> {
+    futures_timer::Delay::new(duration)
 }
 
-/// Wait `duration` without blocking the thread. The runtime's one timer:
-/// the init budget races a block's Init against it.
+/// A future that completes `duration` after this call, without blocking the
+/// thread. The runtime's one timer: the init budget races a block's Init
+/// against it. The timer starts here, not when the future is first polled.
 ///
 /// wasm32: the host's global `setTimeout`, which a browser, a Cloudflare
 /// Workers isolate and Node.js all provide. Dropping the future before it
@@ -79,7 +85,7 @@ pub(crate) async fn sleep(duration: std::time::Duration) {
 /// (`i32::MAX` ms, about 24.8 days) is clamped to it, where the host would
 /// otherwise fire at once.
 #[cfg(target_arch = "wasm32")]
-pub(crate) async fn sleep(duration: std::time::Duration) {
+pub(crate) fn sleep(duration: std::time::Duration) -> impl std::future::Future<Output = ()> {
     use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
 
     #[wasm_bindgen]
@@ -104,7 +110,11 @@ pub(crate) async fn sleep(duration: std::time::Duration) {
     let fired = js_sys::Promise::new(&mut |resolve, _reject| {
         id = set_timeout(&resolve, delay_ms);
     });
-    let _clear = ClearOnDrop(id);
-    // The promise only ever resolves (with `undefined`).
-    let _ = wasm_bindgen_futures::JsFuture::from(fired).await;
+    let clear = ClearOnDrop(id);
+    let fired = wasm_bindgen_futures::JsFuture::from(fired);
+    async move {
+        let _clear = clear;
+        // The promise only ever resolves (with `undefined`).
+        let _ = fired.await;
+    }
 }

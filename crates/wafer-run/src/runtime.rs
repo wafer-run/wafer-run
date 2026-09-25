@@ -690,6 +690,8 @@ pub(crate) async fn run_init_pipeline(
         let mut init_ctx = init_ctx;
         let deadline = budget.and_then(|b| Instant::now().checked_add(b.limit));
         init_ctx.deadline = deadline;
+        // Started now, with the deadline, before the attempt is first polled.
+        let timer = budget.map(|b| crate::platform::sleep(b.limit));
         let attempt = async {
             let info = block.info();
             let env_cfg = config_source
@@ -725,10 +727,9 @@ pub(crate) async fn run_init_pipeline(
             run_init_lifecycle(block.as_ref(), &init_ctx, data).await?;
             Ok(crate::runtime::slot::InitializedState::new())
         };
-        let Some(budget) = budget else {
+        let (Some(budget), Some(timer)) = (budget, timer) else {
             return attempt.await;
         };
-        let timer = crate::platform::sleep(budget.limit);
         futures::pin_mut!(attempt, timer);
         match futures::future::select(attempt, timer).await {
             // An attempt that failed once its deadline had passed failed

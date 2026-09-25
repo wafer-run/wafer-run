@@ -94,6 +94,17 @@ pub enum BlockInfoError {
         /// The rejected tool name.
         name: String,
     },
+
+    /// A block declared an init budget of zero milliseconds
+    /// ([`BlockInfo::init_timeout`] under 1 ms). Every init attempt would be
+    /// over it the moment it started, so the block could never initialize.
+    #[error(
+        "block '{block}' declares an init budget of 0 ms: every init attempt would time out at once; declare at least 1 ms, or no budget"
+    )]
+    ZeroInitTimeout {
+        /// Name of the block that declared the budget.
+        block: String,
+    },
 }
 
 /// Block metadata — identity, schema declarations, and admin UI metadata.
@@ -287,11 +298,19 @@ impl BlockInfo {
     /// [`AgentTool::is_valid_name`] for the rule and for what goes wrong
     /// downstream when it is not.
     ///
+    /// A declared init budget ([`BlockInfo::init_timeout`]) must be at least
+    /// 1 ms: a zero budget would time every init attempt out at once.
+    ///
     /// Called by the runtime on every block it registers; returns the first
     /// offending declaration as a typed [`BlockInfoError`] so boot fails
     /// loudly and callers can match on the failure rather than parse a
     /// string.
     pub fn validate(&self, registered_name: &str) -> Result<(), BlockInfoError> {
+        if self.init_timeout_ms == Some(0) {
+            return Err(BlockInfoError::ZeroInitTimeout {
+                block: registered_name.to_string(),
+            });
+        }
         for var in self.config_keys.iter().chain(self.flow_config.iter()) {
             if var.key.starts_with(WAFER_RUN_SHARED_PREFIX) {
                 return Err(BlockInfoError::ReservedConfigKey {
@@ -343,7 +362,9 @@ impl BlockInfo {
     /// succeed: a retry starts the Init again from the beginning. Work the
     /// abandoned attempt started outside the runtime (a database statement,
     /// an outbound request) is not cancelled by dropping it and may still be
-    /// running. Stored in milliseconds, saturating.
+    /// running. Stored in whole milliseconds, saturating; a budget under
+    /// 1 ms is stored as 0, which registration refuses
+    /// ([`BlockInfoError::ZeroInitTimeout`]).
     pub fn init_timeout(mut self, budget: std::time::Duration) -> Self {
         self.init_timeout_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
         self

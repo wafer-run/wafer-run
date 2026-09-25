@@ -258,6 +258,7 @@ impl Block for Migrates {
 /// `DeadlineExceeded`.
 #[tokio::test]
 async fn an_init_failing_past_its_deadline_is_the_timeout_not_permanent() {
+    let mut failed_past_deadline = 0;
     for trial in 0..30 {
         let codes_seen = Arc::new(Mutex::new(Vec::new()));
         let mut w = wafer(
@@ -279,8 +280,176 @@ async fn an_init_failing_past_its_deadline_is_the_timeout_not_permanent() {
             .unwrap_err();
         let msg = transient(&err);
         assert!(msg.contains("init budget of 40ms"), "trial {trial}: {msg}");
-        for code in codes_seen.lock().unwrap().iter() {
+        let codes_seen = codes_seen.lock().unwrap();
+        if !codes_seen.is_empty() {
+            failed_past_deadline += 1;
+        }
+        for code in codes_seen.iter() {
             assert_eq!(*code, ErrorCode::DeadlineExceeded, "trial {trial}");
         }
     }
+    // A trial either returns the Init's own failure past the deadline (the
+    // case under test) or is dropped by the timer first — the Init's calls
+    // can yield to the executor, and the timer wins the race then. Which
+    // one is a scheduling accident, so the per-trial outcome is only
+    // "transient"; across 30 trials the failure path must have been taken.
+    assert!(
+        failed_past_deadline > 0,
+        "no trial's Init failed past its deadline; the test did not reach the case"
+    );
+}
+
+/// A budget under 1 ms is refused at registration: every attempt would time
+/// out at once, so the block could never initialize. So is a zero cap.
+#[test]
+fn a_zero_budget_is_refused() {
+    for budget in [Duration::ZERO, Duration::from_micros(500)] {
+        let mut w = wafer(None, Vec::new());
+        let err = w
+            .register_block(
+                "test/hangs",
+                Arc::new(Hangs {
+                    budget: Some(budget),
+                }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("init budget of 0 ms"), "{err}");
+    }
+    let err = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .init_timeout(Duration::ZERO)
+        .build()
+        .err()
+        .expect("a zero cap is refused")
+        .to_string();
+    assert!(err.contains("init_timeout cap is zero"), "{err}");
+}
+
+/// Blocks its thread for `blocks`, then waits forever — an Init whose
+/// first poll takes a while.
+struct BlocksThenHangs {
+    blocks: Duration,
+}
+
+#[async_trait]
+impl Block for BlocksThenHangs {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/hangs", "0.1.0", "test/iface@v1", "blocks then hangs")
+            .init_timeout(Duration::from_millis(400))
+    }
+
+    async fn lifecycle(&self, _ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init {
+            std::thread::sleep(self.blocks);
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+
+    async fn handle(&self, _ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        OutputStream::respond(Vec::new())
+    }
+}
+
+/// The budget runs from when the attempt starts, not from when the timer is
+/// first polled: an Init that blocks its thread for 300 ms of a 400 ms
+/// budget is dropped at about 400 ms, not 700 ms.
+#[tokio::test]
+async fn the_budget_runs_from_the_start_of_the_attempt() {
+    let mut w = wafer(
+        None,
+        vec![(
+            "test/hangs",
+            Arc::new(BlocksThenHangs {
+                blocks: Duration::from_millis(300),
+            }),
+        )],
+    );
+    w.seal().await.expect("seal");
+    let started = std::time::Instant::now();
+    let err = tokio::time::timeout(Duration::from_secs(10), w.init_block("test/hangs"))
+        .await
+        .expect("init_block returns")
+        .unwrap_err();
+    transient(&err);
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(600), "{elapsed:?}");
+}
+
+/// The timer needs no tokio time driver: on a runtime built without one,
+/// an Init over its budget times out instead of panicking.
+#[test]
+fn the_timeout_works_without_a_tokio_time_driver() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime without enable_time");
+    let err = rt.block_on(async {
+        let mut w = wafer(None, hangs(Some(Duration::from_millis(50))));
+        w.seal().await.expect("seal");
+        w.init_block("test/hangs").await.unwrap_err()
+    });
+    assert!(transient(&err).contains("init budget of 50ms"));
+}
+
+/// A wasm guest whose `__wafer_info` reports `extra` in its `BlockInfo`
+/// JSON, and whose `lifecycle(Init)` spins for a while and then fails with
+/// `Internal`.
+fn spinning_guest(extra: &str) -> Vec<u8> {
+    let info = format!(
+        r#"{{"name":"test/guest","version":"0.1.0","interface":"test/iface@v1","summary":""{extra}}}"#
+    );
+    let result = r#"{"Err":{"code":"Internal","message":"boom","meta":[]}}"#;
+    let info_packed = (64u64 << 32) | info.len() as u64;
+    let result_packed = (4096u64 << 32) | result.len() as u64;
+    wat::parse_str(format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (data (i32.const 64) "{info}")
+            (data (i32.const 4096) "{result}")
+            (func (export "__wafer_alloc") (param i32) (result i32) (i32.const 8192))
+            (func (export "__wafer_info") (result i64) (i64.const {info_packed}))
+            (func (export "__wafer_handle") (param i32 i32) (result i64) (i64.const 0))
+            (func (export "__wafer_lifecycle") (param i32 i32) (result i64)
+              (local $i i32)
+              (local.set $i (i32.const 3000000))
+              (block $done
+                (loop $spin
+                  (br_if $done (i32.eqz (local.get $i)))
+                  (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+                  (br $spin)))
+              (i64.const {result_packed})))"#,
+        info = info.replace('"', "\\\""),
+        result = result.replace('"', "\\\""),
+    ))
+    .expect("guest WAT parses")
+}
+
+/// A budget a wasm guest declares in its `__wafer_info` JSON reaches the
+/// runtime and applies: the guest's Init runs past its 1 ms budget and
+/// fails, which is the transient timeout. Without the declaration the same
+/// failure is permanent.
+#[tokio::test]
+async fn a_guest_declared_budget_crosses_the_wire_and_applies() {
+    let with_budget =
+        wafer_run::WasmiBlock::load_from_bytes(&spinning_guest(r#","init_timeout_ms":1"#))
+            .expect("load guest");
+    assert_eq!(with_budget.info().init_timeout_ms, Some(1));
+    let mut w = wafer(None, vec![("test/guest", Arc::new(with_budget))]);
+    w.seal().await.expect("seal");
+    let err = w.init_block("test/guest").await.unwrap_err();
+    let msg = transient(&err);
+    assert!(
+        msg.contains("init budget of 1ms (declared by the block)"),
+        "{msg}"
+    );
+    assert!(msg.contains("boom"), "{msg}");
+
+    let without = wafer_run::WasmiBlock::load_from_bytes(&spinning_guest("")).expect("load guest");
+    assert_eq!(without.info().init_timeout_ms, None);
+    let mut w = wafer(None, vec![("test/guest", Arc::new(without))]);
+    w.seal().await.expect("seal");
+    let err = w.init_block("test/guest").await.unwrap_err();
+    assert!(matches!(err, InitError::Permanent(_)), "{err:?}");
 }
