@@ -100,7 +100,7 @@ fn default_to_sql(d: &DefaultValue, backend: Backend) -> Result<String, SqlBuild
     })
 }
 
-/// `s` as a string literal that reads back as exactly `s` on every session.
+/// `s` as a string literal that reads back as exactly `s`.
 ///
 /// - SQLite: `'…'` with each `'` doubled. SQLite string literals have no
 ///   other escape; a backslash is an ordinary character.
@@ -111,7 +111,12 @@ fn default_to_sql(d: &DefaultValue, backend: Backend) -> Result<String, SqlBuild
 ///   connection option can turn off, and with it off a `\` before the closing
 ///   quote escapes that quote. An escape string always treats `\` as an
 ///   escape, so with every backslash doubled no escape sequence remains and
-///   the literal means the same whatever the session's settings.
+///   the literal reads the same whatever `standard_conforming_strings` and
+///   `backslash_quote` are set to. That holds while the session's
+///   `client_encoding` is UTF8, which sqlx sets in its startup message: in a
+///   client encoding such as SJIS, where the second byte of a multibyte
+///   character can be `\`, the server reads the SQL text as different
+///   characters from the UTF-8 this function wrote.
 ///
 /// A NUL character is refused ([`SqlBuildError::InvalidDefault`]): PostgreSQL
 /// text cannot hold one, and SQL text cannot carry one inside a literal.
@@ -326,15 +331,10 @@ pub fn build_add_column(
 /// Generate an `ALTER TABLE <table> ADD COLUMN <column> <type_sql>` statement.
 ///
 /// Both `table_name` and `column_name` are quoted as identifiers, and must be
-/// plain identifiers ([`validate_ident`]) or the call is `Err`. `type_sql`
-/// is a dialect column type produced by `data_type_to_sql` (or, for the
-/// write path's lazy column-add, which maps from a `serde_json::Value`, the
-/// column type the backend chose); it is spliced verbatim and must therefore
-/// be a trusted type literal, never untrusted input.
-///
-/// This is the primitive behind [`build_add_column_for_value`], for a caller
-/// that knows only a column name and a target type — not a full [`Column`]
-/// (which [`build_add_column`] requires).
+/// plain identifiers ([`validate_ident`]) or the call is `Err`. `type_sql` is
+/// spliced verbatim, so this stays private: its one caller,
+/// [`build_add_column_for_value`], passes a fixed type from
+/// [`column_type_for_value`].
 ///
 /// Postgres emits `ADD COLUMN IF NOT EXISTS` for idempotency: the lazy
 /// column-add path may legitimately re-attempt the same add (two concurrent
@@ -343,10 +343,10 @@ pub fn build_add_column(
 /// `ADD COLUMN` as a hard error. SQLite does **not** support `IF NOT EXISTS` on
 /// `ADD COLUMN`, so its callers guard with an existence check and swallow the
 /// duplicate-column error instead.
-pub fn build_add_column_with_type(
+fn build_add_column_with_type(
     table_name: &str,
     column_name: &str,
-    type_sql: &str,
+    type_sql: &'static str,
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
     let if_not_exists = match backend {

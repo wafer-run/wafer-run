@@ -34,6 +34,10 @@
   helpers are unchanged; code that built the struct by hand switches to a
   variant, and code that set `is_raw` for `CURRENT_TIMESTAMP` uses
   `DefaultValue::Now`. `DefaultVal::Float` must be finite.
+- `ddl::build_add_column_with_type` is private: it spliced its `type_sql`
+  argument into the statement verbatim. Callers use
+  `ddl::build_add_column_for_value`, or `ddl::build_add_column` with a
+  `Column`.
 - `wafer-block-postgres` is built on sqlx 0.9 (was 0.8), so
   `PostgresDatabaseService::from_pool` takes a sqlx 0.9 `PgPool`. An
   embedder that builds its own pool moves its `sqlx` dependency to 0.9;
@@ -855,8 +859,8 @@
   (`MAX_IDENT_LEN = 63`), and `wafer_sql_utils::ident::validate_ident` now
   enforces the same rule (it admitted uppercase and any length), so the
   executor, every DDL builder and every backend refuse what the handler
-  refuses. `ddl::build_drop_table`, `build_add_column`,
-  `build_add_column_with_type` and `build_add_column_for_value` return
+  refuses. `ddl::build_drop_table`, `build_add_column` and
+  `build_add_column_for_value` return
   `Result<Statement, SqlBuildError>`, and `DatabaseError` implements
   `From<SqlBuildError>` (as `InvalidArgument`). Block names are capped at
   59 bytes (`validate_block_name`), so a block's `{org}__{block}__` table
@@ -886,7 +890,7 @@
   through `database.ensure_table` / `database.add_column`. `DbExec`'s
   `ensure_query_columns` is replaced by `require_columns`, and
   `wafer_sql_utils::ddl::build_add_text_column` (used only by the removed
-  path) is removed — `build_add_column_with_type` covers it.
+  path) is removed — `build_add_column_for_value` covers it.
 - A WASM guest no longer receives the request's `Cookie` or `Authorization`
   header unless it names the header in its declared
   `BlockCapabilities.headers.readable` (in `BlockInfo::capabilities`, which is
@@ -1368,8 +1372,10 @@
   connection option can turn it off, and then a default taken from a
   `database.ensure_table` / `database.add_column` request could end the
   literal early and have the rest of the value parsed as SQL. The literal now
-  reads back as exactly the value on every session. SQLite rendering is
-  unchanged (its literals have no backslash escape).
+  reads back as exactly the value whatever `standard_conforming_strings` and
+  `backslash_quote` are set to, under the UTF8 `client_encoding` sqlx sets
+  when it connects. SQLite rendering is unchanged (its literals have no
+  backslash escape).
 - `ddl::build_create_table` and `ddl::build_add_column` refuse a default no
   SQL literal can express — a string holding a NUL character or a non-finite
   float — with `SqlBuildError::InvalidDefault`, which the database handler
