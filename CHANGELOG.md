@@ -1243,6 +1243,30 @@
   (generated from `ErrorCode`; a `wafer-block` test fails when they drift,
   `WAFER_REGENERATE=1` rewrites them), `WaferClientErrorCode` and
   `isWaferServerErrorCode`.
+- `wafer_core::discovery::generate_openapi` and `generate_agent_card` take
+  the caller's level and an effective-auth resolver, as `generate_webmcp`
+  does: `generate_openapi(blocks, caller, effective_auth, project_name,
+  project_description, server_url)`, and the same for
+  `generate_agent_card`. An endpoint whose `effective_auth(block, ep)` is
+  above `caller` is left out of both documents; they described every
+  schema-carrying endpoint to whoever asked. The OpenAPI `security`
+  requirement follows the effective level too, so a `Public` endpoint the
+  router gates as `Admin` is published with `bearerAuth`. A consumer
+  whose routing never raises an endpoint's declared level passes
+  `|_, ep| ep.auth`; one that already narrowed `BlockInfo::endpoints` to
+  the caller before calling can pass that narrowing's resolver and drop
+  its own filter.
+- `Wafer::seal()` refuses boot with the new
+  `RuntimeError::DuplicateEndpointRoutes` when two endpoints, in one block
+  or across blocks, declare the same method on the same route. Routes are
+  compared by the new `wafer_block::route_shape`, which writes every
+  `{name}` placeholder segment as `{}`, so `GET /items/{id}` and
+  `GET /items/{item_id}` collide; a pattern ending in `/**` is compared
+  as written. The error lists every collision with each claimant's block
+  and declared path (`DuplicateEndpointRouteError`, `RouteClaimant`).
+  Such a pair used to boot, and `generate_openapi` kept only the later
+  one with nothing reported. A `match` over `RuntimeError` needs an arm
+  for the new variant.
 
 ### Added
 

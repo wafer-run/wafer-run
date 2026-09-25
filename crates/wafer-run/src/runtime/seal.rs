@@ -2,13 +2,13 @@
 //! into named phases: lockfile-pinned downloads, config expansion,
 //! block-reference resolution, grant-rejection gate, capability
 //! computation, wasm instance-pooling policy, agent-tool-name uniqueness,
-//! and startup-snapshot finalization.
+//! endpoint-route uniqueness, and startup-snapshot finalization.
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use wafer_block::error::{
-    AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateToolNameError,
-    RuntimeError,
+    AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateEndpointRouteError,
+    DuplicateToolNameError, RouteClaimant, RuntimeError,
 };
 
 use super::Wafer;
@@ -47,7 +47,8 @@ impl Wafer {
     ///    boot) and log each WASM block whose declared `Singleton`/`PerFlow`
     ///    instance mode opts it into warm instance pooling (PERF-01).
     /// 6. Refuse boot if two endpoints — in the same block or across blocks
-    ///    — declare the same WebMCP agent-tool name.
+    ///    — declare the same WebMCP agent-tool name, or the same method on
+    ///    the same route.
     /// 7. Finalize the [`crate::snapshot::StartupSnapshot`] consumed by
     ///    every [`crate::runtime::RuntimeContext`].
     ///
@@ -104,6 +105,7 @@ impl Wafer {
         self.log_wasm_instance_pooling()?;
 
         self.fail_on_duplicate_tool_names()?;
+        self.fail_on_duplicate_endpoint_routes()?;
 
         self.finalize_snapshot();
         Ok(())
@@ -187,6 +189,64 @@ impl Wafer {
             Ok(())
         } else {
             Err(RuntimeError::DuplicateToolNames(duplicates))
+        }
+    }
+
+    /// Refuse boot when two endpoints declare the same method on the same
+    /// route.
+    ///
+    /// `BlockInfo::validate` sees one block at a time, so two blocks that both
+    /// declare `GET /api/items` each pass it. Only one handler can answer such
+    /// a request, and the discovery documents describe it as one operation:
+    /// `wafer_core::discovery::generate_openapi` keys operations by method and
+    /// path, so one claimant would replace the other in the document with
+    /// nothing reported. The collision is refused here instead, aggregated
+    /// like [`Self::fail_on_duplicate_tool_names`].
+    ///
+    /// Routes are compared by [`wafer_block::route_shape`]: placeholders
+    /// match regardless of their names, so `/items/{id}` and
+    /// `/items/{item_id}` collide. Every declared endpoint counts, with or
+    /// without a schema — a route is claimed by being declared.
+    fn fail_on_duplicate_endpoint_routes(&self) -> Result<(), RuntimeError> {
+        // BTreeMap so the aggregated message is sorted and stable across
+        // boots; `registration.blocks` is a HashMap. Keyed by the method's
+        // rendering because `HttpMethod` is not `Ord`.
+        let mut claimants: BTreeMap<
+            (String, String),
+            (wafer_block::HttpMethod, Vec<RouteClaimant>),
+        > = BTreeMap::new();
+        for block in self.registration.blocks.values() {
+            let info = block.info();
+            for ep in &info.endpoints {
+                let route = wafer_block::route_shape(&ep.path).into_owned();
+                claimants
+                    .entry((route, ep.method.to_string()))
+                    .or_insert_with(|| (ep.method, Vec::new()))
+                    .1
+                    .push(RouteClaimant {
+                        block: info.name.clone(),
+                        path: ep.path.clone(),
+                    });
+            }
+        }
+
+        let duplicates: Vec<DuplicateEndpointRouteError> = claimants
+            .into_iter()
+            .filter(|(_, (_, claimants))| claimants.len() > 1)
+            .map(|((route, _), (method, mut claimants))| {
+                claimants.sort_by(|a, b| (&a.block, &a.path).cmp(&(&b.block, &b.path)));
+                DuplicateEndpointRouteError {
+                    method,
+                    route,
+                    claimants,
+                }
+            })
+            .collect();
+
+        if duplicates.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::DuplicateEndpointRoutes(duplicates))
         }
     }
 
@@ -768,10 +828,11 @@ mod widening_tests {
 }
 
 #[cfg(test)]
-mod tool_name_tests {
-    //! Cross-block agent-tool-name uniqueness. `BlockInfo::validate` sees one
-    //! block at a time, so a name two blocks both claim only becomes visible
-    //! once every block is registered — which is what `seal()` is for.
+mod endpoint_uniqueness_tests {
+    //! Cross-block agent-tool-name and endpoint-route uniqueness.
+    //! `BlockInfo::validate` sees one block at a time, so a name or route two
+    //! blocks both claim only becomes visible once every block is registered
+    //! — which is what `seal()` is for.
 
     use std::sync::Arc;
 
@@ -952,6 +1013,130 @@ mod tool_name_tests {
         assert!(
             matches!(err, RuntimeError::DuplicateToolNames(_)),
             "wrong variant: {err:?}"
+        );
+    }
+
+    fn items(name: &str, endpoints: Vec<BlockEndpoint>) -> BlockInfo {
+        BlockInfo::new(name, "1.0.0", "http-handler@v1", "Items").endpoints(endpoints)
+    }
+
+    #[tokio::test]
+    async fn seal_refuses_two_blocks_declaring_the_same_route() {
+        let mut wafer = wafer_with(vec![
+            items("test/items", vec![BlockEndpoint::get("/api/items")]),
+            items("test/more-items", vec![BlockEndpoint::get("/api/items")]),
+        ]);
+        let err = wafer.seal().await.expect_err("seal must refuse");
+        let RuntimeError::DuplicateEndpointRoutes(duplicates) = &err else {
+            panic!("wrong variant: {err:?}");
+        };
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].route, "/api/items");
+        assert_eq!(
+            duplicates[0]
+                .claimants
+                .iter()
+                .map(|c| c.block.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test/items", "test/more-items"]
+        );
+
+        // Both claimants are named: an operator has to know which two
+        // endpoints to look at, not just that a collision exists.
+        let msg = err.to_string();
+        for expected in [
+            "1 duplicate endpoint route(s)",
+            "GET /api/items declared by 2 endpoints",
+            "block `test/items` GET /api/items",
+            "block `test/more-items` GET /api/items",
+        ] {
+            assert!(msg.contains(expected), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn routes_differing_only_in_placeholder_names_collide() {
+        let wafer = wafer_with(vec![
+            items("test/items", vec![BlockEndpoint::get("/api/items/{id}")]),
+            items(
+                "test/more-items",
+                vec![BlockEndpoint::get("/api/items/{item_id}")],
+            ),
+        ]);
+        let err = wafer
+            .fail_on_duplicate_endpoint_routes()
+            .expect_err("both patterns match every `/api/items/<x>`");
+        let msg = err.to_string();
+        for expected in [
+            "GET /api/items/{} declared by 2 endpoints",
+            "block `test/items` GET /api/items/{id}",
+            "block `test/more-items` GET /api/items/{item_id}",
+        ] {
+            assert!(msg.contains(expected), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn a_route_declared_twice_inside_one_block_collides() {
+        let wafer = wafer_with(vec![items(
+            "test/items",
+            vec![
+                BlockEndpoint::post("/api/items").auth(AuthLevel::Public),
+                BlockEndpoint::post("/api/items").auth(AuthLevel::Admin),
+            ],
+        )]);
+        assert!(matches!(
+            wafer.fail_on_duplicate_endpoint_routes(),
+            Err(RuntimeError::DuplicateEndpointRoutes(_))
+        ));
+    }
+
+    #[test]
+    fn a_shared_path_under_different_methods_or_routes_is_accepted() {
+        let wafer = wafer_with(vec![
+            items(
+                "test/items",
+                vec![
+                    BlockEndpoint::get("/api/items"),
+                    BlockEndpoint::get("/api/items/{id}"),
+                    BlockEndpoint::get("/api/items/new"),
+                ],
+            ),
+            items(
+                "test/more-items",
+                vec![
+                    BlockEndpoint::post("/api/items"),
+                    BlockEndpoint::delete("/api/items/{id}"),
+                ],
+            ),
+        ]);
+        assert!(wafer.fail_on_duplicate_endpoint_routes().is_ok());
+    }
+
+    #[test]
+    fn aggregates_every_route_collision_sorted_by_route_then_method() {
+        let wafer = wafer_with(vec![
+            items(
+                "test/items",
+                vec![BlockEndpoint::post("/api/b"), BlockEndpoint::get("/api/a")],
+            ),
+            items(
+                "test/more-items",
+                vec![BlockEndpoint::post("/api/b"), BlockEndpoint::get("/api/a")],
+            ),
+        ]);
+        let err = wafer
+            .fail_on_duplicate_endpoint_routes()
+            .expect_err("two collisions");
+        let RuntimeError::DuplicateEndpointRoutes(duplicates) = &err else {
+            panic!("wrong variant: {err:?}");
+        };
+        assert_eq!(
+            duplicates
+                .iter()
+                .map(|d| format!("{} {}", d.method, d.route))
+                .collect::<Vec<_>>(),
+            vec!["GET /api/a", "POST /api/b"]
         );
     }
 }

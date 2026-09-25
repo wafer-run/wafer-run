@@ -1695,9 +1695,25 @@ fn rewrite_schema_map(node: &Value, renames: &std::collections::BTreeMap<String,
     )
 }
 
-/// Generate a full OpenAPI 3.1 JSON document from the given blocks.
+/// Generate an OpenAPI 3.1 JSON document describing the schema-carrying
+/// endpoints `caller` is allowed to invoke.
+///
+/// Endpoints above `caller`'s level are omitted, not marked: a document that
+/// describes routes its reader cannot call is recon surface. `effective_auth`
+/// says, for one block and one of its endpoints, what access level the
+/// consumer's router enforces on that route — see [`generate_webmcp`] for
+/// why that is an argument and not `ep.auth`. The same level decides whether
+/// the operation carries a `security` requirement.
+///
+/// Operations are keyed by method and path. `Wafer::seal()` refuses two
+/// endpoints declaring the same method on the same route
+/// (`RuntimeError::DuplicateEndpointRoutes`), so declarations from a sealed
+/// runtime never share a key; for declarations that never passed through
+/// `seal()`, the later endpoint in `blocks` order replaces the earlier one.
 pub fn generate_openapi(
     blocks: &[BlockInfo],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
     project_name: &str,
     project_description: &str,
     server_url: &str,
@@ -1716,6 +1732,10 @@ pub fn generate_openapi(
     for block in blocks {
         for ep in &block.endpoints {
             if !ep.has_schema() {
+                continue;
+            }
+            let required = effective_auth(block, ep);
+            if required > caller {
                 continue;
             }
 
@@ -1787,7 +1807,7 @@ pub fn generate_openapi(
             operation.insert("responses".into(), json!({ "200": response_200 }));
 
             // security
-            match ep.auth {
+            match required {
                 AuthLevel::Authenticated | AuthLevel::Admin => {
                     operation.insert("security".into(), json!([{ "bearerAuth": [] }]));
                 }
@@ -1844,9 +1864,15 @@ pub fn generate_openapi(
 // generate_agent_card
 // ---------------------------------------------------------------------------
 
-/// Generate an A2A AgentCard JSON document from the given blocks.
+/// Generate an A2A AgentCard JSON document whose skills are the
+/// schema-carrying endpoints `caller` is allowed to invoke.
+///
+/// Filtered exactly as [`generate_openapi`] is: an endpoint whose
+/// `effective_auth` level is above `caller` is omitted.
 pub fn generate_agent_card(
     blocks: &[BlockInfo],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
     project_name: &str,
     project_description: &str,
     server_url: &str,
@@ -1855,7 +1881,7 @@ pub fn generate_agent_card(
 
     for block in blocks {
         for ep in &block.endpoints {
-            if !ep.has_schema() {
+            if !ep.has_schema() || effective_auth(block, ep) > caller {
                 continue;
             }
 
@@ -2266,15 +2292,12 @@ impl std::fmt::Display for WebMcpRefusalReport {
 /// filtered to what `caller` is allowed to invoke.
 ///
 /// This is the third projection of `BlockInfo::endpoints`, alongside
-/// [`generate_openapi`] and [`generate_agent_card`]. Two things make it
-/// different from those:
-///
-/// * **Opt-in.** Only endpoints carrying `AgentTool` metadata appear.
-///   Carrying a schema is not consent to being called by an agent.
-/// * **Auth-filtered.** Tools above `caller`'s level are omitted entirely —
-///   not marked unavailable. A name an agent cannot use is recon surface, so
-///   it never reaches the page. This mirrors the SEC-073 posture applied to
-///   the discovery documents.
+/// [`generate_openapi`] and [`generate_agent_card`], and is auth-filtered the
+/// same way they are: tools above `caller`'s level are omitted entirely —
+/// not marked unavailable. A name an agent cannot use is recon surface, so it
+/// never reaches the page. What sets it apart is that it is **opt-in**: only
+/// endpoints carrying `AgentTool` metadata appear. Carrying a schema is not
+/// consent to being called by an agent.
 ///
 /// Each emitted tool carries `name`, `description`, `inputSchema`, and
 /// `invocation`, plus `outputSchema` when the endpoint declares a response
@@ -2938,6 +2961,8 @@ mod tests {
         let block = test_block();
         let doc = generate_openapi(
             &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
             "My Project",
             "A test project",
             "https://example.com",
@@ -2954,7 +2979,14 @@ mod tests {
     #[test]
     fn openapi_includes_schema_endpoints_only() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         // /b/test/health has no schema — should not appear
         assert!(
@@ -2977,7 +3009,14 @@ mod tests {
     #[test]
     fn openapi_post_has_request_body() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         let op = &doc["paths"]["/b/test/api/login"]["post"];
         assert!(
@@ -2994,7 +3033,14 @@ mod tests {
     #[test]
     fn openapi_get_has_response_schema() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         let op = &doc["paths"]["/b/test/api/me"]["get"];
         let schema = &op["responses"]["200"]["content"]["application/json"]["schema"];
@@ -3005,7 +3051,14 @@ mod tests {
     #[test]
     fn openapi_auth_sets_security() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         // Public endpoint: no security field
         let login_op = &doc["paths"]["/b/test/api/login"]["post"];
@@ -3027,7 +3080,14 @@ mod tests {
     #[test]
     fn openapi_tags_propagated() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         let login_tags = &doc["paths"]["/b/test/api/login"]["post"]["tags"];
         assert_eq!(*login_tags, json!(["auth"]));
@@ -3040,7 +3100,14 @@ mod tests {
     #[test]
     fn openapi_security_scheme_present() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         let bearer = &doc["components"]["securitySchemes"]["bearerAuth"];
         assert_eq!(bearer["type"], "http");
@@ -3060,7 +3127,14 @@ mod tests {
             })),
         ]),
         ];
-        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
         let schema = &doc["paths"]["/b/test/offers"]["post"]["requestBody"]["content"]
             ["application/json"]["schema"];
         assert!(schema.get("$defs").is_none(), "{schema}");
@@ -3080,7 +3154,14 @@ mod tests {
     #[test]
     fn openapi_without_defs_is_byte_identical_to_before_the_hoist() {
         let block = test_block();
-        let doc = generate_openapi(&[block], "P", "d", "https://x.com");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "d",
+            "https://x.com",
+        );
 
         assert_eq!(
             doc,
@@ -3192,7 +3273,14 @@ mod tests {
                     })),
             ]),
         ];
-        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
 
         // The first-seen body keeps the bare name.
         assert_eq!(
@@ -3256,7 +3344,14 @@ mod tests {
                     })),
             ]),
         ];
-        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
         let op = &doc["paths"]["/b/test/items/{id}"]["get"];
 
         let id_param = op["parameters"]
@@ -3321,7 +3416,14 @@ mod tests {
                     })),
             ]),
         ];
-        let doc = generate_openapi(&blocks, "t", "t", "https://x.test");
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
         let schema = &doc["paths"]["/b/test/literal"]["post"]["requestBody"]["content"]
             ["application/json"]["schema"];
 
@@ -3358,6 +3460,8 @@ mod tests {
         let block = test_block();
         let card = generate_agent_card(
             &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
             "My Project",
             "A test project",
             "https://example.com",
@@ -3380,7 +3484,14 @@ mod tests {
     #[test]
     fn agent_card_skills_from_schema_endpoints() {
         let block = test_block();
-        let card = generate_agent_card(&[block], "P", "", "https://x.com");
+        let card = generate_agent_card(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         let skills = card["skills"].as_array().unwrap();
         // Only 2 schema endpoints (login + me); health has no schema
@@ -3404,7 +3515,14 @@ mod tests {
     #[test]
     fn agent_card_skill_ids_include_block_name() {
         let block = test_block();
-        let card = generate_agent_card(&[block], "P", "", "https://x.com");
+        let card = generate_agent_card(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         let skills = card["skills"].as_array().unwrap();
         for skill in skills {
@@ -3420,10 +3538,104 @@ mod tests {
     #[test]
     fn agent_card_capabilities_defaults() {
         let block = test_block();
-        let card = generate_agent_card(&[block], "P", "", "https://x.com");
+        let card = generate_agent_card(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "https://x.com",
+        );
 
         assert_eq!(card["capabilities"]["streaming"], true);
         assert_eq!(card["capabilities"]["pushNotifications"], false);
+    }
+
+    // Caller scoping of the two discovery documents.
+
+    fn openapi_paths(doc: &Value) -> Vec<String> {
+        doc["paths"]
+            .as_object()
+            .expect("paths object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    fn agent_card_skill_names(card: &Value) -> Vec<String> {
+        card["skills"]
+            .as_array()
+            .expect("skills array")
+            .iter()
+            .map(|s| s["name"].as_str().expect("skill name").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn openapi_omits_endpoints_above_the_caller() {
+        let blocks = [test_block()];
+        let public = generate_openapi(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
+        assert_eq!(openapi_paths(&public), vec!["/b/test/api/login"]);
+
+        let signed_in = generate_openapi(
+            &blocks,
+            AuthLevel::Authenticated,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "u",
+        );
+        assert_eq!(
+            openapi_paths(&signed_in),
+            vec!["/b/test/api/login", "/b/test/api/me"]
+        );
+    }
+
+    #[test]
+    fn openapi_filters_and_secures_by_effective_auth_not_declared_auth() {
+        // A router that mounts this block under an admin-only prefix enforces
+        // Admin on the Public login endpoint. An anonymous caller must not be
+        // told it exists, and an admin must be told it needs a bearer token.
+        let blocks = [test_block()];
+        let admin_mount = |_: &BlockInfo, _: &BlockEndpoint| AuthLevel::Admin;
+
+        let public = generate_openapi(&blocks, AuthLevel::Public, admin_mount, "P", "", "u");
+        assert!(openapi_paths(&public).is_empty(), "got {public}");
+
+        let admin = generate_openapi(&blocks, AuthLevel::Admin, admin_mount, "P", "", "u");
+        assert_eq!(
+            admin["paths"]["/b/test/api/login"]["post"]["security"][0]["bearerAuth"],
+            json!([]),
+            "the enforced level, not the declared one, decides `security`"
+        );
+    }
+
+    #[test]
+    fn agent_card_omits_endpoints_above_the_caller() {
+        let blocks = [test_block()];
+        let public = generate_agent_card(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
+        assert_eq!(agent_card_skill_names(&public), vec!["Login"]);
+
+        let admin_mount = |_: &BlockInfo, _: &BlockEndpoint| AuthLevel::Admin;
+        let public_under_admin_mount =
+            generate_agent_card(&blocks, AuthLevel::Public, admin_mount, "P", "", "u");
+        assert!(
+            agent_card_skill_names(&public_under_admin_mount).is_empty(),
+            "got {public_under_admin_mount}"
+        );
+
+        let signed_in = generate_agent_card(
+            &blocks,
+            AuthLevel::Authenticated,
+            |_, ep| ep.auth,
+            "P",
+            "",
+            "u",
+        );
+        assert_eq!(
+            agent_card_skill_names(&signed_in),
+            vec!["Login", "Get current user"]
+        );
     }
 
     // 12. inline_refs_leaves_flat_schema_unchanged
@@ -5983,7 +6195,14 @@ mod tests {
                 "required": ["name", "key"]
             }))]);
 
-        let doc = generate_openapi(&[block], "T", "D", "https://example.test");
+        let doc = generate_openapi(
+            &[block],
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "T",
+            "D",
+            "https://example.test",
+        );
         let paths = doc["paths"].as_object().expect("paths object");
         assert_eq!(
             paths.keys().collect::<Vec<_>>(),
