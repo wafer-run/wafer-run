@@ -2185,6 +2185,16 @@
 
 ### Refactored
 
+- `wafer-block-crypto` is built on argon2 0.6 (was 0.5). argon2 0.5 pulled
+  in blake2 0.10 and with it a second copy of `digest` (0.10) beside the
+  0.11 line the rest of the crate's crypto uses, in every build that links
+  it, wasm32 Worker builds included. The crate now depends on getrandom 0.4
+  (argon2's salts and `primitives::random_bytes`) and selects its JS
+  backend (`wasm_js`) on wasm32-unknown-unknown itself, as `wafer-block`
+  does for getrandom 0.2, so an embedder adds nothing. Hashes are
+  byte-identical: the libargon2 known-answer vectors verify under both
+  versions, so stored credentials stay valid.
+
 - `wafer-block-sqlite`'s private `apply_filter` and `wafer-core`'s private
   `auth_rank` are deleted; both are now the shared APIs above.
 

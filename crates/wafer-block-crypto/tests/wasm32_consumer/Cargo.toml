@@ -23,10 +23,11 @@ path = "src/lib.rs"
 [dependencies]
 wafer-block-crypto = { path = "../.." }
 
-# `getrandom` (argon2's `OsRng`) and `uuid` (through wafer-core) refuse to
-# build for wasm32-unknown-unknown without a randomness source, and the choice
-# belongs to the embedding binary, not to the library crates that use them.
-# This fixture is that binary's stand-in, so it makes the choice here rather
-# than forcing one on every consumer.
-getrandom = { version = "0.2", features = ["js"] }
+# `uuid` (through wafer-core) refuses to build for wasm32-unknown-unknown
+# without a randomness source, and the choice belongs to the embedding binary,
+# not to the library crates that use it. This fixture is that binary's
+# stand-in, so it makes the choice here rather than forcing one on every
+# consumer. `getrandom` needs no entry: wafer-block (0.2) and
+# wafer-block-crypto (0.4, argon2's salts and `random_bytes`) select its JS
+# backend on this target themselves.
 uuid = { version = "1", features = ["js"] }

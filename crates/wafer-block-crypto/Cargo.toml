@@ -20,6 +20,14 @@ pbkdf2 = { workspace = true }
 hkdf = { workspace = true }
 base64ct = { workspace = true }
 subtle = { workspace = true }
+# The OS RNG behind `primitives::random_bytes`; argon2 draws its salts through
+# the same major version.
+getrandom = "0.4"
+
+# getrandom needs the JS backend on wasm32-unknown-unknown (wasip1 has a
+# native WASI source), as wafer-block selects it for getrandom 0.2.
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 wafer-block = { path = "../wafer-block" }

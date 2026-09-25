@@ -102,11 +102,8 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Generate `n` cryptographically-secure random bytes from the OS RNG.
 pub fn random_bytes(n: usize) -> Result<Vec<u8>, CryptoError> {
-    use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut buf = vec![0u8; n];
-    OsRng
-        .try_fill_bytes(&mut buf)
-        .map_err(|e| CryptoError::Other(format!("rng error: {e}")))?;
+    getrandom::fill(&mut buf).map_err(|e| CryptoError::Other(format!("rng error: {e}")))?;
     Ok(buf)
 }
 
@@ -362,17 +359,14 @@ const _: () = {
 /// Hash a password with argon2id at the given cost, producing a PHC-format
 /// string (`$argon2id$...`) with a random 16-byte salt.
 pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoError> {
-    use argon2::{
-        password_hash::{rand_core::OsRng, SaltString},
-        Argon2, PasswordHasher,
-    };
+    use argon2::{Argon2, PasswordHasher};
     let (m, t, p) = cost.costs();
     let params = argon2::Params::new(m, t, p, None)
         .map_err(|e| CryptoError::HashError(format!("argon2 params: {e}")))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let salt = SaltString::generate(&mut OsRng);
+    // `hash_password` draws a fresh 16-byte salt from the OS RNG.
     argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| CryptoError::HashError(e.to_string()))
 }
@@ -420,13 +414,13 @@ pub const ARGON2_MAX_P_COST: u32 = 10 * argon2::Params::DEFAULT_P_COST;
 /// ceilings refuse.
 pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
     use argon2::{
-        password_hash::{self, PasswordHash},
+        password_hash::{self, phc::PasswordHash},
         Argon2, PasswordVerifier,
     };
     let malformed = |what: String| CryptoError::MalformedHash(format!("argon2: {what}"));
 
     let parsed = PasswordHash::new(hash).map_err(|e| malformed(e.to_string()))?;
-    // The verifier reports a missing salt or output as `Error::Password`,
+    // The verifier reports a missing salt or output as `Error::PasswordInvalid`,
     // the same error as a wrong password; refuse both here so that error
     // below can only mean a mismatch.
     if parsed.salt.is_none() || parsed.hash.is_none() {
@@ -447,7 +441,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
 
     match Argon2::default().verify_password(password.as_bytes(), &parsed) {
         Ok(()) => Ok(()),
-        Err(password_hash::Error::Password) => Err(CryptoError::PasswordMismatch),
+        Err(password_hash::Error::PasswordInvalid) => Err(CryptoError::PasswordMismatch),
         Err(e) => Err(malformed(e.to_string())),
     }
 }
