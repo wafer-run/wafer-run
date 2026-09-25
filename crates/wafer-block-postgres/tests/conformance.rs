@@ -34,6 +34,10 @@
 //!
 //! [`DatabaseService`]: wafer_core::interfaces::database::service::DatabaseService
 
+// The dynamic SQL this file runs directly is test fixture setup and
+// inspection: text written here or built by wafer-sql-utils, carrying no
+// outside input, so each string is asserted injection-safe for sqlx.
+use sqlx::AssertSqlSafe;
 use wafer_block_postgres::service::PostgresDatabaseService;
 use wafer_core::interfaces::database::conformance::{
     run_conformance, run_two_instance_conformance,
@@ -102,7 +106,7 @@ async fn a_search_path_without_public_is_conformant() {
         format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"),
         format!("CREATE SCHEMA {SCHEMA}"),
     ] {
-        sqlx::query(&stmt)
+        sqlx::query(AssertSqlSafe(stmt.as_str()))
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("{stmt}: {e}"));
@@ -131,22 +135,23 @@ async fn a_search_path_without_public_is_conformant() {
         .execute(&session)
         .await
         .expect("create the probe table");
-    let tables: Vec<String> = sqlx::query_scalar(&build_list_tables(Backend::Postgres))
-        .fetch_all(&session)
-        .await
-        .expect("list tables");
+    let tables: Vec<String> =
+        sqlx::query_scalar(AssertSqlSafe(build_list_tables(Backend::Postgres)))
+            .fetch_all(&session)
+            .await
+            .expect("list tables");
     assert!(tables.contains(&"conf_sp_probe".to_string()), "{tables:?}");
     let (sql, params) = build_list_tables_like("conf_sp_", Backend::Postgres);
-    let like: Vec<String> = sqlx::query_scalar(&sql)
+    let like: Vec<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
         .bind(params[0].as_str().expect("pattern"))
         .fetch_all(&session)
         .await
         .expect("list tables like");
     assert_eq!(like, ["conf_sp_probe"]);
     let (sql, params) = build_table_info("conf_sp_probe", Backend::Postgres).expect("valid name");
-    let info: Vec<(String, String, String)> = sqlx::query_as(&format!(
+    let info: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT column_name, data_type, is_nullable FROM ({sql}) AS info"
-    ))
+    )))
     .bind(params[0].as_str().expect("table name"))
     .fetch_all(&session)
     .await
@@ -160,7 +165,7 @@ async fn a_search_path_without_public_is_conformant() {
     );
     session.close().await;
 
-    sqlx::query(&format!("DROP SCHEMA {SCHEMA} CASCADE"))
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {SCHEMA} CASCADE")))
         .execute(&admin)
         .await
         .expect("drop the schema");
@@ -274,7 +279,7 @@ async fn an_included_column_is_not_part_of_the_primary_key() {
             .unwrap_or_else(|e| panic!("{stmt}: {e}"));
     }
     let (sql, params) = build_list_primary_key("conf_include_key", Backend::Postgres);
-    let key: Vec<String> = sqlx::query_scalar(&sql)
+    let key: Vec<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
         .bind(params[0].as_str().expect("bound table name"))
         .fetch_all(&admin)
         .await
@@ -342,7 +347,7 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
             let session_default = session_default.clone();
             Box::pin(async move {
                 if let Some(stmt) = session_default {
-                    sqlx::Executor::execute(conn, stmt.as_str()).await?;
+                    sqlx::raw_sql(AssertSqlSafe(stmt)).execute(conn).await?;
                 }
                 Ok(())
             })
@@ -385,7 +390,7 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
              FOR EACH ROW EXECUTE FUNCTION {table}_linger()"
         ),
     ] {
-        sqlx::query(&stmt)
+        sqlx::query(AssertSqlSafe(stmt.as_str()))
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("{stmt}: {e}"));
@@ -489,7 +494,7 @@ async fn race_guarded_writes(url: &str, table: &str, isolation: Option<&str>) {
     let bytes = svc.sum(table, "size", &[owner("v")]).await.expect("sum");
 
     svc.schema_drop_table(table).await.expect("drop");
-    sqlx::query(&format!("DROP FUNCTION {table}_linger()"))
+    sqlx::query(AssertSqlSafe(format!("DROP FUNCTION {table}_linger()")))
         .execute(&admin)
         .await
         .expect("drop function");
@@ -523,7 +528,7 @@ async fn a_catalog_collision_is_not_already_exists() {
     };
     let table = "conf_catalog_race";
     let admin = PgPool::connect(&url).await.expect("connect as admin");
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+    sqlx::query(AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
         .execute(&admin)
         .await
         .expect("drop");
@@ -532,10 +537,12 @@ async fn a_catalog_collision_is_not_already_exists() {
         .expect("connect the service");
 
     let mut other = admin.begin().await.expect("begin the other session");
-    sqlx::query(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY)"))
-        .execute(&mut *other)
-        .await
-        .expect("create in the other session");
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE TABLE {table} (id TEXT PRIMARY KEY)"
+    )))
+    .execute(&mut *other)
+    .await
+    .expect("create in the other session");
     // Through `exec_raw`, the path a migration runner takes: the driver's
     // error reaches the classifier unwrapped.
     let statement = format!("CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY)");
@@ -546,7 +553,7 @@ async fn a_catalog_collision_is_not_already_exists() {
     };
     let (created, ()) = tokio::join!(create, commit);
 
-    sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+    sqlx::query(AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
         .execute(&admin)
         .await
         .expect("drop");
@@ -842,7 +849,7 @@ async fn a_name_in_two_schemas_resolves_as_the_statements_do() {
     assert_eq!(svc.count("conf_second_only", &[]).await.expect("count"), 0);
 
     let (sql, params) = build_list_tables_like("conf_", Backend::Postgres);
-    let names: Vec<String> = sqlx::query_scalar(&sql)
+    let names: Vec<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
         .bind(params[0].as_str().expect("pattern"))
         .fetch_all(&session)
         .await

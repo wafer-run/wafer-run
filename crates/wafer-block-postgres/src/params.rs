@@ -26,11 +26,25 @@ use sqlx::{
     encode::IsNull,
     error::BoxDynError,
     postgres::{types::Oid, PgArgumentBuffer, PgArguments, PgConnection, PgTypeInfo},
-    Arguments as _, Either, Executor as _, Postgres, Statement as _, TypeInfo as _,
+    Arguments as _, AssertSqlSafe, Either, Executor as _, Postgres, SqlSafeStr as _, SqlStr,
+    Statement as _, TypeInfo as _,
 };
 use wafer_core::interfaces::database::service::DatabaseError;
 
 use crate::errors::sqlx_error;
+
+/// `sql` as the statement text sqlx executes.
+///
+/// sqlx requires any SQL string that is not a `&'static str` to be asserted
+/// free of injected data. Every statement this backend runs is either built
+/// by `wafer-sql-utils` (identifiers quoted, every value a `$n` parameter) or
+/// is a caller's own statement handed through `query_raw`/`exec_raw`; in both
+/// cases the values travel separately as bind parameters (see [`bind`]) and
+/// this backend adds no text of its own, so the text is exactly what the
+/// caller wrote.
+pub(crate) fn statement_text(sql: &str) -> SqlStr {
+    AssertSqlSafe(sql).into_sql_str()
+}
 
 /// The arguments for `sql`, each of `params` encoded for the type PostgreSQL
 /// infers for its parameter, preparing (and caching) `sql` on `conn`.
@@ -39,10 +53,13 @@ use crate::errors::sqlx_error;
 /// statement whose parameter types the arguments were encoded for.
 pub(crate) async fn bind(
     conn: &mut PgConnection,
-    sql: &str,
+    sql: &SqlStr,
     params: &[serde_json::Value],
 ) -> Result<PgArguments, DatabaseError> {
-    let statement = conn.prepare(sql).await.map_err(|e| sqlx_error(&e))?;
+    let statement = conn
+        .prepare(sql.clone())
+        .await
+        .map_err(|e| sqlx_error(&e))?;
     let types = match statement.parameters() {
         Some(Either::Left(types)) => types,
         _ => &[],

@@ -4,6 +4,16 @@
 
 ### Breaking changes
 
+- `wafer-block-postgres` is built on sqlx 0.9 (was 0.8), so
+  `PostgresDatabaseService::from_pool` takes a sqlx 0.9 `PgPool`. An
+  embedder that builds its own pool moves its `sqlx` dependency to 0.9;
+  `PostgresDatabaseService::connect(url)` is unchanged. The move takes the
+  workspace's own crypto onto the RustCrypto digest 0.11 line together
+  (`sha2` 0.11, `hmac` 0.13, `hkdf` 0.13, `pbkdf2` 0.13): sqlx 0.8 pinned
+  `hkdf` 0.12, so bumping `hkdf` alone would have linked two copies. Hash,
+  HMAC, HKDF and PBKDF2 outputs are byte-identical (the SHA-256, RFC 4231
+  HMAC, HKDF known-answer and PBKDF2 vector tests pass unchanged), so
+  stored password hashes, tokens and derived keys stay valid.
 - An `OutputSink` dropped without an explicit terminal now ends its stream
   with an `Error` terminal (`ErrorCode::Internal`, message `output stream
   ended without a terminal event: …`, naming a panic when the drop happens

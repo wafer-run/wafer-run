@@ -77,9 +77,10 @@ pub fn b64url_decode(s: &str) -> Result<Vec<u8>, CryptoError> {
 /// Argument order is `(key, data)` — HMAC(K, m). Infallible: HMAC accepts
 /// keys of any length (RFC 2104 hashes long keys, pads short ones).
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -185,7 +186,7 @@ pub fn jwt_verify(
     secret: &[u8],
     exp_policy: JwtExpPolicy,
 ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
     let parts: Vec<&str> = token.split('.').collect();
@@ -223,7 +224,7 @@ pub fn jwt_verify(
     let signing_input = format!("{header_b64}.{payload_b64}");
     let sig_bytes = b64url_decode(sig_b64)?;
     let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC accepts any key length");
+        <Hmac<Sha256> as KeyInit>::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(signing_input.as_bytes());
     mac.verify_slice(&sig_bytes)
         .map_err(|_| CryptoError::VerifyError("signature mismatch".to_string()))?;

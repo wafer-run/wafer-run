@@ -85,7 +85,7 @@ impl PostgresDatabaseService {
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
         let stmt = ddl::build_drop_table(name, Backend::Postgres)?;
-        sqlx::query(&stmt.sql)
+        sqlx::query(params::statement_text(&stmt.sql))
             .execute(&self.pool)
             .await
             .map_err(|e| sqlx_error(&e))?;
@@ -98,7 +98,7 @@ impl PostgresDatabaseService {
         column: &Column,
     ) -> Result<(), DatabaseError> {
         let stmt = ddl::build_add_column(table, column, Backend::Postgres)?;
-        sqlx::query(&stmt.sql)
+        sqlx::query(params::statement_text(&stmt.sql))
             .execute(&self.pool)
             .await
             .map_err(|e| sqlx_error(&e))?;
@@ -142,7 +142,8 @@ impl DbExec for PostgresDatabaseService {
         _json: &JsonColumns,
     ) -> Result<Record, DatabaseError> {
         let mut conn = self.connection().await?;
-        let args = params::bind(&mut conn, sql, params).await?;
+        let sql = params::statement_text(sql);
+        let args = params::bind(&mut conn, &sql, params).await?;
         let row = sqlx::query_with(sql, args)
             .fetch_optional(&mut *conn)
             .await
@@ -467,7 +468,8 @@ async fn fetch_all(
     sql: &str,
     params: &[serde_json::Value],
 ) -> Result<Vec<PgRow>, DatabaseError> {
-    let args = params::bind(conn, sql, params).await?;
+    let sql = params::statement_text(sql);
+    let args = params::bind(conn, &sql, params).await?;
     sqlx::query_with(sql, args)
         .fetch_all(&mut *conn)
         .await
@@ -480,7 +482,8 @@ async fn execute(
     sql: &str,
     params: &[serde_json::Value],
 ) -> Result<i64, DatabaseError> {
-    let args = params::bind(conn, sql, params).await?;
+    let sql = params::statement_text(sql);
+    let args = params::bind(conn, &sql, params).await?;
     let done = sqlx::query_with(sql, args)
         .execute(&mut *conn)
         .await
@@ -499,7 +502,8 @@ async fn fetch_scalar<T>(
 where
     T: for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres> + Send + Unpin,
 {
-    let args = params::bind(conn, sql, params).await?;
+    let sql = params::statement_text(sql);
+    let args = params::bind(conn, &sql, params).await?;
     sqlx::query_scalar_with(sql, args)
         .fetch_one(&mut *conn)
         .await
