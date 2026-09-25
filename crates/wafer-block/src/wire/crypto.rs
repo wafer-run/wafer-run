@@ -4,7 +4,7 @@
 //! `Vec<u8>` body fields (`RandomBytesResponse::bytes`) — no-inflation tests
 //! lock the load-bearing invariant.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +30,9 @@ pub struct CompareHashRequest {
 /// Request for `crypto.sign` — produce a signed token over `claims`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignRequest {
-    /// Claims to encode into the token payload.
-    pub claims: HashMap<String, serde_json::Value>,
+    /// Claims to encode into the token payload. The signer encodes them
+    /// with keys sorted, so equal claims yield equal tokens.
+    pub claims: BTreeMap<String, serde_json::Value>,
     /// Lifetime of the token in seconds (defaults to 1h).
     #[serde(default = "default_expiry")]
     pub expiry_secs: u64,
@@ -90,7 +91,7 @@ pub struct SignResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyResponse {
     /// Verified claims extracted from the token.
-    pub claims: HashMap<String, serde_json::Value>,
+    pub claims: BTreeMap<String, serde_json::Value>,
 }
 
 /// Response for `crypto.random_bytes`.
@@ -133,7 +134,7 @@ mod tests {
 
     #[test]
     fn sign_request_round_trips() {
-        let mut claims = HashMap::new();
+        let mut claims = BTreeMap::new();
         claims.insert("sub".into(), serde_json::json!("user-1"));
         let original = SignRequest {
             claims,
@@ -147,7 +148,7 @@ mod tests {
 
     #[test]
     fn verify_response_round_trips() {
-        let mut claims = HashMap::new();
+        let mut claims = BTreeMap::new();
         claims.insert("sub".into(), serde_json::json!("u1"));
         let original = VerifyResponse { claims };
         let encoded = codec::encode(&original).expect("encode");
@@ -227,7 +228,7 @@ mod tests {
     #[test]
     fn schema_lock_sign_request() {
         let req = SignRequest {
-            claims: HashMap::new(),
+            claims: BTreeMap::new(),
             expiry_secs: 0,
         };
         let encoded = codec::encode(&req).expect("encode");

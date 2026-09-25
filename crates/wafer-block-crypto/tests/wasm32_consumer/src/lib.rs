@@ -14,7 +14,7 @@ compile_error!(
      build it with --target wasm32-unknown-unknown (scripts/check.sh wasm does)"
 );
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use wafer_block_crypto::{
     primitives::{self, Argon2Cost},
@@ -31,7 +31,7 @@ pub fn crypto_service(jwt_secret: String) -> Result<Box<dyn CryptoService>, Cryp
 pub fn primitives_round_trip(password: &str, secret: &[u8]) -> Result<bool, CryptoError> {
     let hash = primitives::hash_password(password, Argon2Cost::Constrained)?;
     primitives::verify_password_any_scheme(password, &hash)?;
-    let token = primitives::jwt_sign(HashMap::new(), Duration::from_secs(60), secret)?;
+    let token = primitives::jwt_sign(BTreeMap::new(), Duration::from_secs(60), secret)?;
     let nonce = primitives::random_bytes(16)?;
     Ok(primitives::constant_time_eq(token.as_bytes(), &nonce))
 }

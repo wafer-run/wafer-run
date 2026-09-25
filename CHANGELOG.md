@@ -10,6 +10,23 @@
   `wafer-net-security`, where they are defined; import them from there
   (`wafer_net_security::is_blocked_url`) and add `wafer-net-security` to
   the crate's dependencies. The predicates' behaviour is unchanged.
+- JWT claims are a `BTreeMap<String, serde_json::Value>` everywhere they
+  were a `HashMap`: `wire::crypto::SignRequest::claims`,
+  `wire::crypto::VerifyResponse::claims`, `CryptoService::sign_for` /
+  `verify_for`, `wafer_core::clients::crypto::sign` / `verify`, and
+  `wafer_block_crypto::primitives::jwt_sign` / `jwt_verify`. The signer now
+  encodes the payload as canonical JSON, keys sorted at every depth, so
+  equal claims signed in the same second with the same expiry by the same
+  calling block (the same derived key) give byte-identical tokens;
+  caller-supplied `iat`/`exp` do not count, as the signer overwrites both.
+  Before, the payload followed a `HashMap`'s randomised iteration order:
+  equal claims usually signed to different bytes and occasionally to the
+  same bytes, so a caller that told tokens apart by their bytes worked by
+  chance. A caller that needs two tokens to differ must now put a
+  differing claim in them (a random `jti`). The msgpack wire format is
+  unchanged (a map either way), and verification does not depend on key
+  order, so tokens already issued keep verifying. The workspace's
+  `serde_json` floor is 1.0.129, for `Value::sort_all_objects`.
 - `wafer-block-postgres` is built on sqlx 0.9 (was 0.8), so
   `PostgresDatabaseService::from_pool` takes a sqlx 0.9 `PgPool`. An
   embedder that builds its own pool moves its `sqlx` dependency to 0.9;

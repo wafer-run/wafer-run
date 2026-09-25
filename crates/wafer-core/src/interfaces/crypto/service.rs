@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use thiserror::Error;
 
@@ -37,7 +37,7 @@ pub enum CryptoError {
 /// [`verify_for`](Self::verify_for) itself.
 ///
 /// ```compile_fail,E0046
-/// use std::{collections::HashMap, time::Duration};
+/// use std::{collections::BTreeMap, time::Duration};
 /// use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 ///
 /// struct NoSignFor;
@@ -50,7 +50,7 @@ pub enum CryptoError {
 ///         &self,
 ///         _: &str,
 ///         _: &str,
-///     ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+///     ) -> Result<BTreeMap<String, serde_json::Value>, CryptoError> {
 ///         unimplemented!()
 ///     }
 ///     fn random_bytes(&self, _: usize) -> Result<Vec<u8>, CryptoError> { unimplemented!() }
@@ -66,11 +66,12 @@ pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError>;
 
     /// Create a signed token from claims with the given expiry, using the
-    /// key derived for `block_id`.
+    /// key derived for `block_id`. Equal claims must encode to equal bytes:
+    /// the payload's key order may not depend on anything but the keys.
     fn sign_for(
         &self,
         block_id: &str,
-        claims: HashMap<String, serde_json::Value>,
+        claims: BTreeMap<String, serde_json::Value>,
         expiry: Duration,
     ) -> Result<String, CryptoError>;
 
@@ -80,7 +81,7 @@ pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         &self,
         block_id: &str,
         token: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, CryptoError>;
+    ) -> Result<BTreeMap<String, serde_json::Value>, CryptoError>;
 
     /// RandomBytes generates n cryptographically-secure random bytes.
     fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError>;

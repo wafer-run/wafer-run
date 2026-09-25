@@ -30,13 +30,19 @@
 //!   hex-encoded. Every consumer MUST match this exactly or cross-component
 //!   token verification breaks; [`derive_block_key`] carries a pinned
 //!   known-answer test guarding the format.
+//! - **The JWT payload is canonical JSON**: object keys in sorted order at
+//!   every depth, no insignificant whitespace. The payload is therefore a
+//!   function of the claim set as signed (the caller's claims with `iat`
+//!   and `exp` stamped over them): whatever order the caller built them
+//!   in, equal claim sets encode to equal bytes and different claim sets
+//!   to different bytes. See [`jwt_sign`] for when two whole tokens match.
 //! - **JWT secrets should be at least [`MIN_JWT_SECRET_LEN`] bytes.** The
 //!   primitives themselves accept any key length (HMAC does); enforcing
 //!   the minimum is a construction-time policy for service wrappers.
 //!
 //! [`Argon2JwtCryptoService`]: crate::service::Argon2JwtCryptoService
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use wafer_core::interfaces::crypto::service::CryptoError;
 
@@ -132,12 +138,20 @@ pub enum JwtExpPolicy {
 /// the two timestamp claims; callers typically build a fresh map per token.
 /// Caller-supplied `iat`/`exp` entries are overwritten.
 ///
+/// The payload is canonical: keys sorted at every depth. Two calls in the
+/// same second with equal claims, the same `expiry` and the same `secret`
+/// (for a per-block service, the same calling block's derived key) return
+/// byte-identical tokens. Claims that differ only in `iat`/`exp` count as
+/// equal, since both are overwritten. A caller that needs two tokens to
+/// differ must put something that differs in the claims (a random `jti`),
+/// never rely on the encoding to vary.
+///
 /// Errors when `now + expiry` is not a representable date (chrono's
 /// calendar ends in year 262143) — a misconfigured expiry must neither
 /// panic nor silently produce a token with a different lifetime than the
 /// caller asked for.
 pub fn jwt_sign(
-    mut claims: HashMap<String, serde_json::Value>,
+    mut claims: BTreeMap<String, serde_json::Value>,
     expiry: Duration,
     secret: &[u8],
 ) -> Result<String, CryptoError> {
@@ -151,19 +165,19 @@ pub fn jwt_sign(
     claims.insert("iat".to_string(), serde_json::json!(now.timestamp()));
     claims.insert("exp".to_string(), serde_json::json!(exp.timestamp()));
 
-    jwt_encode_unstamped(&claims, secret)
+    jwt_encode_unstamped(claims, secret)
 }
 
-/// Encode and sign claims exactly as given — no `iat`/`exp` stamping.
+/// Encode claims as [`canonical_json`] and sign them — no `iat`/`exp`
+/// stamping.
 ///
 /// Private on purpose: production tokens must carry `exp` (see
 /// [`JwtExpPolicy`]). Used by tests to craft tokens with arbitrary claims.
 fn jwt_encode_unstamped(
-    claims: &HashMap<String, serde_json::Value>,
+    claims: BTreeMap<String, serde_json::Value>,
     secret: &[u8],
 ) -> Result<String, CryptoError> {
-    let payload_json =
-        serde_json::to_string(claims).map_err(|e| CryptoError::SignError(e.to_string()))?;
+    let payload_json = canonical_json(claims)?;
     let payload_b64 = b64url_encode(payload_json.as_bytes());
 
     let signing_input = format!("{JWT_HEADER_B64}.{payload_b64}");
@@ -171,6 +185,20 @@ fn jwt_encode_unstamped(
     let sig_b64 = b64url_encode(&sig);
 
     Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// Serialize `claims` as canonical JSON: keys sorted at every depth.
+///
+/// The `BTreeMap` sorts the top level. Nested objects are
+/// `serde_json::Map`s, which keep insertion order instead of sorting when
+/// any crate in the final build enables serde_json's `preserve_order`
+/// feature; [`serde_json::Value::sort_all_objects`] sorts them in that
+/// build and does nothing in the default one.
+fn canonical_json(mut claims: BTreeMap<String, serde_json::Value>) -> Result<String, CryptoError> {
+    claims
+        .values_mut()
+        .for_each(serde_json::Value::sort_all_objects);
+    serde_json::to_string(&claims).map_err(|e| CryptoError::SignError(e.to_string()))
 }
 
 /// Verify a compact HS256 JWT and return its claims.
@@ -185,7 +213,7 @@ pub fn jwt_verify(
     token: &str,
     secret: &[u8],
     exp_policy: JwtExpPolicy,
-) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
+) -> Result<BTreeMap<String, serde_json::Value>, CryptoError> {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
@@ -231,7 +259,7 @@ pub fn jwt_verify(
 
     // Decode payload.
     let payload_bytes = b64url_decode(payload_b64)?;
-    let claims: HashMap<String, serde_json::Value> = serde_json::from_slice(&payload_bytes)
+    let claims: BTreeMap<String, serde_json::Value> = serde_json::from_slice(&payload_bytes)
         .map_err(|e| CryptoError::VerifyError(format!("payload decode: {e}")))?;
 
     // Validate expiry per policy.
@@ -650,8 +678,8 @@ mod tests {
 
     const SECRET: &[u8] = b"test-secret-padded-to-32-bytes-or-more-for-validation";
 
-    fn claims_with_sub(sub: &str) -> HashMap<String, serde_json::Value> {
-        let mut m = HashMap::new();
+    fn claims_with_sub(sub: &str) -> BTreeMap<String, serde_json::Value> {
+        let mut m = BTreeMap::new();
         m.insert("sub".to_string(), serde_json::json!(sub));
         m
     }
@@ -809,7 +837,7 @@ mod tests {
         let past = chrono::Utc::now().timestamp() - 60;
         let mut claims = claims_with_sub("u1");
         claims.insert("exp".to_string(), serde_json::json!(past));
-        let token = jwt_encode_unstamped(&claims, SECRET).unwrap();
+        let token = jwt_encode_unstamped(claims, SECRET).unwrap();
 
         for policy in [JwtExpPolicy::Required, JwtExpPolicy::AllowMissing] {
             let err = jwt_verify(&token, SECRET, policy).expect_err("expired token must fail");
@@ -825,7 +853,7 @@ mod tests {
 
     #[test]
     fn jwt_verify_exp_policy_governs_missing_exp() {
-        let token = jwt_encode_unstamped(&claims_with_sub("u1"), SECRET).unwrap();
+        let token = jwt_encode_unstamped(claims_with_sub("u1"), SECRET).unwrap();
 
         let err = jwt_verify(&token, SECRET, JwtExpPolicy::Required)
             .expect_err("Required must reject exp-less token");
@@ -846,7 +874,7 @@ mod tests {
     fn jwt_verify_required_treats_non_numeric_exp_as_missing() {
         let mut claims = claims_with_sub("u1");
         claims.insert("exp".to_string(), serde_json::json!("not-a-number"));
-        let token = jwt_encode_unstamped(&claims, SECRET).unwrap();
+        let token = jwt_encode_unstamped(claims, SECRET).unwrap();
         assert!(jwt_verify(&token, SECRET, JwtExpPolicy::Required).is_err());
     }
 

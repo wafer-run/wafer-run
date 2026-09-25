@@ -3,7 +3,7 @@
 //! stored hash cannot be checked, and when a token expiry cannot be
 //! represented.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use wafer_block::{
     codec,
@@ -147,7 +147,7 @@ async fn a_wrong_password_is_still_a_mismatch() {
 async fn an_unrepresentable_expiry_is_an_error_not_a_panic() {
     let svc = service();
     let body = codec::encode(&wire::SignRequest {
-        claims: HashMap::new(),
+        claims: BTreeMap::new(),
         expiry_secs: 10_000_000_000_000,
     })
     .unwrap();

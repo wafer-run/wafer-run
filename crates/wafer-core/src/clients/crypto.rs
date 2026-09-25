@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[cfg(not(feature = "wasm-component"))]
 use wafer_block::context::Context;
@@ -54,7 +54,7 @@ dual_api! {
     /// calling block's derived key.
     pub fn sign(
         ctx,
-        claims: &HashMap<String, serde_json::Value>,
+        claims: &BTreeMap<String, serde_json::Value>,
         expiry: std::time::Duration,
     ) -> Result<String, WaferError> {
         let req = SignRequest { claims: claims.clone(), expiry_secs: expiry.as_secs() };
@@ -72,7 +72,7 @@ dual_api! {
 
     /// Verify the JWT `token` under the calling block's derived key and
     /// return the decoded claims map.
-    pub fn verify(ctx, token: &str) -> Result<HashMap<String, serde_json::Value>, WaferError> {
+    pub fn verify(ctx, token: &str) -> Result<BTreeMap<String, serde_json::Value>, WaferError> {
         let req = VerifyRequest { token: token.to_string() };
         let data = svc!(ctx, BLOCK, ServiceOp::CRYPTO_VERIFY, &req, Some("verify"), false, Some("crypto"))?;
         let resp: VerifyResponse = decode(&data)?;

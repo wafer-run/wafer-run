@@ -7,7 +7,7 @@
 //! point of the fix is to make grants fine-grainable per path / per op.
 
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 
@@ -226,7 +226,7 @@ async fn crypto_sign_passes_operation_as_resource() {
     let ctx = RecordingContext::new(resp);
     let _ = wafer_core::clients::crypto::sign(
         &ctx,
-        &HashMap::new(),
+        &BTreeMap::new(),
         std::time::Duration::from_secs(60),
     )
     .await;
@@ -238,7 +238,7 @@ async fn crypto_sign_passes_operation_as_resource() {
 #[tokio::test]
 async fn crypto_verify_passes_operation_as_resource() {
     let resp = wafer_block::codec::encode(&wafer_block::wire::crypto::VerifyResponse {
-        claims: HashMap::new(),
+        claims: BTreeMap::new(),
     })
     .unwrap();
     let ctx = RecordingContext::new(resp);
