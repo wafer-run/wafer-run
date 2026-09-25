@@ -26,11 +26,36 @@ use sqlx::{
     encode::IsNull,
     error::BoxDynError,
     postgres::{types::Oid, PgArgumentBuffer, PgArguments, PgConnection, PgTypeInfo},
-    Arguments as _, Either, Executor as _, Postgres, Statement as _, TypeInfo as _,
+    Arguments as _, AssertSqlSafe, Either, Executor as _, Postgres, SqlSafeStr as _, SqlStr,
+    Statement as _, TypeInfo as _,
 };
 use wafer_core::interfaces::database::service::DatabaseError;
 
 use crate::errors::sqlx_error;
+
+/// `sql` as the statement text sqlx executes.
+///
+/// sqlx requires any SQL string that is not a `&'static str` to be asserted
+/// free of injected data. This backend adds no text of its own; every
+/// statement it runs is one of:
+///
+/// - a `wafer-sql-utils` query or mutation: identifiers quoted, every value a
+///   `$n` parameter bound separately (see [`bind`]);
+/// - `wafer-sql-utils` DDL (`ddl::build_*`), which takes no parameters, so a
+///   column default is written into the text. A default arriving through
+///   the `database.ensure_table`/`add_column` wire ops is `null`, `now`, or a
+///   string, number or boolean literal, and a string is quoted with each `'`
+///   doubled. That quoting holds only while the session's
+///   `standard_conforming_strings` is `on` (PostgreSQL's default; neither
+///   sqlx nor this backend sets it). A verbatim SQL default
+///   (`DefaultValue::is_raw`) has no wire form and is built only by host Rust
+///   code;
+/// - a caller's own statement handed through `query_raw`/`exec_raw`, whose
+///   text is exactly what the caller wrote and whose values are bound as
+///   parameters.
+pub(crate) fn statement_text(sql: &str) -> SqlStr {
+    AssertSqlSafe(sql).into_sql_str()
+}
 
 /// The arguments for `sql`, each of `params` encoded for the type PostgreSQL
 /// infers for its parameter, preparing (and caching) `sql` on `conn`.
@@ -39,10 +64,13 @@ use crate::errors::sqlx_error;
 /// statement whose parameter types the arguments were encoded for.
 pub(crate) async fn bind(
     conn: &mut PgConnection,
-    sql: &str,
+    sql: &SqlStr,
     params: &[serde_json::Value],
 ) -> Result<PgArguments, DatabaseError> {
-    let statement = conn.prepare(sql).await.map_err(|e| sqlx_error(&e))?;
+    let statement = conn
+        .prepare(sql.clone())
+        .await
+        .map_err(|e| sqlx_error(&e))?;
     let types = match statement.parameters() {
         Some(Either::Left(types)) => types,
         _ => &[],

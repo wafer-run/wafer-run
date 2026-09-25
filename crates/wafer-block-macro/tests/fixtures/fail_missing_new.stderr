@@ -16,8 +16,8 @@ error[E0599]: no associated function or constant named `new` found for struct `W
    = note: the following traits define an item `new`, perhaps you need to implement one of them:
            candidate #1: `crypto_common::KeyInit`
            candidate #2: `crypto_common::KeyIvInit`
-           candidate #3: `digest::VariableOutput`
-           candidate #4: `digest::core_api::VariableOutputCore`
+           candidate #3: `crypto_common::TryKeyInit`
+           candidate #4: `digest::block_api::VariableOutputCore`
            candidate #5: `digest::digest::Digest`
            candidate #6: `typenum::marker_traits::Bit`
    = note: this error originates in the macro `::wafer_block::register_static_block` which comes from the expansion of the attribute macro `wafer_block` (in Nightly builds, run with -Z macro-backtrace for more info)

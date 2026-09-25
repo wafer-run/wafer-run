@@ -7,12 +7,13 @@ description = "ONNX-based EmbeddingService via fastembed-rs"
 
 [dependencies]
 wafer-core = { path = "../wafer-core", default-features = false }
-fastembed = "5"
-# Same requirement as fastembed 5's own `tokenizers` dep: names the type of
-# `TextEmbedding::tokenizer` (cloned for lock-free count_tokens). If fastembed
-# ever bumps to an incompatible tokenizers, this fails loudly at compile time
-# instead of silently splitting into two crate versions.
-tokenizers = { version = "0.22", default-features = false }
+fastembed = "7"
+# Same requirement as every fastembed 7 release's own `tokenizers` dep
+# (`^0.23.2`): names the type of `TextEmbedding::tokenizer` (cloned for
+# lock-free count_tokens). If fastembed ever bumps to an incompatible
+# tokenizers, this fails loudly at compile time instead of silently splitting
+# into two crate versions.
+tokenizers = { version = "0.23.2", default-features = false }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
