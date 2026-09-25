@@ -291,9 +291,10 @@ pub fn to_upsert_spec(
 
 /// Convert one wire [`wire::BatchWrite`] into the service's
 /// [`WriteOp`](service::WriteOp), validating it exactly as its single-op arm
-/// does: data keys pass [`check_name`], `UpdateWhere` filters are bounded and
-/// flattened to AND-of-leaves (a group or a column-to-column leaf is
-/// `InvalidArgument`, as for `database.update_where`), and `Upsert` goes
+/// does: data keys pass [`check_name`], `UpdateWhere` and `DeleteWhere`
+/// filters are bounded and flattened to AND-of-leaves (a group or a
+/// column-to-column leaf is `InvalidArgument`, as for `database.update_where`
+/// and `database.delete_where`), and `Upsert` goes
 /// through [`to_upsert_spec`]. The collection was checked before the batch
 /// was authorized.
 fn to_write_op(write: wire::BatchWrite) -> Result<service::WriteOp, WaferError> {
@@ -327,6 +328,13 @@ fn to_write_op(write: wire::BatchWrite) -> Result<service::WriteOp, WaferError> 
                 data,
             }
         }
+        wire::BatchWrite::DeleteWhere {
+            collection,
+            filters,
+        } => service::WriteOp::DeleteWhere {
+            collection,
+            filters: flatten_leaves(&convert_filter_tree(filters)?)?,
+        },
         wire::BatchWrite::Upsert(req) => {
             let (collection, spec) = to_upsert_spec(req)?;
             service::WriteOp::Upsert { collection, spec }
@@ -387,6 +395,9 @@ fn write_outcome_to_wire(outcome: service::WriteOutcome) -> wire::BatchWriteResu
         }
         service::WriteOutcome::UpdatedWhere { rows_affected } => {
             wire::BatchWriteResult::UpdatedWhere { rows_affected }
+        }
+        service::WriteOutcome::DeletedWhere { rows_affected } => {
+            wire::BatchWriteResult::DeletedWhere { rows_affected }
         }
         service::WriteOutcome::Upserted { rows_affected } => {
             wire::BatchWriteResult::Upserted { rows_affected }

@@ -320,3 +320,102 @@ async fn calls_over_the_write_limit_are_refused_and_the_limit_itself_runs() {
     );
     assert_eq!(count(&svc).await, 3 + 2 * MAX_BATCH_WRITES as i64);
 }
+
+/// A `DeleteWhere` off the wire removes what its filters match and reports
+/// the count as `DeletedWhere`; a create after it may reuse a removed row's
+/// key, because it ran first in the same transaction.
+#[tokio::test]
+async fn batch_delete_where_then_create_replaces_the_matched_rows() {
+    let svc = seeded().await;
+    let resp = dispatch(
+        &svc,
+        ServiceOp::DATABASE_BATCH,
+        &serde_json::json!({ "ops": [
+            { "DeleteWhere": {
+                "collection": TABLE,
+                "filters": [{ "field": "kind", "value": "a" }],
+            } },
+            { "Create": { "collection": TABLE, "data": { "id": "i1", "name": "new", "kind": "a" } } },
+        ] }),
+    )
+    .await
+    .expect("batch");
+    assert_eq!(
+        resp["results"][0],
+        serde_json::json!({ "DeletedWhere": { "rows_affected": 2 } }),
+        "{resp}"
+    );
+    assert_eq!(resp["results"][1]["Created"]["id"], "i1", "{resp}");
+    assert_eq!(count(&svc).await, 2, "i1 (replaced) and i3");
+    assert_eq!(
+        svc.get(TABLE, "i1").await.expect("i1").data["name"],
+        serde_json::json!("new")
+    );
+}
+
+/// The replace-a-table shape — an unfiltered `DeleteWhere`, then the new
+/// rows — whose last create fails at the database leaves the table as it
+/// was: the delete is rolled back with the creates.
+#[tokio::test]
+async fn a_failed_replacement_leaves_the_original_rows() {
+    let svc = seeded().await;
+    let err = dispatch(
+        &svc,
+        ServiceOp::DATABASE_BATCH,
+        &serde_json::json!({ "ops": [
+            { "DeleteWhere": { "collection": TABLE, "filters": [] } },
+            { "Create": { "collection": TABLE, "data": { "id": "n1" } } },
+            { "Create": { "collection": TABLE, "data": { "id": "n1" } } },
+        ] }),
+    )
+    .await
+    .expect_err("the duplicate key fails the replacement");
+    assert_eq!(err.code, ErrorCode::AlreadyExists, "{}", err.message);
+    assert_eq!(count(&svc).await, 3, "i1 i2 i3 survive, n1 was rolled back");
+    for id in ["i1", "i2", "i3"] {
+        svc.get(TABLE, id).await.expect("original row survives");
+    }
+}
+
+/// A `DeleteWhere` is one statement, so it counts as one op against
+/// `MAX_BATCH_WRITES` however many rows it matches: with `MAX - 1` creates
+/// it runs, with `MAX` creates the call is refused before anything is
+/// deleted.
+#[tokio::test]
+async fn a_delete_where_counts_as_one_op_against_the_write_limit() {
+    let svc = seeded().await;
+    let ops = |creates: usize| -> Vec<serde_json::Value> {
+        std::iter::once(serde_json::json!({ "DeleteWhere": {
+            "collection": TABLE, "filters": [],
+        } }))
+        .chain((0..creates).map(|i| {
+            serde_json::json!({ "Create": {
+                "collection": TABLE, "data": { "name": format!("b{i}") },
+            } })
+        }))
+        .collect()
+    };
+
+    let err = dispatch(
+        &svc,
+        ServiceOp::DATABASE_BATCH,
+        &serde_json::json!({ "ops": ops(MAX_BATCH_WRITES) }),
+    )
+    .await
+    .expect_err("one over the limit is refused");
+    assert_eq!(err.code, ErrorCode::InvalidArgument, "{}", err.message);
+    assert_eq!(count(&svc).await, 3, "nothing was deleted");
+
+    let resp = dispatch(
+        &svc,
+        ServiceOp::DATABASE_BATCH,
+        &serde_json::json!({ "ops": ops(MAX_BATCH_WRITES - 1) }),
+    )
+    .await
+    .expect("exactly the limit");
+    assert_eq!(
+        resp["results"][0],
+        serde_json::json!({ "DeletedWhere": { "rows_affected": 3 } })
+    );
+    assert_eq!(count(&svc).await, MAX_BATCH_WRITES as i64 - 1);
+}

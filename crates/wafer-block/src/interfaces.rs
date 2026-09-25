@@ -284,7 +284,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_BATCH => ActionSpec {
-            description: format!("Apply writes in order in one transaction: all of them, or none when any statement fails. Each op is Create{{collection,data}}, Update{{collection,id,data}}, Delete{{collection,id}}, UpdateWhere{{collection,filters,data}} or Upsert{{...as database.upsert}}; every op's collection is WRAP-authorized for write before anything runs. An Update or Delete whose id matches no row is reported in its result, not an error. At most {MAX_BATCH_WRITES} ops per call; a larger call is InvalidArgument."),
+            description: format!("Apply writes in order in one transaction: all of them, or none when any statement fails. Each op is Create{{collection,data}}, Update{{collection,id,data}}, Delete{{collection,id}}, UpdateWhere{{collection,filters,data}}, DeleteWhere{{collection,filters}} or Upsert{{...as database.upsert}}; every op's collection is WRAP-authorized before anything runs (a Create needs append, every other op write). An Update or Delete whose id matches no row is reported in its result, not an error. At most {MAX_BATCH_WRITES} ops per call, each counted once however many rows it touches; a larger call is InvalidArgument."),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -297,7 +297,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 "properties": {
                     "results": {
                         "type": "array",
-                        "description": "One per op, in order: Created(record), Updated(record or null), Deleted{rows_affected}, UpdatedWhere{rows_affected} or Upserted{rows_affected}.",
+                        "description": "One per op, in order: Created(record), Updated(record or null), Deleted{rows_affected}, UpdatedWhere{rows_affected}, DeletedWhere{rows_affected} or Upserted{rows_affected}.",
                         "items": { "type": "object" }
                     }
                 }

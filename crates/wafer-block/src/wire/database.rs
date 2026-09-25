@@ -484,6 +484,15 @@ pub enum BatchWrite {
         /// Column → value map to set on matching rows.
         data: HashMap<String, serde_json::Value>,
     },
+    /// As `database.delete_where_count`.
+    DeleteWhere {
+        /// Collection (table) name.
+        collection: String,
+        /// WHERE-clause predicates (AND-combined leaves). Empty matches
+        /// every row.
+        #[serde(default)]
+        filters: Vec<FilterNode>,
+    },
     /// As `database.upsert`.
     Upsert(UpsertRequest),
 }
@@ -497,7 +506,8 @@ impl BatchWrite {
             Self::Create { collection, .. }
             | Self::Update { collection, .. }
             | Self::Delete { collection, .. }
-            | Self::UpdateWhere { collection, .. } => collection,
+            | Self::UpdateWhere { collection, .. }
+            | Self::DeleteWhere { collection, .. } => collection,
             Self::Upsert(req) => &req.collection,
         }
     }
@@ -512,6 +522,7 @@ impl BatchWrite {
             Self::Update { .. }
             | Self::Delete { .. }
             | Self::UpdateWhere { .. }
+            | Self::DeleteWhere { .. }
             | Self::Upsert(_) => crate::types::ResourceAccess::Write,
         }
     }
@@ -842,6 +853,11 @@ pub enum BatchWriteResult {
     /// Rows the filtered update changed.
     UpdatedWhere {
         /// Number of rows updated.
+        rows_affected: i64,
+    },
+    /// Rows the filtered delete removed.
+    DeletedWhere {
+        /// Number of rows deleted.
         rows_affected: i64,
     },
     /// Rows the upsert inserted or updated.
@@ -1333,6 +1349,15 @@ mod tests {
                     })],
                     data: HashMap::new(),
                 },
+                BatchWrite::DeleteWhere {
+                    collection: "f".into(),
+                    filters: vec![FilterNode::Leaf(FilterDef {
+                        field: "k".into(),
+                        operator: "eq".into(),
+                        value: serde_json::json!(2),
+                        column: None,
+                    })],
+                },
                 BatchWrite::Upsert(UpsertRequest {
                     collection: "e".into(),
                     data: vec![("id".into(), serde_json::json!("3"))],
@@ -1344,10 +1369,18 @@ mod tests {
         let decoded: BatchRequest =
             codec::decode(&codec::encode(&original).expect("encode")).expect("decode");
         let collections: Vec<&str> = decoded.ops.iter().map(BatchWrite::collection).collect();
-        assert_eq!(collections, ["a", "b", "c", "d", "e"]);
+        assert_eq!(collections, ["a", "b", "c", "d", "f", "e"]);
         assert!(matches!(&decoded.ops[1], BatchWrite::Update { id, .. } if id == "1"));
         assert!(
             matches!(&decoded.ops[3], BatchWrite::UpdateWhere { filters, .. } if filters.len() == 1)
+        );
+        assert!(
+            matches!(&decoded.ops[4], BatchWrite::DeleteWhere { filters, .. } if filters.len() == 1)
+        );
+        assert_eq!(
+            decoded.ops[4].access(),
+            crate::types::ResourceAccess::Write,
+            "a filtered delete removes existing rows, so it is never an append"
         );
     }
 
@@ -1364,6 +1397,7 @@ mod tests {
                 BatchWriteResult::Updated(None),
                 BatchWriteResult::Deleted { rows_affected: 0 },
                 BatchWriteResult::UpdatedWhere { rows_affected: 2 },
+                BatchWriteResult::DeletedWhere { rows_affected: 3 },
                 BatchWriteResult::Upserted { rows_affected: 1 },
             ],
         };

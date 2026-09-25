@@ -271,6 +271,11 @@ fn refused_ops() -> Vec<(&'static str, &'static str, Value)> {
             })),
         ),
         (
+            "batch DeleteWhere",
+            ServiceOp::DATABASE_BATCH,
+            batch(json!({ "DeleteWhere": { "collection": AUDIT, "filters": seed_filter() } })),
+        ),
+        (
             "batch Upsert",
             ServiceOp::DATABASE_BATCH,
             batch(json!({ "Upsert": upsert })),
@@ -281,6 +286,14 @@ fn refused_ops() -> Vec<(&'static str, &'static str, Value)> {
             json!({ "ops": [
                 { "Create": { "collection": AUDIT, "data": { "action": "smuggled" } } },
                 { "Delete": { "collection": AUDIT, "id": "seed" } },
+            ] }),
+        ),
+        (
+            "batch DeleteWhere (unfiltered) + Create",
+            ServiceOp::DATABASE_BATCH,
+            json!({ "ops": [
+                { "DeleteWhere": { "collection": AUDIT, "filters": [] } },
+                { "Create": { "collection": AUDIT, "data": { "action": "replaced" } } },
             ] }),
         ),
         // Schema ops on the collection.
