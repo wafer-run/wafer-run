@@ -3,10 +3,10 @@
 //! [`super::response_meta::overlay`] lays a later producer's header over an
 //! earlier one's, and for most headers the later value replaces the earlier.
 //! For the headers here — every header the security-headers middleware sets
-//! that restricts what a document may do, or what others may do with it —
-//! the result is instead the stricter of the two, so a responding or failing
-//! step, in this flow or in a `next` transfer's target, can tighten the
-//! middleware's policy but never loosen it:
+//! that restricts what a document may do, or what others may do with it,
+//! except the two below — the result is instead at least as strict as each
+//! of the two, so a responding or failing step, in this flow or in a `next`
+//! transfer's target, can tighten the middleware's policy but not loosen it:
 //!
 //! - `Content-Security-Policy`: both policies. A header value may hold
 //!   several comma-separated policies and a browser enforces every one, so
@@ -15,21 +15,28 @@
 //! - `X-Content-Type-Options`: `nosniff` over anything else.
 //! - `Referrer-Policy`: the policy that sends less to another origin (see
 //!   [`referrer_rank`]).
-//! - `Strict-Transport-Security`: the longer `max-age`, then
-//!   `includeSubDomains`.
+//! - `Strict-Transport-Security`: the longer `max-age`, with
+//!   `includeSubDomains` when either value has it, and `preload` when a
+//!   value with `includeSubDomains` has it.
 //! - `Permissions-Policy`: per feature, the intersection of the two
-//!   allowlists; a feature only one value names keeps that value's list.
+//!   allowlists. A feature only one value names is intersected with `self`,
+//!   which is never looser than the default allowlist (`self` or `*`) the
+//!   other value leaves it. Member parameters (`;report-to=…`, which only
+//!   names where violation reports go) are dropped.
 //!
 //! The result means the same whichever value came first; of two equally
-//! strict values, the later stands. A value a browser would ignore (it does not
+//! strict `X-Frame-Options`, `X-Content-Type-Options` or `Referrer-Policy`
+//! values, the later stands. A value a browser would ignore (it does not
 //! parse) never counts as stricter than one it applies.
 //!
-//! `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` are not
-//! listed: they opt a document into cross-origin isolation, and their values
-//! are not ordered by strictness (`require-corp` refuses the cross-origin
-//! subresources `credentialless` loads without credentials), so a page that
-//! needs one mode sets it and the later value replaces the earlier, as for
-//! any other header.
+//! Not listed, so the later value replaces the earlier as for any other
+//! header:
+//! - `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`.
+//!   Cross-origin isolation is a page's opt-in, not a site-wide floor: a
+//!   route legitimately relaxes it, for example an OAuth or payment page
+//!   that must keep a handle on the provider's popup, which
+//!   `Cross-Origin-Opener-Policy: same-origin` severs.
+//! - `Content-Security-Policy-Report-Only`, which enforces nothing.
 
 use std::cmp::Ordering;
 
@@ -42,7 +49,7 @@ pub(super) fn combine(lower_name: &str, earlier: &str, later: &str) -> Option<St
         "x-frame-options" => stricter(earlier, later, x_frame_options_rank),
         "x-content-type-options" => stricter(earlier, later, is_nosniff),
         "referrer-policy" => stricter(earlier, later, referrer_rank),
-        "strict-transport-security" => stricter(earlier, later, hsts_strength),
+        "strict-transport-security" => hsts_union(earlier, later),
         "permissions-policy" => permissions_intersection(earlier, later),
         _ => return None,
     };
@@ -139,13 +146,22 @@ fn referrer_rank(value: &str) -> usize {
         .map_or(0, |i| REFERRER_POLICIES.len() - i)
 }
 
-/// A `Strict-Transport-Security` value's `(max-age, includeSubDomains)`, or
-/// `None` when a browser ignores it (RFC 6797 §6.1: no valid `max-age`, or a
-/// directive given twice).
-fn hsts_strength(value: &str) -> Option<(u64, bool)> {
+/// A `Strict-Transport-Security` value, as a browser reads it.
+#[derive(Clone, Copy)]
+struct Hsts {
+    max_age: u64,
+    include_subdomains: bool,
+    preload: bool,
+}
+
+/// Parse a `Strict-Transport-Security` value, or `None` when a browser
+/// ignores it (RFC 6797 §6.1: no valid `max-age`, or a directive given
+/// twice).
+fn parse_hsts(value: &str) -> Option<Hsts> {
     let mut seen: Vec<String> = Vec::new();
     let mut max_age = None;
     let mut include_subdomains = false;
+    let mut preload = false;
     for directive in value.split(';').map(str::trim).filter(|d| !d.is_empty()) {
         let (name, arg) = match directive.split_once('=') {
             Some((name, arg)) => (name.trim(), Some(arg.trim())),
@@ -168,33 +184,62 @@ fn hsts_strength(value: &str) -> Option<(u64, bool)> {
                 max_age = Some(digits.parse().unwrap_or(u64::MAX));
             }
             "includesubdomains" => include_subdomains = true,
+            "preload" => preload = true,
             _ => {}
         }
         seen.push(name);
     }
-    max_age.map(|age| (age, include_subdomains))
+    max_age.map(|max_age| Hsts {
+        max_age,
+        include_subdomains,
+        preload,
+    })
 }
 
-/// The per-feature intersection of two `Permissions-Policy` values. A value
-/// that is not a valid structured-field dictionary is ignored by a browser,
-/// so the other value stands whole.
+/// The longer `max-age` of the two values, `includeSubDomains` when either
+/// has it, and `preload` when a value with `includeSubDomains` has it (the
+/// preload list requires both). A value a browser ignores leaves the other
+/// whole.
+fn hsts_union(earlier: &str, later: &str) -> String {
+    let (a, b) = match (parse_hsts(earlier), parse_hsts(later)) {
+        (Some(a), Some(b)) => (a, b),
+        (Some(_), None) => return earlier.to_string(),
+        (None, _) => return later.to_string(),
+    };
+    let mut out = format!("max-age={}", a.max_age.max(b.max_age));
+    if a.include_subdomains || b.include_subdomains {
+        out.push_str("; includeSubDomains");
+    }
+    if [a, b].iter().any(|h| h.include_subdomains && h.preload) {
+        out.push_str("; preload");
+    }
+    out
+}
+
+/// The per-feature intersection of two `Permissions-Policy` values, a
+/// feature only one names intersected with `self` (see the module docs). A
+/// value that is not a valid structured-field dictionary is ignored by a
+/// browser, so the other value stands whole.
 fn permissions_intersection(earlier: &str, later: &str) -> String {
     let (a, b) = match (parse_permissions(earlier), parse_permissions(later)) {
         (Some(a), Some(b)) => (a, b),
         (Some(_), None) => return earlier.to_string(),
         (None, _) => return later.to_string(),
     };
+    let default = Allowlist::Only(vec!["self".to_string()]);
     let mut out: Vec<String> = Vec::new();
     for member in &a {
-        match b.iter().find(|m| m.feature == member.feature) {
-            Some(other) => out.push(member.intersect(other)),
-            None => out.push(member.raw.clone()),
-        }
+        let other = b
+            .iter()
+            .find(|m| m.feature == member.feature)
+            .map_or(&default, |m| &m.allowlist);
+        out.push(member.intersect(other));
     }
-    for member in &b {
-        if !a.iter().any(|m| m.feature == member.feature) {
-            out.push(member.raw.clone());
-        }
+    for member in b
+        .iter()
+        .filter(|m| !a.iter().any(|n| n.feature == m.feature))
+    {
+        out.push(member.intersect(&default));
     }
     out.join(", ")
 }
@@ -213,15 +258,13 @@ enum Allowlist {
 #[derive(Debug)]
 struct Permission {
     feature: String,
-    /// The member as written, parameters included.
-    raw: String,
     allowlist: Allowlist,
 }
 
 impl Permission {
-    /// `feature=…` allowing only what both `self` and `other` allow.
-    fn intersect(&self, other: &Permission) -> String {
-        let allowlist = match (&self.allowlist, &other.allowlist) {
+    /// `feature=…` allowing only what both this member and `other` allow.
+    fn intersect(&self, other: &Allowlist) -> String {
+        let allowlist = match (&self.allowlist, other) {
             (Allowlist::All, list) | (list, Allowlist::All) => list.clone(),
             (Allowlist::Only(a), Allowlist::Only(b)) => {
                 Allowlist::Only(a.iter().filter(|item| b.contains(item)).cloned().collect())
@@ -242,7 +285,6 @@ fn parse_permissions(value: &str) -> Option<Vec<Permission>> {
     let mut i = skip(s, 0, b" \t");
     let mut out: Vec<Permission> = Vec::new();
     while i < s.len() {
-        let start = i;
         let feature = parse_key(s, &mut i)?;
         let items = if s.get(i) == Some(&b'=') {
             i += 1;
@@ -263,11 +305,7 @@ fn parse_permissions(value: &str) -> Option<Vec<Permission>> {
         } else {
             Allowlist::Only(items)
         };
-        let member = Permission {
-            feature,
-            raw: value[start..i].to_string(),
-            allowlist,
-        };
+        let member = Permission { feature, allowlist };
         match out.iter_mut().find(|m| m.feature == member.feature) {
             Some(existing) => *existing = member,
             None => out.push(member),
@@ -525,15 +563,33 @@ mod tests {
     }
 
     #[test]
-    fn hsts_keeps_the_longer_max_age_then_subdomains() {
+    fn hsts_takes_the_longer_max_age_and_keeps_subdomains_and_preload() {
         let full = "max-age=31536000; includeSubDomains; preload";
+        // `preload` without `includeSubDomains` is not a preload request.
+        assert_eq!(
+            combine(
+                "strict-transport-security",
+                "max-age=1; preload",
+                "max-age=2"
+            )
+            .as_deref(),
+            Some("max-age=2")
+        );
         for (other, want) in [
             ("max-age=0", full),
             ("max-age=600", full),
             ("max-age=31536000", full),
             ("includeSubDomains", full),
             ("max-age=1; max-age=63072000", full),
-            ("max-age=\"63072000\"", "max-age=\"63072000\""),
+            // A longer max-age keeps the other value's subdomains and preload.
+            (
+                "max-age=63072000",
+                "max-age=63072000; includeSubDomains; preload",
+            ),
+            (
+                "max-age=\"63072000\"; preload",
+                "max-age=63072000; includeSubDomains; preload",
+            ),
         ] {
             let (ab, ba) = both_ways("strict-transport-security", full, other);
             assert_eq!((ab.as_str(), ba.as_str()), (want, want), "{other}");
@@ -566,6 +622,19 @@ mod tests {
             narrowed.as_deref(),
             Some("fullscreen=(self), usb=(\"https://a.example\")")
         );
+    }
+
+    /// A feature only one value names gets no more than `self`: the other
+    /// value leaves it at its default allowlist, `self` or `*`.
+    #[test]
+    fn a_feature_only_one_value_names_is_held_to_self() {
+        let (ab, ba) = both_ways(
+            "permissions-policy",
+            "camera=()",
+            "usb=*, serial=(\"https://a.example\"), midi=(self)",
+        );
+        assert_eq!(ab, "camera=(), usb=(self), serial=(), midi=(self)");
+        assert_eq!(ba, "usb=(self), serial=(), midi=(self), camera=()");
     }
 
     #[test]

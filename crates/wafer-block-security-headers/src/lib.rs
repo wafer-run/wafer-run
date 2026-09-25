@@ -8,12 +8,15 @@
 //!
 //! These are a floor for the flow's response: when a step that responds or
 //! fails after this one sets its own value for one of these headers, the
-//! flow executor keeps the stricter of the two (a `Content-Security-Policy`
-//! of each, both enforced; `DENY` over `SAMEORIGIN`), so a responder can
-//! tighten this block's policy but not loosen it. The exceptions are
-//! `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`, whose
-//! values are not ordered by strictness: a later step's own value replaces
-//! this block's. Every header this block sets is in
+//! flow executor combines the two into a value at least as strict as each
+//! (a `Content-Security-Policy` of each, both enforced; `DENY` over
+//! `SAMEORIGIN`; the longer HSTS `max-age` keeping `includeSubDomains`), so
+//! a responder can tighten this block's policy but not loosen it. The
+//! exceptions are `Cross-Origin-Opener-Policy` and
+//! `Cross-Origin-Embedder-Policy`: cross-origin isolation is a page's
+//! opt-in that a route may legitimately relax (a page keeping a handle on
+//! an OAuth or payment popup), so a later step's own value replaces this
+//! block's. Every header this block sets is in
 //! [`capabilities::DEFAULT_SENSITIVE_HEADERS`](wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS),
 //! so a WASM step can set one only when its capabilities' `writable` list
 //! names it.

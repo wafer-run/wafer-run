@@ -21,11 +21,12 @@
 //! value replaces the earlier's, with two exceptions:
 //! - the list-valued [`UNION_HEADERS`] get the union of both values (so a
 //!   `Vary: Origin` a CORS middleware set survives a terminal's own `Vary`);
-//! - the security headers in [`super::restrictive_headers`] get the stricter
-//!   of the two, so a responding or failing step — in this flow or in a
-//!   `next` transfer's target — can tighten the security-headers
-//!   middleware's `X-Frame-Options: DENY` or `Content-Security-Policy` but
-//!   never loosen it.
+//! - the security headers in [`super::restrictive_headers`] get a value at
+//!   least as strict as each of the two, so a responding or failing step —
+//!   in this flow or in a `next` transfer's target — can tighten the
+//!   security-headers middleware's `Content-Security-Policy` or
+//!   `Referrer-Policy` but not loosen its `X-Frame-Options: DENY` or any
+//!   other of them.
 
 use std::collections::HashMap;
 

@@ -50,17 +50,20 @@ const LOOSER: &[(&str, &str)] = &[
     ("x-content-type-options", "sniff"),
     ("referrer-policy", "unsafe-url"),
     ("strict-transport-security", "max-age=0"),
+    // `usb` is a feature the block does not name.
     (
         "permissions-policy",
-        "camera=*, microphone=*, geolocation=*",
+        "camera=*, microphone=*, geolocation=*, usb=*",
     ),
 ];
 
 /// Stricter than the block's: a download served sandboxed, never sending a
-/// referrer.
+/// referrer, pinning HTTPS for longer (without restating the block's
+/// `includeSubDomains; preload`).
 const STRICTER: &[(&str, &str)] = &[
     ("Content-Security-Policy", "default-src 'none'; sandbox"),
     ("Referrer-Policy", "no-referrer"),
+    ("Strict-Transport-Security", "max-age=63072000"),
 ];
 
 async fn start(flows: &[serde_json::Value]) -> Arc<Wafer> {
@@ -166,7 +169,7 @@ async fn a_responder_cannot_loosen_the_middlewares_security_headers() {
     );
     assert_eq!(
         header(&parts, "Permissions-Policy"),
-        "camera=(), microphone=(), geolocation=()"
+        "camera=(), microphone=(), geolocation=(), usb=(self)"
     );
 }
 
@@ -185,6 +188,10 @@ async fn a_responder_can_tighten_the_middlewares_security_headers() {
     let parts = run_http(&wafer, "stricter").await;
 
     assert_eq!(header(&parts, "Referrer-Policy"), "no-referrer");
+    assert_eq!(
+        header(&parts, "Strict-Transport-Security"),
+        "max-age=63072000; includeSubDomains; preload"
+    );
     assert_eq!(
         header(&parts, "Content-Security-Policy"),
         format!(
