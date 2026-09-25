@@ -4,6 +4,31 @@
 
 ### Breaking changes
 
+- The fixed cap on `database.create_many` rows and `database.batch` ops is
+  gone: `wire::database::MAX_BATCH_WRITES` (1000) is removed, and each
+  backend now reports its own budget. `DatabaseService` and `DbExec` gain a
+  required `fn statement_budget(&self) -> Result<StatementBudget,
+  DatabaseError>` (no default: a decorator that forgot it would hide its
+  backend's limit), reporting `StatementBudget::Unbounded` or
+  `Limited { limit, used }` — the statements one invocation may run and how
+  many this one already has; an error is the call's answer. The
+  database handler admits a `create_many` (one statement per row) or `batch`
+  (one per op) against it before anything runs, and the shared `DbExec`
+  orchestration admits every `run_transaction` again after planning, so the
+  introspection a write ran while planning counts too. A call over the whole
+  limit is `InvalidArgument`; one that fits the limit but not what the
+  invocation has left is the new `DatabaseError::ResourceExhausted`
+  (`ErrorCode::ResourceExhausted`, HTTP 429), and nothing is written.
+  Native SQLite and PostgreSQL report `Unbounded` and now take a call of any
+  size (before, anything over 1000 was refused); a Cloudflare D1 adapter
+  reports D1's per-invocation query limit (1000 on Workers Paid, 50 on Free)
+  and the statements it has sent in this invocation, which the old global
+  cap could not see — a `batch` of 1000 after earlier queries in the same
+  request overflowed D1. Every `DatabaseService`/`DbExec` implementor must
+  add the method; a `forward_database_service!` ledger needs
+  `statement_budget: forward` (or `custom`) after `set_strict_schema`, and an
+  exhaustive `match` on `DatabaseError` needs the new arm. The
+  `database.create_many`/`database.batch` action schemas drop `maxItems`.
 - `wire::database::BatchWrite` gains `DeleteWhere { collection, filters }`,
   `BatchWriteResult` gains `DeletedWhere { rows_affected }`, and the
   service-side twins `WriteOp` / `WriteOutcome` gain the same variants.

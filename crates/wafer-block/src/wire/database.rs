@@ -412,17 +412,6 @@ pub struct UpsertRequest {
     pub on_conflict: OnConflict,
 }
 
-/// Most ops one `database.batch` call, or rows one `database.create_many`
-/// call, may carry; the database handler answers a larger call with
-/// `InvalidArgument` before anything runs.
-///
-/// Every op or row is one SQL statement, so this is sized to Cloudflare's
-/// per-Worker-invocation D1 query limit on Workers Paid (1000; the Free plan
-/// allows 50, so a Free-plan consumer chunks smaller): a call that fits here
-/// fits one invocation. It also bounds how long one call holds a backend's
-/// write path inside its transaction (SQLite has a single write connection).
-pub const MAX_BATCH_WRITES: usize = 1000;
-
 /// Request for `database.create_many`: insert every row of `rows` into
 /// `collection` in one transaction — all of them or, when any insert fails,
 /// none. Rows may carry different column sets. WRAP-authorized (append)
@@ -432,7 +421,8 @@ pub struct CreateManyRequest {
     /// Collection (table) name.
     pub collection: String,
     /// One column → value map per row; `id` and timestamps are stamped when
-    /// absent, as for `database.create`. At most [`MAX_BATCH_WRITES`].
+    /// absent, as for `database.create`. One statement each, admitted against
+    /// the backend's per-invocation statement budget before any runs.
     pub rows: Vec<HashMap<String, serde_json::Value>>,
 }
 
@@ -442,7 +432,8 @@ pub struct CreateManyRequest {
 /// [`BatchWrite::access`] names, before anything runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchRequest {
-    /// The writes, applied in order. At most [`MAX_BATCH_WRITES`].
+    /// The writes, applied in order. One statement each, admitted against the
+    /// backend's per-invocation statement budget before any runs.
     pub ops: Vec<BatchWrite>,
 }
 

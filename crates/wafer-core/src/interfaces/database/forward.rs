@@ -45,7 +45,7 @@
 //! - `forward_to DbExec;` — the implementor is a SQL backend that implements
 //!   [`DbExec`](super::exec::DbExec); `forward` entries call the shared
 //!   executor's default of the same name, qualified so they cannot recurse into
-//!   the method being defined. `DbExec` provides twenty-three of the operations;
+//!   the method being defined. `DbExec` provides twenty-five of the operations;
 //!   the other four must be `custom` or `inherit`.
 //! - `forward_to <method>();` — the implementor is a decorator with an inherent
 //!   `fn <method>(&self) -> &dyn DatabaseService` returning the wrapped
@@ -117,6 +117,7 @@
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
 //!             set_strict_schema: forward,
+//!             statement_budget: forward,
 //!         }
 //!
 //!         async fn create(
@@ -237,6 +238,7 @@
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
 //!             set_strict_schema: forward,
+//!             statement_budget: forward,
 //!         }
 //!     }
 //! }
@@ -327,7 +329,8 @@ macro_rules! __forward_database_ledger {
             schema_columns: $m_schema_columns:ident,
             schema_drop_table: $m_schema_drop_table:ident,
             schema_add_column: $m_schema_add_column:ident,
-            set_strict_schema: $m_set_strict_schema:ident $(,)?
+            set_strict_schema: $m_set_strict_schema:ident,
+            statement_budget: $m_statement_budget:ident $(,)?
         }
         $($custom:tt)*
     ) => {
@@ -362,6 +365,7 @@ macro_rules! __forward_database_ledger {
                 (schema_drop_table, $m_schema_drop_table)
                 (schema_add_column, $m_schema_add_column)
                 (set_strict_schema, $m_set_strict_schema)
+                (statement_budget, $m_statement_budget)
             ],
             []
         );
@@ -377,7 +381,7 @@ macro_rules! __forward_database_ledger {
              \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
              \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_columns,\n\
-             \x20   schema_drop_table, schema_add_column, set_strict_schema\n\
+             \x20   schema_drop_table, schema_add_column, set_strict_schema, statement_budget\n\
              The listing is the point: an operation left out of a decorator \
              silently inherits a non-pass-through trait default."
         );
@@ -1010,6 +1014,25 @@ macro_rules! __forward_database_step {
                 $($acc)*
                 fn set_strict_schema(&self, enabled: bool) {
                     <_ as $target>::set_strict_schema($recv(self), enabled);
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (statement_budget, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                fn statement_budget(
+                    &self,
+                ) -> ::core::result::Result<
+                    $crate::interfaces::database::service::StatementBudget,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::statement_budget($recv(self))
                 }
             ]
         );

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
     AggregateSpec, CapGuard, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-    RecordList, UpsertSpec, WriteOp, WriteOutcome,
+    RecordList, StatementBudget, UpsertSpec, WriteOp, WriteOutcome,
 };
 use wafer_schema::{Column, Table};
 
@@ -35,6 +35,10 @@ fn unused(op: &str) -> DatabaseError {
 
 #[async_trait]
 impl DatabaseService for MemDb {
+    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+        Ok(StatementBudget::Unbounded)
+    }
+
     async fn list(
         &self,
         _collection: &str,
