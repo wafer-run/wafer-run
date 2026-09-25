@@ -164,7 +164,9 @@ async fn equal_claims_sent_to_the_crypto_block_sign_to_identical_bytes() {
 }
 
 /// The canonical form itself: keys sorted at every depth, no whitespace,
-/// array order kept.
+/// array order kept. `scripts/check.sh` also runs this file with
+/// serde_json's `preserve_order` on, where the nested object is only sorted
+/// because the signer sorts it.
 #[test]
 fn the_payload_is_sorted_compact_json() {
     let key = primitives::derive_block_key(SECRET.as_bytes(), CALLER);

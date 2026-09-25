@@ -112,6 +112,13 @@ run_test() {
     # server on loopback that the SSRF gate otherwise blocks).
     echo "==> Network redirect + timeout escape-hatch e2e (allow-private-network)"
     cargo test --locked -p wafer-block-network --features allow-private-network --test redirect_ssrf --test timeouts
+
+    # serde_json's `preserve_order` makes nested JSON objects keep insertion
+    # order instead of sorting. No workspace member enables it, but any
+    # embedder's dependency graph can, so the JWT payload's canonical key
+    # order is checked with it on too.
+    echo "==> JWT canonical payload under serde_json preserve_order"
+    cargo test --locked -p wafer-block-crypto --features serde_json/preserve_order --test jwt_canonical
 }
 
 run_postgres() {
