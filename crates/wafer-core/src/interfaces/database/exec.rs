@@ -1824,15 +1824,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Shared `batch`: plan every op's statement (the same statement its
     /// single-op method runs, except that `Create` and `Update` return the
     /// stored row via `RETURNING *`), lazily add the data columns the ops
-    /// write (an `UpdateWhere`'s filter columns must already exist, as for
-    /// [`update_where_count`](Self::update_where_count)), then run every
+    /// write (an `UpdateWhere`'s or `DeleteWhere`'s filter columns must
+    /// already exist, as for [`update_where_count`](Self::update_where_count)
+    /// and [`delete_where_count`](Self::delete_where_count)), then run every
     /// statement as ONE
     /// [`run_transaction`](Self::run_transaction).
     ///
-    /// An `UpdateWhere` against a missing table settles as
-    /// `UpdatedWhere { rows_affected: 0 }` without a statement, exactly as
-    /// [`update_where_count`](Self::update_where_count) returns 0; every other
-    /// op fails on a missing table, as its single op does.
+    /// An `UpdateWhere` or `DeleteWhere` against a missing table settles as
+    /// `UpdatedWhere`/`DeletedWhere { rows_affected: 0 }` without a
+    /// statement, exactly as [`update_where_count`](Self::update_where_count)
+    /// and [`delete_where_count`](Self::delete_where_count) return 0; every
+    /// other op fails on a missing table, as its single op does.
     ///
     /// The lazy column-adds run before the transaction and are not rolled
     /// back with it. An empty `ops` runs nothing.
@@ -1844,6 +1846,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             Updated(JsonColumns),
             Deleted,
             UpdatedWhere,
+            DeletedWhere,
             Upserted,
             Settled(WriteOutcome),
         }
@@ -1918,6 +1921,23 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     );
                     (Planned::UpdatedWhere, stmt)
                 }
+                WriteOp::DeleteWhere {
+                    collection,
+                    filters,
+                } => {
+                    let table = sql_name(&collection)?;
+                    if !self.table_present_for_op(table).await? {
+                        planned.push(Planned::Settled(WriteOutcome::DeletedWhere {
+                            rows_affected: 0,
+                        }));
+                        continue;
+                    }
+                    self.require_columns(table, &query_columns(&filters, &[], None, None))
+                        .await?;
+                    let stmt =
+                        wafer_sql_utils::query::build_delete_where(table, &filters, Self::BACKEND);
+                    (Planned::DeletedWhere, stmt)
+                }
                 WriteOp::Upsert { collection, spec } => {
                     let json = self.json_columns(sql_name(&collection)?).await?;
                     (
@@ -1984,6 +2004,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     }
                     (Planned::UpdatedWhere, TxResult::Execute(rows_affected)) => {
                         Ok(WriteOutcome::UpdatedWhere { rows_affected })
+                    }
+                    (Planned::DeletedWhere, TxResult::Execute(rows_affected)) => {
+                        Ok(WriteOutcome::DeletedWhere { rows_affected })
                     }
                     (Planned::Upserted, TxResult::Execute(rows_affected)) => {
                         Ok(WriteOutcome::Upserted { rows_affected })

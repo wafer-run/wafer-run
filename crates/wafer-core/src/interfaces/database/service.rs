@@ -162,6 +162,14 @@ pub enum WriteOp {
         /// Column → value map to set.
         data: HashMap<String, serde_json::Value>,
     },
+    /// Delete every row matching `filters`, as
+    /// [`DatabaseService::delete_where_count`].
+    DeleteWhere {
+        /// Target collection.
+        collection: String,
+        /// AND-combined predicates; empty matches every row.
+        filters: Vec<Filter>,
+    },
     /// Insert-or-resolve one row, as [`DatabaseService::upsert`].
     Upsert {
         /// Target collection.
@@ -180,6 +188,7 @@ impl WriteOp {
             | Self::Update { collection, .. }
             | Self::Delete { collection, .. }
             | Self::UpdateWhere { collection, .. }
+            | Self::DeleteWhere { collection, .. }
             | Self::Upsert { collection, .. } => collection,
         }
     }
@@ -200,6 +209,11 @@ pub enum WriteOutcome {
     /// Rows the filtered update changed.
     UpdatedWhere {
         /// Number of rows updated.
+        rows_affected: i64,
+    },
+    /// Rows the filtered delete removed.
+    DeletedWhere {
+        /// Number of rows deleted.
         rows_affected: i64,
     },
     /// Rows the upsert inserted or updated.

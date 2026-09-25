@@ -4,6 +4,12 @@
 
 ### Breaking changes
 
+- `wire::database::BatchWrite` gains `DeleteWhere { collection, filters }`,
+  `BatchWriteResult` gains `DeletedWhere { rows_affected }`, and the
+  service-side twins `WriteOp` / `WriteOutcome` gain the same variants.
+  None of the four is `#[non_exhaustive]`, so an exhaustive `match` on one
+  outside this workspace needs the new arm. A `DatabaseService` that
+  forwards `batch` to `DbExec::batch` needs no change.
 - A flow step can no longer loosen a security header an earlier step set.
   Where a responding or failing step (in the same flow or in a `next`
   transfer's target) sets its own value for one of these headers, the flow
@@ -1411,6 +1417,18 @@
 
 ### Added
 
+- `database.batch` takes a filtered delete, `DeleteWhere { collection,
+  filters }`, with the semantics of `database.delete_where_count`: it
+  removes every row the AND-combined leaf filters match (no filters: every
+  row), reports `DeletedWhere { rows_affected }`, matches nothing on a
+  missing table (0, without aborting the batch) and refuses an unknown
+  filter column. It runs inside the batch's one transaction on every
+  `DbExec` backend, so "delete the matching rows, then create their
+  replacements" is all-or-nothing: a replacement that fails leaves the
+  deleted rows in place. It needs write access on its collection — an
+  append-only or read-only grant refuses the whole batch — and counts as
+  one op against `MAX_BATCH_WRITES` however many rows it matches (it is one
+  statement).
 - `wafer-run/security-headers` has an `allow_blob_workers` step config
   (`true`/`false`, default `false`; any other value fails Init). `true` adds
   `blob:` to `worker-src` and to no other directive, starting from the
