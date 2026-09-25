@@ -10,8 +10,8 @@
 //! step's own partial output, not what an earlier step removed, not a
 //! parallel branch's message, and never a body-describing header or
 //! `resp.status` / `resp.content_type`. The terminal's own entries win (a
-//! cookie by name/path/domain, not by its positional key) and `Vary` values
-//! are unioned.
+//! cookie by name/path/domain, not by its positional key), `Vary` values
+//! are unioned and a security header keeps the stricter value.
 
 use std::sync::Arc;
 
@@ -43,8 +43,8 @@ fn info(name: &str) -> BlockInfo {
 }
 
 /// Rejects the request as unauthenticated, setting its own
-/// `WWW-Authenticate` and (in lowercase) an `x-frame-options` that must win
-/// over the security-headers block's `X-Frame-Options`.
+/// `WWW-Authenticate` and (in lowercase) an `x-frame-options: SAMEORIGIN`
+/// that must not loosen the security-headers block's `DENY`.
 struct Unauthenticated;
 
 #[async_trait::async_trait]
@@ -386,8 +386,9 @@ async fn an_error_keeps_the_cors_and_security_headers_of_the_steps_before_it() {
     assert_eq!(header(&parts, "WWW-Authenticate"), vec!["Bearer"]);
     assert_eq!(
         header(&parts, "X-Frame-Options"),
-        vec!["SAMEORIGIN"],
-        "the error's own header must win, case-insensitively, and appear once"
+        vec!["DENY"],
+        "the error's looser header must not replace the middleware's, and the \
+         header must appear once whatever its case"
     );
     assert_eq!(header(&parts, "Content-Type"), vec!["application/json"]);
 }
@@ -694,9 +695,10 @@ async fn a_transferred_flow_error_keeps_the_outer_and_inner_headers() {
     assert_eq!(parts.status, 401);
     assert_middleware_headers(&parts);
     assert_eq!(header(&parts, "X-Inner"), vec!["1"]);
-    // The same precedence as within one flow: the failing step's own value
-    // replaces the outer security-headers step's, and appears once.
-    assert_eq!(header(&parts, "X-Frame-Options"), vec!["SAMEORIGIN"]);
+    // The same precedence as within one flow: the failing step's looser
+    // value does not replace the outer security-headers step's `DENY`, and
+    // the header appears once.
+    assert_eq!(header(&parts, "X-Frame-Options"), vec!["DENY"]);
 }
 
 /// A parallel branch's message changes are discarded at the join, on

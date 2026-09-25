@@ -6,9 +6,7 @@
 //! applies.
 //!
 //! Identity rules, shared by both:
-//! - a header is identified by its name, case-insensitively — except the
-//!   list-valued [`UNION_HEADERS`], whose values are unioned (so a `Vary:
-//!   Origin` a CORS middleware set survives a terminal's own `Vary`);
+//! - a header is identified by its name, case-insensitively;
 //! - a cookie is identified by its name plus its `Path` and `Domain`
 //!   attributes ([`CookieId`]), not by its `resp.set_cookie.*` key.
 //!   [`wafer_block::response::ResponseBuilder`] and
@@ -20,16 +18,14 @@
 //!   under either of its keys: the HTTP codec renders the later one).
 //!
 //! Precedence: where two producers set the same header, the later one's
-//! value stands. Security headers are no exception — a responding or
-//! failing step's own `X-Frame-Options` or `Content-Security-Policy`
-//! replaces the one the security-headers middleware set, on a `next`
-//! transfer as within one flow. That is the per-route override (an embed
-//! endpoint answering `SAMEORIGIN` under a site-wide `DENY`), and only a
-//! block the host trusts can make it: those headers are in
-//! [`wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS`], so a WASM
-//! step emits one only when its capabilities' `HeaderPolicy::writable`
-//! names it — a grant the operator can narrow — and a native block is host
-//! code.
+//! value replaces the earlier's, with two exceptions:
+//! - the list-valued [`UNION_HEADERS`] get the union of both values (so a
+//!   `Vary: Origin` a CORS middleware set survives a terminal's own `Vary`);
+//! - the security headers in [`super::restrictive_headers`] get the stricter
+//!   of the two, so a responding or failing step — in this flow or in a
+//!   `next` transfer's target — can tighten the security-headers
+//!   middleware's `X-Frame-Options: DENY` or `Content-Security-Policy` but
+//!   never loosen it.
 
 use std::collections::HashMap;
 
@@ -41,6 +37,8 @@ use wafer_block::{
     },
     meta::META_RESP_COOKIE_PREFIX,
 };
+
+use super::restrictive_headers;
 
 /// Headers that describe a body (or a redirect to one), never carried from
 /// the flow message onto a short-circuit terminal: the terminal has its own
@@ -140,13 +138,14 @@ pub(super) struct Written {
     /// unrelated cookie of `base` is written under a fresh
     /// `resp.set_cookie.*` key.
     pub(super) key: String,
-    /// The `base` entries it displaced: the header of the same name (for a
-    /// [`UNION_HEADERS`] header, whose values it absorbed) or the cookies of
-    /// the same identity.
+    /// The `base` entries it displaced: the header of the same name (whose
+    /// values it absorbed, for a [`UNION_HEADERS`] or restrictive header) or
+    /// the cookies of the same identity.
     pub(super) displaced: Vec<MetaEntry>,
 }
 
-/// Lay `top` over `base`, `top` winning (see the module docs for identity).
+/// Lay `top` over `base`, `top` winning except where the module docs'
+/// precedence rules combine the two (see the module docs for identity).
 /// Returns the response headers and cookies `top` wrote, with what each
 /// displaced.
 pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<Written> {
@@ -210,7 +209,14 @@ pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<Wri
                             .chain(std::iter::once(entry.value.as_str())),
                     )
                 } else {
-                    entry.value
+                    displaced
+                        .iter()
+                        .map(|e| e.value.clone())
+                        .chain(std::iter::once(entry.value))
+                        .reduce(|earlier, later| {
+                            restrictive_headers::combine(&name, &earlier, &later).unwrap_or(later)
+                        })
+                        .expect("the chain ends with the entry's own value")
                 };
                 let at = base.iter().position(|e| header_name_is(e, &name));
                 base.retain(|e| !header_name_is(e, &name));
@@ -345,18 +351,51 @@ mod tests {
     #[test]
     fn a_header_is_replaced_case_insensitively_in_place() {
         let mut base = vec![
-            e("resp.header.X-Frame-Options", "DENY"),
+            e("resp.header.Cache-Control", "no-store"),
             e("resp.header.X-Other", "1"),
         ];
         overlay(
             &mut base,
-            vec![e("resp.header.x-frame-options", "SAMEORIGIN")],
+            vec![e("resp.header.cache-control", "max-age=60")],
         );
         assert_eq!(
             base,
             vec![
-                e("resp.header.x-frame-options", "SAMEORIGIN"),
+                e("resp.header.cache-control", "max-age=60"),
                 e("resp.header.X-Other", "1"),
+            ]
+        );
+    }
+
+    /// A later security header can tighten an earlier one, in any case, but
+    /// not loosen it; the entry keeps the later producer's key.
+    #[test]
+    fn a_security_header_only_gets_stricter() {
+        let mut base = vec![
+            e("resp.header.X-Frame-Options", "DENY"),
+            e(
+                "resp.header.Referrer-Policy",
+                "strict-origin-when-cross-origin",
+            ),
+            e("resp.header.Content-Security-Policy", "default-src 'self'"),
+        ];
+        overlay(
+            &mut base,
+            vec![
+                e("resp.header.x-frame-options", "SAMEORIGIN"),
+                e("resp.header.referrer-policy", "no-referrer"),
+                e("resp.header.content-security-policy", "sandbox"),
+            ],
+        );
+        assert_eq!(
+            base,
+            vec![
+                e("resp.header.x-frame-options", "DENY"),
+                e("resp.header.referrer-policy", "no-referrer"),
+                e(
+                    "resp.header.content-security-policy",
+                    "default-src 'self', sandbox"
+                ),
             ]
         );
     }

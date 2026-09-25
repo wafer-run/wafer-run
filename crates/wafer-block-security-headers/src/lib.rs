@@ -6,12 +6,17 @@
 //! a restrictive baseline (see [`merge_csp`]) so they can only widen the
 //! policy in safe ways.
 //!
-//! These are defaults for the flow's response, not a floor: under the flow
-//! executor's precedence rule, a later step's own value for one of these
-//! headers replaces this block's. Every header this block sets is in
+//! These are a floor for the flow's response: when a step that responds or
+//! fails after this one sets its own value for one of these headers, the
+//! flow executor keeps the stricter of the two (a `Content-Security-Policy`
+//! of each, both enforced; `DENY` over `SAMEORIGIN`), so a responder can
+//! tighten this block's policy but not loosen it. The exceptions are
+//! `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy`, whose
+//! values are not ordered by strictness: a later step's own value replaces
+//! this block's. Every header this block sets is in
 //! [`capabilities::DEFAULT_SENSITIVE_HEADERS`](wafer_block::capabilities::DEFAULT_SENSITIVE_HEADERS),
-//! so a WASM step can replace one only when its capabilities' `writable`
-//! list names it.
+//! so a WASM step can set one only when its capabilities' `writable` list
+//! names it.
 
 #![warn(missing_docs)]
 

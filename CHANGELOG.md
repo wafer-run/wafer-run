@@ -4,6 +4,27 @@
 
 ### Breaking changes
 
+- A flow step can no longer loosen a security header an earlier step set.
+  Where a responding or failing step (in the same flow or in a `next`
+  transfer's target) sets its own value for one of these headers, the flow
+  executor now keeps the stricter of the two instead of the later one:
+  `Content-Security-Policy` sends both policies, comma-separated, and a
+  browser enforces each; `X-Frame-Options` keeps `DENY` over `SAMEORIGIN`
+  over anything else; `X-Content-Type-Options` keeps `nosniff`;
+  `Referrer-Policy` keeps the policy that sends less to another origin;
+  `Strict-Transport-Security` keeps the longer `max-age`, then
+  `includeSubDomains`; `Permissions-Policy` keeps, per feature, the
+  intersection of the two allowlists. Before, the later value replaced the
+  security-headers middleware's, so a handler's `X-Frame-Options:
+  SAMEORIGIN` turned the site-wide `DENY` off for its response (a 401 across
+  a flow transfer included). A handler that relied on that to relax a
+  header per route now gets the middleware's value; relax it in the
+  `wafer-run/security-headers` step config instead (`frame_ancestors`,
+  `csp`). Tightening still works: a handler's own sandboxing
+  `Content-Security-Policy` or `Referrer-Policy: no-referrer` applies on top
+  of the middleware's. `Cross-Origin-Opener-Policy` and
+  `Cross-Origin-Embedder-Policy` are not ordered by strictness and keep the
+  later value.
 - `wafer_core::security` is removed, and `wafer-core` no longer depends on
   `wafer-net-security`. The module only re-exported `is_blocked_ip`,
   `is_blocked_ipv4`, `is_blocked_ipv6` and `is_blocked_url` from

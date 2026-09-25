@@ -8,6 +8,7 @@ pub(crate) mod executor;
 /// flattened, blocks resolved, jump targets indexed — once per flow.
 pub(crate) mod plan;
 mod response_meta;
+mod restrictive_headers;
 
 pub(crate) use executor::execute as execute_waferflow;
 pub(crate) use response_meta::ResponderRecord;
