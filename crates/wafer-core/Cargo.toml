@@ -22,7 +22,6 @@ conformance = []
 wafer-schema = { workspace = true }
 wafer-block = { path = "../wafer-block" }
 wafer-sql-utils = { workspace = true }
-wafer-net-security = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
