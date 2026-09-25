@@ -39,7 +39,9 @@ type Collected = Result<usize, wafer_block::ErrorCode>;
 /// minute, `/bad-headers` with a `Content-Security-Policy` no transport can
 /// send beside a valid header, `/owned-headers` with transport-owned headers
 /// and a lower-case `content-type`, `/xff` with the request's
-/// `X-Forwarded-For` header as the message carries it; anything else answers
+/// `X-Forwarded-For` header as the message carries it, `/cut-off` with a
+/// producer that sends part of a body and ends without a terminal event;
+/// anything else answers
 /// with the client IP the listener put on the message. Every path except
 /// `/collect` and `/first-chunk` reads the whole body first and ignores how
 /// it ended.
@@ -114,6 +116,9 @@ impl wafer_block::Runtime for TestRuntime {
                 ],
             ),
             "/xff" => OutputStream::respond(msg.header("x-forwarded-for").as_bytes().to_vec()),
+            "/cut-off" => OutputStream::from_producer(|sink, _cancel| async move {
+                let _ = sink.send_chunk(b"partial body".to_vec()).await;
+            }),
             "/hang" => {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 OutputStream::respond(b"hang done".to_vec())
@@ -302,6 +307,23 @@ async fn an_unsendable_response_header_fails_closed_as_a_500() {
         response.ends_with(r#"{"error":"Internal","message":"internal server error"}"#),
         "{response}"
     );
+}
+
+/// A body whose producer ends without a terminal event is a 500, never a
+/// 200 carrying the truncated prefix as if it were the whole body.
+#[tokio::test]
+async fn a_body_cut_off_by_its_producer_is_a_500() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /cut-off HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+    assert!(!response.contains("partial body"), "{response}");
 }
 
 /// Transport-owned headers are dropped and the response stands; a
