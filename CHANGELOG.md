@@ -1277,17 +1277,28 @@
   (10), PBKDF2 `i` > `PBKDF2_SHA256_MAX_ITERATIONS` (6,000,000), as
   `MalformedHash` before any derivation runs. The costs come from the
   stored string: `t` or `i` at `u32::MAX` pinned a thread for hours, and
-  `m` at `u32::MAX` asked for terabytes. The memory ceiling is the same on
-  every target and sized for a Cloudflare Workers isolate (128 MB, shared
-  with the module and the application): a derivation grows wasm32 linear
-  memory by `m` KiB and linear memory never shrinks, so a stored hash that
-  asks for more kills the isolate instead of failing the login.
-  Both presets `hash_password` writes (19 MiB and 4 MiB) are under it, held
-  there by a compile-time assertion, so no credential this crate wrote is
-  refused. A hash imported from elsewhere above 46 MiB is — including
-  argon2-cffi's and RFC 9106's 64 MiB default — and has to be re-hashed
-  within the ceiling (or reset) before it can be used. `pbkdf2_hash` refuses the same ceiling (`HashError`), so a
-  `PasswordScheme::Pbkdf2Sha256` above it fails at hash time.
+  `m` at `u32::MAX` asked for terabytes. `pbkdf2_hash` refuses the same
+  ceiling (`HashError`), so a `PasswordScheme::Pbkdf2Sha256` above it
+  fails at hash time.
+- The argon2 memory ceiling is the same on every target and sized for a
+  Cloudflare Workers isolate (128 MB, shared with the module and the
+  application). wasm32 linear memory never shrinks, and an allocator handed
+  a slightly larger request than the block it just freed takes fresh
+  memory: two stored hashes just under a ceiling grew it by twice the
+  ceiling (91 MiB for m=46000 then m=47104, measured). Every argon2
+  derivation now runs in a buffer of one of three fixed sizes
+  (`ARGON2_MEMORY_CLASSES`: 4096, 19456 and 47104 KiB), taking the smallest
+  that holds it; on wasm32 each is allocated once and kept, so the argon2
+  share of linear memory is at most their sum, 69 MiB (69.25 MiB measured
+  with allocator overhead), whatever hashes an isolate verifies.
+  `scripts/check.sh wasm` measures this under node. A derivation smaller
+  than a class takes that class's whole buffer: on native targets, where
+  the buffer is freed after each call, a hash at m=20000 briefly holds
+  46 MiB. Both presets `hash_password` writes (19 MiB and 4 MiB) are under
+  the ceilings, held there by a compile-time assertion, so no credential
+  this crate wrote is refused. A hash imported from elsewhere above 46 MiB
+  is — including argon2-cffi's and RFC 9106's 64 MiB default — and has to
+  be re-hashed within the ceiling (or reset) before it can be used.
 - The auth service authorizes its caller per operation. Its handler never
   checked who was asking, so any block that could reach `wafer-run/auth`
   could read any user's email, role and orgs through `auth.user_profile`.
@@ -1755,8 +1766,8 @@
   verify_password_any_scheme}` with
   `PBKDF2_SHA256_RECOMMENDED_ITERATIONS` (600,000, OWASP 2023) and
   `PBKDF2_SHA256_MIN_ITERATIONS` (10,000, NIST SP 800-132 §5.2). PBKDF2
-  exists because argon2id's default memory cost is unaffordable in
-  single-threaded wasm, where it takes minutes per hash.
+  is for a runtime an embedder does not want to spend argon2id's memory
+  in.
 
   **What this changes for a stored credential: nothing.** The scheme selects
   what `CryptoService::hash` *writes*; `compare_hash` dispatches on the PHC
