@@ -990,8 +990,9 @@ async fn a_string_default_round_trips_with_standard_conforming_strings_off() {
     .await
     .expect("add a column with a string default");
 
-    let row: HashMap<String, serde_json::Value> =
-        [("id".to_string(), serde_json::json!("r1"))].into_iter().collect();
+    let row: HashMap<String, serde_json::Value> = [("id".to_string(), serde_json::json!("r1"))]
+        .into_iter()
+        .collect();
     svc.create(&table.name, row).await.expect("insert");
     let got = svc.get(&table.name, "r1").await.expect("get");
     for column in ["created_note", "added_note"] {

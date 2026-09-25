@@ -123,10 +123,7 @@ fn string_literal(s: &str, backend: Backend) -> Result<String, SqlBuildError> {
     }
     Ok(match backend {
         Backend::Sqlite => format!("'{}'", s.replace('\'', "''")),
-        Backend::Postgres => format!(
-            "E'{}'",
-            s.replace('\\', "\\\\").replace('\'', "''")
-        ),
+        Backend::Postgres => format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''")),
     })
 }
 
@@ -838,8 +835,14 @@ mod tests {
         for (default, backend) in [
             (wafer_schema::default_string("a\0b"), Backend::Sqlite),
             (wafer_schema::default_string("a\0b"), Backend::Postgres),
-            (DefaultValue::Value(DefaultVal::Float(f64::NAN)), Backend::Sqlite),
-            (DefaultValue::Value(DefaultVal::Float(f64::INFINITY)), Backend::Postgres),
+            (
+                DefaultValue::Value(DefaultVal::Float(f64::NAN)),
+                Backend::Sqlite,
+            ),
+            (
+                DefaultValue::Value(DefaultVal::Float(f64::INFINITY)),
+                Backend::Postgres,
+            ),
         ] {
             let err = build_create_table(&text_with_default(default.clone()), backend)
                 .expect_err("no SQL literal expresses this default");

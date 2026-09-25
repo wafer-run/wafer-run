@@ -27,6 +27,13 @@
   unchanged (a map either way), and verification does not depend on key
   order, so tokens already issued keep verifying. The workspace's
   `serde_json` floor is 1.0.129, for `Value::sort_all_objects`.
+- `wafer_schema::DefaultValue` is an enum — `Null`, `Now`, or
+  `Value(DefaultVal)` — instead of a struct with `raw` / `is_raw` /
+  `is_null` / `value` fields, so a column default can no longer carry a
+  SQL expression the DDL builders splice in verbatim. The `default_*`
+  helpers are unchanged; code that built the struct by hand switches to a
+  variant, and code that set `is_raw` for `CURRENT_TIMESTAMP` uses
+  `DefaultValue::Now`. `DefaultVal::Float` must be finite.
 - `wafer-block-postgres` is built on sqlx 0.9 (was 0.8), so
   `PostgresDatabaseService::from_pool` takes a sqlx 0.9 `PgPool`. An
   embedder that builds its own pool moves its `sqlx` dependency to 0.9;
@@ -1351,6 +1358,22 @@
   two identical paths, and published a pair differing only in placeholder
   names under two path keys that describe one route. A `match` over
   `RuntimeError` needs an arm for the new variant.
+
+### Security
+
+- A string column default reaches PostgreSQL DDL as an `E'…'` escape string
+  with every backslash and quote doubled. It was a plain `'…'` literal with
+  only quotes doubled, which reads the value correctly only while the
+  session's `standard_conforming_strings` is on; a server configuration or a
+  connection option can turn it off, and then a default taken from a
+  `database.ensure_table` / `database.add_column` request could end the
+  literal early and have the rest of the value parsed as SQL. The literal now
+  reads back as exactly the value on every session. SQLite rendering is
+  unchanged (its literals have no backslash escape).
+- `ddl::build_create_table` and `ddl::build_add_column` refuse a default no
+  SQL literal can express — a string holding a NUL character or a non-finite
+  float — with `SqlBuildError::InvalidDefault`, which the database handler
+  returns as `InvalidArgument`.
 
 ### Added
 
