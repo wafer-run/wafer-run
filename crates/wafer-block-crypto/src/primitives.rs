@@ -317,17 +317,47 @@ pub fn derive_block_key(master_secret: &[u8], block_id: &str) -> String {
 /// Cost parameters are baked into the produced PHC string, so
 /// [`verify_password`] handles hashes of either preset (and any other
 /// argon2 parameters up to [`ARGON2_MAX_M_COST`] and its siblings)
-/// transparently.
+/// transparently. The presets are the only argon2 costs this crate writes,
+/// and a compile-time assertion holds each under the verify ceilings, so it
+/// never writes a hash it would refuse to check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Argon2Cost {
-    /// `argon2` crate defaults (currently 19 MiB memory, 2 iterations,
-    /// 1 lane) — for native deployments.
+    /// `argon2` crate defaults: 19 MiB memory, 2 iterations, 1 lane —
+    /// OWASP's recommended argon2id configuration. For native deployments.
     Default,
-    /// Low-cost parameters (4 MiB memory, 2 iterations, 1 lane) for
-    /// CPU/memory-constrained environments such as Cloudflare Workers,
-    /// where the default memory cost exceeds runtime limits.
+    /// Low-cost parameters (4 MiB memory, 2 iterations, 1 lane) for runtimes
+    /// with a tight per-request CPU budget, such as Cloudflare Workers.
+    /// Below OWASP's minimum argon2id configuration (7 MiB at 5 iterations,
+    /// or an equivalent trade), and about a fifth of [`Self::Default`]'s
+    /// work. Memory is not the constraint: [`Self::Default`] grows wasm32
+    /// linear memory by 19 MiB, far inside a Worker isolate's 128 MB.
     Constrained,
 }
+
+impl Argon2Cost {
+    /// `(m_cost KiB, t_cost, p_cost)` of the preset.
+    const fn costs(self) -> (u32, u32, u32) {
+        match self {
+            Self::Default => (
+                argon2::Params::DEFAULT_M_COST,
+                argon2::Params::DEFAULT_T_COST,
+                argon2::Params::DEFAULT_P_COST,
+            ),
+            Self::Constrained => (4096, 2, 1),
+        }
+    }
+}
+
+// Every preset verifies on every target: none exceeds a ceiling.
+const _: () = {
+    let presets = [Argon2Cost::Default, Argon2Cost::Constrained];
+    let mut i = 0;
+    while i < presets.len() {
+        let (m, t, p) = presets[i].costs();
+        assert!(m <= ARGON2_MAX_M_COST && t <= ARGON2_MAX_T_COST && p <= ARGON2_MAX_P_COST);
+        i += 1;
+    }
+};
 
 /// Hash a password with argon2id at the given cost, producing a PHC-format
 /// string (`$argon2id$...`) with a random 16-byte salt.
@@ -336,14 +366,10 @@ pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoE
         password_hash::{rand_core::OsRng, SaltString},
         Argon2, PasswordHasher,
     };
-    let argon2 = match cost {
-        Argon2Cost::Default => Argon2::default(),
-        Argon2Cost::Constrained => {
-            let params = argon2::Params::new(4096, 2, 1, None)
-                .map_err(|e| CryptoError::HashError(format!("argon2 params: {e}")))?;
-            Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
-        }
-    };
+    let (m, t, p) = cost.costs();
+    let params = argon2::Params::new(m, t, p, None)
+        .map_err(|e| CryptoError::HashError(format!("argon2 params: {e}")))?;
+    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let salt = SaltString::generate(&mut OsRng);
     argon2
         .hash_password(password.as_bytes(), &salt)
@@ -351,8 +377,10 @@ pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoE
         .map_err(|e| CryptoError::HashError(e.to_string()))
 }
 
-/// Highest argon2 memory cost (KiB) [`verify_password`] will run: ten times
-/// the strongest preset this crate writes ([`Argon2Cost::Default`]).
+/// Highest argon2 memory cost (KiB) [`verify_password`] will run: 46 MiB,
+/// the largest memory cost in OWASP's argon2id recommendations (46 MiB at
+/// 1 iteration). The same on every target, so a stored hash verifies on
+/// all of them or on none.
 ///
 /// The cost parameters of a stored hash come from the stored string, and
 /// the `argon2` crate accepts up to `u32::MAX` for each — one crafted hash
@@ -360,14 +388,25 @@ pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoE
 /// anything above these ceilings as [`CryptoError::MalformedHash`]. There is
 /// no floor: an old, cheap hash still verifies (see
 /// [`PBKDF2_SHA256_MIN_ITERATIONS`] for why).
-pub const ARGON2_MAX_M_COST: u32 = 10 * argon2::Params::DEFAULT_M_COST;
+///
+/// The memory ceiling is sized for a Cloudflare Workers isolate, whose
+/// 128 MB limit also holds the compiled module, the JS heap and the rest of
+/// the application. On wasm32 a derivation grows linear memory by `m` KiB
+/// (46.06 MiB measured at this ceiling), and linear memory never shrinks: an
+/// isolate that has already verified a [`Argon2Cost::Constrained`] and an
+/// [`Argon2Cost::Default`] hash grows by 69 MiB in total by the end of a
+/// third at the ceiling (measured), because the allocator does not reuse
+/// the freed blocks for the larger request. Hashes written elsewhere with more memory — RFC 9106's
+/// 64 MiB option, which is argon2-cffi's default — are refused; re-hash
+/// them within the ceiling before importing them.
+pub const ARGON2_MAX_M_COST: u32 = 46 * 1024;
 
-/// Highest argon2 time cost (passes) [`verify_password`] will run; see
-/// [`ARGON2_MAX_M_COST`].
+/// Highest argon2 time cost (passes) [`verify_password`] will run: ten
+/// times [`Argon2Cost::Default`]'s; see [`ARGON2_MAX_M_COST`].
 pub const ARGON2_MAX_T_COST: u32 = 10 * argon2::Params::DEFAULT_T_COST;
 
-/// Highest argon2 parallelism (lanes) [`verify_password`] will run; see
-/// [`ARGON2_MAX_M_COST`].
+/// Highest argon2 parallelism (lanes) [`verify_password`] will run: ten
+/// times [`Argon2Cost::Default`]'s; see [`ARGON2_MAX_M_COST`].
 pub const ARGON2_MAX_P_COST: u32 = 10 * argon2::Params::DEFAULT_P_COST;
 
 /// Verify a password against a PHC-format argon2 hash. The parameters are
@@ -395,13 +434,13 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
     }
     let params = argon2::Params::try_from(&parsed).map_err(|e| malformed(e.to_string()))?;
     for (name, value, max) in [
-        ("m", params.m_cost(), ARGON2_MAX_M_COST),
-        ("t", params.t_cost(), ARGON2_MAX_T_COST),
-        ("p", params.p_cost(), ARGON2_MAX_P_COST),
+        ("memory cost m", params.m_cost(), ARGON2_MAX_M_COST),
+        ("time cost t", params.t_cost(), ARGON2_MAX_T_COST),
+        ("parallelism p", params.p_cost(), ARGON2_MAX_P_COST),
     ] {
         if value > max {
             return Err(malformed(format!(
-                "cost {name}={value} exceeds the ceiling of {max}"
+                "{name}={value} exceeds the ceiling of {max} this runtime will run"
             )));
         }
     }
@@ -1027,6 +1066,56 @@ mod tests {
                 other => panic!("{params}: expected MalformedHash, got {other:?}"),
             }
         }
+    }
+
+    /// argon2id known-answer vectors from an independent implementation
+    /// (the reference C library, through Python's argon2-cffi 25.1
+    /// `low_level.hash_secret`), all over the password below and salt bytes
+    /// `00..0f`, each standing in for a credential already stored.
+    const KAT_PASSWORD: &str = "correcthorsebatterystaple";
+    /// [`Argon2Cost::Default`]'s costs.
+    const KAT_DEFAULT: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAECAwQFBgcICQoLDA0ODw$7RmKhudBqFsX3LFSkYHsVYCSSV/j3hL/zZ9AjkvygIo";
+    /// [`Argon2Cost::Constrained`]'s costs.
+    const KAT_CONSTRAINED: &str = "$argon2id$v=19$m=4096,t=2,p=1$AAECAwQFBgcICQoLDA0ODw$DOJe9Dre1CKOGYGj/SicLaOiPXVXJ1Jame2jnwMAoGU";
+    /// Exactly at [`ARGON2_MAX_M_COST`]: OWASP's 46 MiB, 1-iteration option.
+    const KAT_AT_CEILING: &str = "$argon2id$v=19$m=47104,t=1,p=1$AAECAwQFBgcICQoLDA0ODw$xnXTdHV0WrguRO6PuHmv73XvW60GvsB6rAVhzZddIts";
+    /// argon2-cffi's `PasswordHasher` default (RFC 9106's 64 MiB option):
+    /// a well-formed, correct hash above the memory ceiling.
+    const KAT_OVER_CEILING: &str = "$argon2id$v=19$m=65536,t=3,p=4$AAECAwQFBgcICQoLDA0ODw$ig/1Ydv8lGLja+cEry2Q+/MeqvCw1xexf4oGjq9DiAQ";
+
+    #[test]
+    fn stored_hashes_within_the_ceilings_verify() {
+        for hash in [KAT_DEFAULT, KAT_CONSTRAINED, KAT_AT_CEILING] {
+            verify_password(KAT_PASSWORD, hash).unwrap_or_else(|e| panic!("{hash}: {e:?}"));
+            assert!(
+                matches!(
+                    verify_password("wrong", hash),
+                    Err(CryptoError::PasswordMismatch)
+                ),
+                "{hash}"
+            );
+        }
+    }
+
+    /// A correct password against a genuine hash whose memory cost is above
+    /// what a Workers isolate can run is refused, before deriving, with an
+    /// error that names the cost and the ceiling — not verified, and not
+    /// reported as a wrong password.
+    #[test]
+    fn a_genuine_hash_above_the_memory_ceiling_is_refused() {
+        match verify_password_any_scheme(KAT_PASSWORD, KAT_OVER_CEILING) {
+            Err(CryptoError::MalformedHash(m)) => assert_eq!(
+                m,
+                "argon2: memory cost m=65536 exceeds the ceiling of 47104 this runtime will run"
+            ),
+            other => panic!("expected MalformedHash, got {other:?}"),
+        }
+    }
+
+    /// The memory ceiling is OWASP's largest argon2id memory cost, 46 MiB.
+    #[test]
+    fn the_memory_ceiling_is_46_mib() {
+        assert_eq!(ARGON2_MAX_M_COST, 47104);
     }
 
     /// The ceilings sit above everything this crate writes, so no hash it

@@ -1271,13 +1271,22 @@
   `HashError` (`verify_password`); `VerifyError` is JWT-only. Callers that
   treat every `compare_hash` error as bad credentials should branch on the
   code.
-- Stored-hash verification refuses costs above ten times the strongest
-  preset this crate writes: argon2 `m` > `ARGON2_MAX_M_COST` (194560 KiB),
-  `t` > `ARGON2_MAX_T_COST` (20), `p` > `ARGON2_MAX_P_COST` (10), PBKDF2
-  `i` > `PBKDF2_SHA256_MAX_ITERATIONS` (6,000,000), as `MalformedHash`
-  before any derivation runs. The costs come from the stored string: `t` or
-  `i` at `u32::MAX` pinned a thread for hours, and `m` at `u32::MAX` asked
-  for terabytes. `pbkdf2_hash` refuses the same ceiling (`HashError`), so a
+- Stored-hash verification refuses costs above fixed ceilings: argon2
+  `m` > `ARGON2_MAX_M_COST` (47104 KiB, 46 MiB — OWASP's largest argon2id
+  memory cost), `t` > `ARGON2_MAX_T_COST` (20), `p` > `ARGON2_MAX_P_COST`
+  (10), PBKDF2 `i` > `PBKDF2_SHA256_MAX_ITERATIONS` (6,000,000), as
+  `MalformedHash` before any derivation runs. The costs come from the
+  stored string: `t` or `i` at `u32::MAX` pinned a thread for hours, and
+  `m` at `u32::MAX` asked for terabytes. The memory ceiling is the same on
+  every target and sized for a Cloudflare Workers isolate (128 MB, shared
+  with the module and the application): a derivation grows wasm32 linear
+  memory by `m` KiB and linear memory never shrinks, so a stored hash that
+  asks for more kills the isolate instead of failing the login.
+  Both presets `hash_password` writes (19 MiB and 4 MiB) are under it, held
+  there by a compile-time assertion, so no credential this crate wrote is
+  refused. A hash imported from elsewhere above 46 MiB is — including
+  argon2-cffi's and RFC 9106's 64 MiB default — and has to be re-hashed
+  within the ceiling (or reset) before it can be used. `pbkdf2_hash` refuses the same ceiling (`HashError`), so a
   `PasswordScheme::Pbkdf2Sha256` above it fails at hash time.
 - The auth service authorizes its caller per operation. Its handler never
   checked who was asking, so any block that could reach `wafer-run/auth`
