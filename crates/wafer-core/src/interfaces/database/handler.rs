@@ -632,6 +632,8 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         // The executor's message names only what the caller sent (a table, a
         // column, a limit or offset), so it goes back to the caller as is.
         DatabaseError::InvalidArgument(msg) => WaferError::new(code, msg),
+        // Names only statement counts and the backend's limit.
+        DatabaseError::ResourceExhausted(msg) => WaferError::new(code, msg),
         // Transient: the caller may retry (and the runtime retries a block
         // Init that failed this way instead of caching the failure). The
         // driver's message can name hosts and files, so it is logged, not
@@ -889,12 +891,13 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if req.rows.len() > wire::MAX_BATCH_WRITES {
-                return OutputStream::error(invalid(format!(
-                    "create_many carries {} rows; at most {} per call",
-                    req.rows.len(),
-                    wire::MAX_BATCH_WRITES
-                )));
+            // One INSERT per row: refused before anything runs when the
+            // backend cannot run that many in this invocation.
+            if let Err(e) = service
+                .statement_budget()
+                .admit(req.rows.len(), "create_many")
+            {
+                return OutputStream::error(db_error_to_wafer(e));
             }
             if let Err(e) = req.rows.iter().try_for_each(check_data_names) {
                 return OutputStream::error(e);
@@ -941,12 +944,12 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            if req.ops.len() > wire::MAX_BATCH_WRITES {
-                return OutputStream::error(invalid(format!(
-                    "batch carries {} ops; at most {} per call",
-                    req.ops.len(),
-                    wire::MAX_BATCH_WRITES
-                )));
+            // At most one statement per op (a `DeleteWhere` is one however
+            // many rows it matches), so this refuses, before the append-only
+            // probes or the service run, a batch the backend cannot run in
+            // this invocation.
+            if let Err(e) = service.statement_budget().admit(req.ops.len(), "batch") {
+                return OutputStream::error(db_error_to_wafer(e));
             }
             // A `Create` into a collection the caller may only append to
             // follows the append-only insert rules.

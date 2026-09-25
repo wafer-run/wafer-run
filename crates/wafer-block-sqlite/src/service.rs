@@ -14,7 +14,7 @@ use wafer_core::{
         codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
-        service::{Column, DatabaseError, Record, Table},
+        service::{Column, DatabaseError, Record, StatementBudget, Table},
     },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
@@ -349,6 +349,12 @@ impl DbExec for SQLiteDatabaseService {
         self.strict_schema.load(Ordering::Relaxed)
     }
 
+    /// A local SQLite file has no per-invocation statement limit. A write's cost is
+    /// bounded by what its caller sends, as for any single statement.
+    fn statement_budget(&self) -> StatementBudget {
+        StatementBudget::Unbounded
+    }
+
     async fn run_fetch(
         &self,
         sql: &str,
@@ -610,6 +616,7 @@ forward_database_service! {
             schema_drop_table: custom,
             schema_add_column: custom,
             set_strict_schema: custom,
+            statement_budget: forward,
         }
 
         async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
