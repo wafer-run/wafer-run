@@ -287,7 +287,7 @@ async fn repeated_request_header_lines_reach_the_message_joined() {
 }
 
 /// A header no transport can send fails the response closed: a uniform 500
-/// with none of the response's headers, never the page without its CSP.
+/// keeping the response's other headers, never the page without its CSP.
 #[tokio::test]
 async fn an_unsendable_response_header_fails_closed_as_a_500() {
     let server = Server::start(serde_json::json!({})).await;
@@ -301,7 +301,7 @@ async fn an_unsendable_response_header_fails_closed_as_a_500() {
         .expect("response arrives");
     let lower = response.to_ascii_lowercase();
     assert!(response.starts_with("HTTP/1.1 500"), "{response}");
-    assert!(!lower.contains("x-good"), "{response}");
+    assert!(lower.contains("\r\nx-good: ok\r\n"), "{response}");
     assert!(!lower.contains("content-security-policy"), "{response}");
     assert!(
         response.ends_with(r#"{"error":"Internal","message":"internal server error"}"#),
