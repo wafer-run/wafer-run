@@ -13,7 +13,7 @@
 ///   name the offending block so the misconfiguration can be fixed at its
 ///   source.
 /// - **Boot / seal-time** (`AlreadySealed`, `GrantsRejected`, `BlocksNotFound`,
-///   `DuplicateToolNames`): raised
+///   `DuplicateToolNames`, `DuplicateEndpointRoutes`): raised
 ///   during `Wafer::start()` / `seal()`, after all blocks are registered and
 ///   the link graph is validated as a whole. All but `AlreadySealed` are the *aggregating*
 ///   variants: each wraps a `Vec` and renders every item through
@@ -172,6 +172,22 @@ pub enum RuntimeError {
     /// Remediation: rename one of the endpoints' `agent_tool(...)` names.
     #[error("{}", render_boot_error_list("duplicate agent tool name(s)", .0, render_duplicate_tool_name))]
     DuplicateToolNames(Vec<DuplicateToolNameError>),
+
+    // ── Endpoint routes (seal-time) ─────────────────────────────────────
+    /// Two or more endpoints declare the same method on the same route.
+    ///
+    /// Routes are compared by [`crate::executor::route_shape`], so
+    /// `GET /items/{id}` and `GET /items/{item_id}` are one route: every
+    /// request one matches, the other matches too. Only one handler can
+    /// answer such a request, and the discovery documents
+    /// (`wafer_core::discovery::generate_openapi`) key operations by method
+    /// and path, so the claimants would also describe one operation twice.
+    /// `seal()` aggregates every collision across every registered block and
+    /// refuses boot.
+    ///
+    /// Remediation: move or remove one of the endpoints.
+    #[error("{}", render_boot_error_list("duplicate endpoint route(s)", .0, render_duplicate_endpoint_route))]
+    DuplicateEndpointRoutes(Vec<DuplicateEndpointRouteError>),
 }
 
 impl From<crate::types::BlockInfoError> for RuntimeError {
@@ -332,6 +348,30 @@ pub struct AgentToolClaimant {
     pub path: String,
 }
 
+/// One route declared by more than one endpoint, in
+/// [`RuntimeError::DuplicateEndpointRoutes`]. Aggregated by `Wafer::seal()`
+/// so a single error lists every collision with every endpoint declaring it.
+#[derive(Debug, Clone)]
+pub struct DuplicateEndpointRouteError {
+    /// HTTP method every claimant declares.
+    pub method: crate::types::HttpMethod,
+    /// The shared route, as [`crate::executor::route_shape`] renders it.
+    pub route: String,
+    /// Every endpoint declaring it, sorted by block then path so the rendered
+    /// message is stable across boots (the block registry is a `HashMap`).
+    pub claimants: Vec<RouteClaimant>,
+}
+
+/// One endpoint declaring a route. Entry of
+/// [`DuplicateEndpointRouteError::claimants`].
+#[derive(Debug, Clone)]
+pub struct RouteClaimant {
+    /// Name of the block declaring the endpoint.
+    pub block: String,
+    /// The endpoint's path as declared, placeholder names included.
+    pub path: String,
+}
+
 /// One block reference declared by a block's own config. Returned by
 /// [`crate::Block::collect_block_refs`] for each reference the
 /// implementing block finds.
@@ -390,6 +430,20 @@ fn render_duplicate_tool_name(e: &DuplicateToolNameError) -> String {
         e.claimants
             .iter()
             .map(|c| format!("      \u{2022} block `{}` {} {}", c.block, c.method, c.path))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn render_duplicate_endpoint_route(e: &DuplicateEndpointRouteError) -> String {
+    format!(
+        "  - {} {} declared by {} endpoints:\n{}",
+        e.method,
+        e.route,
+        e.claimants.len(),
+        e.claimants
+            .iter()
+            .map(|c| format!("      \u{2022} block `{}` {} {}", c.block, e.method, c.path))
             .collect::<Vec<_>>()
             .join("\n"),
     )

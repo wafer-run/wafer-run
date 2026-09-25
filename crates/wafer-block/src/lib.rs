@@ -65,7 +65,7 @@ pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
 pub use context::Context;
 pub use error::{BlockConfigRef, RuntimeError};
-pub use executor::{extract_path_vars, match_path, matches_pattern};
+pub use executor::{extract_path_vars, match_path, matches_pattern, route_shape};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hash::expand_env_vars;
 pub use hash::{hex_encode, sha256, sha256_hex};
