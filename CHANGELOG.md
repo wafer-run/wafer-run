@@ -4,6 +4,12 @@
 
 ### Breaking changes
 
+- `wafer_core::security` is removed, and `wafer-core` no longer depends on
+  `wafer-net-security`. The module only re-exported `is_blocked_ip`,
+  `is_blocked_ipv4`, `is_blocked_ipv6` and `is_blocked_url` from
+  `wafer-net-security`, where they are defined; import them from there
+  (`wafer_net_security::is_blocked_url`) and add `wafer-net-security` to
+  the crate's dependencies. The predicates' behaviour is unchanged.
 - `wafer-block-postgres` is built on sqlx 0.9 (was 0.8), so
   `PostgresDatabaseService::from_pool` takes a sqlx 0.9 `PgPool`. An
   embedder that builds its own pool moves its `sqlx` dependency to 0.9;

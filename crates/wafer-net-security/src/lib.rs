@@ -4,7 +4,6 @@
 //! other) so the same predicates and resolver guard every outbound HTTP
 //! surface: the `wafer-run/network` service block (`wafer-block-network`) and
 //! the runtime's registry/manifest downloads (`wafer-run`, SEC-09).
-//! `wafer_core::security` re-exports the predicates for existing consumers.
 //!
 //! Two layers, applied together by callers:
 //! - [`is_blocked_url`] — URL-level pre-check: scheme, `localhost`, and

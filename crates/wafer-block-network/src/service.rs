@@ -136,7 +136,7 @@ impl Configured {
         // checks happen in `SsrfFilteringResolver` and defend against DNS
         // rebinding (SEC-019).
         #[cfg(not(feature = "allow-private-network"))]
-        if wafer_core::security::is_blocked_url(&req.url) {
+        if wafer_net_security::is_blocked_url(&req.url) {
             return Err(NetworkError::RequestError(
                 "request to private/internal address is not allowed".to_string(),
             ));
@@ -387,7 +387,7 @@ mod tests {
 
     /// End-to-end DNS rebinding case: the public-looking caller-supplied
     /// URL host resolves to `127.0.0.1`. The URL-level
-    /// [`wafer_core::security::is_blocked_url`] check passes (host is a
+    /// [`wafer_net_security::is_blocked_url`] check passes (host is a
     /// plain domain), so the only line of defense is the
     /// [`SsrfFilteringResolver`].
     ///
