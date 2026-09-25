@@ -1713,7 +1713,7 @@ async fn check_statement_budget(svc: &dyn DatabaseService) {
             .collect()
     };
 
-    match svc.statement_budget() {
+    match svc.statement_budget().expect("statement_budget") {
         StatementBudget::Unbounded => {
             const LARGE: usize = 2500;
             let inserted = svc

@@ -35,8 +35,8 @@ fn unused(op: &str) -> DatabaseError {
 
 #[async_trait]
 impl DatabaseService for MemDb {
-    fn statement_budget(&self) -> StatementBudget {
-        StatementBudget::Unbounded
+    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+        Ok(StatementBudget::Unbounded)
     }
 
     async fn list(

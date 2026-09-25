@@ -895,7 +895,7 @@ pub async fn handle_message(
             // backend cannot run that many in this invocation.
             if let Err(e) = service
                 .statement_budget()
-                .admit(req.rows.len(), "create_many")
+                .and_then(|budget| budget.admit(req.rows.len(), "create_many"))
             {
                 return OutputStream::error(db_error_to_wafer(e));
             }
@@ -948,7 +948,10 @@ pub async fn handle_message(
             // many rows it matches), so this refuses, before the append-only
             // probes or the service run, a batch the backend cannot run in
             // this invocation.
-            if let Err(e) = service.statement_budget().admit(req.ops.len(), "batch") {
+            if let Err(e) = service
+                .statement_budget()
+                .and_then(|budget| budget.admit(req.ops.len(), "batch"))
+            {
                 return OutputStream::error(db_error_to_wafer(e));
             }
             // A `Create` into a collection the caller may only append to

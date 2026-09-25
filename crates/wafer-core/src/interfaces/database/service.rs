@@ -909,13 +909,16 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// The statements this service may still run in the current invocation.
     /// The database handler admits a `create_many` or `batch` against it
-    /// before calling the service, one statement per row or op.
+    /// before calling the service, one statement per row or op. An error is
+    /// returned as the handler's answer to the call, which then never reaches
+    /// the service (a service that resolves its backend per request fails
+    /// here as it would on any op).
     ///
     /// No default: a decorator that forgot it would report `Unbounded` for a
     /// backend that has a limit, and every call past that limit would fail
     /// inside the backend instead of being refused up front. A SQL backend
     /// forwards to [`DbExec::statement_budget`](super::exec::DbExec::statement_budget).
-    fn statement_budget(&self) -> StatementBudget;
+    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError>;
 }
 
 /// Record represents a single database record.

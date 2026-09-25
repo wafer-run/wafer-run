@@ -126,8 +126,8 @@ impl DbExec for PostgresDatabaseService {
 
     /// PostgreSQL has no per-invocation statement limit. A write's cost is
     /// bounded by what its caller sends, as for any single statement.
-    fn statement_budget(&self) -> StatementBudget {
-        StatementBudget::Unbounded
+    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+        Ok(StatementBudget::Unbounded)
     }
 
     async fn run_fetch(

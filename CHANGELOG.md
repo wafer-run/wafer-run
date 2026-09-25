@@ -7,10 +7,11 @@
 - The fixed cap on `database.create_many` rows and `database.batch` ops is
   gone: `wire::database::MAX_BATCH_WRITES` (1000) is removed, and each
   backend now reports its own budget. `DatabaseService` and `DbExec` gain a
-  required `fn statement_budget(&self) -> StatementBudget` (no default: a
-  decorator that forgot it would hide its backend's limit), returning
-  `StatementBudget::Unbounded` or `Limited { limit, used }` — the
-  statements one invocation may run and how many this one already has. The
+  required `fn statement_budget(&self) -> Result<StatementBudget,
+  DatabaseError>` (no default: a decorator that forgot it would hide its
+  backend's limit), reporting `StatementBudget::Unbounded` or
+  `Limited { limit, used }` — the statements one invocation may run and how
+  many this one already has; an error is the call's answer. The
   database handler admits a `create_many` (one statement per row) or `batch`
   (one per op) against it before anything runs, and the shared `DbExec`
   orchestration admits every `run_transaction` again after planning, so the

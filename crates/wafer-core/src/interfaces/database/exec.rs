@@ -543,7 +543,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`DatabaseService::statement_budget`](super::service::DatabaseService::statement_budget)
     /// has none: a backend with a limit that inherited `Unbounded` would
     /// fail its writes part-way through a request.
-    fn statement_budget(&self) -> StatementBudget;
+    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError>;
 
     // ---- Primitives: the only backend-specific execution code ----
     // `params` is the JSON form produced by `sea_values_to_json(stmt.values)`;
@@ -1825,7 +1825,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .iter()
             .map(|(sql, params)| TxOp::Execute { sql, params })
             .collect();
-        self.statement_budget().admit(ops.len(), "create_many")?;
+        self.statement_budget()?.admit(ops.len(), "create_many")?;
         let mut inserted = 0;
         for result in self.run_transaction(&ops).await? {
             match result {
@@ -1990,7 +1990,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 _ => TxOp::Execute { sql, params },
             })
             .collect();
-        self.statement_budget().admit(tx_ops.len(), "batch")?;
+        self.statement_budget()?.admit(tx_ops.len(), "batch")?;
         let results = self.run_transaction(&tx_ops).await?;
         if results.len() != statements.len() {
             return Err(DatabaseError::Internal(format!(
@@ -2098,7 +2098,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 },
             })
             .collect();
-        self.statement_budget()
+        self.statement_budget()?
             .admit(ops.len(), "a guarded write")?;
         let results = self.run_transaction(&ops).await?;
         if results.len() != ops.len() {
@@ -2257,8 +2257,8 @@ mod tests {
     impl DbExec for BarrierExec {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         fn schema_cache(&self) -> Option<&SchemaCache> {
@@ -2409,8 +2409,8 @@ mod tests {
     impl DbExec for SeqMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         async fn run_fetch(
@@ -2742,14 +2742,14 @@ mod tests {
             true
         }
 
-        fn statement_budget(&self) -> StatementBudget {
-            match self.limit {
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(match self.limit {
                 Some(limit) => StatementBudget::Limited {
                     limit,
                     used: self.issued(),
                 },
                 None => StatementBudget::Unbounded,
-            }
+            })
         }
 
         async fn run_fetch(
@@ -3020,8 +3020,8 @@ mod tests {
     impl DbExec for KeyedMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         fn schema_cache(&self) -> Option<&SchemaCache> {
@@ -3313,8 +3313,8 @@ mod tests {
     impl DbExec for DdlMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         fn schema_cache(&self) -> Option<&SchemaCache> {
@@ -3880,8 +3880,8 @@ mod tests {
     impl DbExec for RacedGuardMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         fn strict_schema(&self) -> bool {

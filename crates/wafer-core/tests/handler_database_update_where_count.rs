@@ -140,8 +140,8 @@ mod db_fakes {
 
     #[async_trait]
     impl DatabaseService for FixtureDb {
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         async fn update_where_count(

@@ -55,8 +55,8 @@ fn row(id: &str) -> Record {
 impl DatabaseService for RecordingDb {
     /// A limited, partly spent budget, so a decorator that reported its own
     /// (or the `Unbounded` a backend without a limit reports) would show.
-    fn statement_budget(&self) -> StatementBudget {
-        StatementBudget::Limited { limit: 7, used: 3 }
+    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+        Ok(StatementBudget::Limited { limit: 7, used: 3 })
     }
 
     async fn get(&self, _collection: &str, id: &str) -> Result<Record, DatabaseError> {
@@ -437,7 +437,7 @@ async fn set_strict_schema_reaches_the_inner_service() {
 fn statement_budget_is_the_inner_services() {
     let (dec, _inner) = decorated();
     assert_eq!(
-        dec.statement_budget(),
+        dec.statement_budget().expect("statement_budget"),
         StatementBudget::Limited { limit: 7, used: 3 }
     );
 }

@@ -20,7 +20,7 @@ use wafer_block::{
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::interfaces::database::{
     handler::handle_message,
-    service::{pk, Column, DataType, DatabaseService, StatementBudget, Table},
+    service::{pk, Column, DataType, DatabaseError, DatabaseService, StatementBudget, Table},
 };
 
 /// A `Context` that grants every resource, so the requests reach the service.
@@ -258,10 +258,12 @@ async fn a_failing_statement_rolls_the_whole_batch_back() {
 
 /// The real SQLite service behind a budget it does not have: every op is
 /// forwarded except `statement_budget`, which reports `budget`, as a backend
-/// with a per-invocation limit (D1) would.
+/// with a per-invocation limit (D1) would — or, when `budget` is `None`,
+/// fails as a service that resolves its backend per request does outside
+/// one.
 struct Budgeted {
     inner: SQLiteDatabaseService,
-    budget: StatementBudget,
+    budget: Option<StatementBudget>,
 }
 
 impl Budgeted {
@@ -306,8 +308,10 @@ wafer_core::forward_database_service! {
             statement_budget: custom,
         }
 
-        fn statement_budget(&self) -> StatementBudget {
-            self.budget
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            self.budget.ok_or_else(|| {
+                DatabaseError::Unavailable("no request in scope".into())
+            })
         }
     }
 }
@@ -315,7 +319,7 @@ wafer_core::forward_database_service! {
 async fn budgeted(limit: u64, used: u64) -> Budgeted {
     Budgeted {
         inner: seeded().await,
-        budget: StatementBudget::Limited { limit, used },
+        budget: Some(StatementBudget::Limited { limit, used }),
     }
 }
 
@@ -418,13 +422,42 @@ async fn a_call_over_what_the_invocation_has_left_is_exhausted() {
     }
 }
 
+/// A service that cannot report its budget answers the call with that
+/// error, and the call never reaches it.
+#[tokio::test]
+async fn a_budget_that_cannot_be_read_refuses_the_call() {
+    let svc = Budgeted {
+        inner: seeded().await,
+        budget: None,
+    };
+    for (op, request) in [
+        (
+            ServiceOp::DATABASE_CREATE_MANY,
+            serde_json::json!({ "collection": TABLE, "rows": rows(1) }),
+        ),
+        (
+            ServiceOp::DATABASE_BATCH,
+            serde_json::json!({ "ops": creates(1) }),
+        ),
+    ] {
+        let err = dispatch(&svc, op, &request)
+            .await
+            .expect_err("no budget, no write");
+        assert_eq!(err.code, ErrorCode::Unavailable, "{op}: {}", err.message);
+        assert_eq!(count(&svc).await, 3, "{op}: nothing was written");
+    }
+}
+
 /// Native SQLite has no per-invocation statement limit, so a call far past
 /// the 1000 statements D1 allows one invocation runs whole.
 #[tokio::test]
 async fn sqlite_runs_a_call_of_any_size() {
     const LARGE: usize = 5000;
     let svc = seeded().await;
-    assert_eq!(svc.statement_budget(), StatementBudget::Unbounded);
+    assert_eq!(
+        svc.statement_budget().expect("statement_budget"),
+        StatementBudget::Unbounded
+    );
     let resp = dispatch(
         &svc,
         ServiceOp::DATABASE_CREATE_MANY,

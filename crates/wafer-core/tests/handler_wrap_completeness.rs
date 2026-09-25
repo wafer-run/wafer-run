@@ -104,8 +104,8 @@ mod db_fakes {
 
     #[async_trait]
     impl DatabaseService for RecordingDb {
-        fn statement_budget(&self) -> StatementBudget {
-            StatementBudget::Unbounded
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
         }
 
         async fn get(&self, _collection: &str, id: &str) -> Result<Record, DatabaseError> {

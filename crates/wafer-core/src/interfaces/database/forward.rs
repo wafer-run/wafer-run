@@ -1028,7 +1028,10 @@ macro_rules! __forward_database_step {
                 $($acc)*
                 fn statement_budget(
                     &self,
-                ) -> $crate::interfaces::database::service::StatementBudget {
+                ) -> ::core::result::Result<
+                    $crate::interfaces::database::service::StatementBudget,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
                     <_ as $target>::statement_budget($recv(self))
                 }
             ]
