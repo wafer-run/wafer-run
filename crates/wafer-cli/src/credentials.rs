@@ -70,6 +70,10 @@ impl From<StoredCredentials> for CredentialsFile {
         for entry in legacy {
             cf.set_token(&Registry::new(&entry.registry), entry.token);
         }
+        // Several stored spellings of one registry (`https://Wafer.run`,
+        // `https://wafer.run:443`) normalize to one key, and the last one
+        // in the file's key order — `tokens` is a sorted map, so the
+        // spelling that sorts last — wins.
         for (registry, token) in stored.tokens {
             cf.set_token(&Registry::new(&registry), token);
         }
@@ -81,6 +85,11 @@ pub fn path() -> Result<PathBuf> {
     Ok(wafer_home()?.join("credentials.toml"))
 }
 
+/// Read `~/.wafer/credentials.toml`; an absent file holds no tokens. Keys
+/// are re-normalized through [`Registry::new`], so spellings of one
+/// registry stored under several keys load as one entry, holding the token
+/// of the spelling that sorts last (`https://wafer.run:443` over
+/// `https://wafer.run`).
 pub fn load() -> Result<CredentialsFile> {
     let p = path()?;
     if !p.exists() {
@@ -274,7 +283,8 @@ mod tests {
         );
         let loaded = load().unwrap();
         assert_eq!(loaded.tokens.len(), 1);
-        assert!(loaded.token(&Registry::new(WAFER)).is_some());
+        // `https://wafer.run:443` sorts after `https://wafer.run`, so it wins.
+        assert_eq!(loaded.token(&Registry::new(WAFER)), Some("PORTED"));
     }
 
     #[test]

@@ -2001,7 +2001,8 @@
   `wafer login --registry https://wafer.run:443` used to store a second
   token beside the one for `https://wafer.run`, which `wafer publish`
   against the other spelling did not find. Entries already on disk under
-  both spellings load as one.
+  both spellings load as one; the token of the spelling that sorts last
+  (`https://wafer.run:443` after `https://wafer.run`) is kept.
 - `wafer test` answers a guest's `lookup_attachment` with the runtime's
   `NotFound` sentinel, which the Rust SDK reads as `Ok(None)`. The stub
   returned 0, which the SDK unpacked as a null buffer and passed to
