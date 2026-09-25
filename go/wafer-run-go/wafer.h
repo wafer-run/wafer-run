@@ -22,7 +22,9 @@
  *
  *     These spawn work on the FFI's internal tokio runtime and return
  *     immediately. The supplied wafer_done_cb is invoked when the work
- *     completes, possibly from a tokio worker thread. The `result`
+ *     completes, possibly from a tokio worker thread (on the caller's
+ *     thread for a call that fails up front, and on the thread calling
+ *     wafer_free for a call it cancels). The `result`
  *     pointer passed to the callback is owned by the FFI and freed
  *     after the callback returns — copy any data you need before
  *     returning. For lifecycle ops the callback's result is NULL on
@@ -30,7 +32,10 @@
  *
  *     The callback is required. Each returns WAFER_ACCEPTED when it took
  *     the work, or WAFER_REFUSED_NULL_CALLBACK — having done nothing, and
- *     with nothing to call back — when `cb` is NULL.
+ *     with nothing to call back — when `cb` is NULL. An accepted call
+ *     invokes its callback exactly once: when the work succeeds or fails,
+ *     with an error if it panics, and with a "Cancelled" error if
+ *     wafer_free cancels it.
  */
 
 #ifndef WAFER_H
@@ -74,10 +79,16 @@ WaferRuntime* wafer_new(void);
 /*
  * Free a WAFER runtime instance. Passing NULL is a no-op.
  *
- * The caller must first call wafer_stop and wait for its callback to fire
- * before calling wafer_free; otherwise block lifecycle(Stop) handlers will
- * not run. wafer_free's drop of the internal tokio runtime waits for any
- * in-flight spawned tasks to complete.
+ * Every async call that has not called back yet is cancelled: its callback
+ * fires with a "Cancelled" error before wafer_free returns, and its work is
+ * dropped. Call wafer_stop and wait for its callback first to let accepted
+ * wafer_run calls finish and block lifecycle(Stop) handlers run. Called
+ * from within a tokio runtime (inside a wafer_done_cb, or from a Rust
+ * embedder's async context), it shuts the FFI's runtime down in the
+ * background: the cancelled callbacks have fired before it returns, but
+ * callbacks already running on the FFI's threads may finish after.
+ *
+ * No other call may use `w` concurrently with or after this one.
  */
 void wafer_free(WaferRuntime* w);
 
@@ -103,8 +114,12 @@ int wafer_start(WaferRuntime* w, wafer_done_cb cb, void* user_data);
 /*
  * Stop the runtime and shut down all block instances (async).
  *
- * Returns WAFER_ACCEPTED immediately and invokes `cb` with NULL when
- * shutdown finishes. Must be awaited before wafer_free so that block
+ * Returns WAFER_ACCEPTED immediately; from then on wafer_run is refused
+ * (its callback reports "Unavailable"). Once every wafer_run accepted
+ * before it has called back, the blocks' lifecycle(Stop) handlers run and
+ * `cb` is invoked: NULL on success, a JSON error string if shutdown
+ * panicked. A second wafer_stop waits for the first, reports the same
+ * outcome, and does not stop the blocks again, even after a panic. Must be awaited before wafer_free so that block
  * lifecycle(Stop) handlers run.
  */
 int wafer_stop(WaferRuntime* w, wafer_done_cb cb, void* user_data);
@@ -155,9 +170,12 @@ char* wafer_register_block(WaferRuntime* w,
  *                  {"kind": "...", "meta": [{"key": "...", "value": "..."}]}
  *                  Both fields are required; `meta` may be [].
  *
- * Returns WAFER_ACCEPTED immediately and invokes `cb` with a JSON result
- * string of the form
+ * Returns WAFER_ACCEPTED immediately and, once the flow has finished and its
+ * response body is collected, invokes `cb` with a JSON result string of the
+ * form
  *   {"action": "respond|drop|error|continue|halt", ...}
+ * After wafer_stop the flow does not run: the result is an "Unavailable"
+ * error.
  *
  * Every action carries a "meta" object of string values holding ONLY
  * response entries, for the host to apply to its response:

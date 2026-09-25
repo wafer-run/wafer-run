@@ -11,6 +11,8 @@
 //!   returns — callers must copy any data they need before returning. The
 //!   callback is required: each returns [`WAFER_ACCEPTED`], or
 //!   [`WAFER_REFUSED_NULL_CALLBACK`] without doing anything when it is NULL.
+//!   An accepted call invokes its callback exactly once, whether the work
+//!   succeeds, fails, panics or is cancelled by [`wafer_free`].
 //! - Synchronous ops (`wafer_new`, `wafer_free`, `wafer_register`,
 //!   `wafer_register_block`, `wafer_flows_info`, `wafer_has_block`) return
 //!   immediately with a result; strings they return must be freed via
@@ -23,12 +25,20 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::{
+    any::Any,
+    collections::HashMap,
     ffi::{c_void, CStr, CString},
+    future::Future,
     os::raw::{c_char, c_int},
-    sync::Arc,
+    panic::AssertUnwindSafe,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard, PoisonError,
+    },
 };
 
-use tokio::sync::RwLock;
+use futures::FutureExt;
+use tokio::sync::{watch, OnceCell, RwLock};
 use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 
 /// Callback invoked when an async FFI op completes.
@@ -50,8 +60,12 @@ use wafer_run::{Message, SealState, StaticConfigSource, Wafer};
 /// `user_data` is opaque to the FFI layer and passed through unchanged.
 ///
 /// The callback may be invoked from any thread owned by the FFI's internal
-/// tokio runtime; consumers are responsible for thread-safety inside the
-/// callback.
+/// tokio runtime; on the caller's own thread before the entry point
+/// returns when the call fails up front (e.g. invalid message JSON); or,
+/// for a call [`wafer_free`] cancels, on the thread calling `wafer_free`;
+/// consumers are responsible for thread-safety inside the callback. It is
+/// invoked exactly once per accepted call — see [`wafer_free`] for calls
+/// still in flight when the runtime is freed.
 ///
 /// The async entry points take it as `Option<WaferDoneCb>`, which has the
 /// same ABI as the C function pointer with NULL as `None`.
@@ -70,6 +84,16 @@ pub const WAFER_REFUSED_NULL_CALLBACK: c_int = -1;
 /// Opaque handle wrapping the Rust runtime.
 pub struct WaferRuntime {
     inner: Arc<RwLock<Wafer>>,
+    /// The callbacks of accepted async calls that have not called back yet;
+    /// `wafer_free` cancels them.
+    callbacks: Arc<Callbacks>,
+    /// The `wafer_run` calls accepted and not yet called back, and whether
+    /// `wafer_stop` has closed the runtime to new ones.
+    runs: Arc<Runs>,
+    /// Set once the blocks' `lifecycle(Stop)` has run — to `Some(message)`
+    /// if it panicked — so a second `wafer_stop` waits for the first and
+    /// reports its outcome instead of stopping the blocks again.
+    stopped: Arc<OnceCell<Option<String>>>,
     /// Tokio runtime that drives spawned async work. Not used to block_on
     /// anything; futures are `spawn`'d and signal completion via the caller's
     /// `WaferDoneCb`.
@@ -82,6 +106,203 @@ pub struct WaferRuntime {
 /// thread-safety are the C caller's responsibility.
 struct UserData(*mut c_void);
 unsafe impl Send for UserData {}
+
+/// The shape of an async call's callback result, which decides how a failure
+/// the call itself did not produce (a panic, a cancellation) is reported.
+#[derive(Clone, Copy)]
+enum CallKind {
+    /// `wafer_resolve` / `wafer_start` / `wafer_stop`: NULL on success, a
+    /// `{"error": ...}` object on failure.
+    Lifecycle,
+    /// `wafer_run`: always a `{"action": ...}` result object.
+    Run,
+}
+
+impl CallKind {
+    fn failure(self, code: &str, msg: &str) -> CString {
+        match self {
+            Self::Lifecycle => error_cstring(msg),
+            Self::Run => run_error_cstring(code, msg),
+        }
+    }
+}
+
+/// A caller's callback for one async call, with how to report a failure the
+/// call itself did not produce.
+struct Callback {
+    cb: WaferDoneCb,
+    user_data: UserData,
+    kind: CallKind,
+    /// The entry point, named in panic and cancellation errors.
+    label: &'static str,
+}
+
+impl Callback {
+    fn new(cb: WaferDoneCb, user_data: *mut c_void, kind: CallKind, label: &'static str) -> Self {
+        Self {
+            cb,
+            user_data: UserData(user_data),
+            kind,
+            label,
+        }
+    }
+
+    fn fire(self, result: Option<CString>) {
+        // SAFETY: `cb` is the caller's non-NULL `wafer_done_cb`; the result
+        // pointer outlives the call.
+        unsafe { invoke_done(self.cb, result, self.user_data) };
+    }
+
+    fn fail(self, code: &str, msg: &str) {
+        let result = self.kind.failure(code, msg);
+        self.fire(Some(result));
+    }
+
+    fn cancel(self) {
+        let msg = format!(
+            "{} cancelled: the runtime was freed before it completed",
+            self.label
+        );
+        self.fail("Cancelled", &msg);
+    }
+}
+
+/// The callbacks of accepted async calls that have not called back yet,
+/// keyed by call. Whoever removes a call's entry — its [`Completion`], or
+/// `wafer_free` cancelling it — is the one that invokes it, so it is invoked
+/// exactly once.
+#[derive(Default)]
+struct Callbacks {
+    pending: Mutex<HashMap<u64, Callback>>,
+    next_id: AtomicU64,
+}
+
+impl Callbacks {
+    fn pending(&self) -> MutexGuard<'_, HashMap<u64, Callback>> {
+        // A panic cannot leave the map half-updated (every critical section
+        // is one insert, remove or drain), so a poisoned lock is still sound.
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Registers `callback` as pending; the [`Completion`] fires it.
+    fn accept(self: &Arc<Self>, callback: Callback) -> Completion {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (kind, label) = (callback.kind, callback.label);
+        self.pending().insert(id, callback);
+        Completion {
+            callbacks: self.clone(),
+            id,
+            kind,
+            label,
+            _run: None,
+        }
+    }
+
+    /// Invokes every pending callback with a `Cancelled` error.
+    fn cancel_all(&self) {
+        let cancelled: Vec<Callback> = self.pending().drain().map(|(_, c)| c).collect();
+        for callback in cancelled {
+            callback.cancel();
+        }
+    }
+}
+
+/// An accepted async call's claim on its pending [`Callback`]: through
+/// [`Completion::fire`] with the call's result, or — when the call is
+/// abandoned without one — from `Drop`: with an `Internal` panic error while
+/// unwinding, otherwise as cancelled. Either finds nothing to invoke once
+/// `wafer_free` has cancelled the call.
+struct Completion {
+    callbacks: Arc<Callbacks>,
+    id: u64,
+    kind: CallKind,
+    label: &'static str,
+    /// Held by a `wafer_run` until its callback has returned, so
+    /// `wafer_stop` waits for it.
+    _run: Option<RunPermit>,
+}
+
+impl Completion {
+    fn take(&self) -> Option<Callback> {
+        self.callbacks.pending().remove(&self.id)
+    }
+
+    fn fire(self, result: Option<CString>) {
+        if let Some(callback) = self.take() {
+            callback.fire(result);
+        }
+    }
+
+    fn fail(self, code: &str, msg: &str) {
+        let result = self.kind.failure(code, msg);
+        self.fire(Some(result));
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        let Some(callback) = self.take() else {
+            return;
+        };
+        if std::thread::panicking() {
+            let msg = format!("panic in {}", callback.label);
+            callback.fail("Internal", &msg);
+        } else {
+            callback.cancel();
+        }
+    }
+}
+
+/// Admission of `wafer_run` calls: how many are in flight, and whether
+/// `wafer_stop` closed the runtime to new ones. One `watch` value, so
+/// admitting (check + count) and closing are atomic with respect to each
+/// other and `wafer_stop` can wait for the count to reach zero.
+struct Runs(watch::Sender<RunState>);
+
+#[derive(Default)]
+struct RunState {
+    stopping: bool,
+    in_flight: usize,
+}
+
+impl Runs {
+    fn new() -> Self {
+        Self(watch::Sender::new(RunState::default()))
+    }
+
+    /// Counts a run in, unless `wafer_stop` was already called.
+    fn admit(self: &Arc<Self>) -> Option<RunPermit> {
+        let admitted = self.0.send_if_modified(|state| {
+            if state.stopping {
+                return false;
+            }
+            state.in_flight += 1;
+            true
+        });
+        admitted.then(|| RunPermit(self.clone()))
+    }
+
+    /// Refuses every run from now on.
+    fn close(&self) {
+        self.0.send_modify(|state| state.stopping = true);
+    }
+
+    /// Resolves once every admitted run has called back.
+    async fn drained(&self) {
+        let mut rx = self.0.subscribe();
+        // `wait_for` errs only when the sender is dropped; `self` holds it.
+        let _ = rx.wait_for(|state| state.in_flight == 0).await;
+    }
+}
+
+/// One admitted run; releases its count on drop.
+struct RunPermit(Arc<Runs>);
+
+impl Drop for RunPermit {
+    fn drop(&mut self) {
+        self.0 .0.send_modify(|state| state.in_flight -= 1);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -112,6 +333,47 @@ fn error_json(msg: &str) -> *mut c_char {
     let json = serde_json::to_string(&serde_json::json!({ "error": msg }))
         .unwrap_or_else(|_| String::from(r#"{"error":"unprintable"}"#));
     to_c_string(&json)
+}
+
+/// Build a `wafer_run` error result: `{"action":"error","error":{..},"meta":{}}`,
+/// the shape [`wafer_run::embed::output_to_json`] gives an error terminal.
+fn run_error_cstring(code: &str, msg: &str) -> CString {
+    let json = serde_json::to_string(&serde_json::json!({
+        "action": "error",
+        "error": { "code": code, "message": msg },
+        "meta": {},
+    }))
+    .unwrap_or_else(|_| String::from(r#"{"action":"error"}"#));
+    CString::new(json).unwrap_or_else(|_| CString::new(r#"{"action":"error"}"#).unwrap())
+}
+
+/// The message a panic carried, when it is a string.
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
+
+impl WaferRuntime {
+    /// Spawns an accepted call's `work` and fires `done` with its result — or,
+    /// if `work` panics, with an `Internal` error naming the panic. If the
+    /// task is dropped before it finishes, `done` fires from its `Drop`.
+    fn spawn_call<F>(&self, done: Completion, work: F)
+    where
+        F: Future<Output = Option<CString>> + Send + 'static,
+    {
+        self.rt.spawn(async move {
+            match AssertUnwindSafe(work).catch_unwind().await {
+                Ok(result) => done.fire(result),
+                Err(payload) => {
+                    let msg = format!("panic in {}: {}", done.label, panic_message(&*payload));
+                    done.fail("Internal", &msg);
+                }
+            }
+        });
+    }
 }
 
 /// Safely dereference a `*mut WaferRuntime` to `&WaferRuntime`.
@@ -181,6 +443,9 @@ pub extern "C" fn wafer_new() -> *mut WaferRuntime {
         let inner = Wafer::new(Arc::new(StaticConfigSource::default())).ok()?;
         let wr = WaferRuntime {
             inner: Arc::new(RwLock::new(inner)),
+            callbacks: Arc::new(Callbacks::default()),
+            runs: Arc::new(Runs::new()),
+            stopped: Arc::new(OnceCell::new()),
             rt,
         };
         Some(Box::into_raw(Box::new(wr)))
@@ -188,17 +453,36 @@ pub extern "C" fn wafer_new() -> *mut WaferRuntime {
     result.ok().flatten().unwrap_or(std::ptr::null_mut())
 }
 
-/// Free a WAFER runtime instance.
+/// Free a WAFER runtime instance. Passing NULL is a no-op.
 ///
-/// The caller must first call `wafer_stop` and wait for its callback to fire
-/// before calling `wafer_free`; otherwise block `lifecycle(Stop)` handlers
-/// will not run. After `wafer_free`, the tokio runtime is dropped, which
-/// waits for any in-flight spawned tasks to complete.
+/// Every async call that has not called back yet is cancelled: its callback
+/// fires with a `Cancelled` error before `wafer_free` returns, and its work
+/// is dropped. Call [`wafer_stop`] and wait for its callback first to let
+/// accepted `wafer_run` calls finish and block `lifecycle(Stop)` handlers
+/// run.
+///
+/// Called from within any tokio runtime — inside a `WaferDoneCb`, on a
+/// thread of the runtime being freed, or from a Rust embedder's own async
+/// context, where blocking to wait is not allowed — it shuts the runtime
+/// down in the background: the cancelled callbacks have still fired before
+/// it returns, but callbacks already running on the runtime's threads may
+/// finish after it returns.
+///
+/// CALLER CONTRACT: no other call may use `w` concurrently with or after
+/// this one.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
     if !w.is_null() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            drop(Box::from_raw(w));
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let WaferRuntime { rt, callbacks, .. } = *Box::from_raw(w);
+            callbacks.cancel_all();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                rt.shutdown_background();
+            } else {
+                // Shuts the workers down, dropping every task, and waits for
+                // them — and so for any callback still running on one.
+                drop(rt);
+            }
         }));
     }
 }
@@ -208,30 +492,28 @@ pub unsafe extern "C" fn wafer_free(w: *mut WaferRuntime) {
 /// `wafer_resolve` always seals (`only_if_unsealed = false`), so a second
 /// resolve reports `AlreadySealed`; `wafer_start` seals only a runtime that
 /// is not sealed yet, so resolve-then-start seals once, and re-reports the
-/// failure of a resolve that failed. `panic_label` keeps their panic
-/// messages distinguishable.
+/// failure of a resolve that failed. `label` names the call in panic and
+/// cancellation errors.
 unsafe fn spawn_seal(
     w: *mut WaferRuntime,
     cb: Option<WaferDoneCb>,
     user_data: *mut c_void,
-    panic_label: &str,
+    label: &'static str,
     only_if_unsealed: bool,
 ) -> c_int {
     let Some(cb) = cb else {
         return WAFER_REFUSED_NULL_CALLBACK;
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(runtime) = deref_ref(w) else {
-            invoke_done(
-                cb,
-                Some(error_cstring("null runtime pointer")),
-                UserData(user_data),
-            );
-            return;
-        };
+    let callback = Callback::new(cb, user_data, CallKind::Lifecycle, label);
+    let Some(runtime) = deref_ref(w) else {
+        callback.fail("Internal", "null runtime pointer");
+        return WAFER_ACCEPTED;
+    };
+    let done = runtime.callbacks.accept(callback);
+    // A panic here drops `done` while unwinding, which reports it.
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(move || {
         let inner = runtime.inner.clone();
-        let ud = UserData(user_data);
-        runtime.rt.spawn(async move {
+        runtime.spawn_call(done, async move {
             let mut wafer = inner.write().await;
             let result = match (only_if_unsealed, wafer.seal_state().clone()) {
                 (true, SealState::Sealed) => Ok(()),
@@ -239,20 +521,9 @@ unsafe fn spawn_seal(
                 _ => wafer.seal().await.map_err(|e| e.to_string()),
             };
             drop(wafer);
-            let err = match result {
-                Ok(()) => None,
-                Err(reason) => Some(error_cstring(&reason)),
-            };
-            invoke_done(cb, err, ud);
+            result.err().map(|reason| error_cstring(&reason))
         });
     }));
-    if result.is_err() {
-        invoke_done(
-            cb,
-            Some(error_cstring(&format!("panic in {panic_label}"))),
-            UserData(user_data),
-        );
-    }
     WAFER_ACCEPTED
 }
 
@@ -301,10 +572,15 @@ pub unsafe extern "C" fn wafer_start(
 
 /// Stop the runtime and shut down all block instances (async).
 ///
-/// Returns immediately with [`WAFER_ACCEPTED`]; invokes `cb` (with NULL
-/// result) when shutdown completes. Must be called before `wafer_free` for
-/// block `lifecycle(Stop)` handlers to run. A NULL `cb` is refused
-/// ([`WAFER_REFUSED_NULL_CALLBACK`]) and the runtime is not stopped.
+/// Returns immediately with [`WAFER_ACCEPTED`]. From then on `wafer_run` is
+/// refused (its callback reports `Unavailable`). Once every `wafer_run`
+/// accepted before it has called back, the blocks' `lifecycle(Stop)`
+/// handlers run, and `cb` fires: NULL on success, a JSON error string if
+/// shutdown panicked. A second `wafer_stop` waits for the first, reports
+/// the same outcome, and does not stop the blocks again — not even after a
+/// panic. Must be called before `wafer_free` for the
+/// handlers to run. A NULL `cb` is refused ([`WAFER_REFUSED_NULL_CALLBACK`])
+/// and the runtime is not stopped.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_stop(
     w: *mut WaferRuntime,
@@ -314,29 +590,34 @@ pub unsafe extern "C" fn wafer_stop(
     let Some(cb) = cb else {
         return WAFER_REFUSED_NULL_CALLBACK;
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let Some(runtime) = deref_ref(w) else {
-            invoke_done(
-                cb,
-                Some(error_cstring("null runtime pointer")),
-                UserData(user_data),
-            );
-            return;
-        };
+    let callback = Callback::new(cb, user_data, CallKind::Lifecycle, "wafer_stop");
+    let Some(runtime) = deref_ref(w) else {
+        callback.fail("Internal", "null runtime pointer");
+        return WAFER_ACCEPTED;
+    };
+    let done = runtime.callbacks.accept(callback);
+    // A panic here drops `done` while unwinding, which reports it.
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        runtime.runs.close();
+        let runs = runtime.runs.clone();
+        let stopped = runtime.stopped.clone();
         let inner = runtime.inner.clone();
-        let ud = UserData(user_data);
-        runtime.rt.spawn(async move {
-            inner.write().await.shutdown().await;
-            invoke_done(cb, None, ud);
+        runtime.spawn_call(done, async move {
+            let panicked = stopped
+                .get_or_init(|| async {
+                    runs.drained().await;
+                    // Caught here, not by `spawn_call`, so the attempt is
+                    // recorded and a panicking Stop never runs twice.
+                    AssertUnwindSafe(async { inner.write().await.shutdown().await })
+                        .catch_unwind()
+                        .await
+                        .err()
+                        .map(|payload| format!("panic in wafer_stop: {}", panic_message(&*payload)))
+                })
+                .await;
+            panicked.as_deref().map(error_cstring)
         });
     }));
-    if result.is_err() {
-        invoke_done(
-            cb,
-            Some(error_cstring("panic in wafer_stop")),
-            UserData(user_data),
-        );
-    }
     WAFER_ACCEPTED
 }
 
@@ -427,7 +708,7 @@ unsafe fn with_runtime_write(
     label: &str,
     op: impl FnOnce(&mut Wafer) -> Result<(), String>,
 ) -> *mut c_char {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
             return error_json("null runtime pointer");
         };
@@ -447,10 +728,11 @@ unsafe fn with_runtime_write(
 /// Run a flow with the given message (body-less). Async.
 ///
 /// Returns immediately with [`WAFER_ACCEPTED`]; invokes `cb` with the JSON
-/// result string when the flow finishes. `cb`'s `result` is always non-NULL
-/// — a JSON object of the form
+/// result string when the flow finishes and its response body has been
+/// collected. `cb`'s `result` is always non-NULL — a JSON object of the form
 /// `{"action":"respond|drop|error|continue|halt", ...}` (see
-/// [`WaferDoneCb`]). A NULL `cb` is refused
+/// [`WaferDoneCb`]); after [`wafer_stop`] it is an `Unavailable` error and
+/// the flow does not run. A NULL `cb` is refused
 /// ([`WAFER_REFUSED_NULL_CALLBACK`]) and the flow does not run.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_run(
@@ -463,78 +745,52 @@ pub unsafe extern "C" fn wafer_run(
     let Some(cb) = cb else {
         return WAFER_REFUSED_NULL_CALLBACK;
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let internal_err = |code: &str, msg: &str| {
-            // Build with serde_json so the code/message are escaped as valid
-            // JSON — control chars, backslashes, and quotes included. Mirrors
-            // `error_cstring`/`error_json`; the previous hand-rolled escape
-            // only handled `"` and emitted invalid JSON for `\n`/`\t`/`\\`.
-            let json = serde_json::to_string(&serde_json::json!({
-                "action": "error",
-                "error": { "code": code, "message": msg },
-            }))
-            .unwrap_or_else(|_| String::from("{}"));
-            CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap())
-        };
-
-        let Some(runtime) = deref_ref(w) else {
-            invoke_done(
-                cb,
-                Some(internal_err("Internal", "null runtime pointer")),
-                UserData(user_data),
-            );
-            return;
-        };
+    let callback = Callback::new(cb, user_data, CallKind::Run, "wafer_run");
+    let Some(runtime) = deref_ref(w) else {
+        callback.fail("Internal", "null runtime pointer");
+        return WAFER_ACCEPTED;
+    };
+    let mut done = runtime.callbacks.accept(callback);
+    // A panic here drops `done` while unwinding, which reports it.
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(move || {
         let Some(fid) = c_str_to_str(flow_id) else {
-            invoke_done(
-                cb,
-                Some(internal_err("Internal", "invalid flow_id")),
-                UserData(user_data),
-            );
+            done.fail("Internal", "invalid flow_id");
             return;
         };
         let Some(msg_str) = c_str_to_str(message_json) else {
-            invoke_done(
-                cb,
-                Some(internal_err("Internal", "invalid message_json")),
-                UserData(user_data),
-            );
+            done.fail("Internal", "invalid message_json");
             return;
         };
-
         let msg: Message = match serde_json::from_str(msg_str) {
             Ok(m) => m,
             Err(e) => {
-                invoke_done(
-                    cb,
-                    Some(internal_err(
-                        "InvalidArgument",
-                        &format!("invalid Message JSON: {e}"),
-                    )),
-                    UserData(user_data),
-                );
+                done.fail("InvalidArgument", &format!("invalid Message JSON: {e}"));
                 return;
             }
         };
+        let Some(permit) = runtime.runs.admit() else {
+            done.fail("Unavailable", "the runtime is stopped");
+            return;
+        };
+        done._run = Some(permit);
 
         let inner = runtime.inner.clone();
         let flow_id = fid.to_owned();
-        let ud = UserData(user_data);
-        runtime.rt.spawn(async move {
-            let input = wafer_run::InputStream::empty();
-            let output = inner.read().await.run(&flow_id, msg, input).await;
+        runtime.spawn_call(done, async move {
+            // The read guard is held until the result is encoded: the
+            // output may still be streaming from a block, which
+            // `wafer_stop` must not stop under it.
+            let wafer = inner.read().await;
+            let output = wafer
+                .run(&flow_id, msg, wafer_run::InputStream::empty())
+                .await;
             let json = wafer_run::embed::output_to_json(output).await;
-            let cs = CString::new(json).unwrap_or_else(|_| CString::new("{}").unwrap());
-            invoke_done(cb, Some(cs), ud);
+            drop(wafer);
+            Some(CString::new(json).unwrap_or_else(|_| {
+                run_error_cstring("Internal", "result JSON has an interior NUL")
+            }))
         });
     }));
-    if result.is_err() {
-        invoke_done(
-            cb,
-            Some(error_cstring("panic in wafer_run")),
-            UserData(user_data),
-        );
-    }
     WAFER_ACCEPTED
 }
 
@@ -555,7 +811,7 @@ pub unsafe extern "C" fn wafer_run(
 /// success-looking `[]`, so callers can tell a crash apart from "no flows".
 #[no_mangle]
 pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
             return to_c_string("[]");
         };
@@ -576,7 +832,7 @@ pub unsafe extern "C" fn wafer_flows_info(w: *mut WaferRuntime) -> *mut c_char {
 /// docs on `WaferDoneCb`). A contract violation surfaces as the -1 sentinel.
 #[no_mangle]
 pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const c_char) -> c_int {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let Some(runtime) = deref_ref(w) else {
             return 0;
         };
@@ -602,11 +858,13 @@ pub unsafe extern "C" fn wafer_has_block(w: *mut WaferRuntime, type_name: *const
 #[no_mangle]
 pub unsafe extern "C" fn wafer_free_string(s: *mut c_char) {
     if !s.is_null() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
             drop(CString::from_raw(s));
         }));
     }
 }
 
+#[cfg(test)]
+mod callback_tests;
 #[cfg(test)]
 mod smoke_tests;

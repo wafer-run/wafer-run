@@ -1,0 +1,6 @@
+{
+  "id": "gated",
+  "name": "FFI flow whose body waits for the test",
+  "version": "0.1.0",
+  "steps": [{ "id": "root", "block": "test/gated" }]
+}
