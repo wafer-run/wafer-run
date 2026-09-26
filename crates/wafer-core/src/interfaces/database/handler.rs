@@ -621,7 +621,8 @@ fn is_preserved_db_error(msg: &str) -> bool {
 
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     let code = e.code();
-    match e {
+    let detail = e.detail_code();
+    let err = match e {
         DatabaseError::NotFound => WaferError::new(code, "record not found"),
         // The driver's message names the constraint and its columns, which is
         // schema, not the caller's concern; log it, answer with the code.
@@ -633,7 +634,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         // column, a limit or offset), so it goes back to the caller as is.
         DatabaseError::InvalidArgument(msg) => WaferError::new(code, msg),
         // Names only statement counts and the backend's limit.
-        DatabaseError::ResourceExhausted(msg) => WaferError::new(code, msg),
+        DatabaseError::StatementLimitExceeded(msg) | DatabaseError::ResourceExhausted(msg) => {
+            WaferError::new(code, msg)
+        }
         // Transient: the caller may retry (and the runtime retries a block
         // Init that failed this way instead of caching the failure). The
         // driver's message can name hosts and files, so it is logged, not
@@ -661,6 +664,14 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
                 WaferError::new(code, "internal database error")
             }
         }
+    };
+    // The detail code tells a caller what the coarse code cannot: a
+    // statement-budget refusal shares its code with other refusals (any
+    // `InvalidArgument`; a rate limit's or the call-depth limit's
+    // `ResourceExhausted`).
+    match detail {
+        Some(detail) => err.with_detail_code(detail),
+        None => err,
     }
 }
 
@@ -1599,6 +1610,37 @@ mod tests {
         let w = db_error_to_wafer(DatabaseError::NotFound);
         assert_eq!(w.code, ErrorCode::NotFound);
         assert_eq!(w.message, "record not found");
+    }
+
+    /// Only a statement-budget refusal carries a detail code, so a caller
+    /// can tell it from the other errors sharing its coarse code. The
+    /// message is the budget's own, not the `DatabaseError` display.
+    #[test]
+    fn only_statement_budget_refusals_carry_a_detail_code() {
+        use wafer_block::wire::database::{
+            STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED,
+        };
+
+        let w = db_error_to_wafer(DatabaseError::StatementLimitExceeded("over".into()));
+        assert_eq!(w.code, ErrorCode::InvalidArgument);
+        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXCEEDS_LIMIT));
+        assert_eq!(w.message, "over");
+
+        let w = db_error_to_wafer(DatabaseError::ResourceExhausted("spent".into()));
+        assert_eq!(w.code, ErrorCode::ResourceExhausted);
+        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXHAUSTED));
+        assert_eq!(w.message, "spent");
+
+        for other in [
+            DatabaseError::NotFound,
+            DatabaseError::AlreadyExists("k".into()),
+            DatabaseError::InvalidArgument("bad column".into()),
+            DatabaseError::Unavailable("busy".into()),
+            DatabaseError::Internal("boom".into()),
+        ] {
+            let w = db_error_to_wafer(other);
+            assert_eq!(w.detail_code(), None, "{w:?}");
+        }
     }
 
     // `FilterOp::parse_wire` unit tests live next to the parser in

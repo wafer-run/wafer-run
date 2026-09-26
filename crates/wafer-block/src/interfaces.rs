@@ -267,7 +267,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_CREATE_MANY => ActionSpec {
-            description: "Insert many records into one collection in one transaction: all of them, or none when any insert fails. Rows may carry different columns. Each row is one statement: a call over the backend's per-invocation statement limit is InvalidArgument, and one over what the current invocation has left is ResourceExhausted, before any row is written.".into(),
+            description: "Insert many records into one collection in one transaction: all of them, or none when any insert fails. Rows may carry different columns. Each row is one statement: a call over the backend's per-invocation statement limit is InvalidArgument with detail code database.statement_budget_exceeds_limit, and one over what the current invocation has left is ResourceExhausted with detail code database.statement_budget_exhausted, before any row is written.".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -284,7 +284,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_BATCH => ActionSpec {
-            description: "Apply writes in order in one transaction: all of them, or none when any statement fails. Each op is Create{collection,data}, Update{collection,id,data}, Delete{collection,id}, UpdateWhere{collection,filters,data}, DeleteWhere{collection,filters} or Upsert{...as database.upsert}; every op's collection is WRAP-authorized before anything runs (a Create needs append, every other op write). An Update or Delete whose id matches no row is reported in its result, not an error. Each op is at most one statement however many rows it touches (an UpdateWhere or DeleteWhere on a missing table runs none), and is counted as one: a call over the backend's per-invocation statement limit is InvalidArgument, and one over what the current invocation has left is ResourceExhausted, before any op runs.".into(),
+            description: "Apply writes in order in one transaction: all of them, or none when any statement fails. Each op is Create{collection,data}, Update{collection,id,data}, Delete{collection,id}, UpdateWhere{collection,filters,data}, DeleteWhere{collection,filters} or Upsert{...as database.upsert}; every op's collection is WRAP-authorized before anything runs (a Create needs append, every other op write). An Update or Delete whose id matches no row is reported in its result, not an error. Each op is at most one statement however many rows it touches (an UpdateWhere or DeleteWhere on a missing table runs none), and is counted as one: a call over the backend's per-invocation statement limit is InvalidArgument with detail code database.statement_budget_exceeds_limit, and one over what the current invocation has left is ResourceExhausted with detail code database.statement_budget_exhausted, before any op runs.".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
