@@ -15,6 +15,7 @@ use wafer_block::{
         output::{OutputStream, TerminalNotResponse},
     },
     types::{ResourceAccess, ResourceType},
+    wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED},
     ErrorCode, Message, WaferError,
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
@@ -367,6 +368,11 @@ async fn a_call_over_the_backends_limit_is_refused_and_the_limit_itself_runs() {
             "{op}: {}",
             err.message
         );
+        assert_eq!(
+            err.detail_code(),
+            Some(STATEMENT_BUDGET_EXCEEDS_LIMIT),
+            "{op}: the refusal says it is the statement budget: {err:?}"
+        );
         assert!(
             err.message.contains(&format!("at most {LIMIT}")),
             "{op}: the refusal names the limit: {}",
@@ -407,6 +413,11 @@ async fn a_call_over_what_the_invocation_has_left_is_exhausted() {
             ErrorCode::ResourceExhausted,
             "{op}: {}",
             err.message
+        );
+        assert_eq!(
+            err.detail_code(),
+            Some(STATEMENT_BUDGET_EXHAUSTED),
+            "{op}: the refusal says it is the statement budget: {err:?}"
         );
         assert!(
             err.message.contains("5 of its 20 left"),

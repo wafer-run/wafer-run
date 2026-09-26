@@ -1612,6 +1612,37 @@ mod tests {
         assert_eq!(w.message, "record not found");
     }
 
+    /// Only a statement-budget refusal carries a detail code, so a caller
+    /// can tell it from the other errors sharing its coarse code. The
+    /// message is the budget's own, not the `DatabaseError` display.
+    #[test]
+    fn only_statement_budget_refusals_carry_a_detail_code() {
+        use wafer_block::wire::database::{
+            STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED,
+        };
+
+        let w = db_error_to_wafer(DatabaseError::StatementLimitExceeded("over".into()));
+        assert_eq!(w.code, ErrorCode::InvalidArgument);
+        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXCEEDS_LIMIT));
+        assert_eq!(w.message, "over");
+
+        let w = db_error_to_wafer(DatabaseError::ResourceExhausted("spent".into()));
+        assert_eq!(w.code, ErrorCode::ResourceExhausted);
+        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXHAUSTED));
+        assert_eq!(w.message, "spent");
+
+        for other in [
+            DatabaseError::NotFound,
+            DatabaseError::AlreadyExists("k".into()),
+            DatabaseError::InvalidArgument("bad column".into()),
+            DatabaseError::Unavailable("busy".into()),
+            DatabaseError::Internal("boom".into()),
+        ] {
+            let w = db_error_to_wafer(other);
+            assert_eq!(w.detail_code(), None, "{w:?}");
+        }
+    }
+
     // `FilterOp::parse_wire` unit tests live next to the parser in
     // `wafer-block/src/db.rs`; the handler's use of it (including bad-operator
     // rejection) is covered by `filter_tree_conversion_tests` below.
