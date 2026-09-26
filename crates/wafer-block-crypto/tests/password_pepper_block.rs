@@ -212,9 +212,8 @@ async fn invalid_settings_fail_init() {
             PASSWORD_PEPPER_REQUIRED,
         ),
     ] {
-        let err = match init(&config).await {
-            Ok(_) => panic!("{config:?} must fail init"),
-            Err(e) => e,
+        let Err(err) = init(&config).await else {
+            panic!("{config:?} must fail init");
         };
         assert!(
             matches!(

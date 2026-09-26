@@ -180,10 +180,10 @@ mod tests {
         }
     }
 
-    fn init(data: serde_json::Value) -> LifecycleEvent {
+    fn init(data: &serde_json::Value) -> LifecycleEvent {
         LifecycleEvent {
             event_type: LifecycleType::Init,
-            data: serde_json::to_vec(&data).unwrap(),
+            data: serde_json::to_vec(data).unwrap(),
         }
     }
 
@@ -193,7 +193,7 @@ mod tests {
     ) -> Result<(), WaferError> {
         let block = CryptoBlock::new(Arc::clone(svc) as Arc<dyn CryptoService>);
         let ctx = crate::test_support::noop_context();
-        block.lifecycle(&*ctx, init(data)).await
+        block.lifecycle(&*ctx, init(&data)).await
     }
 
     /// The keys are the block's own, so the runtime resolves them for it,

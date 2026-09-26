@@ -2008,7 +2008,7 @@ mod pepper_tests {
     fn only(key: PepperKey) -> PasswordPeppers {
         PasswordPeppers::new(Some(key), Vec::new(), false).unwrap()
     }
-    fn is_pepper_error(r: Result<(), CryptoError>) -> bool {
+    fn is_pepper_error(r: &Result<(), CryptoError>) -> bool {
         matches!(r, Err(CryptoError::Pepper(_)))
     }
 
@@ -2087,7 +2087,7 @@ mod pepper_tests {
 
         let dropped = only(key2());
         verify_password_any_scheme(PASSWORD, &fresh, &dropped).expect("still verifies");
-        assert!(is_pepper_error(verify_password_any_scheme(
+        assert!(is_pepper_error(&verify_password_any_scheme(
             PASSWORD,
             KAT_PEPPERED,
             &dropped
@@ -2110,7 +2110,7 @@ mod pepper_tests {
                 verify_password_any_scheme("wrong", legacy, &optional),
                 Err(CryptoError::PasswordMismatch)
             ));
-            assert!(is_pepper_error(verify_password_any_scheme(
+            assert!(is_pepper_error(&verify_password_any_scheme(
                 PASSWORD, legacy, &required
             )));
         }
@@ -2141,7 +2141,7 @@ mod pepper_tests {
     #[test]
     fn a_missing_key_is_refused_before_any_derivation() {
         let absurd = KAT_PEPPERED.replace("m=4096", "m=4294967295");
-        assert!(is_pepper_error(verify_password_peppered(
+        assert!(is_pepper_error(&verify_password_peppered(
             PASSWORD,
             &absurd,
             &PasswordPeppers::default()
