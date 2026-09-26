@@ -4,6 +4,38 @@
 
 ### Breaking changes
 
+- Passwords can be peppered. `CryptoService` gains a required
+  `configure_password_pepper(&PasswordPepperConfig)`, which the crypto block
+  calls at `lifecycle(Init)` with the values of three config keys it now
+  declares: `WAFER_RUN__CRYPTO__PASSWORD_PEPPER_KEY` (standard base64 of at
+  least 32 random bytes), `WAFER_RUN__CRYPTO__PASSWORD_PEPPER_PREVIOUS_KEY`
+  (earlier keys, comma-separated, verify only) and
+  `WAFER_RUN__CRYPTO__PASSWORD_PEPPER_REQUIRED` (`"true"`/`"false"`). A
+  setting the service refuses — a short or non-base64 key, a duplicate,
+  previous keys without a current one, "required" without a key, an
+  unparseable flag — fails the Init permanently. There is no default for
+  the method: an implementation that cannot pepper must refuse a configured
+  key rather than hash without it. `Argon2JwtCryptoService` writes
+  `$argon2id-hmac-sha256$v=19$m=…,t=…,p=…,pepper=<key id>$<salt>$<mac>`,
+  where the MAC is HMAC-SHA-256 keyed by the pepper over the 32-byte
+  argon2id output (OWASP's post-hashing pepper) and the key id is derived
+  from the key (the first 8 bytes of `HMAC-SHA-256(key, "wafer-run password
+  pepper id")`, hex), so a hash always names the key it needs. It verifies a
+  peppered hash with the named key, current or previous; a hash naming a key
+  it does not hold fails with the new `CryptoError::Pepper` (the handler
+  answers `Internal`, never `matches: false`), before any argon2 work. With
+  no key configured nothing changes: hashes are written unpeppered. With a
+  key, stored unpeppered hashes keep verifying unless the pepper is
+  required, in which case they are refused with `CryptoError::Pepper`. Only
+  argon2id is peppered: a service writing PBKDF2 refuses a key. In
+  `primitives`, `hash_password_with` and `verify_password_any_scheme` take a
+  `&PasswordPeppers`, and `PepperKey`, `PasswordPeppers`,
+  `hash_password_peppered`, `verify_password_peppered`,
+  `ARGON2ID_PEPPERED_ID` and `PASSWORD_PEPPER_MIN_LEN` are new; the format
+  is pinned by a known-answer test computed with argon2-cffi. An exhaustive
+  `match` on `CryptoError` needs the new arm. The keys must reach the block
+  from a secret store or the process environment, never from the database
+  that holds the hashes.
 - Every `CryptoService` method is `async` (`hash`, `compare_hash`,
   `sign_for`, `verify_for`, `random_bytes`), and the crypto block awaits
   each call on every target. On wasm32 the block used to call the service

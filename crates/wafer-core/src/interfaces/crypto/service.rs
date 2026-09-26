@@ -17,6 +17,12 @@ pub enum CryptoError {
     /// wrong password.
     #[error("malformed password hash: {0}")]
     MalformedHash(String),
+    /// The password pepper stands in the way: the stored hash was peppered
+    /// with a key this service does not hold, the service requires a pepper
+    /// the stored hash lacks, or the pepper configuration itself is invalid.
+    /// A server configuration fault, never a wrong password.
+    #[error("password pepper: {0}")]
+    Pepper(String),
     /// Failure while issuing / signing a token.
     #[error("sign error: {0}")]
     SignError(String),
@@ -26,6 +32,37 @@ pub enum CryptoError {
     /// Catch-all variant carrying an arbitrary backend message.
     #[error("{0}")]
     Other(String),
+}
+
+/// The deployment's password-pepper settings, as the crypto block read them
+/// from its declared config at `lifecycle(Init)` and hands them to
+/// [`CryptoService::configure_password_pepper`].
+///
+/// The key material is passed as configured — standard base64, the previous
+/// keys comma-separated — and decoded and validated by the service, which
+/// owns the algorithm it is used in. `Debug` redacts both keys.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PasswordPepperConfig {
+    /// The key new password hashes are peppered with; `None` when unset.
+    pub current_key: Option<String>,
+    /// Earlier keys, comma-separated, that stored hashes may still name.
+    /// Used to verify only, never to hash. `None` when unset.
+    pub previous_keys: Option<String>,
+    /// Whether every password this service hashes or verifies must be
+    /// peppered: a missing current key fails configuration, and a stored
+    /// hash without a pepper is refused.
+    pub required: bool,
+}
+
+impl std::fmt::Debug for PasswordPepperConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |v: &Option<String>| v.as_ref().map(|_| "<redacted>");
+        f.debug_struct("PasswordPepperConfig")
+            .field("current_key", &redact(&self.current_key))
+            .field("previous_keys", &redact(&self.previous_keys))
+            .field("required", &self.required)
+            .finish()
+    }
 }
 
 /// Service provides cryptographic operations.
@@ -54,6 +91,12 @@ pub enum CryptoError {
 ///     async fn compare_hash(&self, _: &str, _: &str) -> Result<(), CryptoError> {
 ///         unimplemented!()
 ///     }
+///     fn configure_password_pepper(
+///         &self,
+///         _: &wafer_core::interfaces::crypto::service::PasswordPepperConfig,
+///     ) -> Result<(), CryptoError> {
+///         unimplemented!()
+///     }
 ///     // `sign_for` omitted: there is no default to fall back on.
 ///     async fn verify_for(
 ///         &self,
@@ -76,6 +119,15 @@ pub trait CryptoService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`CryptoError::PasswordMismatch`] for a wrong password,
     /// [`CryptoError::MalformedHash`] when the stored hash cannot be checked.
     async fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError>;
+
+    /// Apply the deployment's password-pepper settings. The crypto block
+    /// calls this at every `lifecycle(Init)` attempt, before it answers any
+    /// message; an error fails the Init.
+    ///
+    /// There is no default: an implementation that cannot pepper must return
+    /// [`CryptoError::Pepper`] when `config` names a key or requires one,
+    /// never accept the settings and go on hashing without them.
+    fn configure_password_pepper(&self, config: &PasswordPepperConfig) -> Result<(), CryptoError>;
 
     /// Create a signed token from claims with the given expiry, using the
     /// key derived for `block_id`. Equal claims must encode to equal bytes:

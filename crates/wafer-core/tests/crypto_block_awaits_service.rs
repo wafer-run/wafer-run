@@ -42,6 +42,12 @@ impl GatedCrypto {
 
 #[wafer_core::wafer_async_trait]
 impl CryptoService for GatedCrypto {
+    fn configure_password_pepper(
+        &self,
+        _config: &wafer_core::interfaces::crypto::service::PasswordPepperConfig,
+    ) -> Result<(), CryptoError> {
+        Ok(())
+    }
     async fn hash(&self, _password: &str) -> Result<String, CryptoError> {
         Self::take(&self.hash)
             .await

@@ -1,10 +1,10 @@
 //! Compile fixture for `wafer-block-crypto` on `wasm32-unknown-unknown`.
 //! See this crate's `Cargo.toml` for why it exists and how it is built.
 //!
-//! Uses the crate the way a Worker or browser embedder does: the password,
-//! JWT and constant-time primitives directly, and `Argon2JwtCryptoService`
-//! behind `dyn CryptoService`. Naming them here makes the build generate code
-//! for them on wasm32, not only typecheck the library.
+//! Uses the crate the way a Worker or browser embedder does: the password
+//! (plain and peppered), JWT and constant-time primitives directly, and
+//! `Argon2JwtCryptoService` behind `dyn CryptoService`. Naming them here makes
+//! the build generate code for them on wasm32, not only typecheck the library.
 //!
 //! Nothing in here ever runs: `cargo build` is the whole test.
 
@@ -30,7 +30,18 @@ pub fn crypto_service(jwt_secret: String) -> Result<Box<dyn CryptoService>, Cryp
 /// own crypto adapters do.
 pub fn primitives_round_trip(password: &str, secret: &[u8]) -> Result<bool, CryptoError> {
     let hash = primitives::hash_password(password, Argon2Cost::Constrained)?;
-    primitives::verify_password_any_scheme(password, &hash)?;
+    let peppers = primitives::PasswordPeppers::new(
+        Some(primitives::PepperKey::new(secret)?),
+        Vec::new(),
+        false,
+    )?;
+    primitives::verify_password_any_scheme(password, &hash, &peppers)?;
+    let peppered = primitives::hash_password_peppered(
+        password,
+        Argon2Cost::Constrained,
+        peppers.current().expect("configured above"),
+    )?;
+    primitives::verify_password_any_scheme(password, &peppered, &peppers)?;
     let token = primitives::jwt_sign(BTreeMap::new(), Duration::from_secs(60), secret)?;
     let nonce = primitives::random_bytes(16)?;
     Ok(primitives::constant_time_eq(token.as_bytes(), &nonce))
