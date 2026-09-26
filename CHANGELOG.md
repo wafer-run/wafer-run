@@ -4,6 +4,38 @@
 
 ### Breaking changes
 
+- A block's init can have a time limit, which the block declares. The new
+  `BlockInfo::init_timeout(Duration)` (field `init_timeout_ms`) sets the
+  longest one attempt at the block's init — loading its declared config and
+  its `lifecycle(Init)` — may run; `WaferBuilder::init_timeout(Duration)`
+  lets an embedder cap every block's budget (the smaller of the two
+  applies). Neither is set by default, so an Init without a declared budget
+  in a runtime without a cap still runs as long as it takes: only the block
+  knows how long its Init may legitimately take (a migration over a large
+  table), and an attempt cut short is retried from the beginning. An
+  attempt still running when its budget passes is dropped, and one that
+  fails after its deadline has passed (whatever error it returns) failed
+  because of it; either way the outcome is `InitError::Transient` naming
+  the block, the budget and who set it, and noting that work the attempt
+  started outside the runtime (a database statement, an outbound request)
+  may still be running. It is retried after the init backoff. The Init
+  context carries the attempt's deadline, and the time of a callee's Init
+  that runs inside the attempt counts against it; a callee attempt dropped
+  with it records no outcome. The timer is `futures-timer` on native hosts
+  (any executor) and the host's global `setTimeout` on wasm32 (a browser, a
+  Cloudflare Workers isolate): `wafer-run` gains `futures-timer` on native
+  and `wasm-bindgen`, `js-sys` and `wasm-bindgen-futures` on wasm32.
+  The budget runs from when the attempt starts, so an Init that blocks its
+  thread before its first `.await` is still cut off on time. A declared
+  budget under 1 ms is refused at registration with the new
+  `BlockInfoError::ZeroInitTimeout`, and a zero cap by
+  `WaferBuilder::build`: either would time every Init out at once.
+  `BlockInfo` is not `#[non_exhaustive]`, so a struct literal outside this
+  workspace needs the new field (`BlockInfo::new` does not), and an
+  exhaustive `match` on `BlockInfoError` needs the new arm.
+- `call_block` from a context whose deadline has passed answers
+  `DeadlineExceeded` (it answered `Cancelled`, the code for a cancelled
+  flow). A context whose flag was cancelled still answers `Cancelled`.
 - The 500 that answers a terminal holding unsendable response meta now
   keeps the terminal's security headers. `http_codec::unsendable_response`
   takes the terminal's meta: `unsendable_response(meta, invalid)`, `meta`

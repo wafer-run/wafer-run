@@ -94,6 +94,17 @@ pub enum BlockInfoError {
         /// The rejected tool name.
         name: String,
     },
+
+    /// A block declared an init budget of zero milliseconds
+    /// ([`BlockInfo::init_timeout`] under 1 ms). Every init attempt would be
+    /// over it the moment it started, so the block could never initialize.
+    #[error(
+        "block '{block}' declares an init budget of 0 ms: every init attempt would time out at once; declare at least 1 ms, or no budget"
+    )]
+    ZeroInitTimeout {
+        /// Name of the block that declared the budget.
+        block: String,
+    },
 }
 
 /// Block metadata — identity, schema declarations, and admin UI metadata.
@@ -207,6 +218,13 @@ pub struct BlockInfo {
     /// Heavy external WASM/JS assets the host must load lazily before this block runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_assets: Vec<ExternalAsset>,
+
+    /// The longest one attempt at this block's init may run, in
+    /// milliseconds; `None` for no limit of its own. Set with
+    /// [`BlockInfo::init_timeout`], which documents what the runtime does
+    /// with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_timeout_ms: Option<u64>,
 }
 
 impl Default for BlockInfo {
@@ -246,6 +264,7 @@ impl BlockInfo {
             capabilities: None,
             tool: None,
             external_assets: Vec::new(),
+            init_timeout_ms: None,
         }
     }
 
@@ -279,11 +298,19 @@ impl BlockInfo {
     /// [`AgentTool::is_valid_name`] for the rule and for what goes wrong
     /// downstream when it is not.
     ///
+    /// A declared init budget ([`BlockInfo::init_timeout`]) must be at least
+    /// 1 ms: a zero budget would time every init attempt out at once.
+    ///
     /// Called by the runtime on every block it registers; returns the first
     /// offending declaration as a typed [`BlockInfoError`] so boot fails
     /// loudly and callers can match on the failure rather than parse a
     /// string.
     pub fn validate(&self, registered_name: &str) -> Result<(), BlockInfoError> {
+        if self.init_timeout_ms == Some(0) {
+            return Err(BlockInfoError::ZeroInitTimeout {
+                block: registered_name.to_string(),
+            });
+        }
         for var in self.config_keys.iter().chain(self.flow_config.iter()) {
             if var.key.starts_with(WAFER_RUN_SHARED_PREFIX) {
                 return Err(BlockInfoError::ReservedConfigKey {
@@ -318,6 +345,29 @@ impl BlockInfo {
             }
         }
         Ok(())
+    }
+
+    /// Declare the longest one attempt at this block's init may run: loading
+    /// its declared config and its `lifecycle(Init)`. Without one the block
+    /// has no limit of its own; an embedder's runtime-wide cap (the
+    /// `wafer-run` builder's `init_timeout`) still applies, and the smaller
+    /// of the two is the budget.
+    ///
+    /// Only the block knows how long its Init may legitimately take — a
+    /// migration over a large table can take minutes — so it declares the
+    /// budget, rather than the runtime guessing one. An attempt still
+    /// running when its budget passes is abandoned (its future dropped at
+    /// the next `.await`) and fails transiently, to be retried after the
+    /// init backoff, so a budget must cover the slowest Init that should
+    /// succeed: a retry starts the Init again from the beginning. Work the
+    /// abandoned attempt started outside the runtime (a database statement,
+    /// an outbound request) is not cancelled by dropping it and may still be
+    /// running. Stored in whole milliseconds, saturating; a budget under
+    /// 1 ms is stored as 0, which registration refuses
+    /// ([`BlockInfoError::ZeroInitTimeout`]).
+    pub fn init_timeout(mut self, budget: std::time::Duration) -> Self {
+        self.init_timeout_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
+        self
     }
 
     /// Set the declared [`crate::InstanceMode`] (default: `PerNode`).
