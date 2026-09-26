@@ -9,8 +9,8 @@
 //! - [`service`] — `Argon2JwtCryptoService`, the native [`CryptoService`]
 //!   implementation built on those primitives. The `CryptoService` trait is
 //!   re-exported from `wafer_core::interfaces::crypto`. On a native host it
-//!   hashes and verifies passwords on Tokio's blocking pool, so it needs a
-//!   Tokio runtime there.
+//!   hashes and verifies passwords on a dedicated thread, under any
+//!   executor.
 //!
 //! Use `wafer_core::service_blocks::crypto::register_with()` to register.
 //!

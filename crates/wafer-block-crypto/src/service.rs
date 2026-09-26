@@ -84,9 +84,9 @@ impl Argon2JwtCryptoService {
 
 #[wafer_core::wafer_async_trait]
 impl CryptoService for Argon2JwtCryptoService {
-    /// On a native host the derivation runs on the blocking pool (see
-    /// [`crate::offload`]), so a hash never stalls an executor thread; on
-    /// wasm32 it runs inline.
+    /// On a native host the derivation runs on a dedicated thread (see
+    /// `offload`), so a hash never stalls the thread polling it, whatever the
+    /// executor; on wasm32 it runs inline.
     async fn hash(&self, password: &str) -> Result<String, CryptoError> {
         let scheme = self.password_scheme;
         #[cfg(not(target_arch = "wasm32"))]
@@ -114,7 +114,7 @@ impl CryptoService for Argon2JwtCryptoService {
     /// reason the selector exists — silently invalidate every password
     /// already stored.
     ///
-    /// Runs where [`CryptoService::hash`] does: on the blocking pool on a
+    /// Runs where [`CryptoService::hash`] does: on a dedicated thread on a
     /// native host, inline on wasm32.
     async fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
         #[cfg(not(target_arch = "wasm32"))]
@@ -451,5 +451,88 @@ mod password_scheme_tests {
             .verify_for("my-org/auth", &block_token)
             .await
             .expect("per-block derivation is unchanged");
+    }
+}
+
+/// Where password work runs on a native host, driven by `futures`' own
+/// executor rather than Tokio's: the service must not need a particular
+/// runtime, and Argon2 must not run on the thread that polls the future.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod offload_tests {
+    use std::{
+        cell::Cell,
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use super::*;
+
+    const TEST_SECRET: &str = "test-secret-padded-to-32-bytes-or-more-for-validation-aaaaaaaaaa";
+
+    fn svc() -> Argon2JwtCryptoService {
+        Argon2JwtCryptoService::new(TEST_SECRET.to_string()).expect("long enough")
+    }
+
+    /// Returns `Pending` once, waking itself: lets the executor poll the
+    /// other futures joined with it.
+    struct YieldNow(bool);
+
+    impl Future for YieldNow {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    /// No Tokio runtime anywhere: hashing and verifying still work.
+    #[test]
+    fn password_ops_work_without_a_tokio_runtime() {
+        let svc = svc();
+        futures::executor::block_on(async {
+            let hash = svc.hash("correct horse").await.expect("hash");
+            svc.compare_hash("correct horse", &hash)
+                .await
+                .expect("the right password verifies");
+            assert!(matches!(
+                svc.compare_hash("wrong", &hash).await,
+                Err(CryptoError::PasswordMismatch)
+            ));
+        });
+    }
+
+    /// PERF-02: while a hash runs, the thread polling it keeps running other
+    /// work. A derivation run inline finishes inside its first poll, before
+    /// the ticker joined with it is ever polled, and the ticker counts
+    /// nothing.
+    #[test]
+    fn argon2_runs_off_the_polling_thread() {
+        let svc = svc();
+        let done = Cell::new(false);
+        let ticks = Cell::new(0_u64);
+        futures::executor::block_on(async {
+            let hash = async {
+                let hash = svc.hash("correct horse").await;
+                done.set(true);
+                hash
+            };
+            let ticker = async {
+                while !done.get() {
+                    ticks.set(ticks.get() + 1);
+                    YieldNow(false).await;
+                }
+            };
+            let (hash, ()) = futures::join!(hash, ticker);
+            hash.expect("hash");
+        });
+        assert!(
+            ticks.get() > 0,
+            "the polling thread did no other work while Argon2 ran"
+        );
     }
 }

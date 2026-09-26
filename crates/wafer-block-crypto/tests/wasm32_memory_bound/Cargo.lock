@@ -1098,6 +1098,7 @@ dependencies = [
  "async-trait",
  "base64ct",
  "chrono",
+ "futures",
  "getrandom 0.4.2",
  "hkdf",
  "hmac",

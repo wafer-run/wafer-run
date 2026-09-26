@@ -16,10 +16,11 @@
   `interfaces::crypto::handler::handle_message` is now `async`, and
   `handle_message_native` is removed: moving Argon2 off the executor thread
   is the service's job, not the handler's. `Argon2JwtCryptoService` hashes
-  and verifies passwords on Tokio's blocking pool on native hosts (behind
-  the same semaphore as before) and inline on wasm32, so on a native host it
-  now needs a Tokio runtime; `wafer-block-crypto` gains `tokio` on native,
-  and `wafer-core` drops its direct native `tokio` dependency.
+  and verifies passwords on a dedicated thread on native hosts (behind the
+  same semaphore as before, the result awaited over a oneshot channel, so
+  any executor can drive it — it no longer needs a Tokio runtime) and
+  inline on wasm32; `wafer-block-crypto` gains `tokio` (for its `Semaphore`)
+  and `futures` on native, and `wafer-core` drops its direct native `tokio` dependency.
 - A block's init can have a time limit, which the block declares. The new
   `BlockInfo::init_timeout(Duration)` (field `init_timeout_ms`) sets the
   longest one attempt at the block's init — loading its declared config and
