@@ -325,14 +325,15 @@ mod crypto_fakes {
 
     pub struct OkCrypto;
 
+    #[wafer_block::wafer_async_trait]
     impl CryptoService for OkCrypto {
-        fn hash(&self, _password: &str) -> Result<String, CryptoError> {
+        async fn hash(&self, _password: &str) -> Result<String, CryptoError> {
             Ok("hash".into())
         }
-        fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
+        async fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
             Ok(())
         }
-        fn sign_for(
+        async fn sign_for(
             &self,
             _block_id: &str,
             _claims: BTreeMap<String, serde_json::Value>,
@@ -340,14 +341,14 @@ mod crypto_fakes {
         ) -> Result<String, CryptoError> {
             Ok("token".into())
         }
-        fn verify_for(
+        async fn verify_for(
             &self,
             _block_id: &str,
             _token: &str,
         ) -> Result<BTreeMap<String, serde_json::Value>, CryptoError> {
             Ok(BTreeMap::new())
         }
-        fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
+        async fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
             Ok(vec![0; n])
         }
     }
@@ -364,7 +365,8 @@ async fn crypto_sign_rejects_mismatched_op() {
     // Meta is inert now — `DenyCtx` is what makes this request unauthorized.
     let msg = msg_with_meta(ServiceOp::CRYPTO_SIGN, "random_bytes", "read", "crypto");
     let out =
-        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body)
+            .await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }
@@ -384,7 +386,8 @@ async fn crypto_sign_accepts_matched_op() {
         Some("test/caller"),
         &msg,
         &body,
-    );
+    )
+    .await;
     assert!(terminal_error(out).await.is_none());
 }
 
@@ -395,7 +398,8 @@ async fn crypto_random_bytes_rejects_mismatched_op() {
     let body = codec::encode(&req).unwrap();
     let msg = msg_with_meta(ServiceOp::CRYPTO_RANDOM_BYTES, "sign", "read", "crypto");
     let out =
-        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body)
+            .await;
     let err = terminal_error(out).await.expect("expected error");
     assert_eq!(err.code, ErrorCode::PermissionDenied);
 }

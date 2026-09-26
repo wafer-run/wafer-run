@@ -8,7 +8,9 @@
 //!   wrappers over it instead of re-implementing the algorithms.
 //! - [`service`] — `Argon2JwtCryptoService`, the native [`CryptoService`]
 //!   implementation built on those primitives. The `CryptoService` trait is
-//!   re-exported from `wafer_core::interfaces::crypto`.
+//!   re-exported from `wafer_core::interfaces::crypto`. On a native host it
+//!   hashes and verifies passwords on a dedicated thread, under any
+//!   executor.
 //!
 //! Use `wafer_core::service_blocks::crypto::register_with()` to register.
 //!
@@ -16,6 +18,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(not(target_arch = "wasm32"))]
+mod offload;
 pub mod primitives;
 
 /// `Argon2JwtCryptoService`: the native `CryptoService` implementation —

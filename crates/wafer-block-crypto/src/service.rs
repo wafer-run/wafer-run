@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, time::Duration};
 
 // Re-export the trait and error from wafer-core.
 pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
+#[cfg(not(target_arch = "wasm32"))]
+use zeroize::Zeroizing;
 
 // Re-exported from `primitives` (where the recommendation is documented as
 // part of the shared policy) so existing `service::MIN_JWT_SECRET_LEN`
@@ -80,9 +82,25 @@ impl Argon2JwtCryptoService {
     }
 }
 
+#[wafer_core::wafer_async_trait]
 impl CryptoService for Argon2JwtCryptoService {
-    fn hash(&self, password: &str) -> Result<String, CryptoError> {
-        primitives::hash_password_with(password, self.password_scheme)
+    /// On a native host the derivation runs on a dedicated thread (see
+    /// `offload`), so a hash never stalls the thread polling it, whatever the
+    /// executor; on wasm32 it runs inline.
+    async fn hash(&self, password: &str) -> Result<String, CryptoError> {
+        let scheme = self.password_scheme;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let password = Zeroizing::new(password.to_owned());
+            crate::offload::offload_blocking(move || {
+                primitives::hash_password_with(&password, scheme)
+            })
+            .await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            primitives::hash_password_with(password, scheme)
+        }
     }
 
     /// Verify against whichever scheme the **stored hash** names, not the
@@ -95,11 +113,26 @@ impl CryptoService for Argon2JwtCryptoService {
     /// database against two targets that hash differently, which is the
     /// reason the selector exists — silently invalidate every password
     /// already stored.
-    fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
-        primitives::verify_password_any_scheme(password, hash)
+    ///
+    /// Runs where [`CryptoService::hash`] does: on a dedicated thread on a
+    /// native host, inline on wasm32.
+    async fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let password = Zeroizing::new(password.to_owned());
+            let hash = hash.to_owned();
+            crate::offload::offload_blocking(move || {
+                primitives::verify_password_any_scheme(&password, &hash)
+            })
+            .await
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            primitives::verify_password_any_scheme(password, hash)
+        }
     }
 
-    fn sign_for(
+    async fn sign_for(
         &self,
         block_id: &str,
         claims: BTreeMap<String, serde_json::Value>,
@@ -112,7 +145,7 @@ impl CryptoService for Argon2JwtCryptoService {
     /// Verify with [`JwtExpPolicy::Required`]: [`CryptoService::sign_for`]
     /// always stamps `exp`, so a token without one was not minted by this
     /// service and is rejected rather than treated as never-expiring.
-    fn verify_for(
+    async fn verify_for(
         &self,
         block_id: &str,
         token: &str,
@@ -121,7 +154,7 @@ impl CryptoService for Argon2JwtCryptoService {
         primitives::jwt_verify(token, derived.as_bytes(), JwtExpPolicy::Required)
     }
 
-    fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
+    async fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
         primitives::random_bytes(n)
     }
 }
@@ -144,13 +177,14 @@ mod tests {
         m
     }
 
-    #[test]
-    fn sign_and_verify_roundtrip() {
+    #[tokio::test]
+    async fn sign_and_verify_roundtrip() {
         let svc = test_service();
         let token = svc
             .sign_for("my-org/auth", test_claims(), Duration::from_secs(3600))
+            .await
             .unwrap();
-        let claims = svc.verify_for("my-org/auth", &token).unwrap();
+        let claims = svc.verify_for("my-org/auth", &token).await.unwrap();
         assert_eq!(claims.get("sub").unwrap(), &serde_json::json!("user-1"));
         assert!(claims.contains_key("exp"), "sign must stamp exp");
     }
@@ -159,8 +193,8 @@ mod tests {
     /// `sign_for` always stamps `exp`, so an exp-less token was not minted by
     /// this service and must be rejected rather than treated as
     /// never-expiring.
-    #[test]
-    fn verify_rejects_token_without_exp() {
+    #[tokio::test]
+    async fn verify_rejects_token_without_exp() {
         use crate::primitives::{b64url_encode, derive_block_key, hmac_sha256};
 
         // Hand-craft a correctly signed token whose payload has no `exp`.
@@ -173,6 +207,7 @@ mod tests {
 
         let err = test_service()
             .verify_for("my-org/auth", &token)
+            .await
             .expect_err("exp-less token must be rejected");
         assert!(
             err.to_string().contains("missing exp"),
@@ -180,36 +215,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sign_for_different_blocks_produces_different_tokens() {
+    #[tokio::test]
+    async fn sign_for_different_blocks_produces_different_tokens() {
         let svc = test_service();
         let expiry = Duration::from_secs(3600);
 
-        let token_a = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
-        let token_b = svc.sign_for("my-org/admin", test_claims(), expiry).unwrap();
+        let token_a = svc
+            .sign_for("my-org/auth", test_claims(), expiry)
+            .await
+            .unwrap();
+        let token_b = svc
+            .sign_for("my-org/admin", test_claims(), expiry)
+            .await
+            .unwrap();
 
         // Tokens signed with different derived keys must differ (the signature
         // portion will be different even though the payload is the same).
         assert_ne!(token_a, token_b);
     }
 
-    #[test]
-    fn verify_for_correct_block_succeeds() {
+    #[tokio::test]
+    async fn verify_for_correct_block_succeeds() {
         let svc = test_service();
         let expiry = Duration::from_secs(3600);
 
-        let token = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
-        let claims = svc.verify_for("my-org/auth", &token).unwrap();
+        let token = svc
+            .sign_for("my-org/auth", test_claims(), expiry)
+            .await
+            .unwrap();
+        let claims = svc.verify_for("my-org/auth", &token).await.unwrap();
         assert_eq!(claims.get("sub").unwrap(), &serde_json::json!("user-1"));
     }
 
-    #[test]
-    fn verify_for_wrong_block_fails() {
+    #[tokio::test]
+    async fn verify_for_wrong_block_fails() {
         let svc = test_service();
         let expiry = Duration::from_secs(3600);
 
-        let token = svc.sign_for("my-org/auth", test_claims(), expiry).unwrap();
-        let result = svc.verify_for("my-org/admin", &token);
+        let token = svc
+            .sign_for("my-org/auth", test_claims(), expiry)
+            .await
+            .unwrap();
+        let result = svc.verify_for("my-org/admin", &token).await;
         assert!(
             result.is_err(),
             "token signed for auth must not verify under admin"
@@ -217,26 +264,30 @@ mod tests {
     }
 
     /// A token signed with the master secret itself is no block's token.
-    #[test]
-    fn a_master_key_token_verifies_for_no_block() {
+    #[tokio::test]
+    async fn a_master_key_token_verifies_for_no_block() {
         let master = crate::primitives::jwt_sign(
             test_claims(),
             Duration::from_secs(3600),
             TEST_SECRET.as_bytes(),
         )
         .unwrap();
-        assert!(test_service().verify_for("my-org/auth", &master).is_err());
+        assert!(test_service()
+            .verify_for("my-org/auth", &master)
+            .await
+            .is_err());
     }
 
-    #[test]
-    fn hash_and_compare_password() {
+    #[tokio::test]
+    async fn hash_and_compare_password() {
         let svc = test_service();
-        let hash = svc.hash("correcthorsebatterystaple").unwrap();
+        let hash = svc.hash("correcthorsebatterystaple").await.unwrap();
         assert!(hash.starts_with("$argon2id$"));
         svc.compare_hash("correcthorsebatterystaple", &hash)
+            .await
             .unwrap();
         assert!(matches!(
-            svc.compare_hash("wrong", &hash),
+            svc.compare_hash("wrong", &hash).await,
             Err(CryptoError::PasswordMismatch)
         ));
     }
@@ -292,34 +343,34 @@ mod password_scheme_tests {
     /// The default is what it always was. A service built the old way keeps
     /// writing argon2id at the default cost, so this change is inert for
     /// every existing caller.
-    #[test]
-    fn the_default_service_still_writes_argon2id() {
-        let hash = svc().hash("pw").expect("hash");
+    #[tokio::test]
+    async fn the_default_service_still_writes_argon2id() {
+        let hash = svc().hash("pw").await.expect("hash");
         assert!(hash.starts_with("$argon2id$"), "{hash}");
     }
 
-    #[test]
-    fn constrained_argon2_is_selectable() {
+    #[tokio::test]
+    async fn constrained_argon2_is_selectable() {
         let s = svc().with_password_scheme(PasswordScheme::Argon2(Argon2Cost::Constrained));
-        let hash = s.hash("pw").expect("hash");
+        let hash = s.hash("pw").await.expect("hash");
         assert!(hash.starts_with("$argon2id$"), "{hash}");
         assert!(
             hash.contains("m=4096"),
             "the constrained memory cost must reach the hash: {hash}"
         );
-        s.compare_hash("pw", &hash).expect("round trip");
+        s.compare_hash("pw", &hash).await.expect("round trip");
     }
 
-    #[test]
-    fn pbkdf2_is_selectable() {
+    #[tokio::test]
+    async fn pbkdf2_is_selectable() {
         let s = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
             iterations: PBKDF2_SHA256_MIN_ITERATIONS,
         });
-        let hash = s.hash("pw").expect("hash");
+        let hash = s.hash("pw").await.expect("hash");
         assert!(hash.starts_with("$pbkdf2-sha256$i=10000$"), "{hash}");
-        s.compare_hash("pw", &hash).expect("round trip");
+        s.compare_hash("pw", &hash).await.expect("round trip");
         assert!(matches!(
-            s.compare_hash("wrong", &hash),
+            s.compare_hash("wrong", &hash).await,
             Err(CryptoError::PasswordMismatch)
         ));
     }
@@ -329,10 +380,10 @@ mod password_scheme_tests {
     /// stored under the other scheme keep verifying, in both directions —
     /// otherwise selecting a scheme would be a password reset for every
     /// existing user.
-    #[test]
-    fn switching_scheme_does_not_invalidate_stored_credentials() {
+    #[tokio::test]
+    async fn switching_scheme_does_not_invalidate_stored_credentials() {
         let argon2_svc = svc();
-        let stored_argon2 = argon2_svc.hash("pw-argon2").expect("hash");
+        let stored_argon2 = argon2_svc.hash("pw-argon2").await.expect("hash");
 
         let pbkdf2_svc = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
             iterations: PBKDF2_SHA256_MIN_ITERATIONS,
@@ -341,6 +392,7 @@ mod password_scheme_tests {
         // A service now writing PBKDF2 still reads argon2 credentials…
         pbkdf2_svc
             .compare_hash("pw-argon2", &stored_argon2)
+            .await
             .expect("argon2 credential survives the switch to pbkdf2");
 
         // …and a service writing argon2 still reads PBKDF2 credentials,
@@ -348,30 +400,31 @@ mod password_scheme_tests {
         // floor it would write today.
         argon2_svc
             .compare_hash(STORED_PBKDF2_PASSWORD, STORED_PBKDF2)
+            .await
             .expect("pbkdf2 credential survives the switch to argon2");
 
         // Wrong passwords stay wrong across both.
         assert!(matches!(
-            pbkdf2_svc.compare_hash("nope", &stored_argon2),
+            pbkdf2_svc.compare_hash("nope", &stored_argon2).await,
             Err(CryptoError::PasswordMismatch)
         ));
         assert!(matches!(
-            argon2_svc.compare_hash("nope", STORED_PBKDF2),
+            argon2_svc.compare_hash("nope", STORED_PBKDF2).await,
             Err(CryptoError::PasswordMismatch)
         ));
     }
 
     /// A scheme selection cannot be talked into writing a weak hash.
-    #[test]
-    fn a_below_floor_iteration_count_fails_at_hash_time() {
+    #[tokio::test]
+    async fn a_below_floor_iteration_count_fails_at_hash_time() {
         let s = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 { iterations: 1 });
-        assert!(matches!(s.hash("pw"), Err(CryptoError::HashError(_))));
+        assert!(matches!(s.hash("pw").await, Err(CryptoError::HashError(_))));
     }
 
     /// The scheme is about passwords only; JWT signing, per-block key
     /// derivation and randomness are untouched by it.
-    #[test]
-    fn the_scheme_does_not_affect_tokens() {
+    #[tokio::test]
+    async fn the_scheme_does_not_affect_tokens() {
         let plain = svc();
         let scheme = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
             iterations: PBKDF2_SHA256_MIN_ITERATIONS,
@@ -382,17 +435,104 @@ mod password_scheme_tests {
 
         let token = plain
             .sign_for("my-org/auth", claims.clone(), Duration::from_secs(3600))
+            .await
             .expect("sign");
         let back = scheme
             .verify_for("my-org/auth", &token)
+            .await
             .expect("a token signed by either verifies in both");
         assert_eq!(back.get("sub"), Some(&serde_json::json!("user-1")));
 
         let block_token = scheme
             .sign_for("my-org/auth", claims, Duration::from_secs(3600))
+            .await
             .expect("sign_for");
         plain
             .verify_for("my-org/auth", &block_token)
+            .await
             .expect("per-block derivation is unchanged");
+    }
+}
+
+/// Where password work runs on a native host, driven by `futures`' own
+/// executor rather than Tokio's: the service must not need a particular
+/// runtime, and Argon2 must not run on the thread that polls the future.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod offload_tests {
+    use std::{
+        cell::Cell,
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use super::*;
+
+    const TEST_SECRET: &str = "test-secret-padded-to-32-bytes-or-more-for-validation-aaaaaaaaaa";
+
+    fn svc() -> Argon2JwtCryptoService {
+        Argon2JwtCryptoService::new(TEST_SECRET.to_string()).expect("long enough")
+    }
+
+    /// Returns `Pending` once, waking itself: lets the executor poll the
+    /// other futures joined with it.
+    struct YieldNow(bool);
+
+    impl Future for YieldNow {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    /// No Tokio runtime anywhere: hashing and verifying still work.
+    #[test]
+    fn password_ops_work_without_a_tokio_runtime() {
+        let svc = svc();
+        futures::executor::block_on(async {
+            let hash = svc.hash("correct horse").await.expect("hash");
+            svc.compare_hash("correct horse", &hash)
+                .await
+                .expect("the right password verifies");
+            assert!(matches!(
+                svc.compare_hash("wrong", &hash).await,
+                Err(CryptoError::PasswordMismatch)
+            ));
+        });
+    }
+
+    /// PERF-02: while a hash runs, the thread polling it keeps running other
+    /// work. A derivation run inline finishes inside its first poll, before
+    /// the ticker joined with it is ever polled, and the ticker counts
+    /// nothing.
+    #[test]
+    fn argon2_runs_off_the_polling_thread() {
+        let svc = svc();
+        let done = Cell::new(false);
+        let ticks = Cell::new(0_u64);
+        futures::executor::block_on(async {
+            let hash = async {
+                let hash = svc.hash("correct horse").await;
+                done.set(true);
+                hash
+            };
+            let ticker = async {
+                while !done.get() {
+                    ticks.set(ticks.get() + 1);
+                    YieldNow(false).await;
+                }
+            };
+            let (hash, ()) = futures::join!(hash, ticker);
+            hash.expect("hash");
+        });
+        assert!(
+            ticks.get() > 0,
+            "the polling thread did no other work while Argon2 ran"
+        );
     }
 }

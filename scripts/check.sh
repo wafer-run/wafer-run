@@ -69,7 +69,8 @@ run_fmt() {
         crates/wafer-block/tests/wasm_static_blocks \
         crates/wafer-block/tests/wasm_local_input_stream \
         crates/wafer-block-crypto/tests/wasm32_consumer \
-        crates/wafer-block-crypto/tests/wasm32_memory_bound; do
+        crates/wafer-block-crypto/tests/wasm32_memory_bound \
+        crates/wafer-core/tests/wasm32_crypto_block; do
         cargo +nightly fmt --all --manifest-path "$fixture/Cargo.toml" -- --check
     done
 }
@@ -197,6 +198,19 @@ run_wasm() {
         --manifest-path crates/wafer-block-crypto/tests/wasm32_memory_bound/Cargo.toml
     node crates/wafer-block-crypto/tests/wasm32_memory_bound/measure.mjs \
         "$bound_dir/wasm32-unknown-unknown/release/wasm32_argon2_memory_bound_fixture.wasm"
+
+    # A Worker's CryptoService may answer only after awaiting a JS promise
+    # (password hashing in a Durable Object), so the crypto block must await
+    # the service on wasm32, where no native test reaches the block's code.
+    # The fixture drives the real block through a service that completes
+    # after an await point and fails unless every call waited for it.
+    echo "==> Crypto block awaits its service on wasm32 (node)"
+    local crypto_dir="${CARGO_TARGET_DIR:-$PWD/target}/wasm32-crypto-block"
+    cargo build --locked --release --target wasm32-unknown-unknown \
+        --target-dir "$crypto_dir" \
+        --manifest-path crates/wafer-core/tests/wasm32_crypto_block/Cargo.toml
+    node crates/wafer-core/tests/wasm32_crypto_block/run.mjs \
+        "$crypto_dir/wasm32-unknown-unknown/release/wasm32_crypto_block_fixture.wasm"
 }
 
 run_bindings() {
