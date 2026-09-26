@@ -58,7 +58,8 @@ pub struct RuntimeContext {
     /// call tree. Sibling calls at the same logical depth therefore all see
     /// the same value; only true nesting increases it. `0` at the top level.
     pub call_depth: u32,
-    /// Maximum call depth (default: 16).
+    /// Maximum call depth (default:
+    /// [`DEFAULT_MAX_CALL_DEPTH`](crate::runtime::call_gates::DEFAULT_MAX_CALL_DEPTH)).
     pub max_call_depth: u32,
     /// Immutable bundle of post-startup metadata: registered blocks,
     /// flow infos/defs, expanded block configs, interface specs.
@@ -120,12 +121,6 @@ pub struct RuntimeContext {
     pub(crate) dispatch: Arc<crate::runtime::exec_plan::DispatchTable>,
 }
 
-// --- Output helpers (used by RuntimeContext impl) ---
-
-fn err_output(code: ErrorCode, message: impl Into<String>) -> OutputStream {
-    OutputStream::error(WaferError::new(code, message))
-}
-
 impl RuntimeContext {
     /// The context `block`'s `lifecycle(Init)` runs on, for the init run
     /// `attempt`. The one constructor every init path uses (`Wafer::init_block`,
@@ -165,16 +160,9 @@ impl RuntimeContext {
         }
     }
 
-    /// Resolve `name` through the alias map, single-hop. Mirrors
-    /// [`crate::Wafer::canonicalize`]. Single-hop is sufficient because
-    /// [`crate::Wafer::add_alias`] rejects chained registrations.
-    pub(crate) fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
-        self.aliases.get(name).map_or(name, |s| s.as_str())
-    }
-
     /// Shared dispatch path used by both `call_block` and
-    /// `call_block_with_attachments`. Performs the full validation pipeline
-    /// (depth, cancellation, requires, WRAP, capabilities, interface action),
+    /// `call_block_with_attachments`. Admits the call through
+    /// [`call_gates::admit_call`](crate::runtime::call_gates::admit_call),
     /// then builds a sub-context with `current_attachments` populated and
     /// dispatches.
     ///
@@ -189,149 +177,18 @@ impl RuntimeContext {
         input: InputStream,
         attachments: Option<BTreeMap<String, Attachment>>,
     ) -> OutputStream {
-        // Recursion depth check. COR-01: `call_depth` is this frame's depth,
-        // not a shared in-flight counter — a block at the maximum nesting
-        // depth cannot call further. The callee's sub-context below is given
-        // `self.call_depth + 1`, so concurrent sibling calls (all made from
-        // this same frame) never accumulate.
-        if self.call_depth >= self.max_call_depth {
-            return err_output(
-                ErrorCode::ResourceExhausted,
-                format!(
-                    "call_block depth exceeded maximum of {} (calling '{}')",
-                    self.max_call_depth, block_name
-                ),
-            );
-        }
-
-        // Deadline, then cancellation. A passed deadline is its own code:
-        // the caller ran out of time, nobody cancelled it.
-        if let Some(deadline) = self.deadline {
-            if Instant::now() >= deadline {
-                self.cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                return err_output(
-                    ErrorCode::DeadlineExceeded,
-                    format!("deadline exceeded before calling '{block_name}'"),
-                );
-            }
-        }
-        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return err_output(ErrorCode::Cancelled, "execution cancelled");
-        }
-
-        // Resolve the alias once up front. This canonical name is the caller
-        // identity used for every downstream decision: the callee's sub-context
-        // `node_id` (WRAP attribution), the capability `allows_call_block`
-        // membership check, and the block lookup. Computing it once avoids the
-        // earlier bug where some sites compared/attributed against the raw
-        // alias and others against the resolved name.
-        let resolved_block_name = self.canonicalize(block_name);
-
-        // Enforce requires: if the caller declared a requires list, check it.
-        // Match against BOTH the raw alias the caller wrote and the resolved
-        // canonical name, so a `requires` entry written either way is honored.
-        if let Some(ref requires) = self.caller_requires {
-            if !requires
-                .iter()
-                .any(|r| r == block_name || r == resolved_block_name)
-            {
-                return err_output(
-                    ErrorCode::PermissionDenied,
-                    format!("block '{block_name}' not in requires list — call_block denied"),
-                );
-            }
-        }
-
-        // Capability check: if the calling block is a WASM block with restricted
-        // capabilities, verify it has permission for this service call.
-        if let Some(caller_block) = self.all_blocks.get(&self.node_id) {
-            if let Some(caps) = caller_block.block_capabilities() {
-                // Check call_block capability. `allows_call_block` does exact
-                // membership against the canonical names a block declares in
-                // its capabilities, so it must see the resolved name — an alias
-                // would never match and produce a false denial.
-                if !caps.allows_call_block(resolved_block_name) {
-                    return err_output(
-                        ErrorCode::PermissionDenied,
-                        format!("block capability denies call to '{block_name}'"),
-                    );
-                }
-            }
-        }
-
-        // Look up the block (resolved canonical name first, then the raw name
-        // as a defensive fallback — the same canonicalize-then-fallback the
-        // flow runner and `Wafer::lookup_block` use). `resolved_block_name` was
-        // computed once near the top of this fn.
-        let block = match self
-            .all_blocks
-            .get(resolved_block_name)
-            .or_else(|| self.all_blocks.get(block_name))
-        {
-            Some(b) => b.clone(),
-            None => {
-                return err_output(
-                    ErrorCode::Unimplemented,
-                    format!("block '{block_name}' is not registered"),
-                );
-            }
+        // The admission sequence (depth, deadline, cancellation, `requires`,
+        // capability, registration, interface action) is the public
+        // `call_gates::admit_call`, so an embedder's own `Context` can run
+        // the same gates instead of re-stating them.
+        let crate::runtime::call_gates::AdmittedCall {
+            resolved: resolved_block_name,
+            block,
+            requires: called_requires,
+        } = match crate::runtime::call_gates::admit_call(self, block_name, &msg) {
+            Ok(admitted) => admitted,
+            Err(refusal) => return OutputStream::error(refusal),
         };
-
-        // The callee's interface and its own `call_block` allowlist
-        // (`None`: unrestricted), compiled at seal; a block the table misses
-        // (a context built before seal, or a block registered after it) is
-        // read from its `BlockInfo`.
-        let (interface, called_requires): (std::borrow::Cow<'_, str>, _) =
-            match self.dispatch.blocks.get(resolved_block_name) {
-                Some(facts) => (facts.interface.as_str().into(), facts.requires.clone()),
-                None => {
-                    let info = block.info();
-                    let requires = info.call_allowlist().map(Arc::new);
-                    (info.interface.into(), requires)
-                }
-            };
-
-        // Interface action validation: verify the message action is part of the
-        // target block's declared interface. Skipped for action-agnostic
-        // interfaces (empty action map) and for interfaces the runtime does
-        // not recognize (warn-once, then proceed).
-        //
-        // Two callers populate the action field, in two different places:
-        //   - HTTP listener: maps `POST` → `req.action` meta = `"create"` etc.
-        //     `kind` carries the composite `"METHOD:/path"` for routing.
-        //   - SDK clients (`wafer_sdk::clients::*`): set `kind` to the service
-        //     op (e.g. `"network.do"`); the meta entry is not populated.
-        // Prefer the meta value (semantic action) when present; fall back to
-        // `kind` (the SDK op name). This keeps a single validation lookup that
-        // works for both call-paths without forcing the SDK to duplicate kind
-        // into meta on every call.
-        {
-            let action_meta = msg.action();
-            let action = if !action_meta.is_empty() {
-                action_meta
-            } else {
-                msg.kind.as_str()
-            };
-            match crate::runtime::validation::check_action_interface(
-                resolved_block_name,
-                &interface,
-                action,
-                &self.dispatch.interface_specs,
-            ) {
-                crate::runtime::validation::ActionCheck::Valid => {}
-                crate::runtime::validation::ActionCheck::Invalid { message } => {
-                    return err_output(ErrorCode::Unimplemented, message);
-                }
-                crate::runtime::validation::ActionCheck::UnknownInterface => {
-                    crate::runtime::validation::warn_once_unknown_interface(
-                        &self.warned_unknown_interfaces,
-                        resolved_block_name,
-                        &interface,
-                    );
-                }
-            }
-        }
 
         // Wrap attachments in an Arc once, consuming the BTreeMap — no deep clone.
         let att_arc: Option<Arc<BTreeMap<String, Attachment>>> = attachments.map(Arc::new);
@@ -452,21 +309,90 @@ impl RuntimeContext {
     }
 }
 
+/// The runtime's own frame, read by the call admission every `call_block`
+/// runs ([`call_gates::admit_call`](crate::runtime::call_gates::admit_call)).
+impl crate::runtime::call_gates::CallFrame for RuntimeContext {
+    fn call_depth(&self) -> u32 {
+        self.call_depth
+    }
+
+    fn max_call_depth(&self) -> u32 {
+        self.max_call_depth
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn cancellation(&self) -> &std::sync::atomic::AtomicBool {
+        &self.cancelled
+    }
+
+    /// Single-hop, as [`crate::Wafer::canonicalize`] resolves:
+    /// [`crate::Wafer::add_alias`] rejects chained registrations.
+    fn canonicalize<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map_or(name, |s| s.as_str())
+    }
+
+    fn caller_requires(&self) -> Option<&[String]> {
+        self.caller_requires.as_deref().map(Vec::as_slice)
+    }
+
+    /// The block this frame runs as (`node_id`).
+    fn caller_capabilities(&self) -> Option<wafer_block::BlockCapabilities> {
+        self.all_blocks
+            .get(&self.node_id)
+            .and_then(|block| block.block_capabilities())
+    }
+
+    /// `all_blocks` carries every registration name and every alias.
+    fn lookup(&self, name: &str) -> Option<Arc<dyn Block>> {
+        self.all_blocks.get(name).cloned()
+    }
+
+    /// From the table compiled at seal; a callee the table misses (a context
+    /// built before seal, or a block registered after it) is read from its
+    /// `BlockInfo`.
+    fn callee_facts(
+        &self,
+        resolved: &str,
+        block: &dyn Block,
+    ) -> crate::runtime::call_gates::CalleeFacts<'_> {
+        match self.dispatch.blocks.get(resolved) {
+            Some(facts) => crate::runtime::call_gates::CalleeFacts {
+                interface: facts.interface.as_str().into(),
+                requires: facts.requires.clone(),
+            },
+            None => crate::runtime::call_gates::CalleeFacts::declared(block),
+        }
+    }
+
+    fn interface_specs(&self) -> &HashMap<String, wafer_block::types::InterfaceSpec> {
+        &self.dispatch.interface_specs
+    }
+
+    fn unknown_interface(&self, resolved: &str, interface: &str) {
+        crate::runtime::validation::warn_once_unknown_interface(
+            &self.warned_unknown_interfaces,
+            resolved,
+            interface,
+        );
+    }
+}
+
 #[wafer_async_trait]
 impl Context for RuntimeContext {
     /// Dispatch a message to another registered block.
     ///
     /// # Checks
     ///
-    /// Runs in order, returning an error event on failure:
-    /// 1. Call-depth limit (default 16).
-    /// 2. Cancellation / deadline.
-    /// 3. Caller `requires` allowlist.
-    /// 4. Caller `call_block` capability check (WASM capability model).
-    /// 5. **Interface action**: `msg.action()` must be in the target block's
-    ///    declared interface action map, unless the interface is
-    ///    action-agnostic (empty map) or unknown to the runtime. Unknown
-    ///    interfaces produce a one-time `WARN` log per block.
+    /// The call is admitted by
+    /// [`call_gates::admit_call`](crate::runtime::call_gates::admit_call),
+    /// which lists the gates in order — call depth, deadline, cancellation,
+    /// the caller's `requires`, its `call_block` capability, registration and
+    /// the interface action — and the error each refuses with. A callee
+    /// declaring an interface the runtime has no spec for is logged once at
+    /// `WARN` and called.
     ///
     /// WRAP resource access (grant + resource-capability checks) is NOT
     /// enforced here. It moved host-side into [`Context::check_resource_access`],
@@ -1037,5 +963,106 @@ mod tests {
         ));
         assert!(std::ptr::eq(ctx.block_configs(), ctx.block_configs()));
         assert!(std::ptr::eq(ctx.interface_specs(), ctx.interface_specs()));
+    }
+
+    /// `call_block` refuses each gate exactly as
+    /// [`crate::runtime::call_gates::admit_call`] answers over the same frame
+    /// — code and text — and a call it admits reaches the callee: the
+    /// runtime's dispatch and the public admission are one sequence, so an
+    /// embedder `Context` built on `admit_call` refuses what the runtime
+    /// refuses.
+    #[tokio::test]
+    async fn call_block_refuses_as_admit_call_answers() {
+        use crate::runtime::call_gates::{admit_call, DEFAULT_MAX_CALL_DEPTH};
+
+        let mut w = test_wafer();
+        w.register_block(
+            "restricted/block",
+            Arc::new(RestrictedTestBlock {
+                name: "restricted/block",
+            }),
+        )
+        .expect("register restricted block");
+        w.register_block(
+            "open/block",
+            Arc::new(UnrestrictedTestBlock { name: "open/block" }),
+        )
+        .expect("register unrestricted block");
+        w.add_alias("open", "open/block").expect("alias");
+        w.registration.rebuild_all_blocks();
+
+        let refusal_of = |ctx: &RuntimeContext, name: &str| {
+            let err = admit_call(ctx, name, &Message::new("x"))
+                .err()
+                .unwrap_or_else(|| panic!("admit_call admits '{name}'"));
+            (err.code, err.message)
+        };
+        async fn dispatched(
+            ctx: &RuntimeContext,
+            name: &str,
+        ) -> Result<Vec<u8>, (ErrorCode, String)> {
+            match ctx
+                .call_block(name, Message::new("x"), InputStream::empty())
+                .await
+                .collect_buffered()
+                .await
+            {
+                Ok(buf) => Ok(buf.body),
+                Err(wafer_block::streams::output::TerminalNotResponse::Error(e)) => {
+                    Err((e.code, e.message))
+                }
+                Err(other) => panic!("non-response terminal: {other:?}"),
+            }
+        }
+
+        let base = test_ctx(&w);
+        assert_eq!(
+            dispatched(&base, "open").await,
+            Ok(b"ok".to_vec()),
+            "an admitted alias reaches its target"
+        );
+
+        let mut deep = base.clone();
+        deep.call_depth = DEFAULT_MAX_CALL_DEPTH;
+        let mut cancelled = base.clone();
+        cancelled.cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut late = base.clone();
+        late.deadline = Some(Instant::now() - std::time::Duration::from_millis(1));
+        late.cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut required = base.clone();
+        required.caller_requires = Some(Arc::new(vec!["other/block".to_string()]));
+        let mut restricted = base.clone();
+        restricted.node_id = "restricted/block".to_string();
+
+        for (label, ctx, name, code) in [
+            ("depth", &deep, "open", ErrorCode::ResourceExhausted),
+            ("cancelled", &cancelled, "open", ErrorCode::Cancelled),
+            ("requires", &required, "open", ErrorCode::PermissionDenied),
+            (
+                "capability",
+                &restricted,
+                "open",
+                ErrorCode::PermissionDenied,
+            ),
+            (
+                "unregistered",
+                &base,
+                "nope/block",
+                ErrorCode::Unimplemented,
+            ),
+        ] {
+            let expected = refusal_of(ctx, name);
+            assert_eq!(expected.0, code, "{label}: {expected:?}");
+            assert_eq!(dispatched(ctx, name).await, Err(expected), "{label}");
+        }
+
+        // The deadline gate cancels the frame it refuses, so each path gets
+        // its own cancellation flag.
+        let mut late_again = base.clone();
+        late_again.deadline = late.deadline;
+        late_again.cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let expected = refusal_of(&late, "open");
+        assert_eq!(expected.0, ErrorCode::DeadlineExceeded);
+        assert_eq!(dispatched(&late_again, "open").await, Err(expected));
     }
 }

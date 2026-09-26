@@ -1600,6 +1600,16 @@
 
 ### Added
 
+- `wafer_run::runtime::call_gates` exposes the admission every
+  `call_block` runs before its callee: `admit_call(frame, name, &msg)` applies
+  call depth, deadline, cancellation, the caller's `requires`, its
+  `call_block` capability, registration (the resolved name, then the name as
+  written) and the interface action, in that order, and returns the callee,
+  its canonical name and its allowlist or the `WaferError` the runtime
+  refuses with. `RuntimeContext` implements the `CallFrame` trait it reads
+  and dispatches through it, so an embedder's own `Context` (a test harness
+  standing in for the runtime) runs the same gates instead of copying them.
+  `DEFAULT_MAX_CALL_DEPTH` (16) is public there.
 - `database.batch` takes a filtered delete, `DeleteWhere { collection,
   filters }`, with the semantics of `database.delete_where_count`: it
   removes every row the AND-combined leaf filters match (no filters: every
