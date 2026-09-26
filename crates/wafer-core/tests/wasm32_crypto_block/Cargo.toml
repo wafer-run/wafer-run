@@ -1,0 +1,33 @@
+# Runtime fixture: the crypto block awaits its `CryptoService` on wasm32.
+#
+# A Cloudflare Worker that runs password hashing in a Durable Object answers
+# `hash`/`compare_hash` only after awaiting a stub fetch, so the block must
+# await the service on wasm32 as it does natively. Nothing native can show
+# that the wasm32 build of the block does: `scripts/check.sh wasm` builds
+# this for wasm32-unknown-unknown and runs `run.mjs` under node, which calls
+# each export and fails unless it returns 0. The same scenario runs natively
+# in `tests/crypto_block_awaits_service.rs`. Excluded from the workspace (own
+# `[workspace]` table), like the other wasm fixtures.
+[workspace]
+
+[package]
+name = "wasm32-crypto-block-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+wafer-core = { path = "../.." }
+wafer-block = { path = "../../../wafer-block" }
+# `#[wafer_async_trait]` expands to `async_trait`, which the implementing
+# crate names.
+async-trait = "0.1"
+futures = "0.3"
+serde_json = "1"
+# See crates/wafer-block-crypto/tests/wasm32_consumer/Cargo.toml: the
+# embedding binary picks uuid's randomness source.
+uuid = { version = "1", features = ["js"] }

@@ -167,7 +167,8 @@ jobs:
         with:
           prefix-key: wasm
 
-      # Runs the argon2 memory-bound fixture (run_wasm in scripts/check.sh).
+      # Runs the argon2 memory-bound and crypto-block fixtures (run_wasm in
+      # scripts/check.sh).
       - name: Install Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -177,8 +178,9 @@ jobs:
       # --no-default-features (wasmi off), the wafer-core wasm-component
       # guest path, the gizza consumer combo (wafer-run on
       # wasm32-unknown-unknown with --features wasmi), the wasm32 compile
-      # fixtures, wafer-block-crypto on wasm32-unknown-unknown, and the
-      # argon2 memory bound measured on wasm32 under node. See run_wasm in
+      # fixtures, wafer-block-crypto on wasm32-unknown-unknown, the argon2
+      # memory bound measured on wasm32 under node, and the crypto block
+      # awaiting its service on wasm32 under node. See run_wasm in
       # scripts/check.sh.
       - name: Wasm & feature builds
         run: ./scripts/check.sh wasm
