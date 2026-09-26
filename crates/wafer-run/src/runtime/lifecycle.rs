@@ -21,8 +21,8 @@ pub(crate) fn sorted_snapshot<'a>(
 /// Return value of [`validate_and_collect_grants_for_block`].
 ///
 /// Splits accepted and rejected grants so callers can both merge accepted
-/// grants into `Wafer::wrap_grants` and push rejected grants into
-/// `Wafer::grant_validation_errors` for `start()` to surface as
+/// grants into `Wafer::wrap_grants` and push rejected grants into the list
+/// [`Wafer::rejected_grants`] reads, which `seal()` surfaces as
 /// `RuntimeError::GrantsRejected`.
 pub(crate) struct GrantValidationOutcome {
     /// Grants that passed validation and should be merged into `wrap_grants`.

@@ -318,3 +318,119 @@ async fn add_wrap_grants_rejects_malformed_grants_whole() {
     );
     wafer.seal().await.expect("nothing malformed was installed");
 }
+
+/// What a rejection says, for comparing the list `rejected_grants` reads with
+/// the one `seal()` refuses boot with.
+fn rejection_summary(errors: &[wafer_run::GrantValidationError]) -> Vec<(String, String, String)> {
+    errors
+        .iter()
+        .map(|e| (e.block.clone(), e.grant.resource.clone(), e.reason.clone()))
+        .collect()
+}
+
+/// `rejected_grants` reads, before sealing, exactly the rejections `seal()`
+/// then refuses boot with — and only the rejected declarations: the owned
+/// grant beside them is installed and is not listed.
+#[tokio::test]
+async fn rejected_grants_lists_what_seal_refuses_boot_over() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer.set_admin_block("my-org/admin");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![
+                    ResourceGrant::read("*", "test__granter__foo"),
+                    ResourceGrant::read("*", "test__other__foo"),
+                    ResourceGrant::read("*", "https://example.com").typed(ResourceType::Network),
+                ],
+            }),
+        )
+        .expect("register_block succeeds; the rejection surfaces at seal");
+
+    let pending = rejection_summary(wafer.rejected_grants());
+    assert_eq!(
+        pending
+            .iter()
+            .map(|(block, resource, _)| (block.as_str(), resource.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("test/granter", "test__other__foo"),
+            ("test/granter", "https://example.com"),
+        ],
+        "{pending:?}"
+    );
+    assert_eq!(wafer.wrap_grants().len(), 1, "the owned grant is installed");
+
+    match wafer.seal().await {
+        Err(wafer_run::RuntimeError::GrantsRejected(errors)) => {
+            assert_eq!(rejection_summary(&errors), pending);
+        }
+        other => panic!("expected GrantsRejected, got {:?}", other.map(|_| "Ok(_)")),
+    }
+    assert!(
+        wafer.rejected_grants().is_empty(),
+        "seal drains the list into its error"
+    );
+}
+
+/// A block whose grants all validate leaves the list empty, and `seal()`
+/// boots.
+#[tokio::test]
+async fn rejected_grants_is_empty_for_valid_declarations() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![ResourceGrant::read("*", "test__granter__foo")],
+            }),
+        )
+        .expect("register");
+    assert!(
+        wafer.rejected_grants().is_empty(),
+        "{:?}",
+        wafer.rejected_grants()
+    );
+    wafer.seal().await.expect("nothing was rejected");
+}
+
+/// A typed grant registered before the admin block is known is judged when
+/// `set_admin_block` re-checks every registered block: not listed before,
+/// listed after, as the non-admin declaration it is.
+#[tokio::test]
+async fn rejected_grants_follows_the_admin_block_recheck() {
+    let cfg_src: Arc<dyn wafer_run::ConfigSource> = Arc::new(StaticConfigSource::default());
+    let mut wafer = Wafer::new(cfg_src).expect("Wafer::new");
+    wafer
+        .register_block(
+            "test/granter",
+            Arc::new(GrantingBlock {
+                name: "test/granter",
+                grants: vec![
+                    ResourceGrant::read("*", "https://example.com").typed(ResourceType::Network)
+                ],
+            }),
+        )
+        .expect("register");
+    assert!(
+        wafer.rejected_grants().is_empty(),
+        "deferred until the admin block is known: {:?}",
+        wafer.rejected_grants()
+    );
+
+    wafer.set_admin_block("my-org/admin");
+    let rejected = rejection_summary(wafer.rejected_grants());
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0].0, "test/granter");
+    assert!(
+        rejected[0]
+            .2
+            .contains("only be declared by the admin block"),
+        "{rejected:?}"
+    );
+}
