@@ -55,16 +55,17 @@ mod crypto_fakes {
         }
     }
 
+    #[wafer_block::wafer_async_trait]
     impl CryptoService for RecordingCrypto {
-        fn hash(&self, _password: &str) -> Result<String, CryptoError> {
+        async fn hash(&self, _password: &str) -> Result<String, CryptoError> {
             self.record("hash");
             Ok("hash".into())
         }
-        fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
+        async fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
             self.record("compare_hash");
             Ok(())
         }
-        fn sign_for(
+        async fn sign_for(
             &self,
             _block_id: &str,
             _claims: std::collections::BTreeMap<String, serde_json::Value>,
@@ -73,7 +74,7 @@ mod crypto_fakes {
             self.record("sign");
             Ok("token".into())
         }
-        fn verify_for(
+        async fn verify_for(
             &self,
             _block_id: &str,
             _token: &str,
@@ -81,7 +82,7 @@ mod crypto_fakes {
             self.record("verify");
             Ok(Default::default())
         }
-        fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
+        async fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
             self.record("random_bytes");
             Ok(vec![0; n])
         }
@@ -234,7 +235,8 @@ async fn sign_denied_never_reaches_service() {
     let msg = msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN);
 
     let out =
-        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body)
+            .await;
     expect_permission_denied(out).await;
 
     assert!(
@@ -255,7 +257,8 @@ async fn hash_denied_never_reaches_service() {
     let msg = msg_without_wrap_meta(ServiceOp::CRYPTO_HASH);
 
     let out =
-        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body)
+            .await;
     expect_permission_denied(out).await;
 
     assert!(
@@ -274,7 +277,8 @@ async fn random_bytes_denied_never_reaches_service() {
     let msg = msg_without_wrap_meta(ServiceOp::CRYPTO_RANDOM_BYTES);
 
     let out =
-        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body);
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body)
+            .await;
     expect_permission_denied(out).await;
 
     assert!(
@@ -299,91 +303,24 @@ async fn granted_ctx_allows_sign_hash_and_random_bytes() {
         expiry_secs: 3600,
     })
     .unwrap();
-    expect_success(wafer_core::interfaces::crypto::handler::handle_message(
-        &svc,
-        &AllowCtx,
-        Some("test/caller"),
-        &msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN),
-        &sign_body,
-    ))
-    .await;
-
-    let hash_body = codec::encode(&wire::crypto::HashRequest {
-        password: "hunter2".into(),
-    })
-    .unwrap();
-    expect_success(wafer_core::interfaces::crypto::handler::handle_message(
-        &svc,
-        &AllowCtx,
-        None,
-        &msg_without_wrap_meta(ServiceOp::CRYPTO_HASH),
-        &hash_body,
-    ))
-    .await;
-
-    let random_bytes_body = codec::encode(&wire::crypto::RandomBytesRequest { n: 16 }).unwrap();
-    expect_success(wafer_core::interfaces::crypto::handler::handle_message(
-        &svc,
-        &AllowCtx,
-        None,
-        &msg_without_wrap_meta(ServiceOp::CRYPTO_RANDOM_BYTES),
-        &random_bytes_body,
-    ))
-    .await;
-
-    assert_eq!(
-        *calls.lock().unwrap(),
-        vec!["sign", "hash", "random_bytes"],
-        "every op should have reached the service exactly once, in order"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// PERF-02 native offload — `handle_message_native` moves hash/compare_hash
-// to the blocking pool. Authorization must gate the offload exactly like the
-// sync path (deny → service never runs), and granted requests must round-trip
-// through the blocking pool with intact results.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn native_offload_hash_denied_never_reaches_service() {
-    let calls = new_calls();
-    let svc: Arc<dyn wafer_core::interfaces::crypto::service::CryptoService> =
-        Arc::new(crypto_fakes::RecordingCrypto::new(calls.clone()));
-    let body = codec::encode(&wire::crypto::HashRequest {
-        password: "hunter2".into(),
-    })
-    .unwrap();
-
-    let out = wafer_core::interfaces::crypto::handler::handle_message_native(
-        &svc,
-        &DenyCtx,
-        None,
-        &msg_without_wrap_meta(ServiceOp::CRYPTO_HASH),
-        &body,
+    expect_success(
+        wafer_core::interfaces::crypto::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            Some("test/caller"),
+            &msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN),
+            &sign_body,
+        )
+        .await,
     )
     .await;
-    expect_permission_denied(out).await;
-
-    assert!(
-        calls.lock().unwrap().is_empty(),
-        "hash must not be offloaded on a denied request; calls = {:?}",
-        calls.lock().unwrap()
-    );
-}
-
-#[tokio::test]
-async fn native_offload_grants_hash_and_compare_and_delegates_other_ops() {
-    let calls = new_calls();
-    let svc: Arc<dyn wafer_core::interfaces::crypto::service::CryptoService> =
-        Arc::new(crypto_fakes::RecordingCrypto::new(calls.clone()));
 
     let hash_body = codec::encode(&wire::crypto::HashRequest {
         password: "hunter2".into(),
     })
     .unwrap();
     expect_success(
-        wafer_core::interfaces::crypto::handler::handle_message_native(
+        wafer_core::interfaces::crypto::handler::handle_message(
             &svc,
             &AllowCtx,
             None,
@@ -394,27 +331,9 @@ async fn native_offload_grants_hash_and_compare_and_delegates_other_ops() {
     )
     .await;
 
-    let compare_body = codec::encode(&wire::crypto::CompareHashRequest {
-        password: "hunter2".into(),
-        hash: "hash".into(),
-    })
-    .unwrap();
-    expect_success(
-        wafer_core::interfaces::crypto::handler::handle_message_native(
-            &svc,
-            &AllowCtx,
-            None,
-            &msg_without_wrap_meta(ServiceOp::CRYPTO_COMPARE_HASH),
-            &compare_body,
-        )
-        .await,
-    )
-    .await;
-
-    // A non-offloaded op must delegate to the sync path unchanged.
     let random_bytes_body = codec::encode(&wire::crypto::RandomBytesRequest { n: 16 }).unwrap();
     expect_success(
-        wafer_core::interfaces::crypto::handler::handle_message_native(
+        wafer_core::interfaces::crypto::handler::handle_message(
             &svc,
             &AllowCtx,
             None,
@@ -427,9 +346,43 @@ async fn native_offload_grants_hash_and_compare_and_delegates_other_ops() {
 
     assert_eq!(
         *calls.lock().unwrap(),
-        vec!["hash", "compare_hash", "random_bytes"],
+        vec!["sign", "hash", "random_bytes"],
         "every op should have reached the service exactly once, in order"
     );
+}
+
+// ---------------------------------------------------------------------------
+// compare_hash — the one op the DENY/ALLOW cases above leave out.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn compare_hash_is_gated_by_the_ctx() {
+    let calls = new_calls();
+    let svc = crypto_fakes::RecordingCrypto::new(calls.clone());
+    let body = codec::encode(&wire::crypto::CompareHashRequest {
+        password: "hunter2".into(),
+        hash: "hash".into(),
+    })
+    .unwrap();
+    let msg = msg_without_wrap_meta(ServiceOp::CRYPTO_COMPARE_HASH);
+
+    expect_permission_denied(
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &DenyCtx, None, &msg, &body)
+            .await,
+    )
+    .await;
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "compare_hash must not run on a denied request; calls = {:?}",
+        calls.lock().unwrap()
+    );
+
+    expect_success(
+        wafer_core::interfaces::crypto::handler::handle_message(&svc, &AllowCtx, None, &msg, &body)
+            .await,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), vec!["compare_hash"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -448,13 +401,16 @@ async fn granted_token_ops_without_a_caller_are_refused_before_the_service() {
         expiry_secs: 3600,
     })
     .unwrap();
-    let err = expect_permission_denied(wafer_core::interfaces::crypto::handler::handle_message(
-        &svc,
-        &AllowCtx,
-        None,
-        &msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN),
-        &sign_body,
-    ))
+    let err = expect_permission_denied(
+        wafer_core::interfaces::crypto::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            None,
+            &msg_without_wrap_meta(ServiceOp::CRYPTO_SIGN),
+            &sign_body,
+        )
+        .await,
+    )
     .await;
     assert!(err.message.contains("calling block"), "{}", err.message);
 
@@ -462,13 +418,16 @@ async fn granted_token_ops_without_a_caller_are_refused_before_the_service() {
         token: "a.b.c".into(),
     })
     .unwrap();
-    let err = expect_permission_denied(wafer_core::interfaces::crypto::handler::handle_message(
-        &svc,
-        &AllowCtx,
-        None,
-        &msg_without_wrap_meta(ServiceOp::CRYPTO_VERIFY),
-        &verify_body,
-    ))
+    let err = expect_permission_denied(
+        wafer_core::interfaces::crypto::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            None,
+            &msg_without_wrap_meta(ServiceOp::CRYPTO_VERIFY),
+            &verify_body,
+        )
+        .await,
+    )
     .await;
     assert!(err.message.contains("calling block"), "{}", err.message);
 

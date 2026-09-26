@@ -151,7 +151,8 @@ async fn equal_claims_sent_to_the_crypto_block_sign_to_identical_bytes() {
                 .expect("encode");
                 let msg = Message::new(ServiceOp::CRYPTO_SIGN);
                 let out =
-                    handler::handle_message(svc.as_ref(), &AllowCtx, Some(CALLER), &msg, &body);
+                    handler::handle_message(svc.as_ref(), &AllowCtx, Some(CALLER), &msg, &body)
+                        .await;
                 let resp: wire::SignResponse =
                     codec::decode(&outcome(out).await.expect("sign")).expect("decode");
                 tokens.push(resp.token);

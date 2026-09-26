@@ -488,16 +488,17 @@ mod crypto_fakes {
         }
     }
 
+    #[wafer_block::wafer_async_trait]
     impl CryptoService for RecordingCrypto {
-        fn hash(&self, _password: &str) -> Result<String, CryptoError> {
+        async fn hash(&self, _password: &str) -> Result<String, CryptoError> {
             self.record("hash");
             Ok("hash".into())
         }
-        fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
+        async fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
             self.record("compare_hash");
             Ok(())
         }
-        fn sign_for(
+        async fn sign_for(
             &self,
             _block_id: &str,
             _claims: std::collections::BTreeMap<String, serde_json::Value>,
@@ -506,7 +507,7 @@ mod crypto_fakes {
             self.record("sign");
             Ok("token".into())
         }
-        fn verify_for(
+        async fn verify_for(
             &self,
             _block_id: &str,
             _token: &str,
@@ -514,7 +515,7 @@ mod crypto_fakes {
             self.record("verify");
             Ok(Default::default())
         }
-        fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
+        async fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
             self.record("random_bytes");
             Ok(vec![0; n])
         }
@@ -1429,7 +1430,8 @@ async fn crypto_ops_all_deny_under_deny_ctx() {
         // `crypto`'s handler is synchronous, same shape as `config` above.
         let out = wafer_core::interfaces::crypto::handler::handle_message(
             &svc, &DenyCtx, None, &msg, &body,
-        );
+        )
+        .await;
         expect_permission_denied(out, op).await;
 
         assert!(

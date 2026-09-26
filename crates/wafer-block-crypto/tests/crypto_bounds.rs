@@ -92,32 +92,22 @@ async fn an_uncheckable_stored_hash_is_not_reported_as_a_wrong_password() {
         "$pbkdf2-sha256$i=1000$AAECAwQFBgcICQoLDA0ODw==",
     ] {
         let body = compare_body("pw", hash);
-        for (path, out) in [
-            (
-                "sync",
-                handler::handle_message(svc.as_ref(), &AllowCtx, CALLER, &msg, &body),
-            ),
-            (
-                "native",
-                handler::handle_message_native(&svc, &AllowCtx, CALLER, &msg, &body).await,
-            ),
-        ] {
-            let err = outcome(out)
-                .await
-                .expect_err(&format!("{path}: {hash:?} must not verify"));
-            assert_eq!(
-                err.code,
-                ErrorCode::Internal,
-                "{path}: {hash:?} gave {:?}: {}",
-                err.code,
-                err.message
-            );
-            assert!(
-                err.message.contains("malformed password hash"),
-                "{}",
-                err.message
-            );
-        }
+        let out = handler::handle_message(svc.as_ref(), &AllowCtx, CALLER, &msg, &body).await;
+        let err = outcome(out)
+            .await
+            .expect_err(&format!("{hash:?} must not verify"));
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "{hash:?} gave {:?}: {}",
+            err.code,
+            err.message
+        );
+        assert!(
+            err.message.contains("malformed password hash"),
+            "{}",
+            err.message
+        );
     }
 }
 
@@ -126,10 +116,10 @@ async fn an_uncheckable_stored_hash_is_not_reported_as_a_wrong_password() {
 #[tokio::test]
 async fn a_wrong_password_is_still_a_mismatch() {
     let svc = service();
-    let stored = svc.hash("right").unwrap();
+    let stored = svc.hash("right").await.unwrap();
     let msg = Message::new(ServiceOp::CRYPTO_COMPARE_HASH);
-    let body = handler::handle_message_native(
-        &svc,
+    let body = handler::handle_message(
+        svc.as_ref(),
         &AllowCtx,
         CALLER,
         &msg,
@@ -152,15 +142,9 @@ async fn an_unrepresentable_expiry_is_an_error_not_a_panic() {
     })
     .unwrap();
     let msg = Message::new(ServiceOp::CRYPTO_SIGN);
-    let err = outcome(handler::handle_message(
-        svc.as_ref(),
-        &AllowCtx,
-        CALLER,
-        &msg,
-        &body,
-    ))
-    .await
-    .expect_err("an expiry past the last date must be refused");
+    let err = outcome(handler::handle_message(svc.as_ref(), &AllowCtx, CALLER, &msg, &body).await)
+        .await
+        .expect_err("an expiry past the last date must be refused");
     assert_eq!(err.code, ErrorCode::Internal);
     assert!(
         err.message.contains("expiry out of range"),

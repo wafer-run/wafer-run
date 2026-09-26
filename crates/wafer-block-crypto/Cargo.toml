@@ -25,6 +25,11 @@ zeroize = { workspace = true }
 # the same major version.
 getrandom = "0.4"
 
+# Password hashing runs on the blocking pool on native hosts (see
+# src/offload.rs); wasm32 has no blocking pool and never links the runtime.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "sync"] }
+
 # getrandom needs the JS backend on wasm32-unknown-unknown (wasip1 has a
 # native WASI source), as wafer-block selects it for getrandom 0.2.
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
@@ -32,7 +37,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 wafer-block = { path = "../wafer-block" }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
