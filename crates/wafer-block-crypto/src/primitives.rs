@@ -554,7 +554,8 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
         .unwrap_or_default();
 
     let argon2 = Argon2::new(algorithm, version, params);
-    let mut computed = vec![0u8; expected.len()];
+    // The derived output is a function of the candidate password.
+    let mut computed = zeroize::Zeroizing::new(vec![0u8; expected.len()]);
     with_argon2_memory(|memory| {
         memory.derive(&argon2, password.as_bytes(), salt.as_ref(), &mut computed)
     })

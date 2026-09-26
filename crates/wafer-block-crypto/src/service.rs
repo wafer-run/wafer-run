@@ -1,13 +1,7 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, PoisonError, RwLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-// Re-export the trait, its error and the pepper settings from wafer-core.
-pub use wafer_core::interfaces::crypto::service::{
-    CryptoError, CryptoService, PasswordPepperConfig,
-};
+// Re-export the trait and error from wafer-core.
+pub use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 #[cfg(not(target_arch = "wasm32"))]
 use zeroize::Zeroizing;
 
@@ -15,10 +9,11 @@ use zeroize::Zeroizing;
 // part of the shared policy) so existing `service::MIN_JWT_SECRET_LEN`
 // imports keep working.
 pub use crate::primitives::MIN_JWT_SECRET_LEN;
-use crate::primitives::{self, JwtExpPolicy, PasswordPeppers};
+use crate::primitives::{self, JwtExpPolicy};
 // Re-exported so a caller configuring the service does not need a second
-// import path for the two types `with_password_scheme` takes.
-pub use crate::primitives::{Argon2Cost, PasswordScheme};
+// import path for the types `with_password_scheme` and
+// `with_password_peppers` take.
+pub use crate::primitives::{Argon2Cost, PasswordPeppers, PasswordScheme, PepperKey};
 
 /// Argon2 + JWT crypto service.
 ///
@@ -28,20 +23,16 @@ pub use crate::primitives::{Argon2Cost, PasswordScheme};
 /// and per-block keys derived via [`primitives::derive_block_key`]. All pure
 /// Rust, wasm32-compatible.
 ///
-/// Passwords are peppered once
-/// [`CryptoService::configure_password_pepper`] hands it a key (the crypto
-/// block does at Init, from its declared config); until then, and with no
-/// key configured, it hashes without a pepper. See
-/// [`primitives::PasswordPeppers`] for what each setting does.
+/// Passwords are peppered when the service is built with a key
+/// ([`Self::with_password_peppers`]); without one it hashes without a
+/// pepper. See [`PasswordPeppers`] for what each setting does.
 pub struct Argon2JwtCryptoService {
     jwt_secret: String,
     /// Scheme used to WRITE new password hashes. Verification does not
     /// consult it — see this type's [`CryptoService::compare_hash`].
     password_scheme: PasswordScheme,
-    /// The pepper keys in force. Replaced whole by each
-    /// `configure_password_pepper`; every password operation takes one
-    /// snapshot, so a reconfiguration never splits an operation.
-    peppers: RwLock<Arc<PasswordPeppers>>,
+    /// The pepper keys; shared with each offloaded password job.
+    peppers: Arc<PasswordPeppers>,
 }
 
 impl Argon2JwtCryptoService {
@@ -65,14 +56,32 @@ impl Argon2JwtCryptoService {
         Ok(Self {
             jwt_secret,
             password_scheme: PasswordScheme::default(),
-            peppers: RwLock::new(Arc::new(PasswordPeppers::default())),
+            peppers: Arc::new(PasswordPeppers::default()),
         })
     }
 
-    /// The pepper keys in force now. The lock only ever guards a whole-value
-    /// swap, so a poisoned lock still holds a consistent value.
-    fn peppers(&self) -> Arc<PasswordPeppers> {
-        Arc::clone(&self.peppers.read().unwrap_or_else(PoisonError::into_inner))
+    /// Pepper passwords with `peppers`: new argon2id hashes with its current
+    /// key, stored hashes verified with the key they name. Build the set
+    /// from values held outside the database the hashes live in — a secret
+    /// store or the process environment — with
+    /// [`PasswordPeppers::from_config`].
+    ///
+    /// Refused when a current key is set and this service writes PBKDF2,
+    /// which is never peppered; choose the scheme first. (A scheme chosen
+    /// after the peppers is caught at hash time instead:
+    /// [`CryptoService::hash`] fails with [`CryptoError::Pepper`] rather
+    /// than write an unpeppered hash.)
+    pub fn with_password_peppers(mut self, peppers: PasswordPeppers) -> Result<Self, CryptoError> {
+        if peppers.current().is_some()
+            && matches!(self.password_scheme, PasswordScheme::Pbkdf2Sha256 { .. })
+        {
+            return Err(CryptoError::Pepper(
+                "this service writes PBKDF2 hashes, and only argon2id hashes can be peppered"
+                    .to_string(),
+            ));
+        }
+        self.peppers = Arc::new(peppers);
+        Ok(self)
     }
 
     /// Choose the algorithm this service uses when it **writes** a new
@@ -112,7 +121,7 @@ impl CryptoService for Argon2JwtCryptoService {
     /// executor; on wasm32 it runs inline.
     async fn hash(&self, password: &str) -> Result<String, CryptoError> {
         let scheme = self.password_scheme;
-        let peppers = self.peppers();
+        let peppers = Arc::clone(&self.peppers);
         #[cfg(not(target_arch = "wasm32"))]
         {
             let password = Zeroizing::new(password.to_owned());
@@ -144,7 +153,7 @@ impl CryptoService for Argon2JwtCryptoService {
     /// Runs where [`CryptoService::hash`] does: on a dedicated thread on a
     /// native host, inline on wasm32.
     async fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
-        let peppers = self.peppers();
+        let peppers = Arc::clone(&self.peppers);
         #[cfg(not(target_arch = "wasm32"))]
         {
             let password = Zeroizing::new(password.to_owned());
@@ -158,28 +167,6 @@ impl CryptoService for Argon2JwtCryptoService {
         {
             primitives::verify_password_any_scheme(password, hash, &peppers)
         }
-    }
-
-    /// Decode and validate the keys ([`PasswordPeppers::from_config`]) and
-    /// put them in force. Refused, leaving the previous settings in force,
-    /// when they do not validate or when a key is set while this service
-    /// writes PBKDF2, which is never peppered.
-    fn configure_password_pepper(&self, config: &PasswordPepperConfig) -> Result<(), CryptoError> {
-        let peppers = PasswordPeppers::from_config(
-            config.current_key.as_deref(),
-            config.previous_keys.as_deref(),
-            config.required,
-        )?;
-        if peppers.current().is_some()
-            && matches!(self.password_scheme, PasswordScheme::Pbkdf2Sha256 { .. })
-        {
-            return Err(CryptoError::Pepper(
-                "this service writes PBKDF2 hashes, and only argon2id hashes can be peppered"
-                    .to_string(),
-            ));
-        }
-        *self.peppers.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(peppers);
-        Ok(())
     }
 
     async fn sign_for(
@@ -604,27 +591,18 @@ mod pepper_tests {
             .with_password_scheme(PasswordScheme::Argon2(Argon2Cost::Constrained))
     }
 
-    fn config(
-        current: Option<&str>,
-        previous: Option<&str>,
-        required: bool,
-    ) -> PasswordPepperConfig {
-        PasswordPepperConfig {
-            current_key: current.map(str::to_string),
-            previous_keys: previous.map(str::to_string),
-            required,
-        }
+    fn peppers(current: Option<&str>, previous: Option<&str>, required: bool) -> PasswordPeppers {
+        PasswordPeppers::from_config(current, previous, required).expect("valid")
     }
 
     fn peppered(current: &str) -> Argon2JwtCryptoService {
-        let s = svc();
-        s.configure_password_pepper(&config(Some(current), None, false))
-            .expect("valid");
-        s
+        svc()
+            .with_password_peppers(peppers(Some(current), None, false))
+            .expect("argon2 takes a pepper")
     }
 
     #[tokio::test]
-    async fn a_configured_pepper_reaches_new_hashes() {
+    async fn a_pepper_reaches_new_hashes() {
         let s = peppered(KEY_1_B64);
         let hash = s.hash("pw").await.unwrap();
         assert!(
@@ -638,24 +616,32 @@ mod pepper_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn without_a_pepper_nothing_changes() {
+        let hash = svc().hash("pw").await.unwrap();
+        assert!(hash.starts_with("$argon2id$"), "{hash}");
+    }
+
     /// Without the key the hash names, the answer is a pepper fault, not
     /// "wrong password" — for the right password too.
     #[tokio::test]
     async fn without_its_key_a_peppered_hash_is_a_pepper_error() {
         let hash = peppered(KEY_1_B64).hash("pw").await.unwrap();
         for other in [svc(), peppered(KEY_2_B64)] {
-            assert!(matches!(
-                other.compare_hash("pw", &hash).await,
-                Err(CryptoError::Pepper(_))
-            ));
+            for password in ["pw", "wrong"] {
+                assert!(matches!(
+                    other.compare_hash(password, &hash).await,
+                    Err(CryptoError::Pepper(_))
+                ));
+            }
         }
     }
 
     #[tokio::test]
     async fn rotation_keeps_old_hashes_and_writes_with_the_new_key() {
         let old = peppered(KEY_1_B64).hash("pw").await.unwrap();
-        let s = svc();
-        s.configure_password_pepper(&config(Some(KEY_2_B64), Some(KEY_1_B64), false))
+        let s = svc()
+            .with_password_peppers(peppers(Some(KEY_2_B64), Some(KEY_1_B64), false))
             .unwrap();
         s.compare_hash("pw", &old).await.expect("old key verifies");
         let new = s.hash("pw").await.unwrap();
@@ -663,17 +649,15 @@ mod pepper_tests {
     }
 
     #[tokio::test]
-    async fn legacy_unpeppered_hashes_keep_verifying() {
+    async fn legacy_unpeppered_hashes_verify_unless_a_pepper_is_required() {
         let legacy = svc().hash("pw").await.unwrap();
-        assert!(legacy.starts_with("$argon2id$"), "{legacy}");
         peppered(KEY_1_B64)
             .compare_hash("pw", &legacy)
             .await
             .expect("unpeppered hash verifies once a pepper is configured");
 
-        let required = svc();
-        required
-            .configure_password_pepper(&config(Some(KEY_1_B64), None, true))
+        let required = svc()
+            .with_password_peppers(peppers(Some(KEY_1_B64), None, true))
             .unwrap();
         assert!(matches!(
             required.compare_hash("pw", &legacy).await,
@@ -681,38 +665,28 @@ mod pepper_tests {
         ));
     }
 
-    /// A refused configuration leaves the settings in force untouched, and a
-    /// later valid one replaces them whole (an Init retry can also clear).
+    /// PBKDF2 is never peppered: a PBKDF2 service refuses a key, and a scheme
+    /// switched to PBKDF2 after the key is set fails at hash time instead of
+    /// writing an unpeppered hash.
     #[tokio::test]
-    async fn configuration_is_validated_and_replaced_whole() {
-        let s = peppered(KEY_1_B64);
-        assert!(matches!(
-            s.configure_password_pepper(&config(Some("c2hvcnQ="), None, false)),
-            Err(CryptoError::Pepper(_))
-        ));
-        assert!(matches!(
-            s.configure_password_pepper(&config(None, None, true)),
-            Err(CryptoError::Pepper(_))
-        ));
-        assert!(s.hash("pw").await.unwrap().contains(KEY_1_ID));
-
-        s.configure_password_pepper(&PasswordPepperConfig::default())
-            .unwrap();
-        assert!(s.hash("pw").await.unwrap().starts_with("$argon2id$"));
-    }
-
-    /// PBKDF2 is never peppered, so a service writing it refuses a key
-    /// rather than going on hashing without it.
-    #[test]
-    fn a_pbkdf2_service_refuses_a_pepper_key() {
-        let s = svc().with_password_scheme(PasswordScheme::Pbkdf2Sha256 {
+    async fn pbkdf2_is_never_silently_unpeppered() {
+        let pbkdf2 = PasswordScheme::Pbkdf2Sha256 {
             iterations: PBKDF2_SHA256_MIN_ITERATIONS,
-        });
+        };
         assert!(matches!(
-            s.configure_password_pepper(&config(Some(KEY_1_B64), None, false)),
+            svc()
+                .with_password_scheme(pbkdf2)
+                .with_password_peppers(peppers(Some(KEY_1_B64), None, false)),
             Err(CryptoError::Pepper(_))
         ));
-        s.configure_password_pepper(&PasswordPepperConfig::default())
+        svc()
+            .with_password_scheme(pbkdf2)
+            .with_password_peppers(PasswordPeppers::default())
             .expect("no key is fine");
+        let switched = peppered(KEY_1_B64).with_password_scheme(pbkdf2);
+        assert!(matches!(
+            switched.hash("pw").await,
+            Err(CryptoError::Pepper(_))
+        ));
     }
 }

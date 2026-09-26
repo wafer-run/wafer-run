@@ -14,8 +14,11 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 argon2 = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
+# `zeroize`: an HMAC's state is a function of its key (the JWT secret, a
+# password pepper), and a SHA-256 state of what it hashed; both are wiped
+# on drop.
+hmac = { workspace = true, features = ["zeroize"] }
+sha2 = { workspace = true, features = ["zeroize"] }
 pbkdf2 = { workspace = true }
 hkdf = { workspace = true }
 base64ct = { workspace = true }

@@ -1,8 +1,8 @@
-//! The password pepper end to end: the crypto block's `lifecycle(Init)`
-//! reads its declared config and configures [`Argon2JwtCryptoService`], and
-//! the real message handler then hashes and verifies under it.
+//! The password pepper through the crypto block's real message handler, over
+//! an [`Argon2JwtCryptoService`] built with pepper keys the way an embedder
+//! builds it: from values it holds outside the database.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use wafer_block::{
     codec,
@@ -14,15 +14,10 @@ use wafer_block::{
     },
     types::{ResourceAccess, ResourceType},
     wire::crypto as wire,
-    Block, LifecycleEvent, LifecycleType, Message, WaferError,
+    Message, WaferError,
 };
-use wafer_block_crypto::service::{Argon2JwtCryptoService, CryptoService};
-use wafer_core::{
-    interfaces::crypto::handler,
-    service_blocks::crypto::{
-        CryptoBlock, PASSWORD_PEPPER_KEY, PASSWORD_PEPPER_PREVIOUS_KEY, PASSWORD_PEPPER_REQUIRED,
-    },
-};
+use wafer_block_crypto::service::{Argon2JwtCryptoService, CryptoService, PasswordPeppers};
+use wafer_core::interfaces::crypto::handler;
 
 const SECRET: &str = "test-secret-padded-to-32-bytes-or-more-for-validation-aaaaaaaaaa";
 const KEY_1_B64: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=";
@@ -61,23 +56,19 @@ impl Context for AllowCtx {
     }
 }
 
-/// A service behind a block Init-ed with `config` — the JSON map the runtime
-/// builds from the block's declared keys.
-async fn init(config: &[(&str, &str)]) -> Result<Arc<dyn CryptoService>, WaferError> {
-    let service: Arc<dyn CryptoService> =
-        Arc::new(Argon2JwtCryptoService::new(SECRET.to_string()).expect("secret is long enough"));
-    let block = CryptoBlock::new(Arc::clone(&service));
-    let data: HashMap<&str, &str> = config.iter().copied().collect();
-    block
-        .lifecycle(
-            &AllowCtx,
-            LifecycleEvent {
-                event_type: LifecycleType::Init,
-                data: serde_json::to_vec(&data).unwrap(),
-            },
-        )
-        .await?;
-    Ok(service)
+/// A service peppered with `current` and `previous` (either may be unset).
+fn service(
+    current: Option<&str>,
+    previous: Option<&str>,
+    required: bool,
+) -> Arc<dyn CryptoService> {
+    let peppers = PasswordPeppers::from_config(current, previous, required).expect("valid keys");
+    Arc::new(
+        Argon2JwtCryptoService::new(SECRET.to_string())
+            .expect("secret is long enough")
+            .with_password_peppers(peppers)
+            .expect("argon2 takes a pepper"),
+    )
 }
 
 async fn outcome(out: OutputStream) -> Result<Vec<u8>, WaferError> {
@@ -120,10 +111,8 @@ async fn compare(
 }
 
 #[tokio::test]
-async fn init_config_peppers_hashes_through_the_handler() {
-    let svc = init(&[(PASSWORD_PEPPER_KEY, KEY_1_B64)])
-        .await
-        .expect("init");
+async fn a_peppered_service_hashes_and_verifies_through_the_handler() {
+    let svc = service(Some(KEY_1_B64), None, false);
     let stored = hash(&svc, "pw").await;
     assert!(
         stored.starts_with("$argon2id-hmac-sha256$") && stored.contains(KEY_1_ID),
@@ -137,14 +126,10 @@ async fn init_config_peppers_hashes_through_the_handler() {
 /// handler reports a server fault, not `matches: false`.
 #[tokio::test]
 async fn a_missing_pepper_key_is_a_server_fault_not_a_wrong_password() {
-    let stored = hash(
-        &init(&[(PASSWORD_PEPPER_KEY, KEY_1_B64)]).await.unwrap(),
-        "pw",
-    )
-    .await;
+    let stored = hash(&service(Some(KEY_1_B64), None, false), "pw").await;
     for svc in [
-        init(&[]).await.unwrap(),
-        init(&[(PASSWORD_PEPPER_KEY, KEY_2_B64)]).await.unwrap(),
+        service(None, None, false),
+        service(Some(KEY_2_B64), None, false),
     ] {
         let err = compare(&svc, "pw", &stored)
             .await
@@ -158,71 +143,25 @@ async fn a_missing_pepper_key_is_a_server_fault_not_a_wrong_password() {
 }
 
 #[tokio::test]
-async fn rotation_through_init_config() {
-    let old = hash(
-        &init(&[(PASSWORD_PEPPER_KEY, KEY_1_B64)]).await.unwrap(),
-        "pw",
-    )
-    .await;
-    let svc = init(&[
-        (PASSWORD_PEPPER_KEY, KEY_2_B64),
-        (PASSWORD_PEPPER_PREVIOUS_KEY, KEY_1_B64),
-    ])
-    .await
-    .unwrap();
+async fn rotation_through_the_handler() {
+    let old = hash(&service(Some(KEY_1_B64), None, false), "pw").await;
+    let svc = service(Some(KEY_2_B64), Some(KEY_1_B64), false);
     assert!(compare(&svc, "pw", &old).await.unwrap());
     assert!(hash(&svc, "pw").await.contains(KEY_2_ID));
 }
 
 #[tokio::test]
 async fn unpeppered_hashes_verify_until_a_pepper_is_required() {
-    let legacy = hash(&init(&[]).await.unwrap(), "pw").await;
+    let legacy = hash(&service(None, None, false), "pw").await;
     assert!(legacy.starts_with("$argon2id$"), "{legacy}");
-    let optional = init(&[(PASSWORD_PEPPER_KEY, KEY_1_B64)]).await.unwrap();
-    assert!(compare(&optional, "pw", &legacy).await.unwrap());
-
-    let required = init(&[
-        (PASSWORD_PEPPER_KEY, KEY_1_B64),
-        (PASSWORD_PEPPER_REQUIRED, "true"),
-    ])
-    .await
-    .unwrap();
-    let err = compare(&required, "pw", &legacy)
+    assert!(
+        compare(&service(Some(KEY_1_B64), None, false), "pw", &legacy)
+            .await
+            .unwrap()
+    );
+    let err = compare(&service(Some(KEY_1_B64), None, true), "pw", &legacy)
         .await
         .expect_err("refused");
     assert_eq!(err.code, ErrorCode::Internal, "{err}");
     assert!(err.message.contains("not peppered"), "{err}");
-}
-
-/// Bad settings fail the Init — permanently, and without echoing the key.
-#[tokio::test]
-async fn invalid_settings_fail_init() {
-    // 31 bytes.
-    let short = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg==";
-    for (config, expect) in [
-        (vec![(PASSWORD_PEPPER_KEY, short)], "at least 32 bytes"),
-        (vec![(PASSWORD_PEPPER_KEY, "not base64!")], "base64"),
-        (vec![(PASSWORD_PEPPER_REQUIRED, "true")], "required"),
-        (
-            vec![(PASSWORD_PEPPER_PREVIOUS_KEY, KEY_1_B64)],
-            "without a current key",
-        ),
-        (
-            vec![(PASSWORD_PEPPER_REQUIRED, "yes")],
-            PASSWORD_PEPPER_REQUIRED,
-        ),
-    ] {
-        let Err(err) = init(&config).await else {
-            panic!("{config:?} must fail init");
-        };
-        assert!(
-            matches!(
-                err.code,
-                ErrorCode::FailedPrecondition | ErrorCode::InvalidArgument
-            ),
-            "{err}"
-        );
-        assert!(err.message.contains(expect), "{err}");
-        assert!(!err.message.contains("not base64!") && !err.message.contains(short));
-    }
 }

@@ -4,38 +4,36 @@
 
 ### Breaking changes
 
-- Passwords can be peppered. `CryptoService` gains a required
-  `configure_password_pepper(&PasswordPepperConfig)`, which the crypto block
-  calls at `lifecycle(Init)` with the values of three config keys it now
-  declares: `WAFER_RUN__CRYPTO__PASSWORD_PEPPER_KEY` (standard base64 of at
-  least 32 random bytes), `WAFER_RUN__CRYPTO__PASSWORD_PEPPER_PREVIOUS_KEY`
-  (earlier keys, comma-separated, verify only) and
-  `WAFER_RUN__CRYPTO__PASSWORD_PEPPER_REQUIRED` (`"true"`/`"false"`). A
-  setting the service refuses — a short or non-base64 key, a duplicate,
-  previous keys without a current one, "required" without a key, an
-  unparseable flag — fails the Init permanently. There is no default for
-  the method: an implementation that cannot pepper must refuse a configured
-  key rather than hash without it. `Argon2JwtCryptoService` writes
+- Passwords can be peppered. `Argon2JwtCryptoService::with_password_peppers`
+  takes a `PasswordPeppers` — a current key, earlier keys that verify only,
+  and whether a pepper is required — built by the embedder from values it
+  holds outside the database the hashes live in (a secret store, the
+  process environment); `PasswordPeppers::from_config` reads the text form
+  (standard base64 of at least 32 random bytes per key, earlier keys
+  comma-separated) and refuses a short or non-base64 key, a duplicate, an
+  empty list entry, earlier keys without a current one, and "required"
+  without a key. The service writes
   `$argon2id-hmac-sha256$v=19$m=…,t=…,p=…,pepper=<key id>$<salt>$<mac>`,
   where the MAC is HMAC-SHA-256 keyed by the pepper over the 32-byte
   argon2id output (OWASP's post-hashing pepper) and the key id is derived
   from the key (the first 8 bytes of `HMAC-SHA-256(key, "wafer-run password
   pepper id")`, hex), so a hash always names the key it needs. It verifies a
-  peppered hash with the named key, current or previous; a hash naming a key
+  peppered hash with the named key, current or earlier; a hash naming a key
   it does not hold fails with the new `CryptoError::Pepper` (the handler
-  answers `Internal`, never `matches: false`), before any argon2 work. With
-  no key configured nothing changes: hashes are written unpeppered. With a
+  answers `Internal`, never `matches: false`), before any argon2 work.
+  Without peppers nothing changes: hashes are written unpeppered. With a
   key, stored unpeppered hashes keep verifying unless the pepper is
   required, in which case they are refused with `CryptoError::Pepper`. Only
-  argon2id is peppered: a service writing PBKDF2 refuses a key. In
-  `primitives`, `hash_password_with` and `verify_password_any_scheme` take a
-  `&PasswordPeppers`, and `PepperKey`, `PasswordPeppers`,
-  `hash_password_peppered`, `verify_password_peppered`,
+  argon2id is peppered: `with_password_peppers` refuses a key on a service
+  writing PBKDF2, and a service switched to PBKDF2 afterwards fails at hash
+  time. In `primitives`, `hash_password_with` and
+  `verify_password_any_scheme` take a `&PasswordPeppers`, and `PepperKey`,
+  `PasswordPeppers`, `hash_password_peppered`, `verify_password_peppered`,
   `ARGON2ID_PEPPERED_ID` and `PASSWORD_PEPPER_MIN_LEN` are new; the format
   is pinned by a known-answer test computed with argon2-cffi. An exhaustive
-  `match` on `CryptoError` needs the new arm. The keys must reach the block
-  from a secret store or the process environment, never from the database
-  that holds the hashes.
+  `match` on `CryptoError` needs the new arm. `wafer-block-crypto` enables
+  the `zeroize` features of `hmac` and `sha2`, so HMAC and SHA-256 states
+  (functions of the JWT secret or a pepper) are wiped on drop.
 - Every `CryptoService` method is `async` (`hash`, `compare_hash`,
   `sign_for`, `verify_for`, `random_bytes`), and the crypto block awaits
   each call on every target. On wasm32 the block used to call the service
