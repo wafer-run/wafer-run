@@ -13,6 +13,20 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+// --- Error detail codes ---
+
+/// Detail code ([`crate::WaferError::detail_code`]) of the
+/// `InvalidArgument` refusing a write that needs more statements than the
+/// backend runs in one invocation. No invocation can run it: send less.
+pub const STATEMENT_BUDGET_EXCEEDS_LIMIT: &str = "database.statement_budget_exceeds_limit";
+
+/// Detail code ([`crate::WaferError::detail_code`]) of the
+/// `ResourceExhausted` refusing a write that fits the backend's
+/// per-invocation statement limit but not what the current invocation has
+/// left. Nothing was written. Retrying in the same invocation fails the same
+/// way; a fresh invocation (a new request) may run it.
+pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhausted";
+
 // --- Filter / sort sub-types ---
 
 /// A single WHERE-clause predicate: `field <operator> value`, or

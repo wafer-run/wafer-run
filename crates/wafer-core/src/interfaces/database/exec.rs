@@ -3619,14 +3619,15 @@ mod tests {
 
     /// A write that needs more statements than the backend's whole
     /// per-invocation limit can never run, so it is the caller's mistake
-    /// (`InvalidArgument`), not a spent invocation (`ResourceExhausted`).
+    /// (`StatementLimitExceeded`, answered as `InvalidArgument`), not a spent
+    /// invocation (`ResourceExhausted`).
     #[test]
     fn a_write_over_the_whole_limit_is_invalid_and_one_over_the_rest_is_exhausted() {
         let fresh = StatementBudget::Limited { limit: 50, used: 0 };
         assert!(fresh.admit(50, "batch").is_ok());
         assert!(matches!(
             fresh.admit(51, "batch"),
-            Err(DatabaseError::InvalidArgument(_))
+            Err(DatabaseError::StatementLimitExceeded(_))
         ));
         let spent = StatementBudget::Limited {
             limit: 50,

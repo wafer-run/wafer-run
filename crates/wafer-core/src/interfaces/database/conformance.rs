@@ -1747,7 +1747,7 @@ async fn check_statement_budget(svc: &dyn DatabaseService) {
                 .await
                 .expect_err("a create_many over the whole limit is refused");
             assert!(
-                matches!(err, DatabaseError::InvalidArgument(_)),
+                matches!(err, DatabaseError::StatementLimitExceeded(_)),
                 "over the whole limit is the caller's mistake: {err:?}"
             );
             assert_eq!(

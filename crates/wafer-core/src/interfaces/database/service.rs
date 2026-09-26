@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
+use wafer_block::wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_schema::{
@@ -36,6 +37,12 @@ pub enum DatabaseError {
     /// for a page it cannot render (a zero limit, an offset with no limit).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// The work would take more statements than the backend's
+    /// [`StatementBudget`] allows in one invocation, so no invocation can
+    /// run it: the caller must send less. Nothing was written. Answered with
+    /// detail code [`STATEMENT_BUDGET_EXCEEDS_LIMIT`].
+    #[error("statement limit exceeded: {0}")]
+    StatementLimitExceeded(String),
     /// A fault in reaching or using the database that says nothing about the
     /// request and may clear on its own — a busy or locked SQLite file, a
     /// refused or broken connection, a pool with no connection free, a
@@ -47,7 +54,8 @@ pub enum DatabaseError {
     /// The work would take more statements than the backend's
     /// [`StatementBudget`] has left in the current invocation, though no more
     /// than its per-invocation limit, so a fresh invocation may run it.
-    /// Nothing was written.
+    /// Nothing was written. Answered with detail code
+    /// [`STATEMENT_BUDGET_EXHAUSTED`].
     #[error("statement budget exhausted: {0}")]
     ResourceExhausted(String),
     /// Backend-internal failure.
@@ -61,19 +69,40 @@ pub enum DatabaseError {
 impl DatabaseError {
     /// The wire [`ErrorCode`](wafer_block::ErrorCode) this error answers with:
     /// `NotFound`, `AlreadyExists`, `InvalidArgument` and `ResourceExhausted`
-    /// for their variants, `Unavailable` for a transient fault (so a caller,
-    /// and the runtime for a failed block Init, may retry), `Internal`
-    /// otherwise.
+    /// for their variants, `InvalidArgument` for `StatementLimitExceeded`,
+    /// `Unavailable` for a transient fault (so a caller, and the runtime for
+    /// a failed block Init, may retry), `Internal` otherwise.
     #[must_use]
     pub const fn code(&self) -> wafer_block::ErrorCode {
         use wafer_block::ErrorCode;
         match self {
             Self::NotFound => ErrorCode::NotFound,
             Self::AlreadyExists(_) => ErrorCode::AlreadyExists,
-            Self::InvalidArgument(_) => ErrorCode::InvalidArgument,
+            Self::InvalidArgument(_) | Self::StatementLimitExceeded(_) => {
+                ErrorCode::InvalidArgument
+            }
             Self::Unavailable(_) => ErrorCode::Unavailable,
             Self::ResourceExhausted(_) => ErrorCode::ResourceExhausted,
             Self::Internal(_) | Self::Other(_) => ErrorCode::Internal,
+        }
+    }
+
+    /// The detail code ([`wafer_block::WaferError::detail_code`]) this error
+    /// answers with, telling a statement-budget refusal apart from every
+    /// other error sharing its [`code`](Self::code):
+    /// [`STATEMENT_BUDGET_EXCEEDS_LIMIT`] for `StatementLimitExceeded`,
+    /// [`STATEMENT_BUDGET_EXHAUSTED`] for `ResourceExhausted`, none otherwise.
+    #[must_use]
+    pub const fn detail_code(&self) -> Option<&'static str> {
+        match self {
+            Self::StatementLimitExceeded(_) => Some(STATEMENT_BUDGET_EXCEEDS_LIMIT),
+            Self::ResourceExhausted(_) => Some(STATEMENT_BUDGET_EXHAUSTED),
+            Self::NotFound
+            | Self::AlreadyExists(_)
+            | Self::InvalidArgument(_)
+            | Self::Unavailable(_)
+            | Self::Internal(_)
+            | Self::Other(_) => None,
         }
     }
 }
@@ -578,7 +607,7 @@ pub enum StatementBudget {
 
 impl StatementBudget {
     /// Admit `what`, which runs `needed` statements, or refuse it:
-    /// [`DatabaseError::InvalidArgument`] when `needed` exceeds the
+    /// [`DatabaseError::StatementLimitExceeded`] when `needed` exceeds the
     /// per-invocation limit (no invocation can run it, so the caller must
     /// send less), [`DatabaseError::ResourceExhausted`] when it fits the
     /// limit but not what this invocation has left.
@@ -589,7 +618,7 @@ impl StatementBudget {
         let needed = u64::try_from(needed).unwrap_or(u64::MAX);
         let remaining = limit.saturating_sub(used);
         if needed > limit {
-            return Err(DatabaseError::InvalidArgument(format!(
+            return Err(DatabaseError::StatementLimitExceeded(format!(
                 "{what} runs {needed} statements; this database runs at most {limit} per \
                  invocation"
             )));

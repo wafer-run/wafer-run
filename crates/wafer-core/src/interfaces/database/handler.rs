@@ -621,7 +621,8 @@ fn is_preserved_db_error(msg: &str) -> bool {
 
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     let code = e.code();
-    match e {
+    let detail = e.detail_code();
+    let err = match e {
         DatabaseError::NotFound => WaferError::new(code, "record not found"),
         // The driver's message names the constraint and its columns, which is
         // schema, not the caller's concern; log it, answer with the code.
@@ -633,7 +634,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         // column, a limit or offset), so it goes back to the caller as is.
         DatabaseError::InvalidArgument(msg) => WaferError::new(code, msg),
         // Names only statement counts and the backend's limit.
-        DatabaseError::ResourceExhausted(msg) => WaferError::new(code, msg),
+        DatabaseError::StatementLimitExceeded(msg) | DatabaseError::ResourceExhausted(msg) => {
+            WaferError::new(code, msg)
+        }
         // Transient: the caller may retry (and the runtime retries a block
         // Init that failed this way instead of caching the failure). The
         // driver's message can name hosts and files, so it is logged, not
@@ -661,6 +664,14 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
                 WaferError::new(code, "internal database error")
             }
         }
+    };
+    // The detail code tells a caller what the coarse code cannot: a
+    // statement-budget refusal shares its code with other refusals (any
+    // `InvalidArgument`; a rate limit's or the call-depth limit's
+    // `ResourceExhausted`).
+    match detail {
+        Some(detail) => err.with_detail_code(detail),
+        None => err,
     }
 }
 
