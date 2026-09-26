@@ -3,7 +3,8 @@
 //! - [`primitives`] — pure, wasm32-safe building blocks (base64url,
 //!   HMAC-SHA256, HS256 JWT sign/verify with explicit `exp` policy, HKDF
 //!   per-block key derivation, argon2id and PBKDF2-HMAC-SHA256 password
-//!   hashing, constant-time comparison, CSPRNG bytes). The single source of
+//!   hashing, the argon2id-then-HMAC password pepper, constant-time
+//!   comparison, CSPRNG bytes). The single source of
 //!   truth for the WAFER crypto stack — consumers build thin policy
 //!   wrappers over it instead of re-implementing the algorithms.
 //! - [`service`] — `Argon2JwtCryptoService`, the native [`CryptoService`]

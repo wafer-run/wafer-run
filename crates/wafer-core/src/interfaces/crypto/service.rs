@@ -17,6 +17,12 @@ pub enum CryptoError {
     /// wrong password.
     #[error("malformed password hash: {0}")]
     MalformedHash(String),
+    /// The password pepper stands in the way: the stored hash was peppered
+    /// with a key this service does not hold, or the service requires a
+    /// pepper the stored hash lacks, or the pepper keys given to it are
+    /// invalid. A server configuration fault, never a wrong password.
+    #[error("password pepper: {0}")]
+    Pepper(String),
     /// Failure while issuing / signing a token.
     #[error("sign error: {0}")]
     SignError(String),
