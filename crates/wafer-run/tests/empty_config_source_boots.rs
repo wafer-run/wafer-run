@@ -45,7 +45,7 @@ const LINKED_STATIC_BLOCK_CRATES: &[&str] = &[
 ];
 
 /// The `wafer-core` service blocks that declare config, registered below.
-const SERVICE_BLOCKS_WITH_CONFIG: &[&str] = &["database.rs", "network.rs"];
+const SERVICE_BLOCKS_WITH_CONFIG: &[&str] = &["crypto.rs", "database.rs", "network.rs"];
 
 /// The keys a block cannot run without: an empty source must fail on them.
 const GENUINELY_REQUIRED: &[(&str, &str)] =
@@ -79,7 +79,21 @@ fn every_block_over_an_empty_source() -> Wafer {
     wafer_core::service_blocks::database::register_with(&mut wafer, db).expect("database");
     wafer_core::service_blocks::network::register_with(&mut wafer, Arc::new(NoNetwork))
         .expect("network");
+    let crypto = wafer_block_crypto::service::Argon2JwtCryptoService::new("s".repeat(32))
+        .expect("long enough secret");
+    wafer_core::service_blocks::crypto::register_with(&mut wafer, Arc::new(crypto))
+        .expect("crypto");
     wafer
+}
+
+/// No pepper configured is a crypto block that starts and hashes without
+/// one.
+#[tokio::test]
+async fn the_crypto_block_starts_without_a_pepper() {
+    every_block_over_an_empty_source()
+        .init_block("wafer-run/crypto")
+        .await
+        .expect("crypto Init with no pepper configured");
 }
 
 #[tokio::test]

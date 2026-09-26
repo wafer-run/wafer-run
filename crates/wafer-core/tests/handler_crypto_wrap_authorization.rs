@@ -57,6 +57,12 @@ mod crypto_fakes {
 
     #[wafer_block::wafer_async_trait]
     impl CryptoService for RecordingCrypto {
+        fn configure_password_pepper(
+            &self,
+            _config: &wafer_core::interfaces::crypto::service::PasswordPepperConfig,
+        ) -> Result<(), CryptoError> {
+            Ok(())
+        }
         async fn hash(&self, _password: &str) -> Result<String, CryptoError> {
             self.record("hash");
             Ok("hash".into())

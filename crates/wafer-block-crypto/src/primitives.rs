@@ -2,8 +2,8 @@
 //!
 //! Single source of truth for the HS256 JWT stack used across the WAFER
 //! ecosystem: base64url encoding, HMAC-SHA256, JWT sign/verify, HKDF
-//! per-block key derivation, argon2id password hashing, constant-time
-//! comparison, and CSPRNG byte generation.
+//! per-block key derivation, argon2id password hashing and its pepper,
+//! constant-time comparison, and CSPRNG byte generation.
 //!
 //! Everything here is pure Rust and wasm32-compatible (`hmac`, `sha2`,
 //! `hkdf`, `base64ct`, `argon2`, `subtle`). Randomness goes through the OS
@@ -364,30 +364,50 @@ const _: () = {
 };
 
 /// Hash a password with argon2id at the given cost, producing a PHC-format
-/// string (`$argon2id$...`) with a random 16-byte salt.
+/// string (`$argon2id$...`) with a random 16-byte salt. Not peppered; see
+/// [`hash_password_peppered`].
 pub fn hash_password(password: &str, cost: Argon2Cost) -> Result<String, CryptoError> {
-    use argon2::{
-        password_hash::phc::{Output, ParamsString, PasswordHash, Salt},
-        Algorithm, Argon2, Version,
-    };
-    let hash_error = |e: &dyn core::fmt::Display| CryptoError::HashError(format!("argon2: {e}"));
+    use argon2::password_hash::phc::{Output, ParamsString, PasswordHash, Salt};
 
-    let (m, t, p) = cost.costs();
-    let params = argon2::Params::new(m, t, p, None).map_err(|e| hash_error(&e))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let salt = random_bytes(ARGON2_SALT_LEN)?;
-    let mut out = [0u8; argon2::Params::DEFAULT_OUTPUT_LEN];
-    with_argon2_memory(|memory| memory.derive(&argon2, password.as_bytes(), &salt, &mut out))
-        .map_err(|e| hash_error(&e))?;
-
+    let derived = argon2_derive_new(password, cost, &salt)?;
     let phc = PasswordHash {
-        algorithm: Algorithm::Argon2id.ident(),
-        version: Some(Version::V0x13.into()),
-        params: ParamsString::try_from(argon2.params()).map_err(|e| hash_error(&e))?,
-        salt: Some(Salt::new(&salt).map_err(|e| hash_error(&e))?),
-        hash: Some(Output::new(&out).map_err(|e| hash_error(&e))?),
+        algorithm: argon2::Algorithm::Argon2id.ident(),
+        version: Some(argon2::Version::V0x13.into()),
+        params: ParamsString::try_from(&derived.params).map_err(|e| argon2_hash_error(&e))?,
+        salt: Some(Salt::new(&salt).map_err(|e| argon2_hash_error(&e))?),
+        hash: Some(Output::new(&*derived.output).map_err(|e| argon2_hash_error(&e))?),
     };
     Ok(phc.to_string())
+}
+
+fn argon2_hash_error(e: &dyn core::fmt::Display) -> CryptoError {
+    CryptoError::HashError(format!("argon2: {e}"))
+}
+
+/// An argon2id output and the parameters that produced it.
+struct Argon2Derived {
+    params: argon2::Params,
+    output: zeroize::Zeroizing<[u8; argon2::Params::DEFAULT_OUTPUT_LEN]>,
+}
+
+/// The argon2id derivation behind every hash this crate writes: `cost`'s
+/// parameters, version 0x13, a [`argon2::Params::DEFAULT_OUTPUT_LEN`]-byte
+/// output.
+fn argon2_derive_new(
+    password: &str,
+    cost: Argon2Cost,
+    salt: &[u8],
+) -> Result<Argon2Derived, CryptoError> {
+    use argon2::{Algorithm, Argon2, Version};
+
+    let (m, t, p) = cost.costs();
+    let params = argon2::Params::new(m, t, p, None).map_err(|e| argon2_hash_error(&e))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone());
+    let mut output = zeroize::Zeroizing::new([0u8; argon2::Params::DEFAULT_OUTPUT_LEN]);
+    with_argon2_memory(|memory| memory.derive(&argon2, password.as_bytes(), salt, &mut *output))
+        .map_err(|e| argon2_hash_error(&e))?;
+    Ok(Argon2Derived { params, output })
 }
 
 /// Salt length in bytes for [`hash_password`]: the PHC string format's
@@ -522,17 +542,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
         return Err(malformed(&"hash has no salt or no output"));
     };
     let params = argon2::Params::try_from(&parsed).map_err(|e| malformed(&e))?;
-    for (name, value, max) in [
-        ("memory cost m", params.m_cost(), ARGON2_MAX_M_COST),
-        ("time cost t", params.t_cost(), ARGON2_MAX_T_COST),
-        ("parallelism p", params.p_cost(), ARGON2_MAX_P_COST),
-    ] {
-        if value > max {
-            return Err(malformed(&format!(
-                "{name}={value} exceeds the ceiling of {max} this runtime will run"
-            )));
-        }
-    }
+    check_argon2_ceilings(&params).map_err(|e| malformed(&e))?;
     let algorithm = Algorithm::try_from(parsed.algorithm.as_str()).map_err(|e| malformed(&e))?;
     // A PHC string without `v=` is version 0x13, as in the `argon2` crate's
     // own verifier.
@@ -551,6 +561,382 @@ pub fn verify_password(password: &str, hash: &str) -> Result<(), CryptoError> {
     .map_err(|e| malformed(&e))?;
 
     if constant_time_eq(&computed, expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(CryptoError::PasswordMismatch)
+    }
+}
+
+/// Refuse stored argon2 parameters above the verify ceilings
+/// ([`ARGON2_MAX_M_COST`] and its siblings). `Err` carries the reason.
+fn check_argon2_ceilings(params: &argon2::Params) -> Result<(), String> {
+    for (name, value, max) in [
+        ("memory cost m", params.m_cost(), ARGON2_MAX_M_COST),
+        ("time cost t", params.t_cost(), ARGON2_MAX_T_COST),
+        ("parallelism p", params.p_cost(), ARGON2_MAX_P_COST),
+    ] {
+        if value > max {
+            return Err(format!(
+                "{name}={value} exceeds the ceiling of {max} this runtime will run"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Password pepper (argon2id, then HMAC-SHA-256)
+// ---------------------------------------------------------------------------
+
+/// PHC identifier of a peppered argon2id hash.
+///
+/// # Format
+///
+/// `$argon2id-hmac-sha256$v=19$m=<m>,t=<t>,p=<p>,pepper=<key id>$<salt>$<mac>`
+///
+/// - `m`, `t`, `p`, `v` and the salt mean what they mean in a plain
+///   `$argon2id$` string: the argon2id parameters, version 0x13 and the
+///   16-byte salt, in the PHC format's unpadded standard base64.
+/// - `pepper` names the key the hash was peppered with: the
+///   [`PepperKey::id`] of that key, 16 lowercase hex characters.
+/// - `<mac>` is `HMAC-SHA-256(pepper key, argon2id output)`, where the
+///   argon2id output is 32 bytes — the post-hashing pepper of the OWASP
+///   Password Storage Cheat Sheet. 32 bytes, unpadded standard base64.
+///
+/// A distinct identifier, rather than an extra parameter on `$argon2id$`,
+/// keeps the two formats from ever being read as each other: a verifier that
+/// knows only plain argon2id refuses a peppered hash as an unknown scheme
+/// instead of checking it without its pepper.
+///
+/// This is a **persisted credential format**, pinned by a known-answer
+/// test. Changing any part of it strands every stored peppered hash.
+pub const ARGON2ID_PEPPERED_ID: &str = "argon2id-hmac-sha256";
+
+/// The PHC parameter of an [`ARGON2ID_PEPPERED_ID`] hash that names its
+/// pepper key.
+const PEPPER_ID_PARAM: &str = "pepper";
+
+/// Shortest pepper key accepted, in bytes: HMAC-SHA-256's output length, the
+/// key size at which HMAC gives its full strength (RFC 2104 §3). The key is
+/// meant to be random bytes, e.g. `openssl rand -base64 32`.
+pub const PASSWORD_PEPPER_MIN_LEN: usize = 32;
+
+/// Bytes of key fingerprint in a [`PepperKey::id`].
+const PEPPER_ID_LEN: usize = 8;
+
+/// The message a key's fingerprint is the HMAC of. It can never equal an
+/// argon2id output (32 bytes), the only other message a pepper key MACs.
+const PEPPER_ID_LABEL: &[u8] = b"wafer-run password pepper id";
+
+/// One password pepper key and the id stored hashes name it by.
+///
+/// The id is derived from the key — the first 8 bytes of
+/// `HMAC-SHA-256(key, "wafer-run password pepper id")`, hex — rather than
+/// numbered by hand, so a key can never be replaced under an id that stored
+/// hashes already name: a new key is a new id, and a hash naming the old one
+/// fails as a missing key ([`CryptoError::Pepper`]) instead of as a wrong
+/// password. It reveals nothing useful about a random key of
+/// [`PASSWORD_PEPPER_MIN_LEN`] bytes or more.
+pub struct PepperKey {
+    id: String,
+    key: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl PepperKey {
+    /// A key from raw bytes; at least [`PASSWORD_PEPPER_MIN_LEN`] of them.
+    pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
+        if key.len() < PASSWORD_PEPPER_MIN_LEN {
+            return Err(CryptoError::Pepper(format!(
+                "a pepper key must be at least {PASSWORD_PEPPER_MIN_LEN} bytes; got {}",
+                key.len()
+            )));
+        }
+        let fingerprint = hmac_sha256(key, PEPPER_ID_LABEL);
+        let id = fingerprint[..PEPPER_ID_LEN]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Ok(Self {
+            id,
+            key: zeroize::Zeroizing::new(key.to_vec()),
+        })
+    }
+
+    /// A key from standard, padded base64 (RFC 4648 §4) — what
+    /// `openssl rand -base64 32` prints. The error never contains the input.
+    pub fn from_base64(encoded: &str) -> Result<Self, CryptoError> {
+        use base64ct::{Base64, Encoding};
+        let bytes = zeroize::Zeroizing::new(Base64::decode_vec(encoded.trim()).map_err(|_| {
+            CryptoError::Pepper("a pepper key must be standard padded base64".to_string())
+        })?);
+        Self::new(&bytes)
+    }
+
+    /// The id peppered hashes name this key by.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl core::fmt::Debug for PepperKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PepperKey")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The pepper keys a service holds and whether it requires a pepper.
+///
+/// - **No keys** (the [`Default`]): new hashes are not peppered; stored
+///   hashes of every scheme verify, and a peppered one fails with
+///   [`CryptoError::Pepper`] because its key is missing.
+/// - **A current key**: new argon2id hashes are peppered with it. Stored
+///   hashes verify with the key they name — the current one or one of the
+///   previous ones — and stored unpeppered hashes still verify, so turning a
+///   pepper on locks nobody out.
+/// - **Required**: as with a current key (one must be set), but a stored
+///   hash without a pepper is refused with [`CryptoError::Pepper`]. Turn it
+///   on once every stored hash is peppered: until then an attacker who can
+///   write the credential table could plant an unpeppered hash of a password
+///   they know.
+///
+/// Rotation: make the new key current and move the old one to the previous
+/// keys. New hashes use the new key; a stored hash moves to it only when it
+/// is rewritten (a password change, or a re-hash on login). Drop an old key
+/// once no stored hash names it.
+#[derive(Debug, Default)]
+pub struct PasswordPeppers {
+    current: Option<PepperKey>,
+    previous: Vec<PepperKey>,
+    required: bool,
+}
+
+impl PasswordPeppers {
+    /// Assemble a set. Fails when `required` is set without a `current`
+    /// key, when `previous` is non-empty without a `current` key (new hashes
+    /// would silently stop being peppered), or when a key appears twice.
+    pub fn new(
+        current: Option<PepperKey>,
+        previous: Vec<PepperKey>,
+        required: bool,
+    ) -> Result<Self, CryptoError> {
+        if current.is_none() {
+            if required {
+                return Err(CryptoError::Pepper(
+                    "a pepper is required but no current pepper key is configured".to_string(),
+                ));
+            }
+            if !previous.is_empty() {
+                return Err(CryptoError::Pepper(
+                    "previous pepper keys are configured without a current key; new hashes \
+                     would not be peppered"
+                        .to_string(),
+                ));
+            }
+        }
+        let mut ids: Vec<&str> = current
+            .iter()
+            .chain(previous.iter())
+            .map(PepperKey::id)
+            .collect();
+        ids.sort_unstable();
+        if let Some(dup) = ids.windows(2).find(|w| w[0] == w[1]) {
+            return Err(CryptoError::Pepper(format!(
+                "pepper key {} is configured more than once",
+                dup[0]
+            )));
+        }
+        Ok(Self {
+            current,
+            previous,
+            required,
+        })
+    }
+
+    /// Build a set from configuration text: `current` one base64 key,
+    /// `previous` base64 keys separated by commas, each as
+    /// [`PepperKey::from_base64`] reads it. `None` or blank is unset.
+    pub fn from_config(
+        current: Option<&str>,
+        previous: Option<&str>,
+        required: bool,
+    ) -> Result<Self, CryptoError> {
+        let in_setting = |which: String| {
+            move |e: CryptoError| match e {
+                CryptoError::Pepper(msg) => CryptoError::Pepper(format!("{which}: {msg}")),
+                other => other,
+            }
+        };
+        let current = current
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| PepperKey::from_base64(s).map_err(in_setting("current key".into())))
+            .transpose()?;
+        let previous = match previous.map(str::trim).filter(|s| !s.is_empty()) {
+            None => Vec::new(),
+            Some(list) => list
+                .split(',')
+                .enumerate()
+                .map(|(i, entry)| {
+                    let which = format!("previous key {}", i + 1);
+                    if entry.trim().is_empty() {
+                        return Err(CryptoError::Pepper(format!("{which}: empty entry")));
+                    }
+                    PepperKey::from_base64(entry).map_err(in_setting(which))
+                })
+                .collect::<Result<_, _>>()?,
+        };
+        Self::new(current, previous, required)
+    }
+
+    /// The key new hashes are peppered with, if any.
+    pub fn current(&self) -> Option<&PepperKey> {
+        self.current.as_ref()
+    }
+
+    /// The previous keys, which verify and never hash.
+    pub fn previous(&self) -> &[PepperKey] {
+        &self.previous
+    }
+
+    /// Whether a stored hash without a pepper is refused.
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
+
+    fn key(&self, id: &str) -> Option<&PepperKey> {
+        self.current
+            .iter()
+            .chain(self.previous.iter())
+            .find(|k| k.id == id)
+    }
+}
+
+/// Hash a password with argon2id at `cost` and pepper it with `pepper`,
+/// producing an [`ARGON2ID_PEPPERED_ID`] string with a random 16-byte salt.
+pub fn hash_password_peppered(
+    password: &str,
+    cost: Argon2Cost,
+    pepper: &PepperKey,
+) -> Result<String, CryptoError> {
+    let salt = random_bytes(ARGON2_SALT_LEN)?;
+    hash_password_peppered_with_salt(password, cost, pepper, &salt)
+}
+
+fn hash_password_peppered_with_salt(
+    password: &str,
+    cost: Argon2Cost,
+    pepper: &PepperKey,
+    salt: &[u8],
+) -> Result<String, CryptoError> {
+    use argon2::password_hash::phc::{Ident, Output, ParamsString, PasswordHash, Salt};
+
+    let derived = argon2_derive_new(password, cost, salt)?;
+    let mac = hmac_sha256(&pepper.key, &*derived.output);
+    let mut params = ParamsString::new();
+    for (name, value) in [
+        ("m", derived.params.m_cost()),
+        ("t", derived.params.t_cost()),
+        ("p", derived.params.p_cost()),
+    ] {
+        params
+            .add_decimal(name, value)
+            .map_err(|e| argon2_hash_error(&e))?;
+    }
+    params
+        .add_str(PEPPER_ID_PARAM, pepper.id())
+        .map_err(|e| argon2_hash_error(&e))?;
+    let phc = PasswordHash {
+        algorithm: Ident::new(ARGON2ID_PEPPERED_ID).map_err(|e| argon2_hash_error(&e))?,
+        version: Some(argon2::Version::V0x13.into()),
+        params,
+        salt: Some(Salt::new(salt).map_err(|e| argon2_hash_error(&e))?),
+        hash: Some(Output::new(&mac).map_err(|e| argon2_hash_error(&e))?),
+    };
+    Ok(phc.to_string())
+}
+
+/// Verify a password against an [`ARGON2ID_PEPPERED_ID`] hash, with the key
+/// in `peppers` the hash names.
+///
+/// Returns [`CryptoError::PasswordMismatch`] only when the password is wrong.
+/// A hash naming a key `peppers` does not hold is [`CryptoError::Pepper`],
+/// decided before any argon2 work; a string that is not a well-formed
+/// peppered hash, or whose costs exceed the verify ceilings
+/// ([`ARGON2_MAX_M_COST`] and its siblings), is
+/// [`CryptoError::MalformedHash`]. The MAC comparison is constant-time
+/// ([`constant_time_eq`]).
+pub fn verify_password_peppered(
+    password: &str,
+    hash: &str,
+    peppers: &PasswordPeppers,
+) -> Result<(), CryptoError> {
+    use argon2::{password_hash::phc::PasswordHash, Algorithm, Argon2, Version};
+    let malformed = |what: &dyn core::fmt::Display| {
+        CryptoError::MalformedHash(format!("{ARGON2ID_PEPPERED_ID}: {what}"))
+    };
+
+    let parsed = PasswordHash::new(hash).map_err(|e| malformed(&e))?;
+    if parsed.algorithm.as_str() != ARGON2ID_PEPPERED_ID {
+        return Err(malformed(&"not a peppered argon2id hash"));
+    }
+    if parsed.version != Some(Version::V0x13.into()) {
+        return Err(malformed(&"version must be v=19"));
+    }
+    let mut m = None;
+    let mut t = None;
+    let mut p = None;
+    let mut key_id = None;
+    for (name, value) in parsed.params.iter() {
+        let slot_taken = match name.as_str() {
+            "m" => m
+                .replace(value.decimal().map_err(|e| malformed(&e))?)
+                .is_some(),
+            "t" => t
+                .replace(value.decimal().map_err(|e| malformed(&e))?)
+                .is_some(),
+            "p" => p
+                .replace(value.decimal().map_err(|e| malformed(&e))?)
+                .is_some(),
+            PEPPER_ID_PARAM => key_id.replace(value.as_str()).is_some(),
+            other => return Err(malformed(&format!("unknown parameter {other}"))),
+        };
+        if slot_taken {
+            return Err(malformed(&format!("parameter {} repeated", name.as_str())));
+        }
+    }
+    let (Some(m), Some(t), Some(p), Some(key_id)) = (m, t, p, key_id) else {
+        return Err(malformed(&"parameters m, t, p and pepper are all required"));
+    };
+    let (Some(salt), Some(expected)) = (&parsed.salt, &parsed.hash) else {
+        return Err(malformed(&"hash has no salt or no output"));
+    };
+    if expected.len() != argon2::Params::DEFAULT_OUTPUT_LEN {
+        return Err(malformed(&format!(
+            "the MAC must be {} bytes, got {}",
+            argon2::Params::DEFAULT_OUTPUT_LEN,
+            expected.len()
+        )));
+    }
+    let Some(pepper) = peppers.key(key_id) else {
+        return Err(CryptoError::Pepper(format!(
+            "the stored hash is peppered with key {key_id}, which is not configured"
+        )));
+    };
+
+    let params = argon2::Params::new(m, t, p, Some(argon2::Params::DEFAULT_OUTPUT_LEN))
+        .map_err(|e| malformed(&e))?;
+    check_argon2_ceilings(&params).map_err(|e| malformed(&e))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut derived = zeroize::Zeroizing::new([0u8; argon2::Params::DEFAULT_OUTPUT_LEN]);
+    with_argon2_memory(|memory| {
+        memory.derive(&argon2, password.as_bytes(), salt.as_ref(), &mut *derived)
+    })
+    .map_err(|e| malformed(&e))?;
+
+    let mac = hmac_sha256(&pepper.key, &*derived);
+    if constant_time_eq(&mac, expected.as_bytes()) {
         Ok(())
     } else {
         Err(CryptoError::PasswordMismatch)
@@ -770,11 +1156,25 @@ impl Default for PasswordScheme {
     }
 }
 
-/// Hash `password` under `scheme`, producing that scheme's PHC-style string.
-pub fn hash_password_with(password: &str, scheme: PasswordScheme) -> Result<String, CryptoError> {
-    match scheme {
-        PasswordScheme::Argon2(cost) => hash_password(password, cost),
-        PasswordScheme::Pbkdf2Sha256 { iterations } => pbkdf2_hash(password, iterations),
+/// Hash `password` under `scheme`, peppered with the current key of
+/// `peppers` when it has one, producing that scheme's PHC-style string.
+///
+/// Only argon2id is peppered: PBKDF2 with a current pepper key is
+/// [`CryptoError::Pepper`], never an unpeppered hash.
+pub fn hash_password_with(
+    password: &str,
+    scheme: PasswordScheme,
+    peppers: &PasswordPeppers,
+) -> Result<String, CryptoError> {
+    match (scheme, peppers.current()) {
+        (PasswordScheme::Argon2(cost), Some(pepper)) => {
+            hash_password_peppered(password, cost, pepper)
+        }
+        (PasswordScheme::Argon2(cost), None) => hash_password(password, cost),
+        (PasswordScheme::Pbkdf2Sha256 { .. }, Some(_)) => Err(CryptoError::Pepper(
+            "a pepper is configured, and only argon2id hashes can be peppered".to_string(),
+        )),
+        (PasswordScheme::Pbkdf2Sha256 { iterations }, None) => pbkdf2_hash(password, iterations),
     }
 }
 
@@ -794,7 +1194,16 @@ pub fn hash_password_with(password: &str, scheme: PasswordScheme) -> Result<Stri
 /// known one, is [`CryptoError::MalformedHash`] — never an accept, and
 /// never [`CryptoError::PasswordMismatch`], which means only that the
 /// password is wrong.
-pub fn verify_password_any_scheme(password: &str, hash: &str) -> Result<(), CryptoError> {
+///
+/// A peppered hash ([`ARGON2ID_PEPPERED_ID`]) verifies with the key of
+/// `peppers` it names; an unpeppered one of either scheme verifies unless
+/// `peppers` requires a pepper. Either pepper fault is
+/// [`CryptoError::Pepper`], reported before any derivation runs.
+pub fn verify_password_any_scheme(
+    password: &str,
+    hash: &str,
+    peppers: &PasswordPeppers,
+) -> Result<(), CryptoError> {
     // The scheme identifier is the first field of a PHC string
     // (`$<id>$<params>$<salt>$<hash>`), so it is what follows the leading
     // `$`. Dispatching on it explicitly — rather than handing an unknown
@@ -807,8 +1216,14 @@ pub fn verify_password_any_scheme(password: &str, hash: &str) -> Result<(), Cryp
         .strip_prefix('$')
         .and_then(|rest| rest.split('$').next())
     {
+        Some(ARGON2ID_PEPPERED_ID) => verify_password_peppered(password, hash, peppers),
+        Some(PBKDF2_SHA256_ID) | Some("argon2id" | "argon2i" | "argon2d") if peppers.required => {
+            Err(CryptoError::Pepper(
+                "the stored hash is not peppered, and a pepper is required".to_string(),
+            ))
+        }
         Some(PBKDF2_SHA256_ID) => pbkdf2_verify(password, hash),
-        Some(id) if id.starts_with("argon2") => verify_password(password, hash),
+        Some("argon2id" | "argon2i" | "argon2d") => verify_password(password, hash),
         _ => Err(CryptoError::MalformedHash(
             "unrecognised password hash scheme".to_string(),
         )),
@@ -1211,7 +1626,11 @@ mod tests {
     /// reported as a wrong password.
     #[test]
     fn a_genuine_hash_above_the_memory_ceiling_is_refused() {
-        match verify_password_any_scheme(KAT_PASSWORD, KAT_OVER_CEILING) {
+        match verify_password_any_scheme(
+            KAT_PASSWORD,
+            KAT_OVER_CEILING,
+            &PasswordPeppers::default(),
+        ) {
             Err(CryptoError::MalformedHash(m)) => assert_eq!(
                 m,
                 "argon2: memory cost m=65536 exceeds the ceiling of 47104 this runtime will run"
@@ -1508,19 +1927,21 @@ mod scheme_dispatch_tests {
     #[test]
     fn accepts_both_schemes() {
         let argon2 = hash_password("pw-a", Argon2Cost::Constrained).expect("argon2 hash");
-        verify_password_any_scheme("pw-a", &argon2).expect("argon2 accepted");
-        verify_password_any_scheme(KAT_PASSWORD, KAT_HASH).expect("pbkdf2 accepted");
+        verify_password_any_scheme("pw-a", &argon2, &PasswordPeppers::default())
+            .expect("argon2 accepted");
+        verify_password_any_scheme(KAT_PASSWORD, KAT_HASH, &PasswordPeppers::default())
+            .expect("pbkdf2 accepted");
     }
 
     #[test]
     fn rejects_the_wrong_password_under_either_scheme() {
         let argon2 = hash_password("pw-a", Argon2Cost::Constrained).expect("argon2 hash");
         assert!(matches!(
-            verify_password_any_scheme("nope", &argon2),
+            verify_password_any_scheme("nope", &argon2, &PasswordPeppers::default()),
             Err(CryptoError::PasswordMismatch)
         ));
         assert!(matches!(
-            verify_password_any_scheme("nope", KAT_HASH),
+            verify_password_any_scheme("nope", KAT_HASH, &PasswordPeppers::default()),
             Err(CryptoError::PasswordMismatch)
         ));
     }
@@ -1535,7 +1956,7 @@ mod scheme_dispatch_tests {
             "$scrypt$ln=16,r=8,p=1$c2FsdA$aGFzaA",
             "$bcrypt$v=2b$c2FsdA$aGFzaA",
         ] {
-            match verify_password_any_scheme("anything", bad) {
+            match verify_password_any_scheme("anything", bad, &PasswordPeppers::default()) {
                 // An unknown scheme is a broken stored credential, not a
                 // wrong password: an operator reading `PasswordMismatch`
                 // here would chase the user instead of the database.
@@ -1555,5 +1976,299 @@ mod scheme_dispatch_tests {
             PasswordScheme::default(),
             PasswordScheme::Argon2(Argon2Cost::Default)
         );
+    }
+}
+
+#[cfg(test)]
+mod pepper_tests {
+    use super::*;
+
+    const PASSWORD: &str = "correcthorsebatterystaple";
+    /// Bytes 0x20..0x40, base64.
+    const KEY_1_B64: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=";
+    const KEY_1_ID: &str = "b57af81f66f733f4";
+    /// Bytes 0x40..0x60, base64.
+    const KEY_2_B64: &str = "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=";
+    const KEY_2_ID: &str = "d78a88c0339a5e5d";
+
+    /// `PASSWORD` under argon2id at `Argon2Cost::Constrained`, salt bytes
+    /// 0..16, peppered with key 1. Computed independently of this crate:
+    /// argon2-cffi's `hash_secret_raw` for the argon2id output, Python's
+    /// `hmac` for the MAC and the key id.
+    const KAT_PEPPERED: &str = "$argon2id-hmac-sha256$v=19$m=4096,t=2,p=1,\
+        pepper=b57af81f66f733f4$AAECAwQFBgcICQoLDA0ODw$\
+        zVRcJ4xagSyl/Se5+ELmH7dEUVf0ykQfI0sE0HlZofg";
+
+    fn key1() -> PepperKey {
+        PepperKey::from_base64(KEY_1_B64).unwrap()
+    }
+    fn key2() -> PepperKey {
+        PepperKey::from_base64(KEY_2_B64).unwrap()
+    }
+    fn only(key: PepperKey) -> PasswordPeppers {
+        PasswordPeppers::new(Some(key), Vec::new(), false).unwrap()
+    }
+    fn is_pepper_error(r: &Result<(), CryptoError>) -> bool {
+        matches!(r, Err(CryptoError::Pepper(_)))
+    }
+
+    #[test]
+    fn known_answer() {
+        assert_eq!(key1().id(), KEY_1_ID);
+        assert_eq!(key2().id(), KEY_2_ID);
+        let salt: Vec<u8> = (0u8..16).collect();
+        let hash =
+            hash_password_peppered_with_salt(PASSWORD, Argon2Cost::Constrained, &key1(), &salt)
+                .unwrap();
+        assert_eq!(hash, KAT_PEPPERED);
+        verify_password_peppered(PASSWORD, KAT_PEPPERED, &only(key1())).expect("verifies");
+        assert!(matches!(
+            verify_password_peppered("wrong", KAT_PEPPERED, &only(key1())),
+            Err(CryptoError::PasswordMismatch)
+        ));
+    }
+
+    /// A hash names its key; with that key missing — no pepper at all, or
+    /// only some other key — verification fails as a pepper fault, never as
+    /// a wrong password, whatever the password.
+    #[test]
+    fn a_missing_key_is_a_pepper_error_not_a_mismatch() {
+        for peppers in [PasswordPeppers::default(), only(key2())] {
+            for password in [PASSWORD, "wrong"] {
+                match verify_password_any_scheme(password, KAT_PEPPERED, &peppers) {
+                    Err(CryptoError::Pepper(msg)) => assert!(msg.contains(KEY_1_ID), "{msg}"),
+                    other => panic!("expected a pepper error, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// The MAC really is keyed by the pepper: the same hash relabelled to
+    /// name a different configured key does not verify, even with the right
+    /// password.
+    #[test]
+    fn the_pepper_key_is_what_verifies() {
+        let relabelled = KAT_PEPPERED.replace(KEY_1_ID, KEY_2_ID);
+        assert!(matches!(
+            verify_password_peppered(PASSWORD, &relabelled, &only(key2())),
+            Err(CryptoError::PasswordMismatch)
+        ));
+    }
+
+    /// The stored value is not the argon2id output: stripped of its pepper
+    /// label and read as a plain argon2id hash, it does not verify.
+    #[test]
+    fn the_stored_value_is_not_the_bare_argon2_output() {
+        let bare = KAT_PEPPERED
+            .replace(ARGON2ID_PEPPERED_ID, "argon2id")
+            .replace(&format!(",pepper={KEY_1_ID}"), "");
+        assert!(matches!(
+            verify_password(PASSWORD, &bare),
+            Err(CryptoError::PasswordMismatch)
+        ));
+    }
+
+    /// Rotation: with a new current key and the old one kept as previous,
+    /// old hashes verify and new ones name the new key. Dropping the old key
+    /// strands only the hashes that name it.
+    #[test]
+    fn rotation() {
+        let rotated = PasswordPeppers::new(Some(key2()), vec![key1()], false).unwrap();
+        verify_password_any_scheme(PASSWORD, KAT_PEPPERED, &rotated).expect("old key verifies");
+
+        let fresh = hash_password_with(
+            PASSWORD,
+            PasswordScheme::Argon2(Argon2Cost::Constrained),
+            &rotated,
+        )
+        .unwrap();
+        assert!(fresh.contains(&format!("pepper={KEY_2_ID}$")), "{fresh}");
+        verify_password_any_scheme(PASSWORD, &fresh, &rotated).expect("new hash verifies");
+
+        let dropped = only(key2());
+        verify_password_any_scheme(PASSWORD, &fresh, &dropped).expect("still verifies");
+        assert!(is_pepper_error(&verify_password_any_scheme(
+            PASSWORD,
+            KAT_PEPPERED,
+            &dropped
+        )));
+    }
+
+    /// Unpeppered hashes of both schemes keep verifying once a pepper is
+    /// configured, and are refused once one is required.
+    #[test]
+    fn unpeppered_hashes_verify_unless_a_pepper_is_required() {
+        let argon2 = hash_password(PASSWORD, Argon2Cost::Constrained).unwrap();
+        let pbkdf2 = pbkdf2_hash(PASSWORD, PBKDF2_SHA256_MIN_ITERATIONS).unwrap();
+        let optional = only(key1());
+        let required = PasswordPeppers::new(Some(key1()), Vec::new(), true).unwrap();
+        for legacy in [&argon2, &pbkdf2] {
+            verify_password_any_scheme(PASSWORD, legacy, &PasswordPeppers::default())
+                .expect("no pepper");
+            verify_password_any_scheme(PASSWORD, legacy, &optional).expect("pepper optional");
+            assert!(matches!(
+                verify_password_any_scheme("wrong", legacy, &optional),
+                Err(CryptoError::PasswordMismatch)
+            ));
+            assert!(is_pepper_error(&verify_password_any_scheme(
+                PASSWORD, legacy, &required
+            )));
+        }
+        verify_password_any_scheme(PASSWORD, KAT_PEPPERED, &required).expect("peppered verifies");
+    }
+
+    #[test]
+    fn hashing_uses_the_current_key_or_none() {
+        let scheme = PasswordScheme::Argon2(Argon2Cost::Constrained);
+        let plain = hash_password_with(PASSWORD, scheme, &PasswordPeppers::default()).unwrap();
+        assert!(plain.starts_with("$argon2id$"), "{plain}");
+        let peppered = hash_password_with(PASSWORD, scheme, &only(key1())).unwrap();
+        assert!(
+            peppered.starts_with("$argon2id-hmac-sha256$v=19$m=4096,t=2,p=1,pepper="),
+            "{peppered}"
+        );
+        let pbkdf2 = PasswordScheme::Pbkdf2Sha256 {
+            iterations: PBKDF2_SHA256_MIN_ITERATIONS,
+        };
+        assert!(matches!(
+            hash_password_with(PASSWORD, pbkdf2, &only(key1())),
+            Err(CryptoError::Pepper(_))
+        ));
+    }
+
+    /// The key lookup comes first: a hash naming an unknown key is refused
+    /// without running argon2 at its (here absurd) stored cost.
+    #[test]
+    fn a_missing_key_is_refused_before_any_derivation() {
+        let absurd = KAT_PEPPERED.replace("m=4096", "m=4294967295");
+        assert!(is_pepper_error(&verify_password_peppered(
+            PASSWORD,
+            &absurd,
+            &PasswordPeppers::default()
+        )));
+        assert!(matches!(
+            verify_password_peppered(PASSWORD, &absurd, &only(key1())),
+            Err(CryptoError::MalformedHash(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_peppered_hashes() {
+        let peppers = only(key1());
+        let pepper = format!("pepper={KEY_1_ID}");
+        for bad in [
+            KAT_PEPPERED.replace("v=19", "v=16"),
+            KAT_PEPPERED.replace("$v=19", ""),
+            KAT_PEPPERED.replace(&format!(",{pepper}"), ""),
+            KAT_PEPPERED.replace("p=1,", "p=1,x=1,"),
+            KAT_PEPPERED.replace("p=1,", "p=1,p=1,"),
+            KAT_PEPPERED.replace(
+                "zVRcJ4xagSyl/Se5+ELmH7dEUVf0ykQfI0sE0HlZofg",
+                "zVRcJ4xagSyl/Se5",
+            ),
+            KAT_PEPPERED.replace("$zVRcJ4xagSyl/Se5+ELmH7dEUVf0ykQfI0sE0HlZofg", ""),
+            KAT_PEPPERED.replace(ARGON2ID_PEPPERED_ID, "argon2id-hmac-sha512"),
+        ] {
+            assert!(
+                matches!(
+                    verify_password_peppered(PASSWORD, &bad, &peppers),
+                    Err(CryptoError::MalformedHash(_))
+                ),
+                "{bad} must be malformed"
+            );
+        }
+    }
+
+    /// Structural guard, passes before and after by design: timing cannot
+    /// be observed in a unit test, so this pins that the MAC comparison goes
+    /// through `constant_time_eq`, and that `constant_time_eq` is `subtle`'s.
+    #[test]
+    fn the_mac_comparison_is_constant_time() {
+        let src = include_str!("primitives.rs");
+        let start = src
+            .find("pub fn verify_password_peppered(")
+            .expect("verifier present");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("fn end")];
+        assert!(
+            body.contains("if constant_time_eq(&mac, expected.as_bytes())"),
+            "the MAC must be compared with constant_time_eq"
+        );
+        assert!(!body.contains("mac =="), "no `==` on the MAC");
+        assert!(!body.contains("== expected"), "no `==` on the MAC");
+        let ct = &src[src.find("pub fn constant_time_eq(").unwrap()..];
+        let ct = &ct[..ct.find("\n}\n").unwrap()];
+        assert!(
+            ct.contains("ct_eq("),
+            "constant_time_eq must use subtle: {ct}"
+        );
+    }
+
+    #[test]
+    fn configuration_is_validated() {
+        let err = |r: Result<PasswordPeppers, CryptoError>| match r {
+            Err(CryptoError::Pepper(msg)) => msg,
+            other => panic!("expected a pepper error, got {other:?}"),
+        };
+        // 31 bytes.
+        let short = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg==";
+        let msg = err(PasswordPeppers::from_config(Some(short), None, false));
+        assert!(
+            msg.contains("current key") && msg.contains("at least 32 bytes"),
+            "{msg}"
+        );
+        let msg = err(PasswordPeppers::from_config(
+            Some("not base64!"),
+            None,
+            false,
+        ));
+        assert!(msg.contains("base64"), "{msg}");
+        assert!(
+            !msg.contains("not base64!"),
+            "the key text must not leak: {msg}"
+        );
+        let msg = err(PasswordPeppers::from_config(
+            Some(KEY_1_B64),
+            Some(&format!("{KEY_2_B64},{short}")),
+            false,
+        ));
+        assert!(msg.contains("previous key 2"), "{msg}");
+        let msg = err(PasswordPeppers::from_config(
+            Some(KEY_1_B64),
+            Some(&format!("{KEY_2_B64},")),
+            false,
+        ));
+        assert!(msg.contains("previous key 2: empty entry"), "{msg}");
+        let msg = err(PasswordPeppers::from_config(None, None, true));
+        assert!(msg.contains("required"), "{msg}");
+        let msg = err(PasswordPeppers::from_config(None, Some(KEY_1_B64), false));
+        assert!(msg.contains("without a current key"), "{msg}");
+        let msg = err(PasswordPeppers::from_config(
+            Some(KEY_1_B64),
+            Some(&format!("{KEY_2_B64}, {KEY_1_B64}")),
+            false,
+        ));
+        assert!(
+            msg.contains(KEY_1_ID) && msg.contains("more than once"),
+            "{msg}"
+        );
+
+        let ok = PasswordPeppers::from_config(
+            Some(&format!(" {KEY_2_B64} ")),
+            Some(&format!("{KEY_1_B64} ")),
+            true,
+        )
+        .unwrap();
+        assert_eq!(ok.current().map(PepperKey::id), Some(KEY_2_ID));
+        assert_eq!(ok.previous().len(), 1);
+        assert!(ok.is_required());
+        let none = PasswordPeppers::from_config(Some("  "), Some(""), false).unwrap();
+        assert!(none.current().is_none() && !none.is_required());
+    }
+
+    #[test]
+    fn debug_never_prints_key_material() {
+        let dbg = format!("{:?}", only(key1()));
+        assert!(dbg.contains(KEY_1_ID), "{dbg}");
+        assert!(!dbg.contains("32, 33"), "{dbg}");
     }
 }
