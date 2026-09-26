@@ -359,10 +359,10 @@ impl crate::runtime::call_gates::CallFrame for RuntimeContext {
         block: &dyn Block,
     ) -> crate::runtime::call_gates::CalleeFacts<'_> {
         match self.dispatch.blocks.get(resolved) {
-            Some(facts) => crate::runtime::call_gates::CalleeFacts {
-                interface: facts.interface.as_str().into(),
-                requires: facts.requires.clone(),
-            },
+            Some(facts) => crate::runtime::call_gates::CalleeFacts::new(
+                facts.interface.as_str(),
+                facts.requires.clone(),
+            ),
             None => crate::runtime::call_gates::CalleeFacts::declared(block),
         }
     }

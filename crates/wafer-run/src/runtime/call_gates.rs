@@ -90,6 +90,7 @@ pub trait CallFrame {
 }
 
 /// What the action gate and the callee's frame need about a callee.
+#[non_exhaustive]
 pub struct CalleeFacts<'a> {
     /// The callee's declared interface (`BlockInfo::interface`).
     pub interface: Cow<'a, str>,
@@ -97,6 +98,18 @@ pub struct CalleeFacts<'a> {
     /// [`CallFrame::caller_requires`] of the frame it runs on; `None` is
     /// unrestricted.
     pub requires: Option<Arc<Vec<String>>>,
+}
+
+impl<'a> CalleeFacts<'a> {
+    /// Facts from a callee's `interface` and `call_block` allowlist
+    /// (`None`: unrestricted) — for a [`CallFrame::callee_facts`] that
+    /// answers from its own table rather than the callee's `BlockInfo`.
+    pub fn new(interface: impl Into<Cow<'a, str>>, requires: Option<Arc<Vec<String>>>) -> Self {
+        Self {
+            interface: interface.into(),
+            requires,
+        }
+    }
 }
 
 impl CalleeFacts<'static> {
@@ -111,6 +124,7 @@ impl CalleeFacts<'static> {
 }
 
 /// A call [`admit_call`] let through.
+#[non_exhaustive]
 pub struct AdmittedCall<'a> {
     /// The callee's canonical name: the name it runs as, and the identity
     /// its own resource access is attributed to.
