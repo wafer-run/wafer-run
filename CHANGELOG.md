@@ -81,6 +81,26 @@
   `statement_budget: forward` (or `custom`) after `set_strict_schema`, and an
   exhaustive `match` on `DatabaseError` needs the new arm. The
   `database.create_many`/`database.batch` action schemas drop `maxItems`.
+- A statement-budget refusal carries a detail code
+  (`WaferError::detail_code`), so a caller can tell it from the other
+  errors sharing its coarse code — any malformed request's
+  `InvalidArgument`, or the `ResourceExhausted` of a rate limit or the
+  call-depth limit. A write over the backend's whole per-invocation limit is
+  the new `DatabaseError::StatementLimitExceeded` (still `InvalidArgument`
+  on the wire), with detail code `database.statement_budget_exceeds_limit`:
+  no invocation can run it, so send less. One that fits the limit but not
+  what the invocation has left is `ResourceExhausted` with
+  `database.statement_budget_exhausted`: retrying it in the same invocation
+  fails the same way. The new `wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT`
+  and `STATEMENT_BUDGET_EXHAUSTED` name the two codes, and
+  `DatabaseError::detail_code()` returns them. The code reaches every
+  caller: a native block, a wasm guest (both the SDK and the `wafer-core`
+  clients decode the whole error), the HTTP error body's `code` field and
+  the embedder JSON's `detail_code` (the C ABI, the Node addon). A backend
+  refusing a write over its limit itself, instead of through
+  `StatementBudget::admit`, must return `StatementLimitExceeded` (the
+  conformance suite now requires it), and an exhaustive `match` on
+  `DatabaseError` needs the new arm.
 - `wire::database::BatchWrite` gains `DeleteWhere { collection, filters }`,
   `BatchWriteResult` gains `DeletedWhere { rows_affected }`, and the
   service-side twins `WriteOp` / `WriteOutcome` gain the same variants.
@@ -1543,8 +1563,8 @@
   replacements" is all-or-nothing: a replacement that fails leaves the
   deleted rows in place. It needs write access on its collection — an
   append-only or read-only grant refuses the whole batch — and counts as
-  one op against `MAX_BATCH_WRITES` however many rows it matches (it is one
-  statement).
+  one statement against the backend's statement budget however many rows it
+  matches.
 - `wafer-run/security-headers` has an `allow_blob_workers` step config
   (`true`/`false`, default `false`; any other value fails Init). `true` adds
   `blob:` to `worker-src` and to no other directive, starting from the
@@ -1917,10 +1937,9 @@
   handler authorizes every op's collection for WRITE before anything runs,
   and validates every op (filters, upsert identifiers) before any SQL, so a
   batch naming one collection the caller may not write, or one malformed op,
-  touches nothing. One call carries at most `wire::database::MAX_BATCH_WRITES`
-  (1000) ops or rows — Cloudflare's per-invocation D1 query limit on Workers
-  Paid (the Free plan allows 50), which also bounds how long one call holds
-  SQLite's single write connection; a larger call is `InvalidArgument`. An
+  touches nothing. Each op or row is one statement, admitted against the
+  backend's statement budget before anything runs (see the statement-budget
+  entry under Breaking changes). An
   `UpdateWhere` against a missing table matches nothing
   (`UpdatedWhere { rows_affected: 0 }`), as `update_where_count` returns 0.
   Lazily added columns are created before the transaction and are not
