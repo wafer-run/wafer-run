@@ -6481,6 +6481,7 @@ dependencies = [
  "url",
  "wafer-block",
  "wafer-block-cors",
+ "wafer-block-crypto",
  "wafer-block-http-listener",
  "wafer-block-inspector",
  "wafer-block-ip-rate-limit",
