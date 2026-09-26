@@ -4,6 +4,22 @@
 
 ### Breaking changes
 
+- Every `CryptoService` method is `async` (`hash`, `compare_hash`,
+  `sign_for`, `verify_for`, `random_bytes`), and the crypto block awaits
+  each call on every target. On wasm32 the block used to call the service
+  synchronously, so a backend that answers only after awaiting something —
+  password hashing in a Cloudflare Durable Object, a signing key held by a
+  KMS — could not be written without blocking. An implementation adds
+  `#[wafer_core::wafer_async_trait]` (the implementing crate needs
+  `async-trait` as a dependency, as for the other service traits) and makes
+  each method `async fn`; a caller of a method adds `.await`.
+  `interfaces::crypto::handler::handle_message` is now `async`, and
+  `handle_message_native` is removed: moving Argon2 off the executor thread
+  is the service's job, not the handler's. `Argon2JwtCryptoService` hashes
+  and verifies passwords on Tokio's blocking pool on native hosts (behind
+  the same semaphore as before) and inline on wasm32, so on a native host it
+  now needs a Tokio runtime; `wafer-block-crypto` gains `tokio` on native,
+  and `wafer-core` drops its direct native `tokio` dependency.
 - A block's init can have a time limit, which the block declares. The new
   `BlockInfo::init_timeout(Duration)` (field `init_timeout_ms`) sets the
   longest one attempt at the block's init — loading its declared config and
