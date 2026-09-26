@@ -28,7 +28,7 @@ pub(crate) struct GrantValidationOutcome {
     /// Grants that passed validation and should be merged into `wrap_grants`.
     pub(crate) accepted: Vec<wafer_block::types::ResourceGrant>,
     /// Grants that were rejected — typed grant from non-admin block.
-    /// Each entry is a structured rejection that `Wafer::start()` aggregates
+    /// Each entry is a structured rejection that `Wafer::seal()` aggregates
     /// into `RuntimeError::GrantsRejected`.
     pub(crate) rejected: Vec<wafer_block::error::GrantValidationError>,
 }

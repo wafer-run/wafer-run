@@ -324,9 +324,9 @@ impl Wafer {
         &self.registration.wrap.grants
     }
 
-    /// The grant declarations `seal()` will refuse boot over, as the
-    /// [`RuntimeError::GrantsRejected`] it returns lists them: every grant a
-    /// registered block declared that
+    /// The rejected grant declarations of the blocks registered so far — the
+    /// list `seal()` refuses boot over with [`RuntimeError::GrantsRejected`]:
+    /// every grant a registered block declared that
     /// [`BlockInfo::grants`](wafer_block::BlockInfo::grants) validation
     /// rejected — a malformed grant, a typed Network/Crypto grant from a
     /// block other than the admin block, or a namespace grant on a resource
@@ -338,6 +338,12 @@ impl Wafer {
     /// into a throwaway `Wafer` to collect their grants needs, since the
     /// rejected ones are absent from [`Self::wrap_grants`] and nothing else
     /// reports them. Empty once `seal()` has drained it into the error.
+    ///
+    /// A pre-seal read covers only blocks already registered. `seal()` first
+    /// registers the lockfile-pinned blocks it downloads (their cache was
+    /// missing), and their rejections join this list before it is checked;
+    /// `seal()` can also fail earlier, with `BlocksNotFound`, before the
+    /// grant check runs.
     ///
     /// A typed Network/Crypto grant registered while no admin block is set is
     /// neither accepted nor rejected yet: [`Self::set_admin_block`] re-checks
