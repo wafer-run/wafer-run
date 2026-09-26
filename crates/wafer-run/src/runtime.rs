@@ -7,6 +7,9 @@ use wafer_block::{core_types::*, error::RuntimeError, Block};
 
 use crate::{context::RuntimeContext, observability::ObservabilityBus, platform::Instant};
 
+/// The gates a `call_block` passes before its callee runs — one
+/// implementation, shared by `RuntimeContext` and any embedder `Context`.
+pub mod call_gates;
 /// Config-expansion passes run during `seal()` (composite configs,
 /// declarative flow configs, `uses` contributions).
 pub(crate) mod config_expand;
@@ -39,10 +42,6 @@ pub(crate) mod wasm_state;
 
 // Re-export the standalone function so external callers see it at the old path.
 pub use runner::run_block_with_recovery;
-
-/// Maximum depth of nested `call_block()` invocations to prevent infinite recursion.
-const DEFAULT_MAX_CALL_DEPTH: u32 = 16;
-
 // Re-export so consumers continue to write `wafer_run::ValidationReport` /
 // `wafer_run::BrokenBlock`. The canonical definitions now live in
 // `wafer-block` (alongside the `Context` trait whose
@@ -449,7 +448,7 @@ impl Wafer {
             deadline,
             all_blocks: self.all_blocks_arc(),
             call_depth: 0,
-            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            max_call_depth: call_gates::DEFAULT_MAX_CALL_DEPTH,
             snapshot: self.snapshot.clone(),
             warned_unknown_interfaces: self.warned_unknown_interfaces.clone(),
             aliases: self.registration.aliases.clone(),
