@@ -284,7 +284,8 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 /// table says, without `a` having done anything to its own cache.
 ///
 /// Both services are pinned to non-strict mode, the mode in which a read
-/// probes the table before running.
+/// probes the table before running; the id-source check runs `a` in
+/// STRICT_SCHEMA mode for its duration and pins it back.
 pub async fn run_two_instance_conformance(a: &dyn DatabaseService, b: &dyn DatabaseService) {
     a.set_strict_schema(false);
     b.set_strict_schema(false);
@@ -364,13 +365,24 @@ async fn check_table_created_by_another_instance_is_seen(
 /// backend that remembered where the missing table's ids come from (the
 /// executor mints one for a table it knows nothing about) would mint a
 /// string id for the new table, which it refuses.
+///
+/// `a` runs in STRICT_SCHEMA mode, as a deployment with migrations does (D1
+/// included). In non-strict mode the failed first create also tries to add
+/// its columns to the missing table, and that failed `ALTER TABLE`
+/// invalidates the table's cache entry, which would hide a remembered
+/// answer.
 async fn check_id_source_of_a_table_created_by_another_instance(
     a: &dyn DatabaseService,
     b: &dyn DatabaseService,
 ) {
     let table = Table {
         name: "conf_shared_serial".to_string(),
-        columns: vec![pk_int("id"), Column::new("name", DataType::Text).null()],
+        columns: vec![
+            pk_int("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -378,6 +390,7 @@ async fn check_id_source_of_a_table_created_by_another_instance(
     b.schema_drop_table(&table.name)
         .await
         .expect("schema_drop_table (idempotent) must succeed");
+    a.set_strict_schema(true);
 
     a.create(&table.name, row([("name", serde_json::json!("early"))]))
         .await
@@ -395,6 +408,7 @@ async fn check_id_source_of_a_table_created_by_another_instance(
         "the id is the one the database assigned: {created:?}"
     );
 
+    a.set_strict_schema(false);
     b.schema_drop_table(&table.name)
         .await
         .expect("drop the shared table");
