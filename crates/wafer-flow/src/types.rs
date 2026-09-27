@@ -50,7 +50,7 @@ pub struct WaferFlow {
     pub config_map: Option<HashMap<String, ConfigMapEntry>>,
     /// Config merged into other blocks' configs, keyed by block name. Applied
     /// together with `config_map`: only when the flow declares a `config_map`
-    /// and the flow's own config is set.
+    /// and config is registered under the flow's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_defaults: Option<HashMap<String, serde_json::Value>>,
 }
