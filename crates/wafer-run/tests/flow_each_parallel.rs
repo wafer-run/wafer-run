@@ -1,15 +1,15 @@
 //! Executor semantics for `Step::each` (per-item fan-out) and
-//! `Step::parallel` (concurrent branches), per the published
-//! `waferflow/v0.1.0/flow.schema.json`:
+//! `Step::parallel` (concurrent branches), as the field docs on
+//! `wafer_flow::Step` state them (they are also the descriptions in the
+//! WaferFlow JSON Schema, `wafer_flow::json_schema`):
 //!
-//! - `each`: "Expression resolving to an array. The step runs once per item;
-//!   $.each.item and $.each.index are set." Items run sequentially in input
-//!   order; the step's accumulator entry (and pipeline body) is the array of
-//!   per-item outputs. A failing item fails the step fail-fast (later items
-//!   are not invoked).
-//! - `parallel`: "Each branch runs concurrently; results are merged into the
-//!   accumulator." Branches see a snapshot of the accumulator and join before
-//!   the step's own block runs. One failing branch fails the step
+//! - `each`: "the step's block runs once per item, in order, with
+//!   `$.each.item` and `$.each.index` set." The step's accumulator entry (and
+//!   pipeline body) is the array of per-item outputs. A failing item fails
+//!   the step fail-fast (later items are not invoked).
+//! - `parallel`: "run concurrently before the step's own block; their
+//!   accumulator entries are merged once all of them finish." Branches see a
+//!   snapshot of the accumulator. One failing branch fails the step
 //!   deterministically: all branches are awaited, then the first failure in
 //!   branch declaration order wins.
 

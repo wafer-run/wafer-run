@@ -1629,6 +1629,14 @@
 
 ### Added
 
+- `wafer-flow` has a `json-schema` feature: the flow document types derive
+  `schemars::JsonSchema`, and `wafer_flow::json_schema()` returns the JSON
+  Schema (draft 2020-12) a WaferFlow document must satisfy to parse —
+  `on_error` is `"stop"` or `"continue"`, `timeout` and `timeout_ms` carry
+  their formats and bounds, and `blocks`, `config_map`, `config_defaults`
+  and per-step `config` are listed. The wafer.run site publishes this
+  schema and fails its tests when its copy differs.
+
 - `clients::database::upsert_returning` — `upsert`, answering the row the
   statement left instead of a count (`None` when `DO NOTHING` kept the
   existing row). For a `WindowedCounter`, that is the counter already
