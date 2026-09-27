@@ -912,8 +912,13 @@ pub enum UpdateGuardedResponse {
 /// Response for `database.upsert`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpsertResponse {
-    /// Rows affected by the insert/update.
+    /// Rows affected by the insert/update: 1, or 0 when `DO NOTHING` kept
+    /// the existing row.
     pub rows_affected: i64,
+    /// The row as the upsert left it; absent when `DO NOTHING` kept the
+    /// existing row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Record>,
 }
 
 #[cfg(test)]

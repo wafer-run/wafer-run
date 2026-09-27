@@ -1493,12 +1493,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `upsert`: render a single `INSERT … ON CONFLICT …` via the
-    /// backend's dialect and run it, returning rows affected.
+    /// Shared `upsert`: render a single `INSERT … ON CONFLICT … RETURNING *`
+    /// via the backend's dialect and run it on the write path
+    /// ([`run_execute_returning`](Self::run_execute_returning)), returning
+    /// the row as the statement left it — inserted, or updated on conflict —
+    /// or `None` when `DO NOTHING` kept the existing row. One statement: a
+    /// caller that needs the resulting row (a counter's new value) reads it
+    /// without a second query.
     ///
     /// `SetColumns` renders through
-    /// [`wafer_sql_utils::upsert::build_upsert`] (empty update list ⇒
-    /// `DO NOTHING`). `WindowedCounter` reads its insert values out of the
+    /// [`wafer_sql_utils::upsert::build_upsert_returning`] (empty update list
+    /// ⇒ `DO NOTHING`). `WindowedCounter` reads its insert values out of the
     /// spec with [`windowed_counter_row`] (`InvalidArgument` for a shape the
     /// statement would not write in full) and renders the atomic
     /// windowed-counter statement, whose `created_fields` are stamped on
@@ -1509,22 +1514,38 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// `to_upsert_spec`) before reaching here, and again inside the builders
     /// — a fail-closed guard, since the windowed-counter column names are
     /// interpolated into `CASE`/`SET` expression text.
-    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+    async fn upsert(
+        &self,
+        collection: &str,
+        spec: UpsertSpec,
+    ) -> Result<Option<Record>, DatabaseError> {
         let json = self.json_columns(sql_name(collection)?).await?;
-        let stmt = Self::upsert_statement(collection, spec, &json)?;
-        self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
-            .await
+        let stmt = Self::upsert_statement(collection, spec, &json, true)?;
+        let mut rows = self
+            .run_execute_returning(&stmt.sql, &sea_values_to_json(stmt.values), &json)
+            .await?;
+        // One row inserted or updated, or none: the statement inserts one row.
+        if rows.len() > 1 {
+            return Err(DatabaseError::Internal(format!(
+                "upsert into {collection} returned {} rows",
+                rows.len()
+            )));
+        }
+        Ok(rows.pop())
     }
 
     /// Render the single `INSERT … ON CONFLICT …` statement behind
     /// [`upsert`](Self::upsert) — shared with [`batch`](Self::batch)'s
-    /// `Upsert` op, so the two cannot drift. A value for one of `json`'s
-    /// columns is written as its JSON text, as [`create`](Self::create) writes
-    /// it.
+    /// `Upsert` op, so the two cannot drift. With `returning` it ends in
+    /// `RETURNING *` (what `upsert` runs); without, it answers only its
+    /// affected count (what a batch runs). A value for one of `json`'s
+    /// columns is written as its JSON text, as [`create`](Self::create)
+    /// writes it.
     fn upsert_statement(
         collection: &str,
         mut spec: UpsertSpec,
         json: &JsonColumns,
+        returning: bool,
     ) -> Result<wafer_sql_utils::Statement, DatabaseError> {
         let table = sql_name(collection)?;
         for (column, value) in &mut spec.data {
@@ -1546,13 +1567,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 let conflict: Vec<&str> =
                     spec.conflict_columns.iter().map(String::as_str).collect();
                 let update: Vec<&str> = update_cols.iter().map(String::as_str).collect();
-                wafer_sql_utils::upsert::build_upsert(
-                    table,
-                    &spec.data,
-                    &conflict,
-                    &update,
-                    Self::BACKEND,
-                )
+                let build = if returning {
+                    wafer_sql_utils::upsert::build_upsert_returning
+                } else {
+                    wafer_sql_utils::upsert::build_upsert
+                };
+                build(table, &spec.data, &conflict, &update, Self::BACKEND)
             }
             UpsertConflict::WindowedCounter {
                 count_field,
@@ -1565,7 +1585,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 let row = windowed_counter_row(&spec.data, &spec.conflict_columns)?;
                 let created: Vec<&str> = created_fields.iter().map(String::as_str).collect();
                 let updated: Vec<&str> = updated_fields.iter().map(String::as_str).collect();
-                wafer_sql_utils::upsert::build_windowed_counter_upsert(
+                let build = if returning {
+                    wafer_sql_utils::upsert::build_windowed_counter_upsert_returning
+                } else {
+                    wafer_sql_utils::upsert::build_windowed_counter_upsert
+                };
+                build(
                     table,
                     row.conflict_column,
                     row.id,
@@ -1963,7 +1988,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     let json = self.json_columns(sql_name(&collection)?).await?;
                     (
                         Planned::Upserted,
-                        Self::upsert_statement(&collection, spec, &json)?,
+                        Self::upsert_statement(&collection, spec, &json, false)?,
                     )
                 }
             };
@@ -2614,6 +2639,82 @@ mod tests {
             "the DELETE … RETURNING statement must not be dispatched through \
              run_fetch (the read path); calls were: {calls:?}"
         );
+    }
+
+    /// `upsert` is ONE statement — the `INSERT … ON CONFLICT … RETURNING *`
+    /// — dispatched through [`DbExec::run_execute_returning`] (the write
+    /// path), with no read-back: the row it answers is the one the statement
+    /// returned. A backend with a per-invocation statement budget (D1)
+    /// counts it as one. The column introspection before it is what every
+    /// write runs, once per table on a backend with a schema cache.
+    #[tokio::test]
+    async fn upsert_is_one_returning_statement_on_the_write_path() {
+        let mock = SeqMock::new();
+        let returned = DbExec::upsert(
+            &mock,
+            "rl",
+            UpsertSpec {
+                data: vec![
+                    ("id".into(), serde_json::json!("fresh")),
+                    ("key".into(), serde_json::json!("user:1")),
+                ],
+                conflict_columns: vec!["key".into()],
+                on_conflict: UpsertConflict::WindowedCounter {
+                    count_field: "count".into(),
+                    window_field: "window_start".into(),
+                    now: 100,
+                    window_cutoff: 40,
+                    created_fields: Vec::new(),
+                    updated_fields: Vec::new(),
+                },
+            },
+        )
+        .await
+        .expect("upsert");
+
+        let calls = mock.calls.lock().unwrap().clone();
+        let statements: Vec<&String> = calls
+            .iter()
+            .filter(|c| !c.contains("pragma_table_info"))
+            .collect();
+        assert_eq!(
+            statements.len(),
+            1,
+            "one statement besides the column introspection: {calls:?}"
+        );
+        assert!(
+            statements[0].starts_with("execute_returning:INSERT")
+                && statements[0].contains("ON CONFLICT")
+                && statements[0].ends_with("RETURNING *"),
+            "the upsert returns its row from the write path: {calls:?}"
+        );
+        // SeqMock's rows echo the SQL that produced them.
+        assert_eq!(
+            returned.map(|r| r.id),
+            Some(
+                statements[0]
+                    .trim_start_matches("execute_returning:")
+                    .to_string()
+            ),
+            "the answered row is the statement's own"
+        );
+    }
+
+    /// A batch's `Upsert` op runs inside the transaction as a plain statement
+    /// reporting its affected count: it carries no `RETURNING`.
+    #[test]
+    fn a_batched_upsert_statement_does_not_return_rows() {
+        let spec = || UpsertSpec {
+            data: vec![("id".into(), serde_json::json!("w1"))],
+            conflict_columns: vec!["id".into()],
+            on_conflict: UpsertConflict::SetColumns(Vec::new()),
+        };
+        let batched =
+            <SeqMock as DbExec>::upsert_statement("t", spec(), JsonColumns::NONE, false).unwrap();
+        assert!(!batched.sql.contains("RETURNING"), "{}", batched.sql);
+        let single =
+            <SeqMock as DbExec>::upsert_statement("t", spec(), JsonColumns::NONE, true).unwrap();
+        assert!(single.sql.ends_with("RETURNING *"), "{}", single.sql);
     }
 
     #[test]

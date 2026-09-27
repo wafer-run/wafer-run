@@ -157,7 +157,11 @@ impl DatabaseService for MemDb {
     ) -> Result<(), DatabaseError> {
         Err(unused("update_where"))
     }
-    async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+    async fn upsert(
+        &self,
+        _collection: &str,
+        _spec: UpsertSpec,
+    ) -> Result<Option<Record>, DatabaseError> {
         Err(unused("upsert"))
     }
     async fn aggregate(

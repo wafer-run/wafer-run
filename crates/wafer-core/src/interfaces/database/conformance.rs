@@ -2614,8 +2614,8 @@ async fn check_upsert_set_columns(svc: &dyn DatabaseService) {
     };
     reset(svc, &table).await;
 
-    // First upsert: no existing id=w1 -> INSERT.
-    let n1 = svc
+    // First upsert: no existing id=w1 -> INSERT, answering the inserted row.
+    let inserted = svc
         .upsert(
             "conf_upsert",
             UpsertSpec {
@@ -2628,15 +2628,18 @@ async fn check_upsert_set_columns(svc: &dyn DatabaseService) {
             },
         )
         .await
-        .expect("upsert must be implemented");
-    assert_eq!(n1, 1, "insert affects one row");
+        .expect("upsert must be implemented")
+        .expect("an insert answers the inserted row");
+    assert_eq!(inserted.id, "w1");
+    assert_eq!(inserted.data["name"], serde_json::json!("a"));
     assert_eq!(
         svc.get("conf_upsert", "w1").await.unwrap().data["name"],
         serde_json::json!("a")
     );
 
-    // Second upsert on the same PK -> conflict -> UPDATE (not a duplicate row).
-    let n2 = svc
+    // Second upsert on the same PK -> conflict -> UPDATE (not a duplicate
+    // row), answering the row as updated.
+    let updated = svc
         .upsert(
             "conf_upsert",
             UpsertSpec {
@@ -2649,8 +2652,10 @@ async fn check_upsert_set_columns(svc: &dyn DatabaseService) {
             },
         )
         .await
-        .expect("conflict upsert");
-    assert_eq!(n2, 1, "conflict update affects one row");
+        .expect("conflict upsert")
+        .expect("a conflict update answers the updated row");
+    assert_eq!(updated.id, "w1");
+    assert_eq!(updated.data["name"], serde_json::json!("b"));
     assert_eq!(
         svc.get("conf_upsert", "w1").await.unwrap().data["name"],
         serde_json::json!("b"),
@@ -2660,6 +2665,29 @@ async fn check_upsert_set_columns(svc: &dyn DatabaseService) {
         svc.count("conf_upsert", &[]).await.unwrap(),
         1,
         "still one row — updated, not inserted"
+    );
+
+    // An empty update list is `DO NOTHING`: the existing row stays, and no
+    // row is answered.
+    let kept = svc
+        .upsert(
+            "conf_upsert",
+            UpsertSpec {
+                data: vec![
+                    ("id".into(), serde_json::json!("w1")),
+                    ("name".into(), serde_json::json!("c")),
+                ],
+                conflict_columns: vec!["id".into()],
+                on_conflict: UpsertConflict::SetColumns(Vec::new()),
+            },
+        )
+        .await
+        .expect("do-nothing upsert");
+    assert!(kept.is_none(), "DO NOTHING answers no row: {kept:?}");
+    assert_eq!(
+        svc.get("conf_upsert", "w1").await.unwrap().data["name"],
+        serde_json::json!("b"),
+        "DO NOTHING kept the row"
     );
 }
 
@@ -2721,13 +2749,18 @@ async fn check_upsert_windowed_counter(svc: &dyn DatabaseService) {
         },
     };
 
-    // First upsert conflicts on `key` -> in-window increment (1 -> 2).
-    let n1 = svc
+    // First upsert conflicts on `key` -> in-window increment (1 -> 2),
+    // answering the counter row as the statement left it: the stored row's
+    // id, not the per-call one, and the incremented count.
+    let returned = svc
         .upsert("conf_rl", make_spec())
         .await
-        .expect("windowed upsert");
-    assert_eq!(n1, 1, "conflict update affects the one matching row");
+        .expect("windowed upsert")
+        .expect("a conflict update answers the counter row");
+    assert_eq!(returned.id, "seed", "the stored row's id: {returned:?}");
+    assert_eq!(field_i64(&returned, "count"), 2, "{returned:?}");
     let r1 = svc.get("conf_rl", "seed").await.expect("get seed");
+    assert_eq!(returned.data, r1.data, "the answered row is the stored row");
     assert_eq!(
         field_i64(&r1, "count"),
         2,
@@ -2745,11 +2778,12 @@ async fn check_upsert_windowed_counter(svc: &dyn DatabaseService) {
     );
 
     // Second in-window upsert increments again (2 -> 3); still no duplicate row.
-    let n2 = svc
+    let returned = svc
         .upsert("conf_rl", make_spec())
         .await
-        .expect("windowed upsert 2");
-    assert_eq!(n2, 1);
+        .expect("windowed upsert 2")
+        .expect("the counter row");
+    assert_eq!(field_i64(&returned, "count"), 3, "{returned:?}");
     assert_eq!(
         field_i64(&svc.get("conf_rl", "seed").await.unwrap(), "count"),
         3,
@@ -2772,10 +2806,17 @@ async fn check_upsert_windowed_counter(svc: &dyn DatabaseService) {
         ("id".into(), serde_json::json!("fresh-2")),
         ("key".into(), serde_json::json!("user:2")),
     ];
-    svc.upsert("conf_rl", fresh)
+    let returned = svc
+        .upsert("conf_rl", fresh)
         .await
-        .expect("windowed upsert inserting a fresh row");
+        .expect("windowed upsert inserting a fresh row")
+        .expect("an insert answers the new counter row");
     let inserted = svc.get("conf_rl", "fresh-2").await.expect("get fresh row");
+    assert_eq!(returned.id, "fresh-2");
+    assert_eq!(
+        returned.data, inserted.data,
+        "the answered row is the stored row"
+    );
     assert_eq!(field_i64(&inserted, "count"), 1);
     let created = inserted.data["created_at"]
         .as_str()

@@ -535,7 +535,7 @@ fn database_action_spec(op: &str) -> ActionSpec {
             })),
         },
         ServiceOp::DATABASE_UPSERT => ActionSpec {
-            description: "Insert a row, resolving conflicts via an ON CONFLICT strategy (set-columns or windowed-counter); WRAP-authorized against the target collection.".into(),
+            description: "Insert a row, resolving conflicts via an ON CONFLICT strategy (set-columns or windowed-counter), in one statement that also returns the row as it left it; WRAP-authorized against the target collection.".into(),
             message_schema: Some(json!({
                 "type": "object",
                 "properties": {
@@ -555,7 +555,11 @@ fn database_action_spec(op: &str) -> ActionSpec {
             response_schema: Some(json!({
                 "type": "object",
                 "properties": {
-                    "rows_affected": { "type": "integer" }
+                    "rows_affected": { "type": "integer" },
+                    "record": {
+                        "type": "object",
+                        "description": "The row as the upsert left it; absent when DO NOTHING kept the existing row."
+                    }
                 }
             })),
         },

@@ -1,4 +1,4 @@
-use sea_query::{OnConflict, Query, SimpleExpr};
+use sea_query::{InsertStatement, OnConflict, Query, SimpleExpr};
 
 use crate::{
     ident::{validate_ident, DynCol},
@@ -24,6 +24,36 @@ pub fn build_upsert(
     update_columns: &[&str],
     backend: Backend,
 ) -> crate::Statement {
+    let query = upsert_query(table, data, conflict_columns, update_columns);
+    let (sql, values) = crate::render_insert(query, backend);
+    crate::Statement::new(sql, values, table)
+}
+
+/// [`build_upsert`] ending in `RETURNING *`: the statement answers the row
+/// as it stands after the insert or the conflict update, and no row when
+/// `DO NOTHING` kept the existing one. One statement, so a caller that needs
+/// the resulting row reads it without a second query.
+pub fn build_upsert_returning(
+    table: &str,
+    data: &[(String, serde_json::Value)],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+    backend: Backend,
+) -> crate::Statement {
+    let mut query = upsert_query(table, data, conflict_columns, update_columns);
+    query.returning_all();
+    let (sql, values) = crate::render_insert(query, backend);
+    crate::Statement::new(sql, values, table)
+}
+
+/// The `INSERT … ON CONFLICT …` behind [`build_upsert`] and
+/// [`build_upsert_returning`].
+fn upsert_query(
+    table: &str,
+    data: &[(String, serde_json::Value)],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+) -> InsertStatement {
     let mut query = Query::insert();
     query.into_table(DynCol(table.into()));
 
@@ -45,9 +75,7 @@ pub fn build_upsert(
         }
     }
     query.on_conflict(on_conflict);
-
-    let (sql, values) = crate::render_insert(query, backend);
-    crate::Statement::new(sql, values, table)
+    query
 }
 
 /// Build the atomic windowed-counter upsert: insert a fresh counter row, or
@@ -135,6 +163,84 @@ pub fn build_windowed_counter_upsert(
     window_cutoff: i64,
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
+    let query = windowed_counter_upsert_query(
+        table,
+        conflict_column,
+        id,
+        conflict_value,
+        count_field,
+        window_field,
+        created_fields,
+        updated_fields,
+        stamped_at,
+        now,
+        window_cutoff,
+    )?;
+    let (sql, values) = crate::render_insert(query, backend);
+    Ok(crate::Statement::new(sql, values, table))
+}
+
+/// [`build_windowed_counter_upsert`] ending in `RETURNING *`: the statement
+/// answers the counter row as it stands after this call — `{count_field}`
+/// already incremented, or reset to 1 — so incrementing a counter and
+/// reading it is one statement. Same arguments and errors.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same independent column/value parameters as \
+              build_windowed_counter_upsert, which it mirrors"
+)]
+pub fn build_windowed_counter_upsert_returning(
+    table: &str,
+    conflict_column: &str,
+    id: &str,
+    conflict_value: &str,
+    count_field: &str,
+    window_field: &str,
+    created_fields: &[&str],
+    updated_fields: &[&str],
+    stamped_at: &str,
+    now: i64,
+    window_cutoff: i64,
+    backend: Backend,
+) -> Result<crate::Statement, SqlBuildError> {
+    let mut query = windowed_counter_upsert_query(
+        table,
+        conflict_column,
+        id,
+        conflict_value,
+        count_field,
+        window_field,
+        created_fields,
+        updated_fields,
+        stamped_at,
+        now,
+        window_cutoff,
+    )?;
+    query.returning_all();
+    let (sql, values) = crate::render_insert(query, backend);
+    Ok(crate::Statement::new(sql, values, table))
+}
+
+/// The statement behind [`build_windowed_counter_upsert`] and
+/// [`build_windowed_counter_upsert_returning`], unrendered.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the independent column/value parameters of the public \
+              windowed-counter builders it serves"
+)]
+fn windowed_counter_upsert_query(
+    table: &str,
+    conflict_column: &str,
+    id: &str,
+    conflict_value: &str,
+    count_field: &str,
+    window_field: &str,
+    created_fields: &[&str],
+    updated_fields: &[&str],
+    stamped_at: &str,
+    now: i64,
+    window_cutoff: i64,
+) -> Result<InsertStatement, SqlBuildError> {
     use sea_query::CaseStatement;
 
     let conflict_column = validate_ident(conflict_column)?;
@@ -221,9 +327,7 @@ pub fn build_windowed_counter_upsert(
         on_conflict.value(DynCol((*field).into()), stamp());
     }
     query.on_conflict(on_conflict);
-
-    let (sql, values) = crate::render_insert(query, backend);
-    Ok(crate::Statement::new(sql, values, table))
+    Ok(query)
 }
 
 #[cfg(test)]
@@ -584,6 +688,163 @@ mod tests {
         assert_eq!(count, 2, "the second call incremented in window");
         assert_eq!(created, STAMP, "created_at keeps the INSERT stamp");
         assert_eq!(updated, later, "updated_at takes the conflict stamp");
+    }
+
+    /// Run a built `… RETURNING *` statement on a real SQLite connection and
+    /// read the returned rows' `(id, count)`.
+    fn returned_counts(conn: &rusqlite::Connection, stmt: crate::Statement) -> Vec<(String, i64)> {
+        let params: Vec<rusqlite::types::Value> = crate::value::sea_values_to_json(stmt.values)
+            .into_iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => rusqlite::types::Value::Text(s),
+                serde_json::Value::Number(n) => {
+                    rusqlite::types::Value::Integer(n.as_i64().expect("integer"))
+                }
+                other => panic!("unexpected bound value {other:?}"),
+            })
+            .collect();
+        let mut prepared = conn.prepare(&stmt.sql).unwrap();
+        prepared
+            .query_map(rusqlite::params_from_iter(params), |r| {
+                Ok((r.get("id")?, r.get("count")?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap_or_else(|e| panic!("sqlite rejected {}: {e}", stmt.sql))
+    }
+
+    // The returning counter statement answers the row as the call left it:
+    // inserted at 1, incremented in the window, reset to 1 past it — the
+    // stored row's id throughout, never the per-call one.
+    #[test]
+    fn windowed_counter_upsert_returning_answers_the_counter_after_the_call() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE rl (id TEXT PRIMARY KEY, ip TEXT UNIQUE, count INTEGER, \
+             window_start INTEGER, created_at TEXT, updated_at TEXT)",
+            [],
+        )
+        .unwrap();
+        let call = |id: &str, now: i64| {
+            build_windowed_counter_upsert_returning(
+                "rl",
+                "ip",
+                id,
+                "10.0.0.1",
+                "count",
+                "window_start",
+                &["created_at"],
+                &["updated_at"],
+                STAMP,
+                now,
+                now - 60,
+                Backend::Sqlite,
+            )
+            .unwrap()
+        };
+        let t0 = 1_700_000_000;
+        assert_eq!(
+            returned_counts(&conn, call("row-1", t0)),
+            [("row-1".into(), 1)]
+        );
+        assert_eq!(
+            returned_counts(&conn, call("row-2", t0 + 1)),
+            [("row-1".into(), 2)]
+        );
+        assert_eq!(
+            returned_counts(&conn, call("row-3", t0 + 2)),
+            [("row-1".into(), 3)]
+        );
+        assert_eq!(
+            returned_counts(&conn, call("row-4", t0 + 120)),
+            [("row-1".into(), 1)],
+            "past the window the counter restarts"
+        );
+    }
+
+    // The returning set-columns upsert answers the inserted or updated row,
+    // and no row when `DO NOTHING` kept the existing one.
+    #[test]
+    fn upsert_returning_answers_the_row_or_nothing_for_do_nothing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE rl (id TEXT PRIMARY KEY, ip TEXT UNIQUE, count INTEGER)",
+            [],
+        )
+        .unwrap();
+        let data = |id: &str, count: i64| {
+            vec![
+                ("id".to_string(), serde_json::json!(id)),
+                ("ip".to_string(), serde_json::json!("10.0.0.1")),
+                ("count".to_string(), serde_json::json!(count)),
+            ]
+        };
+        let upsert = |id: &str, count: i64, update: &[&str]| {
+            build_upsert_returning("rl", &data(id, count), &["ip"], update, Backend::Sqlite)
+        };
+        assert_eq!(
+            returned_counts(&conn, upsert("a", 5, &["count"])),
+            [("a".into(), 5)]
+        );
+        assert_eq!(
+            returned_counts(&conn, upsert("b", 7, &["count"])),
+            [("a".into(), 7)]
+        );
+        assert!(returned_counts(&conn, upsert("c", 9, &[])).is_empty());
+    }
+
+    #[test]
+    fn returning_builders_end_in_returning_all_in_both_dialects() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            let set = build_upsert_returning(
+                "t",
+                &[("k".to_string(), serde_json::json!("v"))],
+                &["k"],
+                &[],
+                backend,
+            );
+            assert!(set.sql.ends_with("RETURNING *"), "{backend:?}: {}", set.sql);
+            let counter = build_windowed_counter_upsert_returning(
+                "t",
+                "k",
+                "id-1",
+                "v",
+                "count",
+                "window_start",
+                &[],
+                &[],
+                STAMP,
+                10,
+                0,
+                backend,
+            )
+            .unwrap();
+            assert!(
+                counter.sql.ends_with("RETURNING *"),
+                "{backend:?}: {}",
+                counter.sql
+            );
+            let plain = build_windowed_counter_upsert(
+                "t",
+                "k",
+                "id-1",
+                "v",
+                "count",
+                "window_start",
+                &[],
+                &[],
+                STAMP,
+                10,
+                0,
+                backend,
+            )
+            .unwrap();
+            assert!(
+                !plain.sql.contains("RETURNING"),
+                "{backend:?}: {}",
+                plain.sql
+            );
+        }
     }
 
     #[test]

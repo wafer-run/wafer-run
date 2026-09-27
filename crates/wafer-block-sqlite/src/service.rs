@@ -1315,7 +1315,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(n1, 1, "insert affects one row");
+        assert_eq!(
+            n1.map(|r| r.data["name"].clone()),
+            Some(serde_json::json!("a")),
+            "an insert answers the inserted row"
+        );
         let r1 = DatabaseService::get(&svc, "widgets", "w1").await.unwrap();
         assert_eq!(r1.data["name"], serde_json::json!("a"));
 
@@ -1334,7 +1338,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(n2, 1, "conflict update affects one row");
+        assert_eq!(
+            n2.map(|r| r.data["name"].clone()),
+            Some(serde_json::json!("b")),
+            "a conflict update answers the updated row"
+        );
         let r2 = DatabaseService::get(&svc, "widgets", "w1").await.unwrap();
         assert_eq!(
             r2.data["name"],
@@ -1396,7 +1404,11 @@ mod tests {
         let n1 = DatabaseService::upsert(&svc, "rl", make_spec())
             .await
             .unwrap();
-        assert_eq!(n1, 1, "conflict update affects the one matching row");
+        assert_eq!(
+            n1.map(|r| (r.id, r.data["count"].clone())),
+            Some(("seed".to_string(), serde_json::json!(2))),
+            "a conflict update answers the matching row, incremented"
+        );
         let r1 = DatabaseService::get(&svc, "rl", "seed").await.unwrap();
         assert_eq!(
             r1.data["count"],
@@ -1418,7 +1430,10 @@ mod tests {
         let n2 = DatabaseService::upsert(&svc, "rl", make_spec())
             .await
             .unwrap();
-        assert_eq!(n2, 1);
+        assert_eq!(
+            n2.map(|r| r.data["count"].clone()),
+            Some(serde_json::json!(3))
+        );
         let r2 = DatabaseService::get(&svc, "rl", "seed").await.unwrap();
         assert_eq!(
             r2.data["count"],

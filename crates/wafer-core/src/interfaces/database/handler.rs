@@ -1394,7 +1394,10 @@ pub async fn handle_message(
                 Err(e) => return OutputStream::error(e),
             };
             match service.upsert(&collection, spec).await {
-                Ok(rows_affected) => to_output(&wire::UpsertResponse { rows_affected }),
+                Ok(record) => to_output(&wire::UpsertResponse {
+                    rows_affected: i64::from(record.is_some()),
+                    record: record.map(service_record_to_wire),
+                }),
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
