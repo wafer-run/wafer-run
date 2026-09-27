@@ -4,6 +4,18 @@
 
 ### Breaking changes
 
+- `CryptoError` has a new variant, `Unavailable(String)`, for a backend
+  that cannot be reached right now — a remote or out-of-process service (a
+  Durable Object doing the hashing, a KMS) that timed out, refused the
+  connection or is overloaded. The crypto handler answers it with
+  `ErrorCode::Unavailable` (HTTP 503) on every op and every target, where
+  `Other`, `HashError`, `SignError`, `MalformedHash` and `Pepper` answer
+  `Internal` (HTTP 500), so a caller can tell an outage it may retry from a
+  server fault. A service that waits on another service should report that
+  service being unreachable as `Unavailable`, not `Other`. `CryptoError` is
+  not `#[non_exhaustive]`: an exhaustive `match` on it needs an arm for the
+  new variant.
+
 - Passwords can be peppered. `Argon2JwtCryptoService::with_password_peppers`
   takes a `PasswordPeppers` — a current key, earlier keys that verify only,
   and whether a pepper is required — built by the embedder from values it

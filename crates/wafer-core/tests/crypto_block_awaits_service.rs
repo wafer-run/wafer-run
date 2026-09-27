@@ -4,7 +4,11 @@
 //! block, and the block's call stays pending, holding no thread, until the
 //! service resolves.
 //!
-//! `tests/wasm32_crypto_block` runs the same scenario on
+//! A service that fails after the await with `CryptoError::Unavailable` —
+//! the Durable Object could not be reached — makes the block answer
+//! `ErrorCode::Unavailable` (HTTP 503), not `Internal`.
+//!
+//! `tests/wasm32_crypto_block` runs the same scenarios on
 //! wasm32-unknown-unknown, where the block used to call the handler
 //! synchronously.
 
@@ -15,23 +19,25 @@ use wafer_block::{
     codec,
     common::ServiceOp,
     context::Context,
+    http_codec::error_code_to_http_status,
     streams::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
     types::{ResourceAccess, ResourceType},
     wire::crypto as wire,
-    Block, Message, WaferError,
+    Block, ErrorCode, Message, WaferError,
 };
 use wafer_core::{
     interfaces::crypto::service::{CryptoError, CryptoService},
     service_blocks::crypto::CryptoBlock,
 };
 
-/// A service whose password ops resolve only when the test releases them.
+/// A service whose password ops resolve only when the test releases them,
+/// with the answer the test sends.
 struct GatedCrypto {
-    hash: Mutex<Option<oneshot::Receiver<String>>>,
-    compare: Mutex<Option<oneshot::Receiver<bool>>>,
+    hash: Mutex<Option<oneshot::Receiver<Result<String, CryptoError>>>>,
+    compare: Mutex<Option<oneshot::Receiver<Result<(), CryptoError>>>>,
 }
 
 impl GatedCrypto {
@@ -45,15 +51,13 @@ impl CryptoService for GatedCrypto {
     async fn hash(&self, _password: &str) -> Result<String, CryptoError> {
         Self::take(&self.hash)
             .await
-            .map_err(|_| CryptoError::HashError("gate dropped".into()))
+            .unwrap_or_else(|_| Err(CryptoError::HashError("gate dropped".into())))
     }
 
     async fn compare_hash(&self, _password: &str, _hash: &str) -> Result<(), CryptoError> {
-        match Self::take(&self.compare).await {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(CryptoError::PasswordMismatch),
-            Err(_) => Err(CryptoError::Other("gate dropped".into())),
-        }
+        Self::take(&self.compare)
+            .await
+            .unwrap_or_else(|_| Err(CryptoError::Other("gate dropped".into())))
     }
 
     async fn sign_for(
@@ -138,7 +142,7 @@ async fn the_block_waits_for_a_hash_that_completes_after_an_await_point() {
         "the block must wait for the service, not answer before it has"
     );
 
-    release.send("$gated$hash".to_string()).unwrap();
+    release.send(Ok("$gated$hash".to_string())).unwrap();
     let resp: wire::HashResponse = codec::decode(&body_of(call.await).await).unwrap();
     assert_eq!(resp.hash, "$gated$hash");
 }
@@ -167,8 +171,74 @@ async fn the_block_waits_for_a_password_check_that_completes_after_an_await_poin
             "the block must wait for the service, not answer before it has"
         );
 
-        release.send(verdict).unwrap();
+        release
+            .send(if verdict {
+                Ok(())
+            } else {
+                Err(CryptoError::PasswordMismatch)
+            })
+            .unwrap();
         let resp: wire::CompareHashResponse = codec::decode(&body_of(call.await).await).unwrap();
         assert_eq!(resp.matches, matches);
     }
+}
+
+/// The error the block answered with; panics if it answered anything else.
+async fn error_of(out: OutputStream) -> WaferError {
+    match out.collect_buffered().await {
+        Err(TerminalNotResponse::Error(e)) => e,
+        Ok(_) => panic!("the block answered, but the service failed"),
+        Err(other) => panic!("unexpected terminal: {other:?}"),
+    }
+}
+
+fn unreachable_hasher() -> CryptoError {
+    CryptoError::Unavailable("hasher durable object: fetch timed out".into())
+}
+
+#[tokio::test]
+async fn an_unreachable_hash_backend_answers_unavailable() {
+    let (release, gate) = oneshot::channel();
+    let block = CryptoBlock::new(Arc::new(GatedCrypto {
+        hash: Mutex::new(Some(gate)),
+        compare: Mutex::new(None),
+    }));
+    let body = codec::encode(&wire::HashRequest {
+        password: "correct horse".into(),
+    })
+    .unwrap();
+
+    let call = block.handle(
+        &AllowCtx,
+        Message::new(ServiceOp::CRYPTO_HASH),
+        InputStream::from_bytes(body),
+    );
+    release.send(Err(unreachable_hasher())).unwrap();
+    let err = error_of(call.await).await;
+    assert_eq!(err.code, ErrorCode::Unavailable, "{}", err.message);
+    assert_eq!(error_code_to_http_status(&err.code), 503);
+}
+
+#[tokio::test]
+async fn an_unreachable_password_check_backend_answers_unavailable() {
+    let (release, gate) = oneshot::channel();
+    let block = CryptoBlock::new(Arc::new(GatedCrypto {
+        hash: Mutex::new(None),
+        compare: Mutex::new(Some(gate)),
+    }));
+    let body = codec::encode(&wire::CompareHashRequest {
+        password: "correct horse".into(),
+        hash: "$gated$hash".into(),
+    })
+    .unwrap();
+
+    let call = block.handle(
+        &AllowCtx,
+        Message::new(ServiceOp::CRYPTO_COMPARE_HASH),
+        InputStream::from_bytes(body),
+    );
+    release.send(Err(unreachable_hasher())).unwrap();
+    let err = error_of(call.await).await;
+    assert_eq!(err.code, ErrorCode::Unavailable, "{}", err.message);
+    assert_eq!(error_code_to_http_status(&err.code), 503);
 }

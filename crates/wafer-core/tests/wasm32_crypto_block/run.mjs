@@ -1,7 +1,7 @@
 // Drives the crypto block on wasm32 through a CryptoService whose password
 // ops complete only after an await point (see src/lib.rs and Cargo.toml),
 // and fails unless every call waited for the service and returned its
-// answer.
+// answer — for a service whose backend is unreachable, `Unavailable`.
 //
 // Usage: node run.mjs <fixture.wasm>
 import { readFileSync } from "node:fs";
@@ -13,6 +13,8 @@ const STEPS = {
   4: "the block answered with an error",
   5: "a buffered answer did not complete",
   6: "the block's answer is not the service's",
+  7: "the block answered, but the service failed",
+  8: "the block's error is not Unavailable",
 };
 
 const module = new WebAssembly.Module(readFileSync(process.argv[2]));
@@ -32,6 +34,11 @@ for (const [label, run] of [
   ["crypto.hash", () => exports.hash_awaits_the_service()],
   ["crypto.compare_hash (match)", () => exports.compare_hash_awaits_the_service(1)],
   ["crypto.compare_hash (mismatch)", () => exports.compare_hash_awaits_the_service(0)],
+  ["crypto.hash (backend unreachable)", () => exports.unreachable_hash_answers_unavailable()],
+  [
+    "crypto.compare_hash (backend unreachable)",
+    () => exports.unreachable_compare_hash_answers_unavailable(),
+  ],
 ]) {
   const code = run();
   if (code === 0) {
