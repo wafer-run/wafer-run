@@ -385,9 +385,15 @@ mod tests {
         assert_eq!(c.id_policy("t"), None);
         c.set_id_policy_if_gen("t", IdPolicy::Database, c.generation());
         assert_eq!(c.id_policy("t"), Some(IdPolicy::Database));
-        assert!(c.table_known_present("t"), "a probed policy proves the table");
+        assert!(
+            c.table_known_present("t"),
+            "a probed policy proves the table"
+        );
         c.set_id_policy_if_gen("u", IdPolicy::Caller, c.generation());
-        assert!(c.table_known_present("u"), "a probed policy proves the table");
+        assert!(
+            c.table_known_present("u"),
+            "a probed policy proves the table"
+        );
         // Mint too: the probe answers a missing table apart, so a policy
         // that reaches the cache is always an existing table's.
         c.set_id_policy_if_gen("minted", IdPolicy::Mint, c.generation());
