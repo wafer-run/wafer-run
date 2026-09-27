@@ -176,6 +176,7 @@ pub struct FlowConfig {
     /// Cap on the number of step executions, to prevent infinite loops.
     /// Defaults to 1000.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "json-schema", schemars(range(max = u64::MAX)))]
     pub max_steps: Option<NonZeroU64>,
     /// How the runtime reacts when a step errors. Defaults to `"stop"`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -350,11 +351,22 @@ impl schemars::JsonSchema for FlowTimeout {
         "FlowTimeout".into()
     }
 
-    // The 24h ceiling is beyond a regex; the field's description states it.
+    // One alternative per unit, each spelling out `1..=MAX_FLOW_TIMEOUT` in
+    // that unit (leading zeros allowed, as `FromStr` allows them):
+    // 86_400_000ms, 86_400s (or bare), 1_440m, 24h. The schema round-trip
+    // tests in lib.rs check both ends of every range against `FromStr`, so a
+    // change to MAX_FLOW_TIMEOUT that is not carried here fails them.
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": "^[0-9]+(ms|s|m|h)?$",
+            "pattern": concat!(
+                "^0*(",
+                "([1-9][0-9]{0,6}|[1-7][0-9]{7}|8[0-5][0-9]{6}|86[0-3][0-9]{5}|86400000)ms",
+                "|([1-9][0-9]{0,3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400)s?",
+                "|([1-9][0-9]{0,2}|1[0-3][0-9]{2}|14[0-3][0-9]|1440)m",
+                "|([1-9]|1[0-9]|2[0-4])h",
+                ")$"
+            ),
         })
     }
 }
