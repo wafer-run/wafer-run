@@ -2124,6 +2124,22 @@
 
 ### Fixed
 
+- A table's `id` source is cached from the first create into it, so the
+  second create into an insert-only table is its `INSERT` alone. The id-policy
+  probe (`introspect::build_id_policy`) answered `0` ("mint") both for a table
+  with a text `id` and for a missing table, so the schema cache kept a "mint"
+  answer only once something else had proven the table exists — the first
+  create's column read, in time for the third create, so the first two
+  creates into a table nothing reads (a login audit, a token table) each ran
+  the probe; on D1, one more round trip per create. The probe now answers `3`
+  for a missing table, decoded by the new
+  `introspect::IdPolicyProbe::from_code` (`Table(IdPolicy)` or `NoTable`);
+  an existing table's policy, "mint" included, is cached and marks the table
+  present, and a missing table's is not, as before.
+  `SchemaCache::set_id_policy_if_gen` records any policy it is handed, since
+  a missing table's answer no longer reaches it. `IdPolicy::from_code` is
+  unchanged.
+
 - `clients::database::get_by_field` (and `upsert_by_field`, which calls it)
   runs one statement, the `SELECT … LIMIT 1`. It used to leave
   `skip_count` unset, so the backend also ran a `SELECT COUNT(*)` over every

@@ -20,7 +20,7 @@ use wafer_block_macro::wafer_async_trait;
 use wafer_sql_utils::{
     ddl, guard,
     ident::validate_ident,
-    introspect::{self, IdPolicy},
+    introspect::{self, IdPolicy, IdPolicyProbe},
     value::sea_values_to_json,
     Backend,
 };
@@ -730,8 +730,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Consults [`schema_cache`](Self::schema_cache) first and populates it
     /// on a miss. Runs in STRICT_SCHEMA mode too: nothing else tells the
-    /// executor which tables number their own rows. A missing table answers
-    /// [`IdPolicy::Mint`], uncached (see [`SchemaCache::set_id_policy_if_gen`]).
+    /// executor which tables number their own rows. The probe also answers
+    /// whether the table exists ([`IdPolicyProbe`]): an existing table's
+    /// policy is cached, and marks the table present, whatever it is; a
+    /// missing table answers [`IdPolicy::Mint`], uncached, so a table
+    /// created later is probed afresh.
     async fn id_policy(&self, table: &str) -> Result<IdPolicy, DatabaseError> {
         let cache = self.schema_cache();
         if let Some(policy) = cache.and_then(|c| c.id_policy(table)) {
@@ -741,13 +744,18 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let gen0 = cache.map(SchemaCache::generation);
         let (sql, params) = introspect::build_id_policy(table, Self::BACKEND);
         let code = self.run_scalar_i64(&sql, &params).await?;
-        let policy = IdPolicy::from_code(code).ok_or_else(|| {
+        let probe = IdPolicyProbe::from_code(code).ok_or_else(|| {
             DatabaseError::Internal(format!("id policy probe of {table} answered {code}"))
         })?;
-        if let (Some(cache), Some(gen0)) = (cache, gen0) {
-            cache.set_id_policy_if_gen(table, policy, gen0);
+        match probe {
+            IdPolicyProbe::Table(policy) => {
+                if let (Some(cache), Some(gen0)) = (cache, gen0) {
+                    cache.set_id_policy_if_gen(table, policy, gen0);
+                }
+                Ok(policy)
+            }
+            IdPolicyProbe::NoTable => Ok(IdPolicy::Mint),
         }
-        Ok(policy)
     }
 
     /// The [`IdPolicy`] that applies to `data`, a row about to be created in

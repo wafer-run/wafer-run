@@ -250,19 +250,18 @@ impl SchemaCache {
             .and_then(|t| t.id_policy)
     }
 
-    /// Record `table`'s [`IdPolicy`], but only if the cache has not been
+    /// Record the [`IdPolicy`] of `table`, a table the caller's probe found
+    /// to exist, and mark it present — but only if the cache has not been
     /// mutated since `expected_gen` (see the module docs).
     ///
-    /// [`IdPolicy::Database`] and [`IdPolicy::Caller`] describe an `id`
-    /// column, so they prove the table exists and mark it present.
-    /// [`IdPolicy::Mint`] is also the answer for a table that does not exist
-    /// yet, so it is recorded only when the entry already knows the table
-    /// exists; otherwise it is dropped and the next lookup asks again.
+    /// The probe ([`build_id_policy`](wafer_sql_utils::introspect::build_id_policy))
+    /// tells a missing table apart from any policy, so a missing table's
+    /// answer never reaches this setter.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "the write guard covers the whole critical section — the \
-                  generation check, the presence check and the fact-set \
-                  mutate the same entry and are the entire body"
+                  generation check and the two fact-sets mutate the same \
+                  entry and are the entire body"
     )]
     pub fn set_id_policy_if_gen(&self, table: &str, policy: IdPolicy, expected_gen: u64) {
         let mut inner = self.inner.write();
@@ -270,11 +269,7 @@ impl SchemaCache {
             return;
         }
         let entry = inner.tables.entry(table.to_string()).or_default();
-        if policy != IdPolicy::Mint {
-            entry.present = true;
-        } else if !entry.present {
-            return;
-        }
+        entry.present = true;
         entry.id_policy = Some(policy);
     }
 
@@ -383,23 +378,21 @@ mod tests {
     }
 
     #[test]
-    fn id_policy_mint_is_cached_only_for_a_table_known_to_exist() {
+    fn an_id_policy_is_cached_and_marks_the_table_present() {
         use wafer_sql_utils::introspect::IdPolicy;
 
         let c = SchemaCache::new();
         assert_eq!(c.id_policy("t"), None);
         c.set_id_policy_if_gen("t", IdPolicy::Database, c.generation());
         assert_eq!(c.id_policy("t"), Some(IdPolicy::Database));
-        assert!(c.table_known_present("t"), "an id column proves the table");
+        assert!(c.table_known_present("t"), "a probed policy proves the table");
         c.set_id_policy_if_gen("u", IdPolicy::Caller, c.generation());
-        assert!(c.table_known_present("u"), "an id column proves the table");
-        // "Mint" is also a missing table's answer: dropped until the table
-        // is known to exist.
-        c.set_id_policy_if_gen("later", IdPolicy::Mint, c.generation());
-        assert_eq!(c.id_policy("later"), None);
-        c.mark_table_present_if_gen("later", c.generation());
-        c.set_id_policy_if_gen("later", IdPolicy::Mint, c.generation());
-        assert_eq!(c.id_policy("later"), Some(IdPolicy::Mint));
+        assert!(c.table_known_present("u"), "a probed policy proves the table");
+        // Mint too: the probe answers a missing table apart, so a policy
+        // that reaches the cache is always an existing table's.
+        c.set_id_policy_if_gen("minted", IdPolicy::Mint, c.generation());
+        assert_eq!(c.id_policy("minted"), Some(IdPolicy::Mint));
+        assert!(c.table_known_present("minted"));
         let stale = c.generation();
         c.invalidate("t");
         assert_eq!(c.id_policy("t"), None);
