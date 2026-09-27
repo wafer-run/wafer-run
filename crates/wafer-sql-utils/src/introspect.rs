@@ -232,13 +232,42 @@ impl IdPolicy {
     }
 }
 
+/// What [`build_id_policy`] reports for a table: its [`IdPolicy`], or that
+/// no such table exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdPolicyProbe {
+    /// The table exists, and this is where a created row's `id` comes from.
+    Table(IdPolicy),
+    /// No table by that name exists (by the test [`build_table_exists`]
+    /// applies).
+    NoTable,
+}
+
+impl IdPolicyProbe {
+    /// The answer a [`build_id_policy`] result code names: `0`, `1` and `2`
+    /// are a table's policy (see [`IdPolicy::from_code`]), `3` is
+    /// [`NoTable`](Self::NoTable); `None` for any other code.
+    #[must_use]
+    pub const fn from_code(code: i64) -> Option<Self> {
+        match code {
+            3 => Some(Self::NoTable),
+            _ => match IdPolicy::from_code(code) {
+                Some(policy) => Some(Self::Table(policy)),
+                None => None,
+            },
+        }
+    }
+}
+
 /// Build query asking where a table's `id` comes from when an insert leaves
 /// it out (see [`IdPolicy`]).
 ///
 /// Returns `(sql, params)`. The result is a single row with one integer
-/// column `id_policy` — `0` mint, `1` database, `2` caller, decoded by
-/// [`IdPolicy::from_code`] — in both dialects, so callers can read it as an
-/// `i64` scalar. A missing table answers `0`.
+/// column `id_policy` — `0` mint, `1` database, `2` caller, `3` no such
+/// table, decoded by [`IdPolicyProbe::from_code`] — in both dialects, so
+/// callers can read it as an `i64` scalar. A table is missing exactly when
+/// [`build_table_exists`] would answer false for it, so one probe tells a
+/// caller both whether the table exists and, when it does, its policy.
 ///
 /// Database-filled — SQLite: `id` is the table's rowid alias — the sole
 /// primary-key column of a rowid table, declared exactly `INTEGER` — whose
@@ -263,6 +292,8 @@ pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json
     match backend {
         Backend::Sqlite => (
             "SELECT CASE \
+             WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) \
+             THEN 3 \
              WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) \
              WHERE pk = 1 AND name = 'id' COLLATE NOCASE) \
              AND NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk > 1) \
@@ -275,7 +306,11 @@ pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json
             params,
         ),
         Backend::Postgres => (
-            "SELECT CASE \
+            format!(
+                "SELECT CASE \
+             WHEN NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+             WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN {PG_TABLE_KINDS}) \
+             THEN 3::int8 \
              WHEN a.attidentity <> '' \
              OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' THEN 1::int8 \
              WHEN a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype) \
@@ -285,7 +320,7 @@ pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json
              ON a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' \
              AND NOT a.attisdropped \
              LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
-                .to_string(),
+            ),
             params,
         ),
     }
@@ -540,12 +575,18 @@ mod tests {
              CREATE TABLE keyless (id INTEGER, n TEXT);",
         )
         .unwrap();
-        let policy = |table: &str| -> IdPolicy {
+        let probe = |table: &str| -> IdPolicyProbe {
             let (sql, params) = build_id_policy(table, Backend::Sqlite);
             let code = conn
                 .query_row(&sql, [params[0].as_str().unwrap()], |r| r.get::<_, i64>(0))
                 .unwrap();
-            IdPolicy::from_code(code).unwrap()
+            IdPolicyProbe::from_code(code).unwrap()
+        };
+        let policy = |table: &str| -> IdPolicy {
+            match probe(table) {
+                IdPolicyProbe::Table(policy) => policy,
+                IdPolicyProbe::NoTable => panic!("{table} exists"),
+            }
         };
         let generated = |table: &str| policy(table) == IdPolicy::Database;
         for table in ["alias", "alias_lower", "alias_autoinc", "alias_table_desc"] {
@@ -589,8 +630,16 @@ mod tests {
         ] {
             assert_eq!(policy(table), IdPolicy::Caller, "{table}");
         }
-        for table in ["text_key", "other_alias", "no_such_table"] {
+        for table in ["text_key", "other_alias"] {
             assert_eq!(policy(table), IdPolicy::Mint, "{table}");
+        }
+        // A missing table is its own answer, not a mint policy, so a caller
+        // can tell "mint for this table" from "there is no table yet". On
+        // SQLite a view is not a table, as `build_table_exists` has it.
+        conn.execute_batch("CREATE VIEW text_view AS SELECT * FROM text_key;")
+            .unwrap();
+        for table in ["no_such_table", "text_view"] {
+            assert_eq!(probe(table), IdPolicyProbe::NoTable, "{table}");
         }
     }
 

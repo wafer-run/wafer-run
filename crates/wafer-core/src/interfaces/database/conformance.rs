@@ -280,14 +280,17 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 /// one Postgres database, two D1 bindings to one database. The suite covers
 /// what a multi-replica deployment, or a migration run by another process,
 /// relies on: a table `a` saw missing that `b` then creates is visible to
-/// `a`'s next read, without `a` having done anything to its own cache.
+/// `a`'s next read, and `a`'s next create takes its `id` from where the new
+/// table says, without `a` having done anything to its own cache.
 ///
 /// Both services are pinned to non-strict mode, the mode in which a read
-/// probes the table before running.
+/// probes the table before running; the id-source check runs `a` in
+/// STRICT_SCHEMA mode for its duration and pins it back.
 pub async fn run_two_instance_conformance(a: &dyn DatabaseService, b: &dyn DatabaseService) {
     a.set_strict_schema(false);
     b.set_strict_schema(false);
     check_table_created_by_another_instance_is_seen(a, b).await;
+    check_id_source_of_a_table_created_by_another_instance(a, b).await;
 }
 
 /// `a` reads a table while it is missing, `b` creates it and inserts a row,
@@ -351,6 +354,61 @@ async fn check_table_created_by_another_instance_is_seen(
         "and to sum"
     );
 
+    b.schema_drop_table(&table.name)
+        .await
+        .expect("drop the shared table");
+}
+
+/// `a` creates a row without an `id` in a table that is missing, which
+/// fails; `b` then creates the table with a database-filled `id`
+/// ([`pk_int`]), and `a`'s next create gets the id the database assigned. A
+/// backend that remembered where the missing table's ids come from (the
+/// executor mints one for a table it knows nothing about) would mint a
+/// string id for the new table, which it refuses.
+///
+/// `a` runs in STRICT_SCHEMA mode, as a deployment with migrations does (D1
+/// included). In non-strict mode the failed first create also tries to add
+/// its columns to the missing table, and that failed `ALTER TABLE`
+/// invalidates the table's cache entry, which would hide a remembered
+/// answer.
+async fn check_id_source_of_a_table_created_by_another_instance(
+    a: &dyn DatabaseService,
+    b: &dyn DatabaseService,
+) {
+    let table = Table {
+        name: "conf_shared_serial".to_string(),
+        columns: vec![
+            pk_int("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    b.schema_drop_table(&table.name)
+        .await
+        .expect("schema_drop_table (idempotent) must succeed");
+    a.set_strict_schema(true);
+
+    a.create(&table.name, row([("name", serde_json::json!("early"))]))
+        .await
+        .expect_err("a create into a missing table fails");
+
+    b.ensure_schema_table(&table)
+        .await
+        .expect("the other instance creates the table");
+    let created = a
+        .create(&table.name, row([("name", serde_json::json!("late"))]))
+        .await
+        .expect("a create once the other instance created the table");
+    assert!(
+        created.data["id"].is_i64(),
+        "the id is the one the database assigned: {created:?}"
+    );
+
+    a.set_strict_schema(false);
     b.schema_drop_table(&table.name)
         .await
         .expect("drop the shared table");

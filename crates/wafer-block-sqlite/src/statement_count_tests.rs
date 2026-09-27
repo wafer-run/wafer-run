@@ -263,3 +263,60 @@ async fn a_counter_increment_and_its_new_value_are_one_statement() {
     assert_eq!(hit(&ctx, "r9", "login:ada", t0 + 600).await, 1);
     assert_eq!(drain_statements().len(), 1);
 }
+
+/// A create into a table the executor has already written to is the
+/// `INSERT` alone. The probe of where a created row's `id` comes from also
+/// says whether the table exists, so its answer is cached from the first
+/// create; when "mint" could also mean "no table yet", it was kept only once
+/// another probe had proven the table, and the second create ran it again.
+#[tokio::test]
+async fn the_second_create_into_an_insert_only_table_is_one_insert() {
+    let _traced = TRACED.lock().await;
+    // Strict (how a deployment with migrations runs, D1 included) and
+    // non-strict schema take different probes on the first create; both must
+    // have cached everything a create needs by the second.
+    for strict in [true, false] {
+        let svc = traced_service();
+        svc.ensure_schema_table(&Table {
+            name: "login_events".to_string(),
+            columns: vec![
+                pk("id"),
+                Column::new("user_id", DataType::String),
+                Column::new("created_at", DataType::Text),
+                Column::new("updated_at", DataType::Text),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        })
+        .await
+        .expect("create login_events");
+        svc.set_strict_schema(strict);
+        drain_statements();
+
+        let event =
+            |n: u32| HashMap::from([("user_id".to_string(), serde_json::json!(format!("u{n}")))]);
+        svc.create("login_events", event(1))
+            .await
+            .expect("first create");
+        let first = drain_statements();
+        assert!(
+            first.len() > 1,
+            "strict={strict}: the first create probes the schema: {first:#?}"
+        );
+
+        svc.create("login_events", event(2))
+            .await
+            .expect("second create");
+        let second = drain_statements();
+        assert_eq!(
+            second.len(),
+            1,
+            "strict={strict}: the second create is the insert alone: {second:#?}"
+        );
+        assert!(
+            second[0].starts_with("INSERT"),
+            "strict={strict}: {second:#?}"
+        );
+    }
+}
