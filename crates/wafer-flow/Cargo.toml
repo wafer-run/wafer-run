@@ -5,7 +5,15 @@ edition.workspace = true
 license.workspace = true
 description = "WaferFlow — parser, validator, and expression evaluator for declarative flow definitions"
 
+[features]
+default = []
+# Derives `schemars::JsonSchema` on the flow document types and exposes
+# `wafer_flow::json_schema()`, the JSON Schema a flow document must satisfy
+# to parse.
+json-schema = ["dep:schemars"]
+
 [dependencies]
+schemars = { version = "1", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -14,3 +22,6 @@ thiserror = { workspace = true }
 workspace = true
 
 [dev-dependencies]
+# Validates documents against the generated schema in the json_schema
+# round-trip tests; no network or file resolution needed.
+jsonschema = { version = "0.58", default-features = false }

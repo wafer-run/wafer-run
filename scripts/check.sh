@@ -81,10 +81,13 @@ run_clippy() {
 
     # Opt-in features no workspace member enables, so the workspace run above
     # never compiles the code behind them. Downstream embedders ship both:
-    # `json-schema` gates the schemars derives on wafer-block's wire types,
-    # `vectors` gates wafer-block-sqlite's sqlite-vec VectorService.
+    # `json-schema` gates the schemars derives on wafer-block's wire types
+    # and on wafer-flow's flow document types, `vectors` gates
+    # wafer-block-sqlite's sqlite-vec VectorService.
     echo "==> Clippy: wafer-block --features json-schema"
     cargo clippy --locked -p wafer-block --features json-schema --all-targets -- -D warnings
+    echo "==> Clippy: wafer-flow --features json-schema"
+    cargo clippy --locked -p wafer-flow --features json-schema --all-targets -- -D warnings
     echo "==> Clippy: wafer-block-sqlite --features vectors"
     cargo clippy --locked -p wafer-block-sqlite --features vectors --all-targets -- -D warnings
 }
@@ -99,6 +102,12 @@ run_test() {
     # which the workspace run above does not enable.
     echo "==> wafer-block-sqlite vector service (vectors)"
     cargo test --locked -p wafer-block-sqlite --features vectors
+
+    # The WaferFlow JSON Schema (`wafer_flow::json_schema`) and its tests
+    # are behind `json-schema`, which the workspace run above does not
+    # enable.
+    echo "==> wafer-flow JSON Schema (json-schema)"
+    cargo test --locked -p wafer-flow --features json-schema
 
     # SEC-09: the registry-download SSRF e2e has an allow-private-network
     # half (a local wiremock registry served end-to-end) that only compiles

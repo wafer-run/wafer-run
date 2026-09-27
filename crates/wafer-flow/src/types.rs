@@ -1,7 +1,10 @@
 //! Data model for a parsed WaferFlow document.
 //!
-//! These structs mirror the JSON schema published at
-//! `site/public/schema/waferflow/` and are produced by [`crate::parse`].
+//! These structs are produced by [`crate::parse`]. With the `json-schema`
+//! feature they also derive the WaferFlow JSON Schema
+//! ([`crate::json_schema`]), which the wafer.run site publishes under
+//! `/schema/waferflow/`; the site's tests fail when its copy drifts from
+//! these types.
 
 use std::{collections::HashMap, fmt, num::NonZeroU64, str::FromStr, time::Duration};
 
@@ -9,9 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::InvalidTimeout;
 
-/// A complete WaferFlow definition: metadata, typed input/output ports,
-/// the ordered list of [`Step`]s to execute, and optional flow-level config.
+/// A declarative flow: metadata, typed input/output ports, the ordered steps to execute, and optional flow-level config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct WaferFlow {
     /// Stable identifier for the flow (used by the runtime registry).
     pub id: String,
@@ -30,12 +33,14 @@ pub struct WaferFlow {
     pub output: Option<PortSchema>,
     /// Ordered list of steps; execution starts at `steps[0]` unless a
     /// `next` entry redirects.
+    // `validate` rejects an empty list.
+    #[cfg_attr(feature = "json-schema", schemars(length(min = 1)))]
     pub steps: Vec<Step>,
     /// Optional flow-level execution policy (timeouts, step budget, error handling).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<FlowConfig>,
-    /// Block dependencies — the runtime ensures these blocks are registered
-    /// before the flow is allowed to execute.
+    /// Names of the blocks this flow depends on. Informational: the runtime
+    /// resolves blocks from the steps, not from this list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<String>>,
     /// Declarative config routing: maps user-facing config keys to
@@ -43,8 +48,9 @@ pub struct WaferFlow {
     /// can expose a flat config surface that fans out to its component blocks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_map: Option<HashMap<String, ConfigMapEntry>>,
-    /// Static config values always injected into target block configs at
-    /// resolve time (in addition to anything routed via `config_map`).
+    /// Config merged into other blocks' configs, keyed by block name. Applied
+    /// together with `config_map`: only when the flow declares a `config_map`
+    /// and config is registered under the flow's id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_defaults: Option<HashMap<String, serde_json::Value>>,
 }
@@ -52,9 +58,11 @@ pub struct WaferFlow {
 /// A single step in a flow — one block invocation plus its input template
 /// and (optionally) the routing rules for the next step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct Step {
-    /// Step identifier unique within the flow; also the key under which
-    /// the step's output is stored in the [`crate::Accumulator`].
+    /// Step identifier unique within the flow (`input` and `each` are
+    /// reserved); also the key under which the step's output is stored, so
+    /// later steps read it as `$.<id>.<field>`.
     pub id: String,
     /// Registered block name to invoke (e.g. `"crypto/jwt-sign"`).
     pub block: String,
@@ -66,35 +74,45 @@ pub struct Step {
     /// `when` is true (or the lone default entry) wins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<Vec<NextEntry>>,
-    /// `$.path` to an array whose elements drive a per-item fan-out.
-    /// The inner step iteration sees the current item as `$.each.item`.
+    /// `$.path` to an array: the step's block runs once per item, in order,
+    /// with `$.each.item` and `$.each.index` set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub each: Option<String>,
-    /// Parallel branches run concurrently; the step completes when all
-    /// branches finish.
+    /// Parallel branches, run concurrently before the step's own block;
+    /// their accumulator entries are merged once all of them finish.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel: Option<Vec<ParallelBranch>>,
     /// Human-readable description shown in introspection endpoints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Per-step block config merged into `RuntimeContext.config` for this
-    /// invocation only (overrides flow- and instance-level config).
+    /// Per-step block config for this invocation only (overrides flow- and
+    /// instance-level config).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
 }
 
-/// One branch of a [`Step::parallel`] fan-out. Each branch is its own
-/// ordered list of steps that executes concurrently with its siblings.
+/// One branch of a step's `parallel` fan-out: an ordered list of steps that
+/// executes concurrently with its sibling branches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct ParallelBranch {
     /// Ordered steps run within this branch.
     pub steps: Vec<Step>,
 }
 
-/// A single routing rule inside [`Step::next`]: when `when` evaluates to
-/// true, jump to `step` (within this flow) or `flow` (a different flow id).
-/// An entry without `when` is the default fallthrough.
+/// A routing rule in a step's `next` list: when `when` evaluates to true,
+/// jump to `step` (within this flow) or `flow` (a different flow id). An
+/// entry without `when` is the default fallthrough.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+// `validate` requires exactly one of `step` / `flow`.
+#[cfg_attr(
+    feature = "json-schema",
+    schemars(extend("oneOf" = [
+        { "required": ["step"], "properties": { "step": { "type": "string" } } },
+        { "required": ["flow"], "properties": { "flow": { "type": "string" } } },
+    ]))
+)]
 pub struct NextEntry {
     /// Optional `when` expression. Omit for the default fallthrough entry.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +131,7 @@ pub struct NextEntry {
 /// `required`, `default`, `description`) — enough for the introspection UI
 /// without pulling in a full schema library.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct PortSchema {
     /// JSON Schema `type` keyword (`"object"`, `"array"`, `"string"`, ...).
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -134,27 +153,32 @@ pub struct PortSchema {
     pub default: Option<serde_json::Value>,
 }
 
-/// Flow-level execution policy: timeouts and budgets that wrap the whole
-/// step sequence rather than any single step.
-///
-/// Every field is typed: an unknown key, an `on_error` other than `"stop"` /
-/// `"continue"`, a zero `max_steps`, or a `timeout` / `timeout_ms` that is
-/// zero, malformed or above [`MAX_FLOW_TIMEOUT`] fails [`crate::parse`]. Setting both
-/// `timeout` and `timeout_ms` fails [`crate::validate`].
+/// Flow-level execution policy: a timeout, a step budget and an error
+/// policy that wrap the whole step sequence rather than any single step.
+/// Set at most one of `timeout` and `timeout_ms`.
+//
+// Every field is typed: an unknown key, an `on_error` other than `"stop"` /
+// `"continue"`, a zero `max_steps`, or a `timeout` / `timeout_ms` that is
+// zero, malformed or above [`MAX_FLOW_TIMEOUT`] fails [`crate::parse`].
+// Setting both `timeout` and `timeout_ms` fails [`crate::validate`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FlowConfig {
-    /// Hard timeout for the entire flow, in milliseconds.
+    /// Hard timeout for the entire flow, in milliseconds (at most 24h).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<FlowTimeoutMillis>,
-    /// Human-readable timeout (e.g. `"30s"`) — alternative to `timeout_ms`.
+    /// Human-readable timeout (e.g. `"30s"`) — alternative to `timeout_ms`: a
+    /// whole number followed by `ms`, `s`, `m` or `h` (a bare number is
+    /// seconds), at most 24h.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<FlowTimeout>,
     /// Cap on the number of step executions, to prevent infinite loops.
     /// Defaults to 1000.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "json-schema", schemars(range(max = u64::MAX)))]
     pub max_steps: Option<NonZeroU64>,
-    /// How the runtime reacts when a step errors. Defaults to [`OnError::Stop`].
+    /// How the runtime reacts when a step errors. Defaults to `"stop"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_error: Option<OnError>,
 }
@@ -179,6 +203,7 @@ impl FlowConfig {
 
 /// What the runtime does when a step returns an error.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum OnError {
     /// Stop the flow and return the step's error.
@@ -316,15 +341,65 @@ impl From<FlowTimeoutMillis> for u64 {
     }
 }
 
+#[cfg(feature = "json-schema")]
+impl schemars::JsonSchema for FlowTimeout {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FlowTimeout".into()
+    }
+
+    // One alternative per unit, each spelling out `1..=MAX_FLOW_TIMEOUT` in
+    // that unit (leading zeros allowed, as `FromStr` allows them):
+    // 86_400_000ms, 86_400s (or bare), 1_440m, 24h. The schema round-trip
+    // tests in lib.rs check both ends of every range against `FromStr`, so a
+    // change to MAX_FLOW_TIMEOUT that is not carried here fails them.
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": concat!(
+                "^0*(",
+                "([1-9][0-9]{0,6}|[1-7][0-9]{7}|8[0-5][0-9]{6}|86[0-3][0-9]{5}|86400000)ms",
+                "|([1-9][0-9]{0,3}|[1-7][0-9]{4}|8[0-5][0-9]{3}|86[0-3][0-9]{2}|86400)s?",
+                "|([1-9][0-9]{0,2}|1[0-3][0-9]{2}|14[0-3][0-9]|1440)m",
+                "|([1-9]|1[0-9]|2[0-4])h",
+                ")$"
+            ),
+        })
+    }
+}
+
+#[cfg(feature = "json-schema")]
+impl schemars::JsonSchema for FlowTimeoutMillis {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FlowTimeoutMillis".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": MAX_FLOW_TIMEOUT.as_millis(),
+        })
+    }
+}
+
 impl fmt::Display for FlowTimeout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.text)
     }
 }
 
-/// One row of [`WaferFlow::config_map`]: a user-facing flow-config key is
+/// One row of a flow's `config_map`: a user-facing flow-config key is
 /// forwarded into `target` block's config under `key`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct ConfigMapEntry {
     /// Block name receiving the value (e.g. `"crypto/jwt-sign"`).
     pub target: String,
