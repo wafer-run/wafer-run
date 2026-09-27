@@ -14,12 +14,17 @@ use std::{collections::HashMap, sync::Mutex};
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::interfaces::database::service::{pk, Column, DataType, DatabaseService, Table};
 
-/// Every statement SQLite ran, as its trace reported it. One test in this
-/// binary, so nothing else writes here.
+/// Every statement the service sent SQLite, as its trace reported it. One
+/// test in this binary, so nothing else writes here.
 static STATEMENTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// SQLite also traces the statements it runs inside one (a `pragma_*`
+/// table-valued function's `PRAGMA`), prefixed `-- `; those are not
+/// statements the service sent, so they are not counted.
 fn trace(sql: &str) {
-    STATEMENTS.lock().unwrap().push(sql.to_string());
+    if !sql.starts_with("-- ") {
+        STATEMENTS.lock().unwrap().push(sql.to_string());
+    }
 }
 
 /// Take the statements traced so far, leaving the log empty.
