@@ -68,10 +68,7 @@ impl SQLiteDatabaseService {
     /// and moving it onto a dedicated worker thread. No read pool: the
     /// connection's origin (file, memory, shared cache) is unknown here, so
     /// additional connections cannot be opened safely.
-    ///
-    /// For a connection the caller configured first — an attached database,
-    /// a loaded extension, a statement trace.
-    pub fn new(db: Connection) -> Self {
+    pub(crate) fn new(db: Connection) -> Self {
         apply_pragmas(&db);
         Self {
             write: ConnWorker::spawn(db, "sqlite-write"),

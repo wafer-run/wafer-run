@@ -19,6 +19,11 @@ pub mod service;
 /// on an executor thread.
 mod worker;
 
+/// How many statements the shared executor's operations send SQLite,
+/// counted by SQLite's own statement trace.
+#[cfg(test)]
+mod statement_count_tests;
+
 /// Register the `sqlite-vec` extension with SQLite's auto-extension list
 /// the first time this is called. Safe to call repeatedly — after the
 /// first successful registration, subsequent calls are no-ops.
