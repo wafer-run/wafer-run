@@ -2099,6 +2099,12 @@
 
 ### Fixed
 
+- `clients::database::get_by_field` (and `upsert_by_field`, which calls it)
+  runs one statement, the `SELECT … LIMIT 1`. It used to leave
+  `skip_count` unset, so the backend also ran a `SELECT COUNT(*)` over every
+  matching row that nothing read — on D1, a second statement against the
+  per-invocation budget on every lookup, batched into the same round trip.
+
 - A `#[wafer_block]` guest handed a `__wafer_handle` or `__wafer_lifecycle`
   frame it cannot decode answers with an `Internal` error naming the frame
   type and the decode cause, which the host surfaces as the call's error.

@@ -471,6 +471,9 @@ dual_api! {
 
     /// Fetch the first record in `collection` where `field == value`.
     /// Returns `Err(NOT_FOUND)` if no row matches.
+    ///
+    /// One `SELECT … LIMIT 1`: sets `skip_count: true`, since nothing here
+    /// reads a total.
     pub fn get_by_field(ctx, collection: &str, field: &str, value: serde_json::Value) -> Result<Record, WaferError> {
         let result = svc_fn!(ctx, list(
             collection,
@@ -481,6 +484,7 @@ dual_api! {
                     value,
                 }],
                 limit: Some(1),
+                skip_count: true,
                 ..Default::default()
             }
         ))?;

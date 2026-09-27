@@ -27,6 +27,8 @@ default = []
 vectors = ["dep:sqlite-vec", "rusqlite/functions"]
 
 [dev-dependencies]
+# `trace` lets a test count the statements that reach SQLite.
+rusqlite = { workspace = true, features = ["trace"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wafer-block-fastembed = { path = "../wafer-block-fastembed" }
 # Enable the shared DatabaseService conformance suite for tests/conformance.rs.
