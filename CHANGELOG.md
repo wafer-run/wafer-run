@@ -1610,6 +1610,14 @@
   and dispatches through it, so an embedder's own `Context` (a test harness
   standing in for the runtime) runs the same gates instead of copying them.
   `DEFAULT_MAX_CALL_DEPTH` (16) is public there.
+- `Wafer::rejected_grants()` returns the grant declarations `seal()` will
+  refuse boot over with `RuntimeError::GrantsRejected` — each registered
+  block's malformed grants, typed Network/Crypto grants from a block other
+  than the admin block, and namespace grants on resources the block does not
+  own — without sealing. It covers the blocks registered so far: lockfile
+  blocks `seal()` downloads add theirs during `seal()`. A test harness that registers blocks into a
+  throwaway `Wafer` to collect their grants can now refuse a declaration the
+  way boot does instead of silently missing it from `wrap_grants()`.
 - `database.batch` takes a filtered delete, `DeleteWhere { collection,
   filters }`, with the semantics of `database.delete_where_count`: it
   removes every row the AND-combined leaf filters match (no filters: every

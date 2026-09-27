@@ -26,9 +26,9 @@ pub(crate) struct WrapState {
     /// Effective capabilities per block: declared ∩ config, and for a WASM
     /// block ∩ its bound. Computed by `seal()`.
     pub(crate) effective_capabilities: Arc<HashMap<String, wafer_block::BlockCapabilities>>,
-    /// Accumulator for grant-validation failures; drained + checked by
-    /// `Wafer::start()`, which fails boot with `RuntimeError::GrantsRejected`
-    /// if non-empty.
+    /// Accumulator for grant-validation failures, read by
+    /// `Wafer::rejected_grants`; drained + checked by `seal()`, which fails
+    /// boot with `RuntimeError::GrantsRejected` if non-empty.
     pub(crate) validation_errors: Vec<wafer_block::error::GrantValidationError>,
 }
 

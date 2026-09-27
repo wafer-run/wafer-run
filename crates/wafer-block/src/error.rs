@@ -127,7 +127,9 @@ pub enum RuntimeError {
 
     // ── Grant validation ────────────────────────────────────────────────
     /// One or more block grant declarations were rejected during validation.
-    /// `Wafer::start()` returns this instead of silently dropping the grants.
+    /// `Wafer::seal()` (which `Wafer::start()` runs) returns this instead of
+    /// silently dropping the grants; `Wafer::rejected_grants()` lists them
+    /// before sealing.
     /// Remediation: relocate the grants to the block configured via
     /// `Wafer::set_admin_block(...)` or remove them.
     #[error("{}", render_boot_error_list("typed grant(s) rejected", .0, render_grant_rejection))]
@@ -198,7 +200,7 @@ impl From<crate::types::BlockInfoError> for RuntimeError {
 
 /// Detail of a single grant-validation rejection from
 /// `validate_and_collect_grants_for_block`. Aggregated into
-/// `RuntimeError::GrantsRejected` so `Wafer::start()` can refuse boot
+/// `RuntimeError::GrantsRejected` so `Wafer::seal()` can refuse boot
 /// with all rejections listed in one error.
 #[derive(Debug, Clone)]
 pub struct GrantValidationError {

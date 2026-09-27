@@ -324,6 +324,34 @@ impl Wafer {
         &self.registration.wrap.grants
     }
 
+    /// The rejected grant declarations of the blocks registered so far — the
+    /// list `seal()` refuses boot over with [`RuntimeError::GrantsRejected`]:
+    /// every grant a registered block declared that
+    /// [`BlockInfo::grants`](wafer_block::BlockInfo::grants) validation
+    /// rejected — a malformed grant, a typed Network/Crypto grant from a
+    /// block other than the admin block, or a namespace grant on a resource
+    /// the declaring block does not own. Each entry names the block under
+    /// its registration name.
+    ///
+    /// Read it after registering, before sealing, to refuse the same way
+    /// boot does without sealing — what a test harness that registers blocks
+    /// into a throwaway `Wafer` to collect their grants needs, since the
+    /// rejected ones are absent from [`Self::wrap_grants`] and nothing else
+    /// reports them. Empty once `seal()` has drained it into the error.
+    ///
+    /// A pre-seal read covers only blocks already registered. `seal()` first
+    /// registers the lockfile-pinned blocks it downloads (their cache was
+    /// missing), and their rejections join this list before it is checked;
+    /// `seal()` can also fail earlier, with `BlocksNotFound`, before the
+    /// grant check runs.
+    ///
+    /// A typed Network/Crypto grant registered while no admin block is set is
+    /// neither accepted nor rejected yet: [`Self::set_admin_block`] re-checks
+    /// every registered block's grants and replaces this list.
+    pub fn rejected_grants(&self) -> &[wafer_block::error::GrantValidationError] {
+        &self.registration.wrap.validation_errors
+    }
+
     /// Get the admin block ID (read-only).
     pub fn wrap_admin_block(&self) -> &Arc<String> {
         &self.registration.wrap.admin_block
