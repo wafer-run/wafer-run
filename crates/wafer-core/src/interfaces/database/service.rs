@@ -880,10 +880,16 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         ))
     }
 
-    /// Upsert `spec` into `collection`. SQL backends implement this via
-    /// `DbExec::upsert`; a backend that cannot express `ON CONFLICT` must
+    /// Upsert `spec` into `collection` in one statement, answering the row
+    /// as the statement left it (inserted, or updated on conflict), or `None`
+    /// when `DO NOTHING` kept the existing row. SQL backends implement this
+    /// via `DbExec::upsert`; a backend that cannot express `ON CONFLICT` must
     /// return an explicit error. No default — every backend states its choice.
-    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError>;
+    async fn upsert(
+        &self,
+        collection: &str,
+        spec: UpsertSpec,
+    ) -> Result<Option<Record>, DatabaseError>;
 
     /// Grouped aggregate query; no groups for a table that does not exist.
     /// SQL backends implement this via `DbExec::aggregate`. No default —

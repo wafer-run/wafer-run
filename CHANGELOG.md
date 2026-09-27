@@ -4,6 +4,23 @@
 
 ### Breaking changes
 
+- `DatabaseService::upsert` returns `Result<Option<Record>, DatabaseError>`
+  — the row as the statement left it (inserted, or updated on conflict), or
+  `None` when `DO NOTHING` kept the existing row — instead of an affected
+  count. The shared `DbExec::upsert` runs the same single
+  `INSERT … ON CONFLICT …` with `RETURNING *`, through
+  `run_execute_returning` (the write path), so a caller that needs the
+  resulting row, such as a rate limiter reading its counter's new value, gets
+  it without a second query: one statement, counted as one against a
+  per-invocation statement budget (D1). An implementor that writes `upsert`
+  by hand changes its signature; one that forwards with
+  `forward_database_service!` needs nothing. `DbExec::upsert_statement`
+  takes a `returning` flag (`true` for `upsert`, `false` for a batch's
+  `Upsert` op, which still reports only its affected count). The
+  `database.upsert` wire response keeps `rows_affected` (1, or 0 for
+  `DO NOTHING`) and gains `record`, the returned row, omitted when there is
+  none.
+
 - `CryptoError` has a new variant, `Unavailable(String)`, for a backend
   that cannot be reached right now — a remote or out-of-process service (a
   Durable Object doing the hashing, a KMS) that timed out, refused the
@@ -1611,6 +1628,14 @@
   returns as `InvalidArgument`.
 
 ### Added
+
+- `clients::database::upsert_returning` — `upsert`, answering the row the
+  statement left instead of a count (`None` when `DO NOTHING` kept the
+  existing row). For a `WindowedCounter`, that is the counter already
+  incremented or reset, so increment-and-read is one statement.
+  `wafer-sql-utils` gains `upsert::build_upsert_returning` and
+  `upsert::build_windowed_counter_upsert_returning`, the existing builders
+  ending in `RETURNING *`, in both dialects.
 
 - `wafer_run::runtime::call_gates` exposes the admission every
   `call_block` runs before its callee: `admit_call(frame, name, &msg)` applies

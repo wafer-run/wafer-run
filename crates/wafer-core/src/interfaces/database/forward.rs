@@ -788,7 +788,7 @@ macro_rules! __forward_database_step {
                     collection: &str,
                     spec: $crate::interfaces::database::service::UpsertSpec,
                 ) -> ::core::result::Result<
-                    i64,
+                    ::core::option::Option<$crate::interfaces::database::service::Record>,
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::upsert($recv(self), collection, spec).await

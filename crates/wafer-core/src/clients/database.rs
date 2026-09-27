@@ -553,6 +553,37 @@ dual_api! {
         Ok(resp.rows_affected)
     }
 
+    /// [`upsert`], answering the row as the statement left it instead of a
+    /// count: the inserted row, the row updated on conflict (a
+    /// `WindowedCounter` row with its count already incremented or reset),
+    /// or `None` when `DO NOTHING` kept the existing row. Still one
+    /// statement — the same `INSERT … ON CONFLICT … RETURNING *` [`upsert`]
+    /// runs — so an increment and the read of its result cost one round trip.
+    pub fn upsert_returning(
+        ctx,
+        collection: &str,
+        data: Vec<(String, serde_json::Value)>,
+        conflict_columns: Vec<String>,
+        on_conflict: OnConflict,
+    ) -> Result<Option<Record>, WaferError> {
+        let req = UpsertRequest {
+            collection: collection.to_string(),
+            data,
+            conflict_columns,
+            on_conflict,
+        };
+        let bytes = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_UPSERT,
+            &req,
+            Some(collection),
+            true,
+            Some("db")
+        )?;
+        let resp: UpsertResponse = decode(&bytes)?;
+        Ok(resp.record)
+    }
+
     /// Run a grouped aggregate query described by `req` and return one
     /// [`Record`] per group (each carrying the aggregate aliases and any
     /// grouped columns / date buckets). WRAP-authorized (read) against

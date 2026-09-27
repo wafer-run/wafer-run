@@ -274,7 +274,11 @@ mod db_fakes {
         ) -> Result<i64, DatabaseError> {
             Ok(0)
         }
-        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        async fn upsert(
+            &self,
+            _collection: &str,
+            _spec: UpsertSpec,
+        ) -> Result<Option<Record>, DatabaseError> {
             Err(DatabaseError::Internal("fixture: upsert not needed".into()))
         }
         async fn take_where(

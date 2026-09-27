@@ -293,9 +293,13 @@ mod db_fakes {
             self.record("increment_field_where");
             Ok(0)
         }
-        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        async fn upsert(
+            &self,
+            _collection: &str,
+            _spec: UpsertSpec,
+        ) -> Result<Option<Record>, DatabaseError> {
             self.record("upsert");
-            Ok(0)
+            Ok(None)
         }
         async fn aggregate(
             &self,
