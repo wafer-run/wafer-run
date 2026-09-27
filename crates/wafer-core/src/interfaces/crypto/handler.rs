@@ -27,6 +27,9 @@ fn crypto_error_to_wafer(e: CryptoError) -> WaferError {
         e @ CryptoError::MalformedHash(_) => WaferError::new(ErrorCode::Internal, e.to_string()),
         // The same holds for a pepper the service cannot apply.
         e @ CryptoError::Pepper(_) => WaferError::new(ErrorCode::Internal, e.to_string()),
+        // A backend that is down for now is not a server bug: `Unavailable`
+        // lets the caller answer 503 and retry instead of reporting a fault.
+        e @ CryptoError::Unavailable(_) => WaferError::new(ErrorCode::Unavailable, e.to_string()),
         CryptoError::SignError(msg) => WaferError::new(ErrorCode::Internal, msg),
         CryptoError::VerifyError(msg) => WaferError::new(ErrorCode::Unauthenticated, msg),
         CryptoError::Other(msg) => WaferError::new(ErrorCode::Internal, msg),

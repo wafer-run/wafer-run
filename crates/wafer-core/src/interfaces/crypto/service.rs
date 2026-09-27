@@ -23,13 +23,24 @@ pub enum CryptoError {
     /// invalid. A server configuration fault, never a wrong password.
     #[error("password pepper: {0}")]
     Pepper(String),
+    /// The backend that does the work cannot be reached right now: a remote
+    /// or out-of-process service (a Durable Object, a KMS, a hashing
+    /// service) timed out, refused the connection, or is overloaded. The
+    /// request itself is sound and may succeed if retried, so the handler
+    /// answers `Unavailable` rather than `Internal`. A fault that retrying
+    /// cannot fix — a bad key, a malformed hash, a pepper the service does
+    /// not hold, a bug in the computation — is not this variant.
+    #[error("crypto backend unavailable: {0}")]
+    Unavailable(String),
     /// Failure while issuing / signing a token.
     #[error("sign error: {0}")]
     SignError(String),
     /// Failure while verifying / decoding a token.
     #[error("verify error: {0}")]
     VerifyError(String),
-    /// Catch-all variant carrying an arbitrary backend message.
+    /// Catch-all variant carrying an arbitrary backend message; answered as
+    /// `Internal`. A backend that is only temporarily unreachable reports
+    /// [`Unavailable`](Self::Unavailable) instead.
     #[error("{0}")]
     Other(String),
 }
@@ -40,7 +51,11 @@ pub enum CryptoError {
 /// in process, on a blocking pool, or in another isolate or service it has
 /// to wait on (a Cloudflare Durable Object, a KMS holding the signing key).
 /// The crypto block awaits each call on every target, so an implementation
-/// never has to block to answer.
+/// never has to block to answer. An implementation that waits on another
+/// service reports that service being unreachable (a failed or timed-out
+/// fetch, a refused connection) as [`CryptoError::Unavailable`], which the
+/// block answers with `Unavailable` (HTTP 503), not as
+/// [`CryptoError::Other`], which it answers with `Internal` (HTTP 500).
 ///
 /// Tokens are always signed and verified under a key derived for the
 /// calling block, so one block cannot mint or accept another's tokens. The
