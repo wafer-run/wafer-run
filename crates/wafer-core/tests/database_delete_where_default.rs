@@ -120,6 +120,15 @@ impl DatabaseService for MemDb {
     async fn count(&self, _collection: &str, _filters: &[Filter]) -> Result<i64, DatabaseError> {
         Err(unused("count"))
     }
+    async fn increment_field_where(
+        &self,
+        _collection: &str,
+        _col: &str,
+        _delta: i64,
+        _filters: &[Filter],
+    ) -> Result<i64, DatabaseError> {
+        Err(unused("increment_field_where"))
+    }
     async fn sum(
         &self,
         _collection: &str,

@@ -5,7 +5,7 @@
 //!
 //! # The problem
 //!
-//! Six of the trait's operations carry defaults, and none of them is a
+//! Five of the trait's operations carry defaults, and none of them is a
 //! pass-through:
 //!
 //! | operation | default |
@@ -13,7 +13,6 @@
 //! | `delete_where` | `list` then `delete` per row, in a loop until nothing matches |
 //! | `delete_where_count` | `count` then `delete_where` (a TOCTOU window) |
 //! | `update_where_count` | `count` then `update_where` |
-//! | `increment_field_where` | a hard `Internal` error |
 //! | `ensure_schema_tables` | loop over `ensure_schema_table` |
 //! | `set_strict_schema` | a silent no-op |
 //!

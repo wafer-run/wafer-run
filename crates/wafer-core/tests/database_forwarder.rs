@@ -414,8 +414,8 @@ async fn ensure_schema_tables_reaches_the_inner_service() {
     assert_eq!(inner.calls(), vec!["ensure_schema_tables".to_string()]);
 }
 
-/// `increment_field_where`'s default is a hard error, so a decorator that
-/// inherits it turns an atomic counter bump into a 500.
+/// `increment_field_where` has no default, so the ledger's `forward` is the
+/// only way a decorator gets it: the atomic bump must land on the inner service.
 #[tokio::test]
 async fn increment_field_where_reaches_the_inner_service() {
     let (dec, inner) = decorated();
