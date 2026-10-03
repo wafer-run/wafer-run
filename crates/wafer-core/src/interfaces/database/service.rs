@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
+pub use wafer_block::wire::database::RecordData;
 use wafer_block::wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
@@ -736,6 +737,11 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// QueryRaw executes a raw SELECT query.
     ///
+    /// Each record's [`data`](Record::data) holds the row's columns in the
+    /// order the statement returned them — `SELECT b, a, c` iterates `b`,
+    /// `a`, `c` — on every backend. (Two result columns with the same name
+    /// collapse into one entry, the last one's value; alias them apart.)
+    ///
     /// Raw SQL names no single source table, so JSON columns are not decoded
     /// the way the typed reads decode them, and the result differs by backend:
     /// on the SQLite family (native, D1, sql.js) a JSON column comes back as
@@ -959,8 +965,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 pub struct Record {
     /// Primary-key identifier as text.
     pub id: String,
-    /// Remaining columns rendered as a JSON-valued map.
-    pub data: HashMap<String, serde_json::Value>,
+    /// Every column of the row (`id` included), JSON-valued, in the order the
+    /// statement returned them (see [`RecordData`]).
+    pub data: RecordData,
 }
 
 /// RecordList represents a paginated list of records.

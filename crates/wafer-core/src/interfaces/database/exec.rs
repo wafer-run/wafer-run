@@ -29,8 +29,8 @@ use super::{
     codec::{self, encode_json_value, JsonColumns},
     schema_cache::{SchemaCache, TableColumns},
     service::{
-        AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordList,
-        StatementBudget, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+        AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordData,
+        RecordList, StatementBudget, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 
@@ -174,6 +174,15 @@ fn timestamp_now() -> String {
 }
 
 /// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
+/// The row a write echoes back: the columns it wrote, in name order — the
+/// order the INSERT names them in ([`sorted_pairs`]), so the echo is the same
+/// on every run rather than following `HashMap` iteration.
+fn written_columns(data: HashMap<String, serde_json::Value>) -> RecordData {
+    let mut row: RecordData = data.into_iter().collect();
+    row.sort_unstable_keys();
+    row
+}
+
 fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_created: bool) {
     let now = timestamp_now();
     if include_created && !data.contains_key("created_at") {
@@ -550,13 +559,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     // each backend binds it natively. All callers pass single-statement SQL.
     // `json` names the result columns whose text is JSON: a row-returning
     // primitive decodes every row with it (`codec::decode_text` /
-    // `codec::record_from_json_row`) and never guesses from content. The
+    // `codec::record_from_columns`) and never guesses from content. The
     // executor derives it from the declared types of the table a statement
     // reads ([`json_columns`](Self::json_columns)); a statement with no single
     // source table passes `JsonColumns::NONE`.
+    // Every row-returning primitive fills `Record::data` in result-column
+    // order (`RecordData`): `query_raw`'s caller renders a `SELECT b, a, c`
+    // as `b`, `a`, `c`.
 
     /// Run a row-returning query and convert rows to `Record`s, decoding the
-    /// text of `json`'s columns as JSON.
+    /// text of `json`'s columns as JSON. Each record's columns are in the
+    /// order the statement returned them.
     ///
     /// Read path: the statement must have no side effects (a plain `SELECT`).
     /// Implementors that route work along separate read/write paths (e.g.
@@ -1280,14 +1293,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             data.insert("id".to_string(), id);
             return Ok(Record {
                 id: stored.id,
-                data,
+                data: written_columns(data),
             });
         }
         let stmt = wafer_sql_utils::query::build_insert(table, &pairs, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
         let id = data.get("id").map(codec::record_id).unwrap_or_default();
-        Ok(Record { id, data })
+        Ok(Record {
+            id,
+            data: written_columns(data),
+        })
     }
 
     /// Shared `update`: timestamp stamping → lazy column-add → UPDATE-by-id →
@@ -2433,7 +2449,7 @@ mod tests {
             // id echoes the SQL so a decoded row proves which op produced it.
             Record {
                 id: sql.to_string(),
-                data: HashMap::new(),
+                data: RecordData::new(),
             }
         }
     }
@@ -2813,7 +2829,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, decl_type)| Record {
                     id: String::new(),
-                    data: HashMap::from([
+                    data: RecordData::from([
                         ("name".to_string(), serde_json::json!(name)),
                         ("decl_type".to_string(), serde_json::json!(decl_type)),
                     ]),
@@ -2833,11 +2849,11 @@ mod tests {
             vec![
                 Record {
                     id: "r1".into(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 },
                 Record {
                     id: "r2".into(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 },
             ]
         }
@@ -2969,7 +2985,7 @@ mod tests {
                     TxOp::Returning { sql, .. } if sql.starts_with("SELECT") => {
                         TxResult::Returning(vec![Record {
                             id: String::new(),
-                            data: HashMap::from([("g0".to_string(), serde_json::json!(1))]),
+                            data: RecordData::from([("g0".to_string(), serde_json::json!(1))]),
                         }])
                     }
                     TxOp::Returning { .. } => {
@@ -3154,7 +3170,7 @@ mod tests {
                 return Ok(exists
                     .then(|| Record {
                         id: String::new(),
-                        data: HashMap::from([
+                        data: RecordData::from([
                             ("name".to_string(), serde_json::json!("id")),
                             ("decl_type".to_string(), serde_json::json!("TEXT")),
                         ]),
@@ -3170,7 +3186,7 @@ mod tests {
                     .iter()
                     .map(|name| Record {
                         id: String::new(),
-                        data: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+                        data: RecordData::from([("name".to_string(), serde_json::json!(name))]),
                     })
                     .collect());
             }
@@ -3441,7 +3457,7 @@ mod tests {
                 .into_iter()
                 .map(|name| Record {
                     id: String::new(),
-                    data: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+                    data: RecordData::from([("name".to_string(), serde_json::json!(name))]),
                 })
                 .collect())
         }
@@ -4103,7 +4119,7 @@ mod tests {
             let verdict = |holds: i64| {
                 TxResult::Returning(vec![Record {
                     id: String::new(),
-                    data: HashMap::from([("g0".to_string(), serde_json::json!(holds))]),
+                    data: RecordData::from([("g0".to_string(), serde_json::json!(holds))]),
                 }])
             };
             let mut probes = [1, 0].into_iter();

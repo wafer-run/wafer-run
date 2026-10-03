@@ -121,8 +121,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, StatementBudget,
-        UpsertSpec,
+        AggregateSpec, DatabaseError, DatabaseService, Record, RecordData, RecordList,
+        StatementBudget, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -139,7 +139,7 @@ mod db_fakes {
             _collection: &str,
             _spec: AggregateSpec,
         ) -> Result<Vec<Record>, DatabaseError> {
-            let mut data = std::collections::HashMap::new();
+            let mut data = RecordData::new();
             data.insert("status".to_string(), serde_json::json!("active"));
             data.insert("cnt".to_string(), serde_json::json!(7));
             Ok(vec![Record {
@@ -173,7 +173,7 @@ mod db_fakes {
         ) -> Result<Record, DatabaseError> {
             Ok(Record {
                 id: "new".into(),
-                data,
+                data: data.into_iter().collect(),
             })
         }
         async fn create_many(
@@ -223,7 +223,7 @@ mod db_fakes {
         ) -> Result<Record, DatabaseError> {
             Ok(Record {
                 id: id.to_string(),
-                data,
+                data: data.into_iter().collect(),
             })
         }
         async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {

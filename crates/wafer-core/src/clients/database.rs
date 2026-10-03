@@ -7,7 +7,7 @@ use wafer_block::context::Context;
 use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
-pub use wafer_block::wire::database::{Record, RecordList};
+pub use wafer_block::wire::database::{Record, RecordData, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{

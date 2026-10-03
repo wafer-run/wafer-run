@@ -21,7 +21,7 @@ use std::{
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
     AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-    RecordList, StatementBudget, Table, UpsertSpec, WriteOp, WriteOutcome,
+    RecordData, RecordList, StatementBudget, Table, UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ impl RecordingDb {
 fn row(id: &str) -> Record {
     Record {
         id: id.to_string(),
-        data: HashMap::new(),
+        data: RecordData::new(),
     }
 }
 
@@ -114,7 +114,7 @@ impl DatabaseService for RecordingDb {
         Ok(
             wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
                 id: collection.to_string(),
-                data,
+                data: data.into_iter().collect(),
             }),
         )
     }

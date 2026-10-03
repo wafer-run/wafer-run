@@ -2,7 +2,7 @@
 //!
 //! A SQL backend that reads a row has to answer the same three questions each
 //! time: how a column's raw value becomes a [`serde_json::Value`], how a row
-//! map becomes a [`Record`], and how a single-column aggregate row becomes a
+//! row becomes a [`Record`], and how a single-column aggregate row becomes a
 //! scalar. This module answers them once, so the same row reads the same way
 //! on native SQLite, PostgreSQL, Cloudflare D1 and the browser's sql.js — and
 //! says how a value is written to a JSON column, so it reads back as written.
@@ -41,9 +41,7 @@
 //! A JSON column whose text does not parse (a value written before the column
 //! was declared JSON, say) is returned verbatim as a string rather than lost.
 
-use std::collections::HashMap;
-
-use super::service::Record;
+use super::service::{Record, RecordData};
 
 /// The columns of a result row that hold JSON text, by name.
 ///
@@ -104,29 +102,34 @@ pub fn decode_text(column: &str, text: &str, json: &JsonColumns) -> serde_json::
     serde_json::Value::String(text.to_string())
 }
 
-/// Convert a result row already shaped as a JSON object (column name → value)
-/// into a [`Record`], decoding the text of `json`'s columns.
+/// Convert a result row — its columns as name → value pairs, **in the order
+/// the statement returned them** — into a [`Record`], decoding the text of
+/// `json`'s columns.
 ///
 /// Every string-valued column goes through [`decode_text`], so a backend that
-/// hands rows over as JSON (Cloudflare D1, the sql.js bridge) decodes them
-/// exactly as a backend reading native column values does. `id` is copied into
-/// [`Record::id`] **and** retained in [`Record::data`]: row decoders in block
-/// repositories consume the complete column map.
+/// hands rows over as JS values (Cloudflare D1, the sql.js bridge) decodes
+/// them exactly as a backend reading native column values does. `id` is
+/// copied into [`Record::id`] **and** retained in [`Record::data`]: row
+/// decoders in block repositories consume the complete column map.
 ///
-/// A non-object row yields an empty record — the caller asked for a row shape
-/// the backend did not produce, and there is no id to report.
+/// [`Record::data`] keeps the pairs' order (see [`RecordData`]), so a backend
+/// must hand them over in result-column order. A `serde_json::Value` object
+/// cannot carry that order — `serde_json::Map` sorts its keys — which is why
+/// this takes pairs rather than a JSON row. Zip a positional row with the
+/// result's column names where the driver offers them (sql.js does): that is
+/// exact. A driver that only hands rows over as JS objects (D1) can be
+/// deserialized into a [`RecordData`], which keeps the object's own-key order
+/// — column order, except that JS enumerates integer-like names (`SELECT 1`)
+/// first and an object holds one of two same-named columns.
 #[must_use]
-pub fn record_from_json_row(row: serde_json::Value, json: &JsonColumns) -> Record {
-    let serde_json::Value::Object(map) = row else {
-        return Record {
-            id: String::new(),
-            data: HashMap::new(),
-        };
-    };
-
-    let mut data: HashMap<String, serde_json::Value> = HashMap::with_capacity(map.len());
+pub fn record_from_columns<I>(row: I, json: &JsonColumns) -> Record
+where
+    I: IntoIterator<Item = (String, serde_json::Value)>,
+{
+    let row = row.into_iter();
+    let mut data = RecordData::with_capacity(row.size_hint().0);
     let mut id = String::new();
-    for (name, value) in map {
+    for (name, value) in row {
         let value = match value {
             serde_json::Value::String(s) => decode_text(&name, &s, json),
             other => other,

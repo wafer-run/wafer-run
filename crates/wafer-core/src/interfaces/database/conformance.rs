@@ -265,6 +265,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_aggregate(svc).await;
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
+    check_rows_keep_their_column_order(svc).await;
     check_json_value_round_trip(svc).await;
     check_typed_values_round_trip(svc).await;
     check_names_are_verbatim_and_reads_never_reshape(svc).await;
@@ -3410,6 +3411,49 @@ async fn check_raw_sql(svc: &dyn DatabaseService) {
         .expect("exec_raw delete");
     assert_eq!(deleted, 1, "exec_raw delete affected-row count");
     assert_eq!(svc.count("conf_exec", &[]).await.unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// column order
+// ---------------------------------------------------------------------------
+
+fn column_names(record: &Record) -> Vec<&str> {
+    record.data.keys().map(String::as_str).collect()
+}
+
+/// A record lists its columns in the order the statement returned them: a
+/// `query_raw` row in its `SELECT` order (an alias in place, `id` where the
+/// statement put it), and a `get` — `SELECT *` — in the table's declaration
+/// order. Neither name order nor a hash order.
+async fn check_rows_keep_their_column_order(svc: &dyn DatabaseService) {
+    seed_read_fixture(svc).await;
+
+    let rows = svc
+        .query_raw(
+            "SELECT score, name, id, category AS c_alias, amount FROM conf_read WHERE id = 'r1'",
+            &[],
+        )
+        .await
+        .expect("query_raw");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        column_names(&rows[0]),
+        ["score", "name", "id", "c_alias", "amount"],
+        "query_raw must keep the SELECT's column order"
+    );
+    assert_eq!(rows[0].id, "r1", "an `id` anywhere in the SELECT is the id");
+
+    let got = svc.get("conf_read", "r1").await.expect("get");
+    let declared: Vec<String> = crud_table("conf_read")
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(
+        column_names(&got),
+        declared,
+        "a whole-row read lists the table's columns in declaration order"
+    );
 }
 
 // ---------------------------------------------------------------------------

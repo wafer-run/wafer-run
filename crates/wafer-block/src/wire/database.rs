@@ -762,14 +762,30 @@ pub enum GroupByDef {
 
 // --- Responses ---
 
+/// The columns of one result row, name → value, **in the order the statement
+/// returned them**: a `SELECT b, a, c` row iterates `b`, `a`, `c`, and a
+/// `SELECT *` row iterates the table's columns in declaration order.
+///
+/// A backend fills it in result-column order, and the order survives the
+/// wire: the row encodes as a map whose keys are written in that order, so a
+/// peer decoding into an ordered map sees the statement's order. That is the
+/// whole contract — the encoded shape is the same map an unordered
+/// `HashMap<String, Value>` produced, so a peer built against an older
+/// `wafer-block` (which decodes into a `HashMap`) reads it unchanged, and a
+/// row from an older peer still decodes here (in whatever order it was sent).
+///
+/// Look a column up by name (`get`) as with any map. Remove one with
+/// `shift_remove`, which keeps the remaining columns in order.
+pub type RecordData = indexmap::IndexMap<String, serde_json::Value>;
+
 /// Single record returned by `get`, `create`, `update`. Matches
 /// `interfaces::database::service::Record`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     /// Primary-key id of the row.
     pub id: String,
-    /// Column → value map.
-    pub data: HashMap<String, serde_json::Value>,
+    /// Column → value map, in result-column order (see [`RecordData`]).
+    pub data: RecordData,
 }
 
 /// Paginated list of records returned by `list`.
@@ -1008,7 +1024,7 @@ mod tests {
 
     #[test]
     fn record_round_trips() {
-        let mut data = HashMap::new();
+        let mut data = RecordData::new();
         data.insert("k".into(), serde_json::json!("v"));
         let original = Record {
             id: "r1".into(),
@@ -1020,12 +1036,64 @@ mod tests {
         assert_eq!(decoded.data.get("k"), Some(&serde_json::json!("v")));
     }
 
+    /// A `SELECT b, a, c` row in result-column order.
+    fn bac_record() -> Record {
+        Record {
+            id: String::new(),
+            data: RecordData::from([
+                ("b".to_string(), serde_json::json!(2)),
+                ("a".to_string(), serde_json::json!(1)),
+                ("c".to_string(), serde_json::json!(3)),
+            ]),
+        }
+    }
+
+    fn column_names(record: &Record) -> Vec<&str> {
+        record.data.keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn record_keeps_its_column_order_across_the_wire() {
+        let decoded: Record =
+            codec::decode(&codec::encode(&bac_record()).expect("encode")).expect("decode");
+        assert_eq!(column_names(&decoded), ["b", "a", "c"]);
+
+        // The JSON forms (core ABI v1, `HOST_CODEC_JSON` guests) write the
+        // keys in the same order.
+        let json = serde_json::to_string(&bac_record()).expect("to json");
+        assert_eq!(json, r#"{"id":"","data":{"b":2,"a":1,"c":3}}"#);
+        let decoded: Record = serde_json::from_str(&json).expect("from json");
+        assert_eq!(column_names(&decoded), ["b", "a", "c"]);
+    }
+
+    /// `Record` as `wafer-block` declared it before rows kept their column
+    /// order: the same field names, `data` an unordered map.
+    #[derive(Serialize, Deserialize)]
+    struct UnorderedRecord {
+        id: String,
+        data: HashMap<String, serde_json::Value>,
+    }
+
+    #[test]
+    fn an_ordered_record_is_wire_compatible_with_an_unordered_peer() {
+        // Newer host → older guest: the older peer decodes the same map.
+        let old: UnorderedRecord =
+            codec::decode(&codec::encode(&bac_record()).expect("encode")).expect("decode");
+        assert_eq!(old.data.len(), 3);
+        assert_eq!(old.data.get("a"), Some(&serde_json::json!(1)));
+
+        // Older peer → newer: its rows still decode, in the order it sent.
+        let new: Record = codec::decode(&codec::encode(&old).expect("encode")).expect("decode");
+        assert_eq!(new.data.len(), 3);
+        assert_eq!(new.data.get("b"), Some(&serde_json::json!(2)));
+    }
+
     #[test]
     fn record_list_round_trips() {
         let original = RecordList {
             records: vec![Record {
                 id: "r1".into(),
-                data: HashMap::new(),
+                data: RecordData::new(),
             }],
             total_count: 1,
             page: 1,
@@ -1269,7 +1337,7 @@ mod tests {
     fn schema_lock_record() {
         let r = Record {
             id: String::new(),
-            data: HashMap::new(),
+            data: RecordData::new(),
         };
         let encoded = codec::encode(&r).expect("encode");
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
@@ -1398,7 +1466,7 @@ mod tests {
     fn batch_response_round_trips_every_result() {
         let record = Record {
             id: "1".into(),
-            data: HashMap::new(),
+            data: RecordData::new(),
         };
         let original = BatchResponse {
             results: vec![
@@ -1459,7 +1527,7 @@ mod tests {
             InsertGuardedResponse::Inserted {
                 record: Record {
                     id: "1".into(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 },
             },
         ] {

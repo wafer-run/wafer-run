@@ -83,7 +83,7 @@ impl DatabaseService for RecordingDb {
         self.record("create");
         Ok(Record {
             id: "new".into(),
-            data,
+            data: data.into_iter().collect(),
         })
     }
     async fn create_many(
@@ -118,7 +118,7 @@ impl DatabaseService for RecordingDb {
         Ok(
             wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
                 id: collection.to_string(),
-                data,
+                data: data.into_iter().collect(),
             }),
         )
     }
@@ -141,7 +141,7 @@ impl DatabaseService for RecordingDb {
         self.record("update");
         Ok(Record {
             id: id.to_string(),
-            data,
+            data: data.into_iter().collect(),
         })
     }
     async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {

@@ -8,7 +8,7 @@ repository = "https://github.com/wafer-run/wafer-run"
 
 [features]
 default = ["wasm"]
-wasmi = ["dep:wasmi", "dep:getrandom"]
+wasmi = ["dep:wasmi", "dep:getrandom", "dep:serde-transcode"]
 # `wasm` bundles "needs full async runtime + seal-time download of
 # lockfile-pinned blocks": wasmi interpreter, reqwest + flate2 + tar for the
 # download, and tokio's rt + rt-multi-thread for native-side hosting.
@@ -52,6 +52,9 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 toml = { workspace = true }
 rmp-serde = "1.3"
+# JSON ⇄ MessagePack for JSON-codec guests, keeping map key order (see
+# `wasm/wasmi_loader/transcode.rs`).
+serde-transcode = { version = "1.1", optional = true }
 
 # WASM (wasmi interpreter engine)
 wasmi = { workspace = true, optional = true }

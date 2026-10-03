@@ -972,6 +972,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.2.17",
+ "indexmap",
  "linkme",
  "rmp-serde",
  "serde",

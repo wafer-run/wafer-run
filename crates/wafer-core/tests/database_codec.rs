@@ -8,6 +8,7 @@
 //! live service decodes by the table's declared types) is pinned by
 //! `conformance::run_conformance`.
 
+use serde_json::json;
 use wafer_core::interfaces::database::codec::{self, JsonColumns};
 
 fn json_columns(names: &[&str]) -> JsonColumns {
@@ -83,81 +84,102 @@ fn json_column_names_match_case_insensitively() {
 }
 
 // ---------------------------------------------------------------------------
-// record_from_json_row
+// record_from_columns
 // ---------------------------------------------------------------------------
 
+/// A row as a JS-value backend hands it over: name → value pairs in result
+/// column order.
+fn row(pairs: &[(&str, serde_json::Value)]) -> Vec<(String, serde_json::Value)> {
+    pairs
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), value.clone()))
+        .collect()
+}
+
 #[test]
-fn record_from_json_row_splits_out_the_id_and_keeps_it_in_data() {
-    let rec = codec::record_from_json_row(
-        serde_json::json!({
-            "id": "r1",
-            "name": "alpha",
-        }),
+fn record_from_columns_splits_out_the_id_and_keeps_it_in_data() {
+    let rec = codec::record_from_columns(
+        row(&[("id", json!("r1")), ("name", json!("alpha"))]),
         JsonColumns::NONE,
     );
     assert_eq!(rec.id, "r1");
-    assert_eq!(rec.data.get("id"), Some(&serde_json::json!("r1")));
-    assert_eq!(rec.data.get("name"), Some(&serde_json::json!("alpha")));
+    assert_eq!(rec.data.get("id"), Some(&json!("r1")));
+    assert_eq!(rec.data.get("name"), Some(&json!("alpha")));
 }
 
 #[test]
-fn record_from_json_row_stringifies_a_numeric_id() {
-    let rec = codec::record_from_json_row(serde_json::json!({ "id": 7 }), JsonColumns::NONE);
+fn record_from_columns_keeps_the_result_column_order() {
+    // `SELECT b, a, id, c`: not name order, not insertion into a hash map.
+    let rec = codec::record_from_columns(
+        row(&[
+            ("b", json!(2)),
+            ("a", json!("[1]")),
+            ("id", json!("r1")),
+            ("c", json!(null)),
+        ]),
+        &json_columns(&["a"]),
+    );
+    let names: Vec<&str> = rec.data.keys().map(String::as_str).collect();
+    assert_eq!(names, ["b", "a", "id", "c"]);
+    assert_eq!(
+        rec.data.get("a"),
+        Some(&json!([1])),
+        "still decoded in place"
+    );
+}
+
+#[test]
+fn record_from_columns_stringifies_a_numeric_id() {
+    let rec = codec::record_from_columns(row(&[("id", json!(7))]), JsonColumns::NONE);
     assert_eq!(rec.id, "7");
-    assert_eq!(rec.data.get("id"), Some(&serde_json::json!(7)));
+    assert_eq!(rec.data.get("id"), Some(&json!(7)));
 }
 
 #[test]
-fn record_from_json_row_parses_only_the_json_columns() {
+fn record_from_columns_parses_only_the_json_columns() {
     // A row as D1 and sql.js hand it over: every text column is a string.
-    let rec = codec::record_from_json_row(
-        serde_json::json!({
-            "id": "[1]",
-            "payload": r#"{"k":[1,2]}"#,
-            "tags": "[\"a\"]",
-            "title": "[1]",
-            "note": "{}",
-        }),
+    let rec = codec::record_from_columns(
+        row(&[
+            ("id", json!("[1]")),
+            ("payload", json!(r#"{"k":[1,2]}"#)),
+            ("tags", json!("[\"a\"]")),
+            ("title", json!("[1]")),
+            ("note", json!("{}")),
+        ]),
         &json_columns(&["payload", "tags"]),
     );
-    assert_eq!(
-        rec.data.get("payload"),
-        Some(&serde_json::json!({"k":[1,2]}))
-    );
-    assert_eq!(rec.data.get("tags"), Some(&serde_json::json!(["a"])));
-    assert_eq!(rec.data.get("title"), Some(&serde_json::json!("[1]")));
-    assert_eq!(rec.data.get("note"), Some(&serde_json::json!("{}")));
+    assert_eq!(rec.data.get("payload"), Some(&json!({"k":[1,2]})));
+    assert_eq!(rec.data.get("tags"), Some(&json!(["a"])));
+    assert_eq!(rec.data.get("title"), Some(&json!("[1]")));
+    assert_eq!(rec.data.get("note"), Some(&json!("{}")));
     assert_eq!(rec.id, "[1]", "a JSON-looking id is still the id");
 }
 
 #[test]
-fn record_from_json_row_on_a_non_object_is_an_empty_record() {
-    let rec = codec::record_from_json_row(serde_json::json!(5), JsonColumns::NONE);
+fn record_from_columns_on_no_columns_is_an_empty_record() {
+    let rec = codec::record_from_columns(Vec::new(), JsonColumns::NONE);
     assert_eq!(rec.id, "");
     assert!(rec.data.is_empty());
 }
 
 #[test]
-fn record_from_json_row_leaves_non_string_columns_alone() {
-    let rec = codec::record_from_json_row(
-        serde_json::json!({
-            "id": "r1",
-            "n": 3,
-            "f": 1.5,
-            "b": true,
-            "nil": serde_json::Value::Null,
-            "obj": {"already": "structured"},
-        }),
+fn record_from_columns_leaves_non_string_columns_alone() {
+    let rec = codec::record_from_columns(
+        row(&[
+            ("id", json!("r1")),
+            ("n", json!(3)),
+            ("f", json!(1.5)),
+            ("b", json!(true)),
+            ("nil", serde_json::Value::Null),
+            ("obj", json!({"already": "structured"})),
+        ]),
         &json_columns(&["n", "f", "b", "nil", "obj"]),
     );
-    assert_eq!(rec.data.get("n"), Some(&serde_json::json!(3)));
-    assert_eq!(rec.data.get("f"), Some(&serde_json::json!(1.5)));
-    assert_eq!(rec.data.get("b"), Some(&serde_json::json!(true)));
+    assert_eq!(rec.data.get("n"), Some(&json!(3)));
+    assert_eq!(rec.data.get("f"), Some(&json!(1.5)));
+    assert_eq!(rec.data.get("b"), Some(&json!(true)));
     assert_eq!(rec.data.get("nil"), Some(&serde_json::Value::Null));
-    assert_eq!(
-        rec.data.get("obj"),
-        Some(&serde_json::json!({"already": "structured"}))
-    );
+    assert_eq!(rec.data.get("obj"), Some(&json!({"already": "structured"})));
 }
 
 // ---------------------------------------------------------------------------

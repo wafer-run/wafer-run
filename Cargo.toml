@@ -59,6 +59,8 @@ wafer-net-security = { path = "crates/wafer-net-security" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.129"
 serde_bytes = "0.11"
+# Ordered maps: a database row keeps its columns in statement order.
+indexmap = { version = "2", features = ["serde"] }
 thiserror = "2"
 url = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
