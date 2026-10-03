@@ -766,7 +766,7 @@ pub enum GroupByDef {
 /// returned them**: a `SELECT b, a, c` row iterates `b`, `a`, `c`, and a
 /// `SELECT *` row iterates the table's columns in declaration order.
 ///
-/// Every backend fills it in result-column order, and the order survives the
+/// A backend fills it in result-column order, and the order survives the
 /// wire: the row encodes as a map whose keys are written in that order, so a
 /// peer decoding into an ordered map sees the statement's order. That is the
 /// whole contract — the encoded shape is the same map an unordered

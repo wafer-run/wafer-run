@@ -115,9 +115,12 @@ pub fn decode_text(column: &str, text: &str, json: &JsonColumns) -> serde_json::
 /// [`Record::data`] keeps the pairs' order (see [`RecordData`]), so a backend
 /// must hand them over in result-column order. A `serde_json::Value` object
 /// cannot carry that order — `serde_json::Map` sorts its keys — which is why
-/// this takes pairs rather than a JSON row: deserialize a driver's row into a
-/// [`RecordData`] (a JS object's own keys enumerate in insertion order, which
-/// is column order), or zip its column names with a positional row.
+/// this takes pairs rather than a JSON row. Zip a positional row with the
+/// result's column names where the driver offers them (sql.js does): that is
+/// exact. A driver that only hands rows over as JS objects (D1) can be
+/// deserialized into a [`RecordData`], which keeps the object's own-key order
+/// — column order, except that JS enumerates integer-like names (`SELECT 1`)
+/// first and an object holds one of two same-named columns.
 #[must_use]
 pub fn record_from_columns<I>(row: I, json: &JsonColumns) -> Record
 where
