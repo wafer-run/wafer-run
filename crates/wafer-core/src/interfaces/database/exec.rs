@@ -173,7 +173,6 @@ fn timestamp_now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
 /// The row a write echoes back: the columns it wrote, in name order — the
 /// order the INSERT names them in ([`sorted_pairs`]), so the echo is the same
 /// on every run rather than following `HashMap` iteration.
@@ -183,6 +182,7 @@ fn written_columns(data: HashMap<String, serde_json::Value>) -> RecordData {
     row
 }
 
+/// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
 fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_created: bool) {
     let now = timestamp_now();
     if include_created && !data.contains_key("created_at") {

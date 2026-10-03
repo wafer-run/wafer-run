@@ -41,7 +41,7 @@
 //! A JSON column whose text does not parse (a value written before the column
 //! was declared JSON, say) is returned verbatim as a string rather than lost.
 
-use super::service::{Record, RecordData};
+use super::service::{DatabaseError, Record, RecordData};
 
 /// The columns of a result row that hold JSON text, by name.
 ///
@@ -115,12 +115,12 @@ pub fn decode_text(column: &str, text: &str, json: &JsonColumns) -> serde_json::
 /// [`Record::data`] keeps the pairs' order (see [`RecordData`]), so a backend
 /// must hand them over in result-column order. A `serde_json::Value` object
 /// cannot carry that order — `serde_json::Map` sorts its keys — which is why
-/// this takes pairs rather than a JSON row. Zip a positional row with the
-/// result's column names where the driver offers them (sql.js does): that is
-/// exact. A driver that only hands rows over as JS objects (D1) can be
-/// deserialized into a [`RecordData`], which keeps the object's own-key order
-/// — column order, except that JS enumerates integer-like names (`SELECT 1`)
-/// first and an object holds one of two same-named columns.
+/// this takes pairs rather than a JSON row. A driver that answers positional
+/// rows beside the result's column names (sql.js's `exec`, D1's
+/// `raw({ columnNames: true })`) pairs them with [`rows_from_positional`],
+/// which is exact. A JS object row is not: JS enumerates integer-like names
+/// (`SELECT 1`) before the others, so a backend reads positional rows
+/// wherever its driver offers them.
 #[must_use]
 pub fn record_from_columns<I>(row: I, json: &JsonColumns) -> Record
 where
@@ -140,6 +140,38 @@ where
         data.insert(name, value);
     }
     Record { id, data }
+}
+
+/// Pair a positional result — the column names in result order, and each
+/// row's values in that order — into rows of name → value, in that order:
+/// the input [`record_from_columns`] takes.
+///
+/// This is how a backend whose driver answers positional rows (sql.js's
+/// `exec`, D1's `raw({ columnNames: true })`) keeps a result's column order
+/// exactly, integer-like names (`SELECT 1`) included. Two result columns with
+/// one name still collapse into one entry, the last one's value, as they do
+/// in any [`RecordData`]. A row whose length differs from the column list is
+/// not a result the driver produced and is an error rather than truncated.
+///
+/// # Errors
+///
+/// [`DatabaseError::Internal`] naming the row's length and the column count.
+pub fn rows_from_positional(
+    columns: &[String],
+    rows: Vec<Vec<serde_json::Value>>,
+) -> Result<Vec<RecordData>, DatabaseError> {
+    rows.into_iter()
+        .map(|row| {
+            if row.len() != columns.len() {
+                return Err(DatabaseError::Internal(format!(
+                    "a result row has {} values for {} columns",
+                    row.len(),
+                    columns.len()
+                )));
+            }
+            Ok(columns.iter().cloned().zip(row).collect())
+        })
+        .collect()
 }
 
 /// The textual [`Record::id`] for an already-decoded `id` column value.
