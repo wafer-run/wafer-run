@@ -866,19 +866,17 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Implementations must perform this as a single
     /// `UPDATE … SET col = col + delta WHERE …` round-trip — the whole point
-    /// of this op is the absence of a read-modify-write race. The default
-    /// here returns an `Internal` error so backends are forced to override.
+    /// of this op is the absence of a read-modify-write race. No default: a
+    /// backend that forgot it would compile and fail every call at runtime.
+    /// SQL backends forward to
+    /// [`DbExec::increment_field_where`](super::exec::DbExec::increment_field_where).
     async fn increment_field_where(
         &self,
-        _collection: &str,
-        _col: &str,
-        _delta: i64,
-        _filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        Err(DatabaseError::Internal(
-            "increment_field_where is not implemented by this database backend".into(),
-        ))
-    }
+        collection: &str,
+        col: &str,
+        delta: i64,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError>;
 
     /// Upsert `spec` into `collection` in one statement, answering the row
     /// as the statement left it (inserted, or updated on conflict), or `None`

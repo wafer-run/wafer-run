@@ -245,6 +245,17 @@ mod db_fakes {
         async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
             Ok(())
         }
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "fixture: increment_field_where not needed".into(),
+            ))
+        }
         async fn count(
             &self,
             _collection: &str,
