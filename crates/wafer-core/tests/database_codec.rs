@@ -214,3 +214,50 @@ fn scalar_f64_accepts_either_numeric_shape_and_defaults_to_zero() {
     assert!(codec::scalar_f64(Some(serde_json::json!({ "s": "x" }))).abs() < f64::EPSILON);
     assert!(codec::scalar_f64(None).abs() < f64::EPSILON);
 }
+
+// ---------------------------------------------------------------------------
+// rows_from_positional
+// ---------------------------------------------------------------------------
+
+fn names(columns: &[&str]) -> Vec<String> {
+    columns.iter().map(|c| (*c).to_string()).collect()
+}
+
+#[test]
+fn positional_rows_keep_the_select_order_integer_like_names_included() {
+    // `SELECT name, 1, id`: a JS object would enumerate `1` first.
+    let rows = codec::rows_from_positional(
+        &names(&["name", "1", "id"]),
+        vec![vec![json!("x"), json!(1), json!("r1")]],
+    )
+    .expect("pair");
+    let order: Vec<&str> = rows[0].keys().map(String::as_str).collect();
+    assert_eq!(order, ["name", "1", "id"]);
+    let rec = codec::record_from_columns(rows.into_iter().next().unwrap(), JsonColumns::NONE);
+    assert_eq!(rec.id, "r1");
+}
+
+#[test]
+fn positional_rows_collapse_a_duplicate_name_to_the_last_value() {
+    let rows = codec::rows_from_positional(
+        &names(&["v", "w", "v"]),
+        vec![vec![json!(1), json!(2), json!(3)]],
+    )
+    .expect("pair");
+    let order: Vec<&str> = rows[0].keys().map(String::as_str).collect();
+    assert_eq!(order, ["v", "w"], "the first position keeps its place");
+    assert_eq!(rows[0]["v"], json!(3), "the last value wins");
+}
+
+#[test]
+fn positional_rows_with_no_rows_are_empty() {
+    assert!(codec::rows_from_positional(&[], Vec::new())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn a_positional_row_of_the_wrong_length_is_refused() {
+    let err = codec::rows_from_positional(&names(&["a", "b"]), vec![vec![json!(1)]]).unwrap_err();
+    assert!(err.to_string().contains("1 values for 2 columns"), "{err}");
+}

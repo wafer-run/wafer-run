@@ -4,6 +4,34 @@
 
 ### Breaking changes
 
+- A database row keeps its columns in the order the statement returned
+  them (#424). `Record::data`, on the wire type
+  (`wafer_block::wire::database::Record`, re-exported from
+  `wafer_core::clients::database`) and on the service type
+  (`interfaces::database::service::Record`), is now `RecordData`
+  (`IndexMap<String, serde_json::Value>`) instead of
+  `HashMap<String, serde_json::Value>`: `SELECT b, a, c` iterates `b`, `a`,
+  `c`, and a whole-row read iterates the table's columns in declaration
+  order. Code that builds a `Record` builds a `RecordData` (or `.collect()`s
+  into one); code that takes `&HashMap` for a row's columns takes
+  `&RecordData`; `remove` is deprecated on it — use `shift_remove`, which
+  keeps the order. `codec::record_from_json_row(serde_json::Value, …)` is
+  replaced by `codec::record_from_columns(pairs, …)`, because a
+  `serde_json` object sorts its keys; a backend whose driver answers
+  positional rows pairs them with `codec::rows_from_positional`. The wire
+  encoding is unchanged (a map keyed by column name, now written in column
+  order), so a guest built against an older `wafer-block` decodes it as
+  before. The JSON host codec transcodes without materializing a
+  `serde_json::Value`, so JSON-codec guests see the order too.
+
+- `VectorService::list_indexes`, `VectorService::describe_index`,
+  `VectorService::list_ids` and `DatabaseService::increment_field_where`
+  have no default any more (#423). Their defaults returned an `Internal`
+  "not implemented by this backend" error, so a backend that forgot one
+  compiled and failed at runtime; every implementor now states its answer.
+  `forward_database_service!` no longer accepts `increment_field_where:
+  inherit`.
+
 - `DatabaseService::upsert` returns `Result<Option<Record>, DatabaseError>`
   — the row as the statement left it (inserted, or updated on conflict), or
   `None` when `DO NOTHING` kept the existing row — instead of an affected
