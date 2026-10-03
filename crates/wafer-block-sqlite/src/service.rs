@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use base64ct::{Base64, Encoding};
 use rusqlite::{types::Value as SqlValue, Connection, OpenFlags, Row, TransactionBehavior};
@@ -14,7 +11,7 @@ use wafer_core::{
         codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
-        service::{Column, DatabaseError, Record, StatementBudget, Table},
+        service::{Column, DatabaseError, Record, RecordData, StatementBudget, Table},
     },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
@@ -182,7 +179,8 @@ impl SQLiteDatabaseService {
 
     fn row_to_record(row: &Row, json: &JsonColumns) -> rusqlite::Result<Record> {
         let column_count = row.as_ref().column_count();
-        let mut data = HashMap::new();
+        // Filled by column index, so the record keeps the result's order.
+        let mut data = RecordData::with_capacity(column_count);
         let mut id = String::new();
 
         for i in 0..column_count {

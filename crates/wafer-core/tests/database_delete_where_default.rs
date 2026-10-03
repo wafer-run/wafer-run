@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
     AggregateSpec, CapGuard, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-    RecordList, StatementBudget, UpsertSpec, WriteOp, WriteOutcome,
+    RecordData, RecordList, StatementBudget, UpsertSpec, WriteOp, WriteOutcome,
 };
 use wafer_schema::{Column, Table};
 
@@ -54,7 +54,7 @@ impl DatabaseService for MemDb {
                 .take(take)
                 .map(|id| Record {
                     id: id.clone(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 })
                 .collect()
         };

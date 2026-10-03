@@ -2,9 +2,16 @@
 //! `HostCodec::Json` (see `wafer_block::abi::HOST_CODEC_EXPORT`).
 //!
 //! Wire DTOs are MessagePack *named maps* with plain `Vec<u8>` byte fields
-//! (no `serde_bytes` in `wafer_block::wire`), so a lossless round trip
-//! through `serde_json::Value` exists: bytes are integer arrays on both
-//! sides and map keys are strings. Depth is bounded on both decoders.
+//! (no `serde_bytes` in `wafer_block::wire`), so a lossless transcode
+//! exists: bytes are integer arrays on both sides and map keys are strings.
+//!
+//! The transcode streams one format's events straight into the other's
+//! serializer (`serde_transcode`) rather than materializing a
+//! `serde_json::Value`: a `Value` object sorts its keys, and a map's key
+//! order is part of what some payloads say — a database row
+//! (`wafer_block::wire::database::RecordData`) lists its columns in the order
+//! the statement returned them, and a JSON guest must see that order too.
+//! Depth is bounded on both decoders.
 
 use wafer_block::{ErrorCode, WaferError};
 
@@ -15,35 +22,40 @@ fn invalid(what: &str, e: impl std::fmt::Display) -> WaferError {
 /// Transcode a JSON host-call body into the MessagePack named-map form the
 /// callee's wire DTOs decode from. Applied to the request body of a
 /// `HostCodec::Json` guest at `stream_finish`.
+///
+/// Every failure is the body's: encoding a JSON value as MessagePack into a
+/// `Vec` cannot fail, so an error out of the transcode is a JSON parse error
+/// (the deserializer's, reported through the serializer's error type).
 pub(super) fn json_to_rmp(json: &[u8]) -> Result<Vec<u8>, WaferError> {
-    let value: serde_json::Value =
-        serde_json::from_slice(json).map_err(|e| invalid("host-call body is not JSON", e))?;
-    rmp_serde::to_vec_named(&value).map_err(|e| invalid("encoding host-call body", e))
+    const NOT_JSON: &str = "host-call body is not JSON";
+    let mut de = serde_json::Deserializer::from_slice(json);
+    let mut rmp = Vec::with_capacity(json.len());
+    serde_transcode::transcode(&mut de, &mut rmp_serde::Serializer::new(&mut rmp))
+        .map_err(|e| invalid(NOT_JSON, e))?;
+    // Only whitespace may follow the value.
+    de.end().map_err(|e| invalid(NOT_JSON, e))?;
+    Ok(rmp)
 }
 
 /// Transcode a MessagePack response frame into JSON. Applied to every frame
 /// read back by a `HostCodec::Json` guest at `stream_read_chunk`.
 pub(super) fn rmp_to_json(rmp: &[u8]) -> Result<Vec<u8>, WaferError> {
+    const NOT_RMP: &str = "response frame is not MessagePack";
     let mut de = rmp_serde::Deserializer::from_read_ref(rmp);
     de.set_max_depth(wafer_block::codec::WIRE_MAX_DEPTH);
-    let value: serde_json::Value = serde::Deserialize::deserialize(&mut de)
-        .map_err(|e| invalid("response frame is not MessagePack", e))?;
+    let mut json = Vec::with_capacity(rmp.len());
+    serde_transcode::transcode(&mut de, &mut serde_json::Serializer::new(&mut json))
+        .map_err(|e| invalid(NOT_RMP, e))?;
     // A frame carries exactly one encoded value. Anything after it — a second
     // value, or bytes that decode as nothing at all — means the frame is not
     // what the callee claims, so a clean end of input is the only acceptable
-    // continuation. (`serde_json` already rejects trailing data on the way in,
-    // so `json_to_rmp` needs no equivalent check.)
+    // continuation. (`json_to_rmp` checks its input's end the same way.)
     match <serde::de::IgnoredAny as serde::Deserialize>::deserialize(&mut de) {
         Err(rmp_serde::decode::Error::InvalidMarkerRead(e))
             if e.kind() == std::io::ErrorKind::UnexpectedEof => {}
-        _ => {
-            return Err(invalid(
-                "response frame is not MessagePack",
-                "trailing bytes after the encoded value",
-            ))
-        }
+        _ => return Err(invalid(NOT_RMP, "trailing bytes after the encoded value")),
     }
-    serde_json::to_vec(&value).map_err(|e| invalid("encoding response frame as JSON", e))
+    Ok(json)
 }
 
 #[cfg(test)]
@@ -76,6 +88,48 @@ mod tests {
         let json = rmp_to_json(&rmp).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(v["data"], serde_json::json!([1, 2, 3]));
+    }
+
+    /// A `SELECT b, a, c` row, encoded by the host as a database response.
+    fn bac_row() -> wire::Record {
+        wire::Record {
+            id: String::new(),
+            data: wire::RecordData::from([
+                ("b".to_string(), serde_json::json!(2)),
+                ("a".to_string(), serde_json::json!(1)),
+                ("c".to_string(), serde_json::json!(3)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn rmp_response_keeps_the_row_column_order() {
+        let rmp = wafer_block::codec::encode(&bac_row()).unwrap();
+        let json = rmp_to_json(&rmp).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&json).unwrap(),
+            r#"{"id":"","data":{"b":2,"a":1,"c":3}}"#,
+        );
+    }
+
+    #[test]
+    fn json_request_keeps_its_key_order() {
+        let json = br#"{"id":"","data":{"b":2,"a":1,"c":3}}"#;
+        let row: wire::Record = wafer_block::codec::decode(&json_to_rmp(json).unwrap()).unwrap();
+        let names: Vec<&str> = row.data.keys().map(String::as_str).collect();
+        assert_eq!(names, ["b", "a", "c"]);
+    }
+
+    #[test]
+    fn trailing_json_after_the_value_is_invalid_argument() {
+        assert!(
+            json_to_rmp(br#"{"a":1}  "#).is_ok(),
+            "trailing whitespace is fine"
+        );
+        assert_eq!(
+            json_to_rmp(br#"{"a":1} 7"#).unwrap_err().code,
+            wafer_block::ErrorCode::InvalidArgument,
+        );
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     str::FromStr as _,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -19,7 +18,7 @@ use wafer_core::{
         codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
-        service::{Column, DatabaseError, Record, StatementBudget},
+        service::{Column, DatabaseError, Record, RecordData, StatementBudget},
     },
 };
 #[cfg(test)]
@@ -343,7 +342,8 @@ fn row_to_record(row: &PgRow) -> Result<Record, DatabaseError> {
     use sqlx::{Column as SqlxColumn, TypeInfo};
 
     let columns = row.columns();
-    let mut data = HashMap::new();
+    // Filled in the driver's column order, so the record keeps the result's.
+    let mut data = RecordData::with_capacity(columns.len());
     let mut id = String::new();
 
     for col in columns {

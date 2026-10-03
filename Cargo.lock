@@ -4918,6 +4918,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-transcode"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "590c0e25c2a5bb6e85bf5c1bce768ceb86b316e7a01bdf07d2cb4ec2271990e2"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_bytes"
 version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6264,6 +6273,7 @@ dependencies = [
  "chrono",
  "futures",
  "getrandom 0.2.17",
+ "indexmap",
  "linkme",
  "rmp-serde",
  "schemars",
@@ -6686,6 +6696,7 @@ dependencies = [
  "reqwest",
  "rmp-serde",
  "serde",
+ "serde-transcode",
  "serde_json",
  "serial_test",
  "sha2 0.11.0",
