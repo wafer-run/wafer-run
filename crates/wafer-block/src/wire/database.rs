@@ -663,6 +663,17 @@ pub struct AggregateRequest {
     /// Optional `LIMIT N`; a value `<= 0` means no limit.
     #[serde(default)]
     pub limit: i64,
+    /// HAVING predicates: AND-combined leaves whose `field` is the alias of
+    /// one of [`aggregates`](Self::aggregates) (not a
+    /// [`CountGroups`](AggregateColumnDef::CountGroups)), compared with the
+    /// aggregate's value. Anything else is `InvalidArgument`.
+    #[serde(default)]
+    pub having: Vec<FilterNode>,
+    /// Groups to skip before the first returned, for paging; `<= 0` skips
+    /// none. A positive offset needs a positive [`limit`](Self::limit), or
+    /// the request is `InvalidArgument`.
+    #[serde(default)]
+    pub offset: i64,
 }
 
 /// One aggregate output column for [`AggregateRequest`].
@@ -743,6 +754,15 @@ pub enum AggregateColumnDef {
         // `BIGINT`, as `Sum::cast_as`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_as: Option<String>,
+    },
+    /// `COUNT(*) OVER () AS alias` — the number of groups the request
+    /// matched (after `filters`, `group_by` and `having`, before
+    /// `limit`/`offset`), the same on every row: the total a paged listing
+    /// shows. A request whose offset is past the last group gets no rows,
+    /// and so no total.
+    CountGroups {
+        /// Output alias for the group count.
+        alias: String,
     },
 }
 
@@ -1215,6 +1235,8 @@ mod tests {
                 desc: true,
             }],
             limit: 50,
+            having: vec![],
+            offset: 0,
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: AggregateRequest = codec::decode(&encoded).expect("decode");
@@ -1253,6 +1275,8 @@ mod tests {
             group_by: vec![],
             sort: vec![],
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: AggregateRequest = codec::decode(&encoded).expect("decode");

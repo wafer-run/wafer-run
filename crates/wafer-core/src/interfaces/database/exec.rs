@@ -4022,6 +4022,8 @@ mod tests {
                 group_by: Vec::new(),
                 sort: Vec::new(),
                 limit: 0,
+                having: vec![],
+                offset: 0,
             },
         )
         .await

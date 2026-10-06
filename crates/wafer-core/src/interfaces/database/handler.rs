@@ -502,6 +502,10 @@ pub fn to_aggregate_spec(
                     cast_as: parse_cast(cast_as.as_deref(), &CastType::ALL)?,
                 }
             }
+            wire::AggregateColumnDef::CountGroups { alias } => {
+                check_name(&alias)?;
+                service::AggregateColumnSpec::CountGroups { alias }
+            }
         };
         aggregates.push(spec);
     }
@@ -527,6 +531,28 @@ pub fn to_aggregate_spec(
     let tree = convert_filter_tree(req.filters)?;
     let filters = flatten_leaves(&tree)?;
 
+    // HAVING is AND-of-leaves too, and each leaf names one of this request's
+    // own aggregates — not a column, and not the group-count window, which is
+    // computed after HAVING.
+    let having = flatten_leaves(&convert_filter_tree(req.having)?)?;
+    for filter in &having {
+        let names_an_aggregate = aggregates.iter().any(|a| {
+            !matches!(a, service::AggregateColumnSpec::CountGroups { .. })
+                && a.alias() == filter.field
+        });
+        if !names_an_aggregate {
+            return Err(invalid(format!(
+                "having filter {:?} does not name one of the request's aggregates",
+                filter.field
+            )));
+        }
+    }
+
+    // The same limit/offset rule a list obeys: no offset without a limit.
+    let limit = (req.limit > 0).then(|| u32::try_from(req.limit).unwrap_or(u32::MAX));
+    wafer_sql_utils::query::check_pagination(limit, req.offset)
+        .map_err(|e| invalid(e.to_string()))?;
+
     let spec = service::AggregateSpec {
         select_columns: req.select_columns,
         aggregates,
@@ -534,6 +560,8 @@ pub fn to_aggregate_spec(
         group_by,
         sort: convert_sort(req.sort)?,
         limit: req.limit,
+        having,
+        offset: req.offset,
     };
     Ok((req.collection, spec))
 }

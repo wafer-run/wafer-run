@@ -1483,6 +1483,8 @@ mod tests {
                 desc: false,
             }],
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
         let rows = DatabaseService::aggregate(&svc, "items", spec)
             .await
@@ -1542,6 +1544,8 @@ mod tests {
                 desc: false,
             }],
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
         let rows = DatabaseService::aggregate(&svc, "reqs", spec)
             .await
@@ -1596,6 +1600,8 @@ mod tests {
                 desc: false,
             }],
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
         let rows = DatabaseService::aggregate(&svc, "events", spec)
             .await

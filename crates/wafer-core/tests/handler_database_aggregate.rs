@@ -372,6 +372,8 @@ async fn aggregate_with_grant_returns_rows() {
         group_by: vec![wire::GroupByDef::Column("status".into())],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let out = dispatch(&AllowCtx, &req).await;
     let buffered = match out.collect_buffered().await {
@@ -398,6 +400,8 @@ async fn aggregate_without_grant_returns_permission_denied() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let out = dispatch(&DenyCtx, &req).await;
     let err = terminal_error(out)
@@ -415,6 +419,59 @@ async fn aggregate_without_grant_returns_permission_denied() {
 // Validation (all InvalidArgument, before the service runs)
 // ---------------------------------------------------------------------------
 
+fn paged_req(having_field: &str, limit: i64, offset: i64) -> wire::AggregateRequest {
+    wire::AggregateRequest {
+        collection: "my_org__auth__users".into(),
+        select_columns: vec!["status".into()],
+        aggregates: vec![
+            count_agg("cnt"),
+            wire::AggregateColumnDef::CountGroups {
+                alias: "groups".into(),
+            },
+        ],
+        filters: vec![],
+        group_by: vec![wire::GroupByDef::Column("status".into())],
+        sort: vec![],
+        limit,
+        having: vec![wire::FilterNode::Leaf(wire::FilterDef {
+            field: having_field.into(),
+            operator: "gt".into(),
+            value: serde_json::json!(0),
+            column: None,
+        })],
+        offset,
+    }
+}
+
+#[tokio::test]
+async fn having_on_an_aggregate_alias_with_a_limited_offset_is_accepted() {
+    let out = dispatch(&AllowCtx, &paged_req("cnt", 10, 10)).await;
+    assert!(terminal_error(out).await.is_none());
+}
+
+#[tokio::test]
+async fn having_on_a_column_or_the_group_count_is_invalid() {
+    expect_invalid(
+        dispatch(&AllowCtx, &paged_req("status", 10, 0)).await,
+        "a column",
+    )
+    .await;
+    expect_invalid(
+        dispatch(&AllowCtx, &paged_req("groups", 10, 0)).await,
+        "the CountGroups window",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_offset_without_a_limit_is_invalid() {
+    expect_invalid(
+        dispatch(&AllowCtx, &paged_req("cnt", 0, 10)).await,
+        "offset without limit",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn aggregate_empty_aggregates_is_invalid_argument() {
     let req = wire::AggregateRequest {
@@ -425,6 +482,8 @@ async fn aggregate_empty_aggregates_is_invalid_argument() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "empty aggregates").await;
 }
@@ -439,6 +498,8 @@ async fn aggregate_bad_alias_is_invalid_argument() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "hostile alias").await;
 }
@@ -453,6 +514,8 @@ async fn aggregate_bad_group_by_column_is_invalid_argument() {
         group_by: vec![wire::GroupByDef::Column("status\") --".into())],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "hostile group-by column").await;
 }
@@ -471,6 +534,8 @@ async fn aggregate_bad_sum_field_is_invalid_argument() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "hostile sum field").await;
 }
@@ -488,6 +553,8 @@ async fn aggregate_bad_max_field_is_invalid_argument() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "hostile max field").await;
 }
@@ -504,6 +571,8 @@ async fn aggregate_bad_date_bucket_field_is_invalid_argument() {
         }],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "hostile date-bucket field").await;
 }
@@ -521,6 +590,8 @@ async fn aggregate_empty_case_when_is_invalid_argument() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "empty case-when predicate").await;
 }
@@ -544,6 +615,8 @@ async fn aggregate_filter_group_is_invalid_argument() {
         group_by: vec![],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     expect_invalid(dispatch(&AllowCtx, &req).await, "filter group").await;
 }
