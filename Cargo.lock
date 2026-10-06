@@ -6470,6 +6470,7 @@ dependencies = [
  "uuid",
  "wafer-block",
  "wafer-block-macro",
+ "wafer-block-postgres",
  "wafer-core",
  "wafer-schema",
  "wafer-sql-utils",
