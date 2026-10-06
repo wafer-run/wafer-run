@@ -263,6 +263,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_upsert_windowed_counter(svc).await;
     check_upsert_windowed_counter_honours_its_columns(svc).await;
     check_aggregate(svc).await;
+    check_aggregate_paging(svc).await;
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
     check_rows_keep_their_column_order(svc).await;
@@ -1109,6 +1110,8 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
                 group_by: vec![GroupBySpec::Column("category".into())],
                 sort: vec![],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             },
         )
         .await
@@ -3048,6 +3051,8 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let groups = svc
         .aggregate("conf_read", spec)
@@ -3097,6 +3102,8 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let cw = svc
         .aggregate("conf_read", spec)
@@ -3124,6 +3131,8 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let buckets = svc
         .aggregate("conf_read", spec)
@@ -3143,6 +3152,92 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
 // ---------------------------------------------------------------------------
 // aggregate over BIGINT money — cast_as, SumWhere, column-to-column filters
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// aggregate paging — HAVING on an aggregate, CountGroups, LIMIT/OFFSET
+// ---------------------------------------------------------------------------
+
+async fn check_aggregate_paging(svc: &dyn DatabaseService) {
+    // The conf_read fixture again: x has 2 rows (sum 30), y 2 (sum 10), z 1
+    // (sum 100).
+    let page = |having: Vec<Filter>, limit: i64, offset: i64| AggregateSpec {
+        select_columns: vec!["category".into()],
+        aggregates: vec![
+            AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            },
+            AggregateColumnSpec::Sum {
+                field: "amount".into(),
+                alias: "total".into(),
+                cast_as: None,
+            },
+            AggregateColumnSpec::CountGroups {
+                alias: "groups".into(),
+            },
+        ],
+        filters: vec![],
+        group_by: vec![GroupBySpec::Column("category".into())],
+        sort: vec![SortField {
+            field: "category".into(),
+            desc: false,
+        }],
+        limit,
+        having,
+        offset,
+    };
+    let categories = |rows: &[Record]| -> Vec<String> {
+        rows.iter()
+            .map(|r| r.data["category"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    // One group a page; the second page is `y`, and every row carries the
+    // total number of groups, not the number on the page.
+    let second = svc
+        .aggregate("conf_read", page(vec![], 1, 1))
+        .await
+        .expect("a paged aggregate");
+    assert_eq!(categories(&second), ["y"], "offset 1, limit 1");
+    assert_eq!(
+        field_i64(&second[0], "groups"),
+        3,
+        "CountGroups counts every group"
+    );
+
+    // HAVING on an aggregate (COUNT >= 2) keeps x and y, and the group count
+    // is of what HAVING kept.
+    let at_least_two = Filter {
+        field: "cnt".into(),
+        operator: FilterOp::GreaterEqual,
+        value: serde_json::json!(2),
+    };
+    let kept = svc
+        .aggregate("conf_read", page(vec![at_least_two.clone()], 10, 0))
+        .await
+        .expect("an aggregate with HAVING");
+    assert_eq!(categories(&kept), ["x", "y"], "HAVING COUNT(*) >= 2");
+    assert!(kept.iter().all(|r| field_i64(r, "groups") == 2), "{kept:?}");
+
+    // A second HAVING leaf is AND-ed: also SUM(amount) > 20 → only x.
+    let over_twenty = Filter {
+        field: "total".into(),
+        operator: FilterOp::GreaterThan,
+        value: serde_json::json!(20),
+    };
+    let both = svc
+        .aggregate("conf_read", page(vec![at_least_two, over_twenty], 10, 0))
+        .await
+        .expect("an aggregate with two HAVING leaves");
+    assert_eq!(categories(&both), ["x"]);
+    assert_eq!(field_i64(&both[0], "groups"), 1);
+
+    // An offset past the last group is an empty page, not an error.
+    assert!(svc
+        .aggregate("conf_read", page(vec![], 1, 3))
+        .await
+        .expect("an offset past the end")
+        .is_empty());
+}
 
 async fn check_aggregate_money(svc: &dyn DatabaseService) {
     // Money in minor units, in `BIGINT` columns — the shape on which Postgres
@@ -3239,6 +3334,8 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let groups = svc
         .aggregate("conf_money", spec)
@@ -3302,6 +3399,8 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
                 group_by: vec![],
                 sort: vec![],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             },
         )
         .await
@@ -3710,6 +3809,8 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
             group_by,
             sort: Vec::new(),
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
     assert_invalid_argument(
         svc.aggregate(

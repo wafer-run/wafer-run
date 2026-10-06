@@ -191,6 +191,13 @@ pub enum AggFunc {
     Max,
     /// `MIN(...)` — smallest value of the inner expression.
     Min,
+    /// `COUNT(*) OVER ()` — the number of groups the query matched (after
+    /// `WHERE`, `GROUP BY` and `HAVING`, before `LIMIT`/`OFFSET`), the same
+    /// on every row. What a paged grouped listing needs for "21–40 of N" in
+    /// the statement that reads the page, rather than in a second one. Takes
+    /// no field and no inner expression; an offset past the last group
+    /// returns no rows and so no count.
+    CountGroups,
     /// `COALESCE(col, default)` — not a true aggregate, but a null-replacement
     /// wrapper that callers can fold into the aggregate-builder pipeline so
     /// they don't have to post-process null values in Rust. The JSON literal
@@ -273,6 +280,18 @@ pub struct AggregateColumn {
 }
 
 impl AggregateColumn {
+    /// `COUNT(*) OVER () AS <alias>`: the number of groups the query matched,
+    /// on every row ([`AggFunc::CountGroups`]).
+    pub fn count_groups(alias: impl Into<String>) -> Self {
+        Self {
+            func: AggFunc::CountGroups,
+            field: None,
+            alias: alias.into(),
+            cast_as: None,
+            inner_expr: None,
+        }
+    }
+
     /// Convenience constructor for
     /// `COALESCE(SUM(CASE WHEN <predicate> THEN 1 ELSE 0 END), 0) AS <alias>`,
     /// a portable way to "count rows matching a predicate" inside a
@@ -379,11 +398,21 @@ pub struct GroupedQueryConfig {
     /// [`group_by`](Self::group_by) columns. Each also selects its bucketed
     /// value under its `alias`. Empty for non-time-series aggregates.
     pub date_buckets: Vec<DateBucketGroup>,
+    /// `HAVING` predicates AND-ed together. Each filter's `field` names the
+    /// alias of one of [`aggregates`](Self::aggregates) (not
+    /// [`AggFunc::CountGroups`]); it renders against that aggregate's own
+    /// expression, because Postgres does not resolve an output alias in
+    /// `HAVING`. Any other name is [`SqlBuildError::InvalidHaving`].
+    pub having: Vec<Filter>,
     /// `ORDER BY` clauses; alias names (e.g. `cnt`) are valid because the
     /// aggregates are emitted with `AS` aliases.
     pub order_by: Vec<SortField>,
     /// Optional `LIMIT N`; values `<= 0` are dropped.
     pub limit: Option<i64>,
+    /// Groups to skip before the first returned, for paging; `<= 0` skips
+    /// none. A positive offset needs a positive [`limit`](Self::limit)
+    /// ([`crate::query::check_pagination`]).
+    pub offset: i64,
 }
 
 /// Build a flexible grouped aggregate query.
@@ -402,7 +431,10 @@ pub struct GroupedQueryConfig {
 /// `needless_pass_by_value` lint can't see that ownership transfer is the point.
 ///
 /// Returns [`SqlBuildError::InvalidIdentifier`] if a
-/// [`DateBucketGroup::field`] is not a plain identifier ([`validate_ident`]).
+/// [`DateBucketGroup::field`] is not a plain identifier ([`validate_ident`]),
+/// [`SqlBuildError::InvalidHaving`] if a `HAVING` filter names no aggregate,
+/// and the [`check_pagination`](crate::query::check_pagination) errors for a
+/// limit/offset pair no backend can render.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "by-value lets async callers drop the !Send GroupedQueryConfig (Rc<dyn Iden>) before awaiting; a &ref signature would poison their futures' Send-ness"
@@ -411,8 +443,18 @@ pub fn build_grouped_query(
     cfg: GroupedQueryConfig,
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
+    let limit = cfg
+        .limit
+        .filter(|limit| *limit > 0)
+        .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX));
+    crate::query::check_pagination(limit, cfg.offset)?;
+
     let mut query = Query::select();
     query.from(DynCol(cfg.table.clone()));
+    // Each aggregate's expression by alias, for `HAVING` (which cannot name
+    // the alias on Postgres). The `CountGroups` window is left out: it is
+    // computed after `HAVING`.
+    let mut having_exprs: Vec<(&str, SimpleExpr)> = Vec::new();
 
     // Plain columns
     for col in &cfg.select_columns {
@@ -441,6 +483,7 @@ pub fn build_grouped_query(
                 Expr::val(crate::value::json_to_sea_value(default)).into(),
             ])
             .into(),
+            AggFunc::CountGroups => Expr::cust("COUNT(*) OVER ()"),
         };
 
         let final_expr: sea_query::SimpleExpr = if let Some(cast_type) = agg.cast_as {
@@ -449,6 +492,9 @@ pub fn build_grouped_query(
             agg_expr
         };
 
+        if !matches!(agg.func, AggFunc::CountGroups) {
+            having_exprs.push((agg.alias.as_str(), final_expr.clone()));
+        }
         query.expr_as(final_expr, Alias::new(&agg.alias));
     }
 
@@ -470,14 +516,32 @@ pub fn build_grouped_query(
         query.add_group_by(vec![expr]);
     }
 
+    // HAVING — each filter against its aggregate's expression.
+    if !cfg.having.is_empty() {
+        let mut cond = sea_query::Cond::all();
+        for filter in &cfg.having {
+            let Some((_, expr)) = having_exprs
+                .iter()
+                .find(|(alias, _)| *alias == filter.field)
+            else {
+                return Err(SqlBuildError::InvalidHaving {
+                    alias: filter.field.clone(),
+                });
+            };
+            cond = cond.add(crate::query::predicate_on(Expr::expr(expr.clone()), filter));
+        }
+        query.cond_having(cond);
+    }
+
     // ORDER BY
     apply_order(&mut query, &cfg.order_by);
 
-    // LIMIT
-    if let Some(limit) = cfg.limit {
-        if limit > 0 {
-            query.limit(limit as u64);
-        }
+    // LIMIT / OFFSET
+    if let Some(limit) = limit {
+        query.limit(u64::from(limit));
+    }
+    if cfg.offset > 0 {
+        query.offset(cfg.offset as u64);
     }
 
     let table = cfg.table.clone();
@@ -553,6 +617,88 @@ mod tests {
         );
     }
 
+    /// A paged grouped listing: `HAVING` on an aggregate (its expression,
+    /// since Postgres does not resolve the alias there), the group count as a
+    /// window, and `LIMIT`/`OFFSET`, on both dialects.
+    fn paged_config() -> GroupedQueryConfig {
+        GroupedQueryConfig {
+            table: "request_logs".into(),
+            select_columns: vec!["path".into()],
+            aggregates: vec![
+                AggregateColumn {
+                    func: AggFunc::Count,
+                    field: None,
+                    alias: "cnt".into(),
+                    cast_as: None,
+                    inner_expr: None,
+                },
+                AggregateColumn::count_groups("total"),
+            ],
+            filters: vec![],
+            group_by: vec!["path".into()],
+            date_buckets: vec![],
+            having: vec![Filter {
+                field: "cnt".into(),
+                operator: FilterOp::GreaterThan,
+                value: serde_json::json!(1),
+            }],
+            order_by: vec![SortField {
+                field: "cnt".into(),
+                desc: true,
+            }],
+            limit: Some(20),
+            offset: 40,
+        }
+    }
+
+    #[test]
+    fn a_paged_grouped_query_renders_having_window_count_and_offset() {
+        let sqlite = build_grouped_query(paged_config(), Backend::Sqlite).unwrap();
+        assert!(
+            sqlite.sql.contains(r#"COUNT(*) OVER () AS "total""#),
+            "{}",
+            sqlite.sql
+        );
+        assert!(sqlite.sql.contains("HAVING COUNT(*) > ?"), "{}", sqlite.sql);
+        assert!(sqlite.sql.ends_with("LIMIT ? OFFSET ?"), "{}", sqlite.sql);
+        let postgres = build_grouped_query(paged_config(), Backend::Postgres).unwrap();
+        assert!(
+            postgres.sql.contains("HAVING COUNT(*) > $1"),
+            "{}",
+            postgres.sql
+        );
+        assert!(
+            !postgres.sql.contains(r#"HAVING "cnt""#),
+            "{}",
+            postgres.sql
+        );
+    }
+
+    #[test]
+    fn having_must_name_an_aggregate_other_than_the_group_count() {
+        for field in ["path", "total", "nope"] {
+            let mut cfg = paged_config();
+            cfg.having[0].field = field.into();
+            assert_eq!(
+                build_grouped_query(cfg, Backend::Sqlite).unwrap_err(),
+                SqlBuildError::InvalidHaving {
+                    alias: field.into()
+                },
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_offset_without_a_limit_is_refused() {
+        let mut cfg = paged_config();
+        cfg.limit = None;
+        assert_eq!(
+            build_grouped_query(cfg, Backend::Sqlite).unwrap_err(),
+            SqlBuildError::OffsetWithoutLimit { offset: 40 }
+        );
+    }
+
     #[test]
     fn test_build_grouped_query() {
         let cfg = GroupedQueryConfig {
@@ -582,6 +728,8 @@ mod tests {
                 desc: true,
             }],
             limit: Some(50),
+            having: vec![],
+            offset: 0,
         };
         let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
@@ -609,6 +757,8 @@ mod tests {
             date_buckets: vec![],
             order_by: vec![],
             limit: None,
+            having: vec![],
+            offset: 0,
         };
         let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
@@ -653,6 +803,8 @@ mod tests {
                 desc: true,
             }],
             limit: Some(50),
+            having: vec![],
+            offset: 0,
         };
         let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
@@ -691,6 +843,8 @@ mod tests {
                 }],
                 order_by: vec![],
                 limit: None,
+                having: vec![],
+                offset: 0,
             },
             Backend::Sqlite,
         )
@@ -728,6 +882,8 @@ mod tests {
                 }],
                 order_by: vec![],
                 limit: None,
+                having: vec![],
+                offset: 0,
             },
             Backend::Postgres,
         )
@@ -755,6 +911,8 @@ mod tests {
                     }],
                     order_by: vec![],
                     limit: None,
+                    having: vec![],
+                    offset: 0,
                 },
                 backend,
             )
@@ -780,6 +938,8 @@ mod tests {
                 date_buckets: vec![],
                 order_by: vec![],
                 limit: None,
+                having: vec![],
+                offset: 0,
             },
             backend,
         )
@@ -891,6 +1051,8 @@ mod tests {
                     date_buckets: vec![],
                     order_by: vec![],
                     limit: None,
+                    having: vec![],
+                    offset: 0,
                 },
                 Backend::Sqlite,
             )

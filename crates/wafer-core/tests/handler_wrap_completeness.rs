@@ -1023,6 +1023,8 @@ fn database_op_body(op: &str) -> Vec<u8> {
             group_by: vec![],
             sort: vec![],
             limit: 0,
+            having: vec![],
+            offset: 0,
         }),
         ServiceOp::DATABASE_ENSURE_TABLE => codec::encode(&wire::EnsureTableRequest {
             table: wire::TableDef {

@@ -212,6 +212,8 @@ fn dispatch(msg: &Message, _body: &[u8]) -> GuestResult {
                 group_by: vec![],
                 sort: vec![],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             };
             dispatch_structured(ServiceOp::DATABASE_AGGREGATE, codec::encode(&req))
         }
@@ -244,6 +246,8 @@ fn dispatch(msg: &Message, _body: &[u8]) -> GuestResult {
                     desc: true,
                 }],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             };
             dispatch_structured(ServiceOp::DATABASE_AGGREGATE, codec::encode(&req))
         }
@@ -262,6 +266,8 @@ fn dispatch(msg: &Message, _body: &[u8]) -> GuestResult {
                 group_by: vec![],
                 sort: vec![],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             };
             dispatch_structured(ServiceOp::DATABASE_AGGREGATE, codec::encode(&req))
         }

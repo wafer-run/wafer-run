@@ -15,14 +15,23 @@ use crate::{ident::DynCol, value::json_to_sea_value, Backend, SqlBuildError};
 /// operand shapes (`In` with a non-array, `Like` with a non-string) render an
 /// always-false `1=0` predicate — narrow, never widen (see the inline notes).
 pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
-    let col = DynCol(filter.field.clone());
+    predicate_on(Expr::col(DynCol(filter.field.clone())), filter)
+}
+
+/// [`leaf_expr`]'s predicate — `filter`'s operator and value — applied to an
+/// arbitrary left-hand expression rather than the column `filter.field`
+/// names. A grouped query's `HAVING` uses it to compare an aggregate's own
+/// expression (`COUNT(*) > 0`): Postgres does not resolve an output alias in
+/// `HAVING`, so the alias cannot stand in for it.
+pub(crate) fn predicate_on(left: Expr, filter: &Filter) -> SimpleExpr {
+    let col = left;
     match filter.operator {
-        FilterOp::IsNull => Expr::col(col).is_null(),
-        FilterOp::IsNotNull => Expr::col(col).is_not_null(),
+        FilterOp::IsNull => col.is_null(),
+        FilterOp::IsNotNull => col.is_not_null(),
         FilterOp::In => {
             if let serde_json::Value::Array(arr) = &filter.value {
                 let values: Vec<sea_query::Value> = arr.iter().map(json_to_sea_value).collect();
-                Expr::col(col).is_in(values)
+                col.is_in(values)
             } else {
                 // Fail-safe: an `In` filter whose value isn't a JSON array
                 // is malformed input. Emit an always-false predicate rather
@@ -32,12 +41,12 @@ pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
                 Expr::cust("1=0")
             }
         }
-        FilterOp::Equal => Expr::col(col).eq(json_to_sea_value(&filter.value)),
-        FilterOp::NotEqual => Expr::col(col).ne(json_to_sea_value(&filter.value)),
-        FilterOp::GreaterThan => Expr::col(col).gt(json_to_sea_value(&filter.value)),
-        FilterOp::GreaterEqual => Expr::col(col).gte(json_to_sea_value(&filter.value)),
-        FilterOp::LessThan => Expr::col(col).lt(json_to_sea_value(&filter.value)),
-        FilterOp::LessEqual => Expr::col(col).lte(json_to_sea_value(&filter.value)),
+        FilterOp::Equal => col.eq(json_to_sea_value(&filter.value)),
+        FilterOp::NotEqual => col.ne(json_to_sea_value(&filter.value)),
+        FilterOp::GreaterThan => col.gt(json_to_sea_value(&filter.value)),
+        FilterOp::GreaterEqual => col.gte(json_to_sea_value(&filter.value)),
+        FilterOp::LessThan => col.lt(json_to_sea_value(&filter.value)),
+        FilterOp::LessEqual => col.lte(json_to_sea_value(&filter.value)),
         FilterOp::Like => {
             if let Some(pattern) = filter.value.as_str() {
                 // Explicit ESCAPE clause: SQLite/D1's LIKE has no default
@@ -47,7 +56,7 @@ pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
                 // nothing. `\` is one well-defined escape char on both
                 // backends — mirrors `vector::build_list_meta_tables`, which
                 // appends the same `ESCAPE '\'` by hand for its raw-SQL path.
-                Expr::col(col).like(LikeExpr::new(pattern).escape('\\'))
+                col.like(LikeExpr::new(pattern).escape('\\'))
             } else {
                 // Fail-safe: a `Like` filter whose value isn't a JSON
                 // string is malformed input. Emit an always-false predicate
@@ -1333,6 +1342,8 @@ mod tests {
                     desc: true,
                 }],
                 limit: Some(5),
+                having: vec![],
+                offset: 0,
             },
             Backend::Postgres,
         )

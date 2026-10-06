@@ -477,6 +477,8 @@ fn aggregate_parity(backend: Backend) {
             desc: true,
         }],
         limit: Some(50),
+        having: vec![],
+        offset: 0,
     };
     let direct = wafer_sql_utils::aggregate::build_grouped_query(cfg_direct, backend)
         .expect("render the direct config");
@@ -520,6 +522,8 @@ fn aggregate_parity(backend: Backend) {
             desc: true,
         }],
         limit: 50,
+        having: vec![],
+        offset: 0,
     };
     let bytes = codec::encode(&req).expect("encode AggregateRequest");
     let decoded: wire::AggregateRequest = codec::decode(&bytes).expect("decode AggregateRequest");

@@ -323,6 +323,14 @@ pub struct AggregateSpec {
     pub sort: Vec<SortField>,
     /// Optional `LIMIT N`; a value `<= 0` means no limit.
     pub limit: i64,
+    /// `HAVING` predicates, AND-combined leaves whose `field` is the alias of
+    /// one of [`aggregates`](Self::aggregates) other than a
+    /// [`CountGroups`](AggregateColumnSpec::CountGroups) (checked upstream).
+    pub having: Vec<Filter>,
+    /// Groups to skip before the first returned; `<= 0` skips none. A
+    /// positive offset comes with a positive [`limit`](Self::limit) (checked
+    /// upstream).
+    pub offset: i64,
 }
 
 /// One aggregate output column in an [`AggregateSpec`] — the validated,
@@ -390,6 +398,28 @@ pub enum AggregateColumnSpec {
         /// Optional output cast.
         cast_as: Option<CastType>,
     },
+    /// `COUNT(*) OVER () AS alias` — the number of groups matched, on every
+    /// row.
+    CountGroups {
+        /// Output alias.
+        alias: String,
+    },
+}
+
+impl AggregateColumnSpec {
+    /// The column's output alias.
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        match self {
+            Self::Count { alias }
+            | Self::Sum { alias, .. }
+            | Self::Avg { alias, .. }
+            | Self::Max { alias, .. }
+            | Self::CaseWhenSum { alias, .. }
+            | Self::SumWhere { alias, .. }
+            | Self::CountGroups { alias } => alias,
+        }
+    }
 }
 
 /// One `GROUP BY` term in an [`AggregateSpec`]: a plain column or a date
@@ -413,14 +443,7 @@ impl AggregateSpec {
     pub fn aliases(&self) -> Vec<&str> {
         self.aggregates
             .iter()
-            .map(|a| match a {
-                AggregateColumnSpec::Count { alias }
-                | AggregateColumnSpec::Sum { alias, .. }
-                | AggregateColumnSpec::Avg { alias, .. }
-                | AggregateColumnSpec::Max { alias, .. }
-                | AggregateColumnSpec::CaseWhenSum { alias, .. }
-                | AggregateColumnSpec::SumWhere { alias, .. } => alias.as_str(),
-            })
+            .map(AggregateColumnSpec::alias)
             .collect()
     }
 
@@ -447,7 +470,7 @@ impl AggregateSpec {
         let mut out: Vec<&str> = self.select_columns.iter().map(String::as_str).collect();
         for aggregate in &self.aggregates {
             match aggregate {
-                AggregateColumnSpec::Count { .. } => {}
+                AggregateColumnSpec::Count { .. } | AggregateColumnSpec::CountGroups { .. } => {}
                 AggregateColumnSpec::Sum { field, .. }
                 | AggregateColumnSpec::Avg { field, .. }
                 | AggregateColumnSpec::Max { field, .. } => out.push(field),
@@ -547,6 +570,7 @@ impl AggregateSpec {
                         wafer_sql_utils::query::tree_to_simple_expr(&when),
                     )
                 },
+                AggregateColumnSpec::CountGroups { alias } => AggregateColumn::count_groups(alias),
             })
             .collect();
 
@@ -572,12 +596,14 @@ impl AggregateSpec {
             filters: self.filters,
             group_by,
             date_buckets,
+            having: self.having,
             order_by: self.sort,
             limit: if self.limit > 0 {
                 Some(self.limit)
             } else {
                 None
             },
+            offset: self.offset,
         }
     }
 }
