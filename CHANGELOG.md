@@ -4,6 +4,14 @@
 
 ### Breaking changes
 
+- `wafer-block-postgres` registers its `wafer-run/postgres` block only with
+  the new `block` feature. Linking the crate for `PostgresDatabaseService`
+  alone used to add a statically registered block that requires its own
+  `WAFER_RUN__POSTGRES__DATABASE_URL`, so an embedder that wraps the service
+  in a database block of its own got a block that failed `Init` on every
+  boot. A consumer that wants the block enables
+  `wafer-block-postgres = { …, features = ["block"] }`.
+
 - A database row keeps its columns in the order the statement returned
   them (#424). `Record::data`, on the wire type
   (`wafer_block::wire::database::Record`, re-exported from

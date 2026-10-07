@@ -110,7 +110,7 @@ wafer-block-monitoring = { path = "../wafer-block-monitoring" }
 wafer-block-cors = { path = "../wafer-block-cors" }
 # Flow short-circuit header carry (tests/flow_error_keeps_middleware_headers.rs).
 wafer-block-security-headers = { path = "../wafer-block-security-headers" }
-wafer-block-postgres = { path = "../wafer-block-postgres" }
+wafer-block-postgres = { path = "../wafer-block-postgres", features = ["block"] }
 wafer-block-s3 = { path = "../wafer-block-s3" }
 wafer-block-router = { path = "../wafer-block-router" }
 # Every statically registered block crate, linked so
