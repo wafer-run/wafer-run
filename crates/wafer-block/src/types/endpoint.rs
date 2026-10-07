@@ -161,6 +161,11 @@ pub struct BlockEndpoint {
     /// Opt-in agent-tool metadata. `None` means never exposed as a tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tool: Option<AgentTool>,
+    /// The endpoint needs something only a server holds (a secret key, say)
+    /// and is never callable when the runtime runs in a browser. Discovery
+    /// for a browser runtime leaves it out. The handler stays the gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub server_only: bool,
 }
 
 impl Default for BlockEndpoint {
@@ -178,6 +183,7 @@ impl Default for BlockEndpoint {
             tags: Vec::new(),
             deprecated: false,
             agent_tool: None,
+            server_only: false,
         }
     }
 }
@@ -197,6 +203,7 @@ impl BlockEndpoint {
             tags: Vec::new(),
             deprecated: false,
             agent_tool: None,
+            server_only: false,
         }
     }
 
@@ -271,6 +278,15 @@ impl BlockEndpoint {
     /// Mark the endpoint as deprecated.
     pub fn deprecated(mut self) -> Self {
         self.deprecated = true;
+        self
+    }
+
+    /// Mark this endpoint as needing something only a server holds (a
+    /// secret key, say). A browser runtime cannot call it, so discovery for
+    /// a browser runtime leaves it out of every document. The handler stays
+    /// the gate; this only stops the endpoint being advertised.
+    pub fn server_only(mut self) -> Self {
+        self.server_only = true;
         self
     }
 
@@ -1056,11 +1072,13 @@ mod block_endpoint_tests {
     /// attached. Nothing is ever left pointing at a table this builder
     /// deleted.
     ///
-    /// The remaining gap is a *consumer* problem: inside an OpenAPI document
-    /// both forms resolve against the OpenAPI root rather than the embedded
-    /// schema. Closing it means hoisting `$defs` into `components/schemas` and
-    /// rewriting the pointers in `generate_openapi`, which is a deliberate
-    /// change to a live surface, not something to smuggle in here.
+    /// Inside an OpenAPI document both forms would resolve against the
+    /// OpenAPI root rather than the embedded schema.
+    /// `wafer_core::discovery::generate_openapi` closes that for the
+    /// `#/$defs/X` form by hoisting `$defs` into `components/schemas` and
+    /// rewriting the pointers (`hoist_defs_into_components`). The bare `#`
+    /// form is not rewritten there and still resolves against the OpenAPI
+    /// root.
     #[cfg(feature = "json-schema")]
     #[test]
     fn recursive_types_never_reference_a_table_that_was_removed() {
@@ -1178,6 +1196,26 @@ mod block_endpoint_tests {
             serde_json::json!("Line item prices."),
             "descriptions survive alongside inlined array items: {rendered}"
         );
+    }
+
+    #[test]
+    fn server_only_round_trips_and_is_absent_when_false() {
+        let plain = BlockEndpoint::post("/b/x/y");
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(
+            json.get("server_only").is_none(),
+            "false must not be serialized: {json}"
+        );
+        // An older guest that never heard of the field still deserializes.
+        let old: BlockEndpoint =
+            serde_json::from_value(serde_json::json!({"method": "POST", "path": "/b/x/y"}))
+                .unwrap();
+        assert!(!old.server_only);
+
+        let marked = BlockEndpoint::post("/b/x/y").server_only();
+        let back: BlockEndpoint =
+            serde_json::from_value(serde_json::to_value(&marked).unwrap()).unwrap();
+        assert!(back.server_only);
     }
 
     #[test]
