@@ -4,6 +4,12 @@
 
 ### Breaking changes
 
+- `wafer-block-s3` registers its `wafer-run/s3` block only with the new
+  `block` feature, as `wafer-block-postgres` does since #427: linking the
+  crate for `S3StorageService` alone no longer adds a block whose `Init`
+  reads (and can refuse) its own `WAFER_RUN__S3__*` config. A consumer that
+  wants the block enables `wafer-block-s3 = { …, features = ["block"] }`.
+
 - `wafer-block-postgres` registers its `wafer-run/postgres` block only with
   the new `block` feature. Linking the crate for `PostgresDatabaseService`
   alone used to add a statically registered block that requires its own
