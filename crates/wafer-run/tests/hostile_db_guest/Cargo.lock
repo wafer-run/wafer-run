@@ -808,6 +808,7 @@ dependencies = [
  "getrandom",
  "indexmap",
  "linkme",
+ "percent-encoding",
  "rmp-serde",
  "serde",
  "serde_bytes",

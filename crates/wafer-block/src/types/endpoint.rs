@@ -423,6 +423,29 @@ impl BlockEndpoint {
 /// `recursive_types_never_reference_a_table_that_was_removed` holds us to
 /// it.
 ///
+/// # A recursive type is referenced, not unrolled
+///
+/// schemars' inlining is decided per use site and cannot see ahead: the
+/// first time it meets a type it inlines the whole body, and only when that
+/// body reaches the type *again* does it fall back to a reference and put
+/// the body in `$defs`. So a recursive type below the root ends up with its
+/// full body pasted in at every use site *and* once more in `$defs` — a
+/// condition tree used in three fields carries its body four times. There
+/// is no setting that changes this: `inline_subschemas` is all-or-nothing,
+/// and turning it off references *every* named type, which also changes the
+/// shape of every non-recursive one (`Option<Struct>` becomes an
+/// `anyOf: [{"$ref": ...}, {"type": "null"}]` instead of a nullable inlined
+/// object), the opposite of what the `derived_*` tests guarantee.
+///
+/// So [`reference_recursive_definitions`] finishes the job schemars stopped
+/// halfway through: every subschema that is a copy of a `$defs` body becomes
+/// a `$ref` to it, keeping the use site's own annotations (a field's doc
+/// comment, its `default`) beside the reference — legal next to `$ref` in
+/// draft 2020-12, and what schemars itself emits for a non-inlined field.
+/// Every type schemars kept in `$defs` then appears exactly once; types it
+/// did not keep are untouched and stay fully inlined.
+/// `recursive_types_are_referenced_not_unrolled` holds us to it.
+///
 /// A surviving `$ref` still does not *resolve* inside an OpenAPI document —
 /// both `#` and `#/$defs/X` are rooted at the OpenAPI document rather than
 /// at the embedded schema, which is why `wafer_core::discovery::generate_openapi`
@@ -498,7 +521,7 @@ fn self_contained_schema<T: schemars::JsonSchema>(
     // the `$defs`/`$ref` form (both contracts emit identical references for a
     // recursive type, so `recursive_types_never_reference_a_table_that_was_removed`
     // holds under either).
-    schemars::generate::SchemaSettings::draft2020_12()
+    let mut schema = schemars::generate::SchemaSettings::draft2020_12()
         .with(|settings| {
             settings.inline_subschemas = true;
             settings.meta_schema = None;
@@ -506,7 +529,252 @@ fn self_contained_schema<T: schemars::JsonSchema>(
         })
         .into_generator()
         .into_root_schema_for::<T>()
-        .to_value()
+        .to_value();
+    reference_recursive_definitions(&mut schema);
+    schema
+}
+
+/// Keywords that annotate a schema without constraining what it accepts —
+/// the ones schemars sets from a *use site* (a field's doc comment, its
+/// `#[serde(default)]`, `#[deprecated]`, ...) on top of the type's own body.
+/// Two schemas that differ only in these accept exactly the same instances.
+#[cfg(feature = "json-schema")]
+const ANNOTATION_KEYWORDS: &[&str] = &[
+    "title",
+    "description",
+    "default",
+    "examples",
+    "deprecated",
+    "readOnly",
+    "writeOnly",
+    "$comment",
+];
+
+/// Keywords whose value is a single subschema.
+#[cfg(feature = "json-schema")]
+const SUBSCHEMA_KEYWORDS: &[&str] = &[
+    "items",
+    "additionalProperties",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contains",
+    "propertyNames",
+    "unevaluatedItems",
+    "unevaluatedProperties",
+    "contentSchema",
+];
+
+/// Keywords whose value is an array of subschemas.
+#[cfg(feature = "json-schema")]
+const SUBSCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
+
+/// Keywords whose value maps author-chosen names to subschemas.
+#[cfg(feature = "json-schema")]
+const SUBSCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "dependentSchemas"];
+
+/// Replace every copy of a `$defs` body with a `$ref` to it — see "A
+/// recursive type is referenced, not unrolled" on [`self_contained_schema`].
+///
+/// A subschema is a copy of definition `X` when, ignoring
+/// [`ANNOTATION_KEYWORDS`] at its top level, it is equal to `X`'s body. Such
+/// a copy accepts exactly what `X` accepts, so the substitution is sound
+/// whatever produced the copy; the use site's annotations that differ from
+/// the body's are kept beside the `$ref`.
+///
+/// The walk follows schema positions only ([`SUBSCHEMA_KEYWORDS`],
+/// [`SUBSCHEMA_LIST_KEYWORDS`], [`SUBSCHEMA_MAP_KEYWORDS`]), so literal
+/// instance data under `default`, `const`, `enum` or `examples` is never
+/// rewritten, and it is bottom-up, so a copy whose own nested copies have
+/// already collapsed is recognised. The bodies themselves are collapsed
+/// first, to a fixpoint: a definition can contain a copy of another (a
+/// recursive type nested inside an unrelated recursive type), and a copy
+/// elsewhere only matches the body once both are in the same, collapsed
+/// form. Neither the document root nor a definition's own top level is ever
+/// replaced — they are what references point *at*.
+#[cfg(feature = "json-schema")]
+fn reference_recursive_definitions(schema: &mut serde_json::Value) {
+    let Some(mut defs) = schema
+        .get("$defs")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    else {
+        return;
+    };
+
+    loop {
+        let mut changed = false;
+        let names: Vec<String> = defs.keys().cloned().collect();
+        for name in names {
+            let mut body = defs[&name].clone();
+            if collapse_subschemas(&mut body, &defs) {
+                defs.insert(name, body);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // `$defs` is not a subschema keyword, so the walk from the root does not
+    // enter the table; it is written back entry by entry so its position in
+    // the document (and every key order) is unchanged.
+    collapse_subschemas(schema, &defs);
+    if let Some(table) = schema
+        .get_mut("$defs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (name, body) in defs {
+            table.insert(name, body);
+        }
+    }
+}
+
+/// Collapse copies of `defs` bodies among the subschemas *below* `schema`,
+/// leaving `schema` itself in place. Returns whether anything changed.
+#[cfg(feature = "json-schema")]
+fn collapse_subschemas(
+    schema: &mut serde_json::Value,
+    defs: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let serde_json::Value::Object(map) = schema else {
+        return false;
+    };
+    let mut changed = false;
+    for (key, value) in map.iter_mut() {
+        let key = key.as_str();
+        if SUBSCHEMA_KEYWORDS.contains(&key) {
+            changed |= collapse(value, defs);
+        } else if SUBSCHEMA_LIST_KEYWORDS.contains(&key) {
+            if let serde_json::Value::Array(items) = value {
+                for item in items {
+                    changed |= collapse(item, defs);
+                }
+            }
+        } else if SUBSCHEMA_MAP_KEYWORDS.contains(&key) {
+            if let serde_json::Value::Object(members) = value {
+                for member in members.values_mut() {
+                    changed |= collapse(member, defs);
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Collapse below `schema`, then `schema` itself if it is now a copy of a
+/// definition. Returns whether anything changed.
+#[cfg(feature = "json-schema")]
+fn collapse(
+    schema: &mut serde_json::Value,
+    defs: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let mut changed = collapse_subschemas(schema, defs);
+    if let Some(reference) = reference_for_copy(schema, defs) {
+        *schema = reference;
+        changed = true;
+    }
+    changed
+}
+
+/// The `$ref` that replaces `schema`, if `schema` is a copy of one of
+/// `defs`' bodies.
+///
+/// Besides an exact copy, this recognises the one other shape schemars gives
+/// a use site of a recursive type: `Option<X>`. schemars makes a schema
+/// nullable (`allow_null`, schemars 1.2) by wrapping it in
+/// `anyOf: [<schema>, {"type": "null"}]` when it has an `if`/`allOf`/
+/// `anyOf`/`oneOf`/`$ref` of its own — whose first member is then an exact
+/// copy and collapses on its own — and otherwise by adding `"null"` to its
+/// `type`. That second form is matched via [`nullable`] and becomes the
+/// `anyOf` form schemars emits for a referenced `Option<X>`.
+#[cfg(feature = "json-schema")]
+fn reference_for_copy(
+    schema: &serde_json::Value,
+    defs: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let copy = schema.as_object()?;
+    if copy.contains_key("$ref") {
+        return None;
+    }
+    for (name, body) in defs {
+        let Some(body) = body.as_object() else {
+            continue;
+        };
+        let target =
+            serde_json::json!({ "$ref": format!("#/$defs/{}", super::encode_ref_name(name)) });
+        let reference = if same_constraints(copy, body) {
+            target
+        } else if nullable(body).is_some_and(|nullable| same_constraints(copy, &nullable)) {
+            serde_json::json!({ "anyOf": [target, { "type": "null" }] })
+        } else {
+            continue;
+        };
+        let serde_json::Value::Object(mut reference) = reference else {
+            unreachable!("built as an object above");
+        };
+        for key in ANNOTATION_KEYWORDS {
+            if let Some(value) = copy.get(*key) {
+                if body.get(*key) != Some(value) {
+                    reference.insert((*key).to_string(), value.clone());
+                }
+            }
+        }
+        return Some(serde_json::Value::Object(reference));
+    }
+    None
+}
+
+/// Whether two schema objects are equal once their top-level
+/// [`ANNOTATION_KEYWORDS`] are ignored.
+#[cfg(feature = "json-schema")]
+fn same_constraints(
+    a: &serde_json::Map<String, serde_json::Value>,
+    b: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let constraints = |map: &serde_json::Map<String, serde_json::Value>| {
+        map.iter()
+            .filter(|(key, _)| !ANNOTATION_KEYWORDS.contains(&key.as_str()))
+            .count()
+    };
+    constraints(a) == constraints(b)
+        && a.iter()
+            .filter(|(key, _)| !ANNOTATION_KEYWORDS.contains(&key.as_str()))
+            .all(|(key, value)| b.get(key) == Some(value))
+}
+
+/// `body` as schemars' `allow_null` renders it in place when it has no
+/// subschema keyword of its own: `"null"` added to its `type`. `None` when
+/// `allow_null` would wrap it in `anyOf` instead, or when it has no `type`
+/// to widen (or already admits `null`), in which case a nullable copy is
+/// recognised by plain equality or not at all. A recursive body always has
+/// a `type` and never a top-level `const`/`enum` — those cannot hold the
+/// reference that makes it recursive — so `allow_null`'s `const`/`enum`
+/// handling has nothing to act on here.
+#[cfg(feature = "json-schema")]
+fn nullable(
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if ["if", "allOf", "anyOf", "oneOf", "$ref"]
+        .iter()
+        .any(|key| body.contains_key(*key))
+    {
+        return None;
+    }
+    let mut widened = body.clone();
+    match widened.get_mut("type")? {
+        serde_json::Value::String(single) if single != "null" => {
+            let single = std::mem::take(single);
+            widened.insert("type".into(), serde_json::json!([single, "null"]));
+        }
+        serde_json::Value::Array(types) if !types.contains(&serde_json::json!("null")) => {
+            types.push(serde_json::json!("null"));
+        }
+        _ => return None,
+    }
+    Some(widened)
 }
 
 #[cfg(test)]
@@ -1138,12 +1406,131 @@ mod block_endpoint_tests {
             );
         }
 
-        // The field's doc comment survives the partial inlining too.
+        // The field's doc comment survives too — beside the `$ref` the use
+        // site became (see `recursive_types_are_referenced_not_unrolled`).
         assert_eq!(
             nested["properties"]["when"]["description"],
             serde_json::json!("The condition tree."),
             "descriptions must survive on recursive fields as well: {nested}"
         );
+    }
+
+    /// A recursive type below the root is *referenced*, never unrolled: its
+    /// body appears exactly once, in `$defs`, and every use site — the
+    /// fields of the root type and the type's own recursive children alike —
+    /// is a `$ref` to it. Before this was pinned, schemars' `inline_subschemas`
+    /// pasted the full body in at every use site *and* kept the `$defs` copy
+    /// that closed the cycle, so a contract using a condition tree in three
+    /// places carried its body four times (impresspress's offer tools shipped
+    /// ~110 KB of such copies in a 291 KB WebMCP manifest).
+    ///
+    /// Counting a marker that only the `Equals` variant's doc comment carries
+    /// counts bodies directly. The use sites' own doc comments must survive
+    /// as siblings of the `$ref`.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn recursive_types_are_referenced_not_unrolled() {
+        #[derive(schemars::JsonSchema)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum Condition {
+            /// Every child condition holds.
+            All { all: Vec<Condition> },
+            /// The child condition does not hold.
+            Not { not: Box<Condition> },
+            /// BODY-MARKER: the input equals a literal.
+            Equals { equals: String },
+        }
+
+        /// A recursive *struct*: an `Option` of it is made nullable by
+        /// widening its `type`, not by wrapping it in `anyOf`.
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Node {
+            /// NODE-MARKER: the child nodes.
+            children: Vec<Node>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            /// When the rule applies.
+            when: Condition,
+            /// Conditions that suspend the rule.
+            unless: Vec<Condition>,
+            /// An optional extra guard.
+            guard: Option<Condition>,
+            /// An optional tree.
+            tree: Option<Node>,
+        }
+
+        for (label, schema) in [
+            (
+                "input",
+                BlockEndpoint::post("/b/x").input::<Rule>().input_schema,
+            ),
+            (
+                "output",
+                BlockEndpoint::post("/b/x").output::<Rule>().output_schema,
+            ),
+        ] {
+            let schema = schema.expect("schema set");
+            let rendered = schema.to_string();
+            assert_eq!(
+                rendered.matches("BODY-MARKER").count(),
+                1,
+                "{label}: the `Condition` body must appear exactly once: {rendered}"
+            );
+            assert!(
+                schema["$defs"]["Condition"].is_object(),
+                "{label}: the single body lives in `$defs`: {rendered}"
+            );
+
+            let when = &schema["properties"]["when"];
+            assert_eq!(
+                when["$ref"],
+                serde_json::json!("#/$defs/Condition"),
+                "{label}: {rendered}"
+            );
+            assert_eq!(
+                when["description"],
+                serde_json::json!("When the rule applies."),
+                "{label}: the use site keeps its own doc next to the `$ref`: {rendered}"
+            );
+            assert_eq!(
+                schema["properties"]["unless"]["description"],
+                serde_json::json!("Conditions that suspend the rule."),
+                "{label}: {rendered}"
+            );
+            assert_eq!(
+                schema["properties"]["unless"]["items"]["$ref"],
+                serde_json::json!("#/$defs/Condition"),
+                "{label}: {rendered}"
+            );
+            assert_eq!(
+                schema["properties"]["guard"],
+                serde_json::json!({
+                    "anyOf": [{ "$ref": "#/$defs/Condition" }, { "type": "null" }],
+                    "description": "An optional extra guard."
+                }),
+                "{label}: {rendered}"
+            );
+
+            assert_eq!(
+                rendered.matches("NODE-MARKER").count(),
+                1,
+                "{label}: the `Node` body must appear exactly once: {rendered}"
+            );
+            assert_eq!(
+                schema["properties"]["tree"],
+                serde_json::json!({
+                    "anyOf": [{ "$ref": "#/$defs/Node" }, { "type": "null" }],
+                    "description": "An optional tree."
+                }),
+                "{label}: a type-widened nullable copy becomes the `anyOf` \
+                 form schemars emits for a referenced `Option`: {rendered}"
+            );
+        }
     }
 
     /// `$defs` is a recursion-only escape hatch, never a routine emission.
