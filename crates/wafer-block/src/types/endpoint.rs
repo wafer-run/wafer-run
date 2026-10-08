@@ -1395,7 +1395,8 @@ mod block_endpoint_tests {
     /// (`hoist_defs_into_components`): it hoists `$defs` into
     /// `components/schemas` and rewrites `#/$defs/X` to the hoisted entry,
     /// and for a root that references itself it hoists the root too, under
-    /// its `title`, and rewrites the bare `#` to that component.
+    /// a key taken from its `title`, and rewrites the bare `#` to that
+    /// component.
     #[cfg(feature = "json-schema")]
     #[test]
     fn recursive_types_never_reference_a_table_that_was_removed() {
