@@ -27,5 +27,5 @@ pub use interface_spec::{ActionSpec, InterfaceSpec};
 pub use message_ext::{hashmap_to_meta, meta_to_hashmap, MetaGet, MetaSet};
 pub use request_action::RequestAction;
 pub use schema::{CollectionSchema, FieldSchema, IndexSchema};
-pub use schema_ref::{decode_ref_name, encode_ref_name};
+pub use schema_ref::{decode_ref_name, encode_ref_name, keyword_value, KeywordValue};
 pub use skill::{ExternalAsset, SkillTool};

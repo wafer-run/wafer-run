@@ -161,9 +161,14 @@ pub struct BlockEndpoint {
     /// Opt-in agent-tool metadata. `None` means never exposed as a tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tool: Option<AgentTool>,
-    /// The endpoint needs something only a server holds (a secret key, say)
-    /// and is never callable when the runtime runs in a browser. Discovery
-    /// for a browser runtime leaves it out. The handler stays the gate.
+    /// The endpoint needs something only a server holds (a secret key, say),
+    /// so it cannot work when the runtime runs in a browser.
+    ///
+    /// wafer only records the flag: nothing in wafer reads it, and
+    /// `wafer-core`'s discovery documents list a flagged endpoint like any
+    /// other. The *host* decides when it applies — impresspress, for one,
+    /// leaves flagged endpoints out of discovery in its browser runtime. It
+    /// is never an access control: the handler stays the gate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub server_only: bool,
 }
@@ -282,9 +287,10 @@ impl BlockEndpoint {
     }
 
     /// Mark this endpoint as needing something only a server holds (a
-    /// secret key, say). A browser runtime cannot call it, so discovery for
-    /// a browser runtime leaves it out of every document. The handler stays
-    /// the gate; this only stops the endpoint being advertised.
+    /// secret key, say) — see the `server_only` field. wafer records the
+    /// flag; the host decides when to act on it (a browser runtime can leave
+    /// the endpoint out of its discovery documents), and the handler stays
+    /// the gate.
     pub fn server_only(mut self) -> Self {
         self.server_only = true;
         self
@@ -457,8 +463,9 @@ impl BlockEndpoint {
 /// A surviving `$ref` still does not *resolve* inside an OpenAPI document —
 /// both `#` and `#/$defs/X` are rooted at the OpenAPI document rather than
 /// at the embedded schema, which is why `wafer_core::discovery::generate_openapi`
-/// hoists definitions into `components/schemas` and rewrites the pointers
-/// before embedding a schema in the document; `wafer-core`'s `inline_refs`
+/// hoists definitions into `components/schemas` (and, for a root that
+/// references itself, the root too) and rewrites the pointers before
+/// embedding a schema in the document; `wafer-core`'s `inline_refs`
 /// builds the WebMCP projection by inlining every acyclic definition and
 /// carrying each cyclic one once in the projection's own `$defs`, rebasing
 /// `#` onto a named entry there.
@@ -559,30 +566,6 @@ const ANNOTATION_KEYWORDS: &[&str] = &[
     "$comment",
 ];
 
-/// Keywords whose value is a single subschema.
-#[cfg(feature = "json-schema")]
-const SUBSCHEMA_KEYWORDS: &[&str] = &[
-    "items",
-    "additionalProperties",
-    "not",
-    "if",
-    "then",
-    "else",
-    "contains",
-    "propertyNames",
-    "unevaluatedItems",
-    "unevaluatedProperties",
-    "contentSchema",
-];
-
-/// Keywords whose value is an array of subschemas.
-#[cfg(feature = "json-schema")]
-const SUBSCHEMA_LIST_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
-
-/// Keywords whose value maps author-chosen names to subschemas.
-#[cfg(feature = "json-schema")]
-const SUBSCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "dependentSchemas"];
-
 /// Replace every copy of a `$defs` body with a `$ref` to it — see "A
 /// recursive type is referenced, not unrolled" on [`self_contained_schema`].
 ///
@@ -592,16 +575,17 @@ const SUBSCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "de
 /// whatever produced the copy; the use site's annotations that differ from
 /// the body's are kept beside the `$ref`.
 ///
-/// The walk follows schema positions only ([`SUBSCHEMA_KEYWORDS`],
-/// [`SUBSCHEMA_LIST_KEYWORDS`], [`SUBSCHEMA_MAP_KEYWORDS`]), so literal
+/// The walk follows schema positions only — the keywords
+/// [`super::keyword_value`] classifies as holding subschemas — so literal
 /// instance data under `default`, `const`, `enum` or `examples` is never
-/// rewritten, and it is bottom-up, so a copy whose own nested copies have
-/// already collapsed is recognised. The bodies themselves are collapsed
-/// first, to a fixpoint: a definition can contain a copy of another (a
-/// recursive type nested inside an unrelated recursive type), and a copy
-/// elsewhere only matches the body once both are in the same, collapsed
-/// form. Neither the document root nor a definition's own top level is ever
-/// replaced — they are what references point *at*.
+/// rewritten, and neither is the value of a keyword it does not know. It is
+/// bottom-up, so a copy whose own nested copies have already collapsed is
+/// recognised. The bodies themselves are collapsed first, to a fixpoint: a
+/// definition can contain a copy of another (a recursive type nested inside
+/// an unrelated recursive type), and a copy elsewhere only matches the body
+/// once both are in the same, collapsed form. Neither the document root nor
+/// a definition's own top level is ever replaced — they are what references
+/// point *at*.
 #[cfg(feature = "json-schema")]
 fn reference_recursive_definitions(schema: &mut serde_json::Value) {
     let Some(mut defs) = schema
@@ -653,21 +637,27 @@ fn collapse_subschemas(
     };
     let mut changed = false;
     for (key, value) in map.iter_mut() {
-        let key = key.as_str();
-        if SUBSCHEMA_KEYWORDS.contains(&key) {
-            changed |= collapse(value, defs);
-        } else if SUBSCHEMA_LIST_KEYWORDS.contains(&key) {
-            if let serde_json::Value::Array(items) = value {
-                for item in items {
-                    changed |= collapse(item, defs);
+        // Instance data (`Literal`) and anything not known to hold subschemas
+        // (`Other`) are left alone: a copy left uncollapsed only stays
+        // inlined, whereas rewriting instance data would change what the
+        // schema says.
+        match super::keyword_value(key) {
+            super::KeywordValue::Subschema => changed |= collapse(value, defs),
+            super::KeywordValue::SubschemaList => {
+                if let serde_json::Value::Array(items) = value {
+                    for item in items {
+                        changed |= collapse(item, defs);
+                    }
                 }
             }
-        } else if SUBSCHEMA_MAP_KEYWORDS.contains(&key) {
-            if let serde_json::Value::Object(members) = value {
-                for member in members.values_mut() {
-                    changed |= collapse(member, defs);
+            super::KeywordValue::SubschemaMap => {
+                if let serde_json::Value::Object(members) = value {
+                    for member in members.values_mut() {
+                        changed |= collapse(member, defs);
+                    }
                 }
             }
+            super::KeywordValue::Literal | super::KeywordValue::Other => {}
         }
     }
     changed
@@ -1401,11 +1391,11 @@ mod block_endpoint_tests {
     ///
     /// Inside an OpenAPI document both forms would resolve against the
     /// OpenAPI root rather than the embedded schema.
-    /// `wafer_core::discovery::generate_openapi` closes that for the
-    /// `#/$defs/X` form by hoisting `$defs` into `components/schemas` and
-    /// rewriting the pointers (`hoist_defs_into_components`). The bare `#`
-    /// form is not rewritten there and still resolves against the OpenAPI
-    /// root.
+    /// `wafer_core::discovery::generate_openapi` closes that for both
+    /// (`hoist_defs_into_components`): it hoists `$defs` into
+    /// `components/schemas` and rewrites `#/$defs/X` to the hoisted entry,
+    /// and for a root that references itself it hoists the root too, under
+    /// its `title`, and rewrites the bare `#` to that component.
     #[cfg(feature = "json-schema")]
     #[test]
     fn recursive_types_never_reference_a_table_that_was_removed() {
