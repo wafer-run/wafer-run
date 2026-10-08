@@ -1748,6 +1748,36 @@ fn component_identity(
     json!({ "body": start, "reaches": reached })
 }
 
+/// The text a disambiguating suffix hashes: `value` serialised with every
+/// object's keys in sorted order, at every depth.
+///
+/// Whether two identities are the same is decided by `Value` equality, which
+/// ignores key order; the suffix must agree with it, or one definition met
+/// twice gets two keys. `Value::to_string` alone does not: with serde_json's
+/// `preserve_order` feature on it writes keys in insertion order, and that
+/// feature is on whenever something else in the build enables it (a
+/// full-workspace build does, through `aws-smithy-http-client`). Sorting
+/// here makes the suffix the same with the feature on or off.
+fn canonical_json(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+                entries.sort_by_key(|(key, _)| *key);
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), sorted(v)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    sorted(value).to_string()
+}
+
 /// Move a schema's `$defs` into `components` and rewrite `#/$defs/X` to
 /// `#/components/schemas/X`.
 ///
@@ -1837,7 +1867,7 @@ fn hoist_defs_into_components(
         // silently shadowed by it.
         let mut salt = 0u32;
         while holder(&key).is_some_and(|held| held != identity) {
-            let text = identity.to_string();
+            let text = canonical_json(&identity);
             let digest = if salt == 0 {
                 short_sha256(&text)
             } else {
@@ -4073,6 +4103,54 @@ mod tests {
             doc["components"]["schemas"].as_object().map(|s| s.len()),
             Some(6),
             "Expr, Cond and Leaf once for each distinct family: {text}"
+        );
+    }
+
+    /// Two definitions that are equal as JSON but whose objects list their
+    /// keys in a different order are one definition, and get one suffixed
+    /// key. With serde_json's `preserve_order` on — which a full-workspace
+    /// build turns on, through `aws-smithy-http-client` — `Value` equality
+    /// ignores key order but `to_string` does not, so hashing the plain
+    /// serialisation published the second as a duplicate component.
+    #[test]
+    fn openapi_suffix_does_not_depend_on_object_key_order() {
+        let mut integer_first = serde_json::Map::new();
+        integer_first.insert("type".into(), json!("integer"));
+        integer_first.insert("minimum".into(), json!(0));
+        let mut minimum_first = serde_json::Map::new();
+        minimum_first.insert("minimum".into(), json!(0));
+        minimum_first.insert("type".into(), json!("integer"));
+        let schema = |cond: serde_json::Map<String, Value>| {
+            json!({
+                "type": "object",
+                "properties": { "c": { "$ref": "#/$defs/Cond" } },
+                "$defs": { "Cond": Value::Object(cond) }
+            })
+        };
+        let doc = openapi_for(&[
+            block_taking(
+                "a/one",
+                "/b/one/x",
+                schema(
+                    [("type".to_string(), json!("string"))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+            block_taking("b/two", "/b/two/x", schema(integer_first)),
+            block_taking("c/three", "/b/three/x", schema(minimum_first)),
+        ]);
+        let text = doc.to_string();
+        let cond_ref = |path: &str| {
+            doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["properties"]["c"]["$ref"]
+                .clone()
+        };
+        assert_eq!(cond_ref("/b/two/x"), cond_ref("/b/three/x"), "{text}");
+        assert_eq!(
+            doc["components"]["schemas"].as_object().map(|s| s.len()),
+            Some(2),
+            "{text}"
         );
     }
 

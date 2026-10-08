@@ -2186,7 +2186,7 @@
 - `/openapi.json` publishes only valid `components.schemas` keys
   (`^[a-zA-Z0-9.\-_]+$`). A `$defs` key or root title outside that alphabet
   (`#[schemars(rename = "Product Status")]`, a hand-written `a/b`) is published
-  as the name with each invalid byte replaced by `_` and a hash of the
+  as the name with each invalid character replaced by `_` and a hash of the
   original name appended (`Product_Status_<16 hex>`), so every `$ref` spells
   its key verbatim. A name that was already valid keeps its key, as before.
 
