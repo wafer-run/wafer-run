@@ -444,15 +444,24 @@ impl BlockEndpoint {
 /// draft 2020-12, and what schemars itself emits for a non-inlined field.
 /// Every type schemars kept in `$defs` then appears exactly once; types it
 /// did not keep are untouched and stay fully inlined.
-/// `recursive_types_are_referenced_not_unrolled` holds us to it.
+/// `recursive_types_are_referenced_not_unrolled` holds us to it, and
+/// `a_recursive_type_inside_another_is_referenced_too` holds the nested case.
+///
+/// Out of scope: a type whose recursion closes on the *root* — schemars'
+/// `{"$ref": "#"}`, with no `$defs` entry — has no body here to reference.
+/// Used as a field of some *other* root, that same type closes on
+/// `#/$defs/X` and is covered; as the root itself its body is the document,
+/// and any copy of it inside (none in schemars' own output, which emits `#`
+/// at every re-entry) would stay as it is.
 ///
 /// A surviving `$ref` still does not *resolve* inside an OpenAPI document —
 /// both `#` and `#/$defs/X` are rooted at the OpenAPI document rather than
 /// at the embedded schema, which is why `wafer_core::discovery::generate_openapi`
 /// hoists definitions into `components/schemas` and rewrites the pointers
 /// before embedding a schema in the document; `wafer-core`'s `inline_refs`
-/// instead flattens what it can for the ref-free WebMCP projection, where
-/// recursive contracts are the only shape affected.
+/// builds the WebMCP projection by inlining every acyclic definition and
+/// carrying each cyclic one once in the projection's own `$defs`, rebasing
+/// `#` onto a named entry there.
 ///
 /// # Which contract
 ///
@@ -745,22 +754,72 @@ fn same_constraints(
             .all(|(key, value)| b.get(key) == Some(value))
 }
 
+/// Keywords that constrain only instances of some *other* type than `null`
+/// (an object, array, string or number) and pass every other instance
+/// through. A schema built from `type` plus these alone accepts `null`
+/// exactly when its `type` lists `"null"` — which is what makes the
+/// type-widened copy in [`nullable`] equivalent to
+/// `anyOf: [{"$ref": body}, {"type": "null"}]`.
+#[cfg(feature = "json-schema")]
+const NULL_TRANSPARENT_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "required",
+    "dependentRequired",
+    "dependentSchemas",
+    "minProperties",
+    "maxProperties",
+    "items",
+    "prefixItems",
+    "unevaluatedItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "contentEncoding",
+    "contentMediaType",
+    "contentSchema",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+];
+
 /// `body` as schemars' `allow_null` renders it in place when it has no
-/// subschema keyword of its own: `"null"` added to its `type`. `None` when
-/// `allow_null` would wrap it in `anyOf` instead, or when it has no `type`
-/// to widen (or already admits `null`), in which case a nullable copy is
-/// recognised by plain equality or not at all. A recursive body always has
-/// a `type` and never a top-level `const`/`enum` — those cannot hold the
-/// reference that makes it recursive — so `allow_null`'s `const`/`enum`
-/// handling has nothing to act on here.
+/// subschema keyword of its own: `"null"` added to its `type`.
+///
+/// `None` — so a nullable copy stays inlined — unless that widened copy is
+/// *exactly* equivalent to `anyOf: [{"$ref": body}, {"type": "null"}]`,
+/// i.e. unless every constraint besides `type` is an annotation or one of
+/// the [`NULL_TRANSPARENT_KEYWORDS`]. A keyword that can reject `null` on
+/// its own — `not`, `enum`, `const`, a composition keyword, an extension
+/// nobody here can read — would make the copy reject `null` where the
+/// `anyOf` form admits it. (`allow_null` wraps a body with
+/// `if`/`allOf`/`anyOf`/`oneOf`/`$ref` in `anyOf` itself; that copy's first
+/// member is exact and collapses on its own.) Also `None` with no `type` to
+/// widen, or one that already admits `null`: such a copy is recognised by
+/// plain equality or not at all.
 #[cfg(feature = "json-schema")]
 fn nullable(
     body: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if ["if", "allOf", "anyOf", "oneOf", "$ref"]
-        .iter()
-        .any(|key| body.contains_key(*key))
-    {
+    let null_transparent = body.keys().all(|key| {
+        let key = key.as_str();
+        key == "type"
+            || ANNOTATION_KEYWORDS.contains(&key)
+            || NULL_TRANSPARENT_KEYWORDS.contains(&key)
+    });
+    if !null_transparent {
         return None;
     }
     let mut widened = body.clone();
@@ -1531,6 +1590,103 @@ mod block_endpoint_tests {
                  form schemars emits for a referenced `Option`: {rendered}"
             );
         }
+    }
+
+    /// A recursive type inside another recursive type's body: schemars
+    /// inlines `Node` into the `$defs` copy of `Condition` too, so that body
+    /// only matches the `Condition` copies elsewhere once its own `Node` copy
+    /// has collapsed. The fixpoint over the `$defs` bodies is what makes that
+    /// happen before the root is walked.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn a_recursive_type_inside_another_is_referenced_too() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Node {
+            /// NODE-MARKER: the child nodes.
+            children: Vec<Node>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum Condition {
+            /// Every child condition holds.
+            All { all: Vec<Condition> },
+            /// COND-MARKER: the tree is non-empty.
+            Tree { tree: Node },
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            when: Condition,
+            unless: Vec<Condition>,
+        }
+
+        let schema = BlockEndpoint::post("/b/x")
+            .input::<Rule>()
+            .input_schema
+            .expect("input schema set");
+        let rendered = schema.to_string();
+        assert_eq!(rendered.matches("COND-MARKER").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("NODE-MARKER").count(), 1, "{rendered}");
+        assert_eq!(
+            schema["properties"]["when"],
+            serde_json::json!({ "$ref": "#/$defs/Condition" }),
+            "{rendered}"
+        );
+        assert_eq!(
+            schema["$defs"]["Condition"]["oneOf"][1]["properties"]["tree"],
+            serde_json::json!({ "$ref": "#/$defs/Node" }),
+            "the copy inside the other definition collapses too: {rendered}"
+        );
+    }
+
+    /// A type-widened nullable copy is replaced only when the replacement is
+    /// exactly equivalent. A body with a top-level `not` rejects `null` on
+    /// its own, so `{"type": ["object", "null"], "not": ...}` does *not*
+    /// admit `null` while `anyOf: [{"$ref"}, {"type": "null"}]` would: that
+    /// copy must stay inlined.
+    #[cfg(feature = "json-schema")]
+    #[test]
+    fn a_nullable_copy_stays_inlined_when_the_body_can_reject_null() {
+        let body = serde_json::json!({
+            "type": "object",
+            "properties": { "next": { "$ref": "#/$defs/Node" } },
+            "not": { "required": ["forbidden"] }
+        });
+        let mut widened = body.clone();
+        widened["type"] = serde_json::json!(["object", "null"]);
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": { "tree": widened.clone() },
+            "$defs": { "Node": body }
+        });
+        reference_recursive_definitions(&mut schema);
+        assert_eq!(
+            schema["properties"]["tree"], widened,
+            "a body with `not` is not null-transparent: {schema}"
+        );
+
+        // Without the `not`, the same copy is equivalent and collapses.
+        let body = serde_json::json!({
+            "type": "object",
+            "properties": { "next": { "$ref": "#/$defs/Node" } }
+        });
+        let mut widened = body.clone();
+        widened["type"] = serde_json::json!(["object", "null"]);
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": { "tree": widened },
+            "$defs": { "Node": body }
+        });
+        reference_recursive_definitions(&mut schema);
+        assert_eq!(
+            schema["properties"]["tree"],
+            serde_json::json!({ "anyOf": [{ "$ref": "#/$defs/Node" }, { "type": "null" }] }),
+            "{schema}"
+        );
     }
 
     /// `$defs` is a recursion-only escape hatch, never a routine emission.

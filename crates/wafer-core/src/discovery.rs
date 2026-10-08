@@ -1616,8 +1616,9 @@ fn published_path_template(path: &str) -> Cow<'_, str> {
 /// Unlike [`inline_refs`], nothing is inlined: OpenAPI clients resolve
 /// `$ref` fine, so each definition is published once under
 /// `components.schemas` and every reference to it is rewritten in place —
-/// including a cyclic one, which stays a `$ref` rather than needing the
-/// back-edge dance `inline_refs` does for the ref-free WebMCP projection.
+/// acyclic ones included, which `inline_refs` expands for the WebMCP
+/// projection (keeping only the cyclic definitions, once each, in that
+/// projection's own `$defs`).
 ///
 /// Two passes: decide every name first (bodies are compared *unrewritten*,
 /// so the decision does not depend on rewrite order), then rewrite the root
