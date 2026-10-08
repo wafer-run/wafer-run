@@ -1884,10 +1884,10 @@ pub fn generate_openapi(
 
     // `hoist_defs_into_components` runs once per document build: `raw` holds
     // every hoisted definition's (and self-referencing root's) unrewritten
-    // body, keyed by its published name, so a same-named definition met later in the walk compares
-    // against what was actually published rather than re-deciding from
-    // scratch; `components` holds the rewritten bodies that go out under
-    // `components.schemas`.
+    // body, keyed by its published name, so a same-named definition met
+    // later in the walk compares against what was actually published rather
+    // than re-deciding from scratch; `components` holds the rewritten bodies
+    // that go out under `components.schemas`.
     let mut raw: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
     let mut components: serde_json::Map<String, Value> = serde_json::Map::new();
 
@@ -1992,9 +1992,9 @@ pub fn generate_openapi(
     }
 
     // A document with no `$defs` and no root-recursion marker (`#`) anywhere
-    // hoists nothing, and must come out
-    // byte-identical to before this hoist existed — so `schemas` is only
-    // added when there is something to publish under it.
+    // hoists nothing, and must come out byte-identical to before this hoist
+    // existed — so `schemas` is only added when there is something to
+    // publish under it.
     let mut components_obj: serde_json::Map<String, Value> = serde_json::Map::new();
     if !components.is_empty() {
         components_obj.insert("schemas".into(), Value::Object(components));

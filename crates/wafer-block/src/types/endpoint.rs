@@ -1391,11 +1391,11 @@ mod block_endpoint_tests {
     ///
     /// Inside an OpenAPI document both forms would resolve against the
     /// OpenAPI root rather than the embedded schema.
-    /// `wafer_core::discovery::generate_openapi` closes that for the
-    /// `#/$defs/X` form by hoisting `$defs` into `components/schemas` and
-    /// rewriting the pointers (`hoist_defs_into_components`). The bare `#`
-    /// form is not rewritten there and still resolves against the OpenAPI
-    /// root.
+    /// `wafer_core::discovery::generate_openapi` closes that for both
+    /// (`hoist_defs_into_components`): it hoists `$defs` into
+    /// `components/schemas` and rewrites `#/$defs/X` to the hoisted entry,
+    /// and for a root that references itself it hoists the root too, under
+    /// its `title`, and rewrites the bare `#` to that component.
     #[cfg(feature = "json-schema")]
     #[test]
     fn recursive_types_never_reference_a_table_that_was_removed() {
