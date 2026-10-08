@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 
 use serde_json::{json, Value};
-use wafer_block::types::{AgentTool, AuthLevel, BlockEndpoint, BlockInfo, HttpMethod};
+use wafer_block::types::{
+    decode_ref_name, encode_ref_name, AgentTool, AuthLevel, BlockEndpoint, BlockInfo, HttpMethod,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,76 +126,20 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "depen
 /// # What the budget bounds, exactly
 ///
 /// It bounds the nodes the *walk emits*, which is not quite the size of the
-/// returned document. [`inline_refs`] keeps a cyclic definition by cloning
-/// the body its frame already produced, so a kept definition's nodes are
-/// charged once (when they were walked) and appear twice (in the output tree
-/// and in the `$defs` table). With `d` definitions kept — `d` is the number
-/// of *distinct* definitions some back-edge names, one for almost every real
-/// recursive type — the returned document holds at most `(d + 1) ×
-/// MAX_INLINED_NODES` nodes.
+/// returned document. A kept (cyclic) definition's body is walked once, into
+/// the `$defs` table, and charged then; its use sites carry only a `$ref`.
+/// The one copy that is not charged is the recursive *root*: [`inline_refs`]
+/// keeps it by cloning the finished document into the table, so its nodes
+/// are charged once and appear twice, and the returned document holds at
+/// most `2 × MAX_INLINED_NODES` nodes.
 ///
 /// The clone is deliberately not charged. Charging it would push a
 /// legitimately-sized recursive schema over a budget that exists for runaway
-/// *expansion*, and there is no runaway here: `d` is bounded by the number of
-/// definitions the source declares, and each kept body is a subtree of output
-/// the walk already paid for. A factor of `d + 1` on a bound chosen to be
+/// *expansion*, and there is no runaway here: the clone is a subtree of
+/// output the walk already paid for. A factor of two on a bound chosen to be
 /// orders of magnitude larger than any real schema is not the failure this
 /// constant guards against.
 const MAX_INLINED_NODES: usize = 100_000;
-
-/// Decode a `#/$defs/` pointer segment back into the key it names in the
-/// `$defs` table.
-///
-/// schemars writes reference *names* through its `encode_ref_name`: `~`
-/// becomes `~0` and `/` becomes `~1` (RFC 6901 JSON-Pointer escaping), and
-/// every other byte outside the URI-fragment safe set is percent-encoded
-/// (space, `"`, `#`, `%`, `<`, `>`, `[`, `\`, `]`, `^`, `` ` ``, `{`, `|`,
-/// `}`, and anything non-ASCII). The `$defs` *keys* are left unencoded, so
-/// `#[schemars(rename = "Product Status")]` emits a reference to
-/// `#/$defs/Product%20Status` against a table keyed `Product Status`.
-/// Looking the raw segment up would miss and silently degrade the property
-/// to `{}`.
-///
-/// Unescaping order is load-bearing, and is the order RFC 6901 §4 requires:
-/// `~1` first, then `~0`. Doing `~0` first would turn the encoding of the
-/// literal name `~1` (which is `~01`) into `~1` and then into `/`.
-///
-/// Returns `None` when percent-decoding does not yield valid UTF-8 — a
-/// segment that cannot name any key, and so must be reported as unresolvable
-/// rather than guessed at.
-fn decode_ref_name(encoded: &str) -> Option<String> {
-    let decoded = percent_encoding::percent_decode_str(encoded)
-        .decode_utf8()
-        .ok()?;
-    Some(decoded.replace("~1", "/").replace("~0", "~"))
-}
-
-/// The bytes a `#/$defs/` pointer segment may carry unencoded: the RFC 3986
-/// unreserved set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`). Everything else
-/// is percent-encoded, including every non-ASCII byte —
-/// `percent_encoding` escapes those regardless of the set.
-const REF_NAME_ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
-
-/// Encode a `$defs` key into the pointer segment that names it — the exact
-/// inverse of [`decode_ref_name`], and the encoding schemars itself writes.
-///
-/// Used for the back-edges [`inline_refs`] emits for a cycle. The `$defs`
-/// keys it writes are the *unencoded* names, exactly as schemars leaves them,
-/// so a definition named `Product Status` is keyed `Product Status` and
-/// referred to as `#/$defs/Product%20Status`.
-///
-/// Order is load-bearing and mirrors the decoder's. JSON-Pointer escaping
-/// comes first (`~` → `~0`, then `/` → `~1`, in that order, so the `~` that
-/// `~1` introduces is not escaped a second time), then percent-encoding —
-/// which leaves the escapes alone, since `~`, `0` and `1` are all unreserved.
-fn encode_ref_name(name: &str) -> String {
-    let escaped = name.replace('~', "~0").replace('/', "~1");
-    percent_encoding::utf8_percent_encode(&escaped, REF_NAME_ESCAPE).to_string()
-}
 
 /// Count the JSON nodes in a value.
 ///
@@ -228,11 +174,19 @@ fn count_nodes(value: &Value) -> usize {
 /// self-contained in the only sense that matters here — a client needs
 /// nothing but the document it was handed to resolve it.
 ///
-/// So the cycle is not cut; it is rebased. The first reference to a
-/// definition is still inlined in full, and only the reference that closes
-/// the cycle becomes a `$ref` back to that definition, which the output then
-/// carries under its own `$defs`. Exactly the definitions some back-edge
-/// names are kept — every other one is inlined and named by nothing.
+/// So the cycle is not cut; it is rebased. A definition that lies on a
+/// cycle of references ([`definitions_on_a_cycle`]) is never inlined: every
+/// reference to it stays a `$ref`, and the output carries its body exactly
+/// once, under its own `$defs`. Inlining it at its first use site and
+/// referencing it only where the cycle closes — what this function used to
+/// do — ships the body once per use site *plus* once in the table: a
+/// condition tree used by three fields reached the agent four times.
+/// Exactly the definitions some emitted `$ref` names are kept; every
+/// definition on no cycle is inlined wherever it is used and named by
+/// nothing. The one exception is a document whose root *is* a reference to
+/// a cyclic definition: the root has to be the schema itself (the merge
+/// flattens its `properties`), so that one reference is inlined, and its
+/// back-edges still resolve against the kept body.
 /// schemars' root-recursion marker `{"$ref": "#"}` is rebased the same way,
 /// onto a definition named after the document's `title` (see
 /// [`root_definition_name`]), because a bare `#` would point at whatever
@@ -251,15 +205,15 @@ fn inline_refs(schema: &Value) -> (Value, RefIssues) {
     let root_name = root_definition_name(schema, &defs);
     let mut walk = RefWalk {
         defs: &defs,
-        active: Vec::new(),
+        cyclic: definitions_on_a_cycle(&defs),
         issues: RefIssues::default(),
         emitted: 0,
         kept: std::collections::BTreeMap::new(),
-        cyclic: std::collections::BTreeSet::new(),
+        started: std::collections::BTreeSet::new(),
         root_name: root_name.clone(),
         root_recursive: false,
     };
-    let mut resolved = walk.resolve(schema);
+    let mut resolved = walk.resolve_document(schema);
     let mut issues = walk.issues;
     let mut kept = walk.kept;
 
@@ -346,33 +300,113 @@ struct RefIssues {
     oversized: bool,
 }
 
-/// One pass of [`inline_refs`]: the reference table it resolves against, the
-/// chain of definitions currently open, what went wrong, and how much output
+/// The `$defs` entries that can reach themselves through `#/$defs/*`
+/// references — the definitions with no finite inlining, which
+/// [`inline_refs`] keeps and references instead of expanding.
+///
+/// A definition referenced from two branches of a finite tree (a diamond) is
+/// not on a cycle and is not in this set: it inlines at both sites. Every
+/// definition on a cycle is, not only the one some traversal happens to
+/// close it on, so `A -> B -> A` keeps both `A` and `B` — each referenced
+/// wherever it is used, each carried once. References are collected from
+/// schema positions only, by the same keyword rules the walk itself follows
+/// ([`collect_def_refs`]); a reference to a missing entry is no edge (the
+/// walk reports it).
+fn definitions_on_a_cycle(defs: &Value) -> std::collections::BTreeSet<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let Some(table) = defs.as_object() else {
+        return BTreeSet::new();
+    };
+    let edges: BTreeMap<&str, BTreeSet<String>> = table
+        .iter()
+        .map(|(name, body)| {
+            let mut targets = BTreeSet::new();
+            collect_def_refs(body, &mut targets);
+            targets.retain(|target| table.contains_key(target));
+            (name.as_str(), targets)
+        })
+        .collect();
+
+    table
+        .keys()
+        .filter(|start| {
+            let mut seen = BTreeSet::new();
+            let mut frontier: Vec<&str> =
+                edges[start.as_str()].iter().map(String::as_str).collect();
+            while let Some(name) = frontier.pop() {
+                if name == start.as_str() {
+                    return true;
+                }
+                if seen.insert(name) {
+                    frontier.extend(edges[name].iter().map(String::as_str));
+                }
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// Collect the `$defs` keys named by `#/$defs/*` references in `node`, read
+/// as a schema — walking exactly the positions [`RefWalk::resolve`] walks:
+/// literal-value keywords are data, [`SCHEMA_MAP_KEYWORDS`] members are
+/// schemas under author-chosen names, and a nested `$defs` is not followed.
+fn collect_def_refs(node: &Value, out: &mut std::collections::BTreeSet<String>) {
+    match node {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref") {
+                if let Some(name) = reference.strip_prefix("#/$defs/").and_then(decode_ref_name) {
+                    out.insert(name);
+                }
+            }
+            for (key, value) in map {
+                let key = key.as_str();
+                if key == "$ref" || key == "$defs" || LITERAL_VALUE_KEYWORDS.contains(&key) {
+                    continue;
+                }
+                if SCHEMA_MAP_KEYWORDS.contains(&key) {
+                    if let Value::Object(members) = value {
+                        for member in members.values() {
+                            collect_def_refs(member, out);
+                        }
+                        continue;
+                    }
+                }
+                collect_def_refs(value, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_def_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One pass of [`inline_refs`]: the reference table it resolves against,
+/// which of its definitions are cyclic, what went wrong, and how much output
 /// has been produced so far.
 struct RefWalk<'a> {
     /// The document's `$defs` table — the only thing a `#/$defs/*` pointer
     /// can name.
     defs: &'a Value,
-    /// The definitions currently being expanded, innermost last.
-    ///
-    /// A stack, not a set of everything ever seen: a definition referenced
-    /// twice from *different* branches of a finite type tree is not a cycle,
-    /// and must inline both times.
-    active: Vec<String>,
+    /// The definitions that lie on a cycle — see [`definitions_on_a_cycle`].
+    /// Every reference to one stays a `$ref`; every other reference is
+    /// inlined.
+    cyclic: std::collections::BTreeSet<String>,
     issues: RefIssues,
     /// JSON nodes emitted so far, charged against [`MAX_INLINED_NODES`].
     emitted: usize,
-    /// Definitions that closed a cycle and are therefore kept under the
-    /// output's `$defs` instead of inlined. Filled when a frame that is
-    /// `active` is referenced again; the body is stored when that frame
-    /// finishes resolving.
+    /// The resolved bodies of the cyclic definitions some emitted `$ref`
+    /// names, carried under the output's `$defs`.
     kept: std::collections::BTreeMap<String, Value>,
-    /// Names whose bodies must be captured when their frame completes.
-    ///
-    /// Separate from `kept` because the two are known at different moments:
-    /// a cycle is discovered at the back-edge, deep inside the frame, and
-    /// the body only exists once that frame unwinds.
-    cyclic: std::collections::BTreeSet<String>,
+    /// Cyclic definitions whose body has been (or is being) resolved into
+    /// `kept`. Separate from `kept` because a body is only stored once it is
+    /// finished, and the references *inside* it to its own definition must
+    /// not start it a second time.
+    started: std::collections::BTreeSet<String>,
     /// The name the document root is known by when it references itself —
     /// see [`root_definition_name`].
     root_name: String,
@@ -397,10 +431,25 @@ impl RefWalk<'_> {
         true
     }
 
-    /// Resolve one `$ref` target, tracking the chain of definitions currently
-    /// being expanded so a cycle is rebased where it closes rather than after
-    /// an arbitrary number of hops.
-    fn resolve_ref_target(&mut self, reference: &str) -> Value {
+    /// Resolve the document root. A root that is itself a `$ref` is
+    /// inlined even when it names a cyclic definition: the root has to *be*
+    /// the schema, not point at one.
+    fn resolve_document(&mut self, schema: &Value) -> Value {
+        match schema {
+            Value::Object(map) if map.get("$ref").is_some_and(Value::is_string) => {
+                if !self.spend(1) {
+                    return json!({});
+                }
+                self.resolve_ref_node(map, true)
+            }
+            _ => self.resolve(schema),
+        }
+    }
+
+    /// Resolve one `$ref` target: a reference to a cyclic definition stays a
+    /// reference (unless `inline_cyclic`, for the document root) and its
+    /// body is kept; any other is replaced by its resolved target.
+    fn resolve_ref_target(&mut self, reference: &str, inline_cyclic: bool) -> Value {
         // schemars' root-recursion marker: the document root contains
         // itself. There is no finite inlining of that, but there is a finite
         // self-contained document — the root under a name of its own, with
@@ -420,27 +469,32 @@ impl RefWalk<'_> {
             self.issues.unresolved = true;
             return json!({});
         };
-        if self.active.contains(&name) {
-            // The cycle closes here. Point back at the definition instead of
-            // expanding it a second time, and mark it so the frame that owns
-            // it leaves a body behind for this reference to resolve against.
-            let back_edge = json!({ "$ref": format!("#/$defs/{}", encode_ref_name(&name)) });
-            self.cyclic.insert(name);
-            return back_edge;
-        }
-
         let target = target.clone();
-        self.active.push(name.clone());
-        let resolved = self.resolve(&target);
-        self.active.pop();
-        // Only a definition something referred *back* to is kept. A
-        // definition that merely appears twice in a finite tree is inlined at
-        // both sites and named by nothing, so putting it in the table would
-        // ship a definition no reference resolves against.
-        if self.cyclic.contains(&name) {
-            self.kept.entry(name).or_insert_with(|| resolved.clone());
+        if self.cyclic.contains(&name) && !inline_cyclic {
+            let reference = json!({ "$ref": format!("#/$defs/{}", encode_ref_name(&name)) });
+            self.keep(name, &target);
+            return reference;
         }
-        resolved
+        // Not on a cycle (or the document root): inline it. Expansion
+        // terminates, because every path back to a definition already being
+        // expanded passes through a cyclic one, which is referenced above
+        // rather than expanded.
+        self.resolve(&target)
+    }
+
+    /// Resolve a cyclic definition's body into the output's `$defs`, once.
+    ///
+    /// Only a definition some emitted `$ref` names is kept; one that is on a
+    /// cycle but never reached is not, so the table never ships a body no
+    /// reference resolves against. The name is marked *before* the body is
+    /// resolved, so the references inside it — to itself, or round a longer
+    /// cycle back to it — stay references instead of starting it again.
+    fn keep(&mut self, name: String, body: &Value) {
+        if !self.started.insert(name.clone()) {
+            return;
+        }
+        let resolved = self.resolve(body);
+        self.kept.insert(name, resolved);
     }
 
     /// Walk one member of a *schema object*, whose keys are JSON Schema
@@ -494,33 +548,8 @@ impl RefWalk<'_> {
         }
         match node {
             Value::Object(map) => {
-                if let Some(Value::String(reference)) = map.get("$ref") {
-                    let mut resolved = self.resolve_ref_target(reference);
-
-                    // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`,
-                    // and schemars uses exactly that: a doc-commented field
-                    // of a named type emits
-                    // `{"description": "...", "$ref": "#/$defs/Status"}`.
-                    // Returning only the resolved target would silently
-                    // delete every such field description. Siblings win over
-                    // the target's own keys, since they are the more specific
-                    // annotation. `$defs` is excluded here too — it is the
-                    // reference table itself, not a schema keyword, and must
-                    // never survive into the output (it can appear as a
-                    // literal sibling of `$ref` when the ref sits at the
-                    // schema root). The siblings are members of a schema
-                    // object, so they go through exactly the keyword-position
-                    // rules the plain-object walk below uses.
-                    if let Some(out) = resolved.as_object_mut() {
-                        for (key, value) in map {
-                            if key == "$ref" || key == "$defs" {
-                                continue;
-                            }
-                            let member = self.resolve_member(key, value);
-                            out.insert(key.clone(), member);
-                        }
-                    }
-                    return resolved;
+                if map.get("$ref").is_some_and(Value::is_string) {
+                    return self.resolve_ref_node(map, false);
                 }
 
                 let mut out = serde_json::Map::new();
@@ -546,6 +575,42 @@ impl RefWalk<'_> {
             }
             other => other.clone(),
         }
+    }
+
+    /// Resolve a schema object that carries a string `$ref`, together with
+    /// the keywords beside it. The node itself has already been charged.
+    fn resolve_ref_node(
+        &mut self,
+        map: &serde_json::Map<String, Value>,
+        inline_cyclic: bool,
+    ) -> Value {
+        let Some(Value::String(reference)) = map.get("$ref") else {
+            unreachable!("callers check for a string `$ref`");
+        };
+        let mut resolved = self.resolve_ref_target(reference, inline_cyclic);
+
+        // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`, and schemars
+        // uses exactly that: a doc-commented field of a named type emits
+        // `{"description": "...", "$ref": "#/$defs/Status"}`. Returning only
+        // the resolved target would silently delete every such field
+        // description. Siblings win over the target's own keys, since they
+        // are the more specific annotation — and when the target stays a
+        // reference (a cyclic definition), they stay beside it. `$defs` is
+        // excluded here too — it is the reference table itself, not a schema
+        // keyword, and must never survive into the output (it can appear as
+        // a literal sibling of `$ref` when the ref sits at the schema root).
+        // The siblings are members of a schema object, so they go through
+        // exactly the keyword-position rules the plain-object walk uses.
+        if let Some(out) = resolved.as_object_mut() {
+            for (key, value) in map {
+                if key == "$ref" || key == "$defs" {
+                    continue;
+                }
+                let member = self.resolve_member(key, value);
+                out.insert(key.clone(), member);
+            }
+        }
+        resolved
     }
 }
 
@@ -592,9 +657,9 @@ struct MergedSource {
 /// [`source_is_flattenable`], and `$defs`, which is neither structure nor
 /// annotation:
 ///
-/// * `$defs` — the definitions [`inline_refs`] kept because a cycle closes
-///   on them. Dropping it would strand every back-edge in `properties` on a
-///   pointer with no referent, which is exactly the unconstrained-`{}` lie
+/// * `$defs` — the definitions [`inline_refs`] kept because they lie on a
+///   cycle. Dropping it would strand every reference to them in
+///   `properties` on a pointer with no referent, which is exactly the unconstrained-`{}` lie
 ///   the rest of this wall exists to prevent. So it is neither dropped nor
 ///   carried in place: [`merge_schema_source`] *hoists* it into the one
 ///   `$defs` table the merged schema has, since the three sources are being
@@ -785,7 +850,7 @@ fn source_is_flattenable(inlined: &Value) -> bool {
 /// A source that kept a cyclic definition (see [`inline_refs`]) arrives with
 /// a `$defs` table of its own, and the merged schema is one document with
 /// one such table. Its entries are therefore folded into the shared `defs`
-/// accumulator rather than left on the source, so that the back-edges in the
+/// accumulator rather than left on the source, so that the references in the
 /// properties this source contributes still resolve inside the merged
 /// document. Two sources naming the same definition *identically* is not a
 /// conflict — they are the same type, and one entry describes both. Two
@@ -1059,7 +1124,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut required: Vec<String> = Vec::new();
 
     // One table for all three sources: the merged schema is a single
-    // document, so the definitions its back-edges name have exactly one
+    // document, so the definitions its references name have exactly one
     // place to live — see `merge_schema_source`.
     let mut defs = serde_json::Map::new();
 
@@ -1222,8 +1287,8 @@ struct AgentOutputSchema {
 
 /// Project an endpoint's declared response schema into the tool's
 /// `outputSchema`: the same self-containment treatment `inputSchema` gets —
-/// every `#/$defs/*` reference inlined except the ones a cycle closes on,
-/// whose definitions travel in the schema's own `$defs`, and the root
+/// every `#/$defs/*` reference inlined except those to a definition on a
+/// cycle, whose definitions travel in the schema's own `$defs`, and the root
 /// `title` dropped — under the same [`MAX_INLINED_NODES`] budget.
 ///
 /// Unlike the input side there is nothing to hoist: an output schema is one
@@ -1551,8 +1616,9 @@ fn published_path_template(path: &str) -> Cow<'_, str> {
 /// Unlike [`inline_refs`], nothing is inlined: OpenAPI clients resolve
 /// `$ref` fine, so each definition is published once under
 /// `components.schemas` and every reference to it is rewritten in place —
-/// including a cyclic one, which stays a `$ref` rather than needing the
-/// back-edge dance `inline_refs` does for the ref-free WebMCP projection.
+/// acyclic ones included, which `inline_refs` expands for the WebMCP
+/// projection (keeping only the cyclic definitions, once each, in that
+/// projection's own `$defs`).
 ///
 /// Two passes: decide every name first (bodies are compared *unrewritten*,
 /// so the decision does not depend on rewrite order), then rewrite the root
@@ -3150,6 +3216,66 @@ mod tests {
         assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
     }
 
+    /// The same recursive type used in two fields of a *derived* schema
+    /// reaches `/openapi.json` as one component: `input::<T>()` already
+    /// references it from every use site, and the hoist rewrites those
+    /// references — and the field doc beside one — without unrolling
+    /// anything.
+    #[test]
+    fn openapi_carries_a_derived_recursive_type_once() {
+        #[derive(schemars::JsonSchema)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum Condition {
+            /// Every child condition holds.
+            All { all: Vec<Condition> },
+            /// BODY-MARKER: the input equals a literal.
+            Equals { equals: String },
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            /// When the rule applies.
+            when: Condition,
+            unless: Vec<Condition>,
+        }
+
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/rules")
+                    .auth(AuthLevel::Public)
+                    .input::<Rule>(),
+            ]),
+        ];
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
+        let text = doc.to_string();
+        assert_eq!(text.matches("BODY-MARKER").count(), 1, "{text}");
+        let schema = &doc["paths"]["/b/test/rules"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+        assert_eq!(
+            schema["properties"]["when"],
+            json!({
+                "$ref": "#/components/schemas/Condition",
+                "description": "When the rule applies."
+            }),
+            "{text}"
+        );
+        assert_eq!(
+            schema["properties"]["unless"]["items"],
+            json!({ "$ref": "#/components/schemas/Condition" }),
+            "{text}"
+        );
+        assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
+    }
+
     // 7c. openapi_without_defs_is_byte_identical_to_before_the_hoist
     #[test]
     fn openapi_without_defs_is_byte_identical_to_before_the_hoist() {
@@ -3754,13 +3880,9 @@ mod tests {
         });
         let (out, issues) = inline_refs(&schema);
         assert_eq!(issues, RefIssues::default());
-        // The first reference is inlined; the cycle inside it is a `$ref`
-        // back to the kept definition.
-        assert_eq!(out["properties"]["root"]["type"], "object");
-        assert_eq!(
-            out["properties"]["root"]["properties"]["children"]["items"],
-            json!({ "$ref": "#/$defs/Node" })
-        );
+        // A cyclic definition is referenced at its use site too, not inlined
+        // there: the body travels once, in the kept table.
+        assert_eq!(out["properties"]["root"], json!({ "$ref": "#/$defs/Node" }));
         assert_eq!(
             out["$defs"]["Node"]["properties"]["children"]["items"],
             json!({ "$ref": "#/$defs/Node" })
@@ -3847,9 +3969,10 @@ mod tests {
     }
 
     /// A definition referenced twice from *different* branches is a diamond,
-    /// not a cycle: the visited stack must unwind, or the second branch is
-    /// falsely read as closing a cycle — inlined once and then left as a
-    /// back-edge to a definition that is in no way recursive.
+    /// not a cycle: it is on no cycle ([`definitions_on_a_cycle`]), so it is
+    /// inlined at both sites rather than kept and referenced — a reference to
+    /// a definition that is in no way recursive would be an indirection an
+    /// MCP client may not follow, for nothing.
     #[test]
     fn inline_refs_resolves_a_definition_referenced_from_two_branches() {
         let schema = json!({
@@ -3880,13 +4003,14 @@ mod tests {
         );
     }
 
-    /// A cycle that closes through an intermediate definition keeps exactly
-    /// the definition the back-edge names — `A`, whose body carries `B`
-    /// inlined — and nothing else. `B` is not part of any cycle on its own,
-    /// so keeping it too would put a definition in the table that nothing
-    /// refers to.
+    /// A cycle that closes through an intermediate definition puts *both*
+    /// definitions on it: `A -> B -> A` is as much a cycle through `B` as
+    /// through `A`. Each is referenced wherever it is used and carried once.
+    /// The document root is the one reference that is inlined — it has to be
+    /// the schema itself — so its `b` is a reference to the kept `B`, whose
+    /// own `a` refers back to the kept `A`.
     #[test]
-    fn inline_refs_keeps_the_definition_an_indirect_cycle_closes_on() {
+    fn inline_refs_keeps_every_definition_on_an_indirect_cycle() {
         let indirect = json!({
             "$ref": "#/$defs/A",
             "$defs": {
@@ -3896,20 +4020,19 @@ mod tests {
         });
         let (out, issues) = inline_refs(&indirect);
         assert_eq!(issues, RefIssues::default());
+        assert_eq!(out["type"], json!("object"), "the root is inlined: {out}");
         assert_eq!(
-            out["properties"]["b"]["properties"]["a"],
-            json!({ "$ref": "#/$defs/A" }),
-            "A -> B -> A closes on A: {out}"
+            out["properties"]["b"],
+            json!({ "$ref": "#/$defs/B" }),
+            "{out}"
         );
         assert_eq!(
-            out["$defs"]["A"]["properties"]["b"]["properties"]["a"],
-            json!({ "$ref": "#/$defs/A" }),
-            "and the kept body is the one the back-edge names: {out}"
-        );
-        assert_eq!(
-            out["$defs"].as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["A"],
-            "B is inlined inside A and is referred to by nothing: {out}"
+            out["$defs"],
+            json!({
+                "A": { "type": "object", "properties": { "b": { "$ref": "#/$defs/B" } } },
+                "B": { "type": "object", "properties": { "a": { "$ref": "#/$defs/A" } } }
+            }),
+            "each definition on the cycle is carried once: {out}"
         );
     }
 
@@ -3936,13 +4059,14 @@ mod tests {
         );
     }
 
-    /// The back-edge is a JSON pointer, so it carries the *encoded* name
+    /// A reference to a kept definition — at the use site and at the
+    /// back-edge alike — is a JSON pointer, so it carries the *encoded* name
     /// while the `$defs` key stays raw — the same split `decode_ref_name`
     /// exists for, now written in the other direction. Getting this wrong is
     /// invisible until a client tries to resolve the pointer and finds
     /// nothing, or finds a fragment that is not a legal URI at all.
     #[test]
-    fn inline_refs_encodes_the_back_edge_of_an_awkwardly_named_definition() {
+    fn inline_refs_encodes_the_reference_to_an_awkwardly_named_definition() {
         let schema = json!({
             "type": "object",
             "properties": { "status": { "$ref": "#/$defs/Product%20Status" } },
@@ -3956,9 +4080,14 @@ mod tests {
         let (out, issues) = inline_refs(&schema);
         assert_eq!(issues, RefIssues::default());
         assert_eq!(
-            out["properties"]["status"]["properties"]["next"],
+            out["properties"]["status"],
             json!({ "$ref": "#/$defs/Product%20Status" }),
             "the pointer is encoded: {out}"
+        );
+        assert_eq!(
+            out["$defs"]["Product Status"]["properties"]["next"],
+            json!({ "$ref": "#/$defs/Product%20Status" }),
+            "{out}"
         );
         assert!(
             out["$defs"].get("Product Status").is_some(),
@@ -5330,8 +5459,8 @@ mod tests {
 
     /// The recursion a real block declares: a `Condition` that nests
     /// `Condition`s inside an otherwise ordinary object body. The tool is
-    /// published, the first reference is inlined, and the back-edge points
-    /// at the definition the schema now carries.
+    /// published, the field references the definition the schema now
+    /// carries, and so does the back-edge inside that definition.
     #[test]
     fn webmcp_publishes_an_endpoint_with_a_recursive_body_and_keeps_defs() {
         let blocks = vec![
@@ -5352,8 +5481,8 @@ mod tests {
         let tool = &doc["tools"][0];
         assert_eq!(tool["name"], "create_offer");
         assert_eq!(
-            tool["inputSchema"]["properties"]["condition"]["type"],
-            "object"
+            tool["inputSchema"]["properties"]["condition"],
+            json!({ "$ref": "#/$defs/Condition" })
         );
         assert_eq!(
             tool["inputSchema"]["$defs"]["Condition"]["properties"]["all"]["items"],
@@ -5406,9 +5535,9 @@ mod tests {
         );
         for (source, field) in [("query", "q"), ("body", "b")] {
             assert_eq!(
-                result.schema["properties"][field]["properties"]["n"],
+                result.schema["properties"][field],
                 json!({ "$ref": "#/$defs/T" }),
-                "the {source} source's back-edge resolves against the merged table: {:?}",
+                "the {source} source's reference resolves against the merged table: {:?}",
                 result.schema
             );
         }
@@ -6799,6 +6928,72 @@ mod tests {
         assert_eq!(
             doc["tools"][0]["inputSchema"]["properties"]["status"],
             json!({ "type": "string", "enum": ["draft", "active"] })
+        );
+    }
+
+    /// A recursive type used in several fields reaches an agent with its
+    /// body exactly once. `BlockEndpoint::input` already emits it that way —
+    /// one `$defs` body, a `$ref` at every use site — and the WebMCP
+    /// projection must not undo that by unrolling a full copy into each
+    /// field: a definition that lies on a cycle is kept under `$defs` and
+    /// referenced from every use site, not just from the back-edge.
+    ///
+    /// Derived through the real `input::<T>()` path, so the shape under test
+    /// is the shape a block ships.
+    #[test]
+    fn webmcp_carries_a_recursive_type_used_in_several_fields_once() {
+        #[derive(schemars::JsonSchema)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum Condition {
+            /// Every child condition holds.
+            All { all: Vec<Condition> },
+            /// The child condition does not hold.
+            Not { not: Box<Condition> },
+            /// BODY-MARKER: the input equals a literal.
+            Equals { equals: String },
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            /// When the rule applies.
+            when: Condition,
+            /// Conditions that suspend the rule.
+            unless: Vec<Condition>,
+        }
+
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/rules")
+                    .auth(AuthLevel::Public)
+                    .input::<Rule>()
+                    .agent_tool("create_rule", "Create a rule."),
+            ]);
+
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
+        assert_eq!(tool_names(&doc), vec!["create_rule".to_string()]);
+        let input = &doc["tools"][0]["inputSchema"];
+        let rendered = input.to_string();
+        assert_eq!(
+            rendered.matches("BODY-MARKER").count(),
+            1,
+            "the `Condition` body must reach the agent exactly once: {rendered}"
+        );
+        assert_eq!(
+            input["properties"]["when"],
+            json!({ "$ref": "#/$defs/Condition", "description": "When the rule applies." }),
+            "{rendered}"
+        );
+        assert_eq!(
+            input["properties"]["unless"]["items"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "{rendered}"
+        );
+        assert_eq!(
+            input["$defs"]["Condition"]["oneOf"][1]["properties"]["not"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "the kept body closes its own cycle: {rendered}"
         );
     }
 

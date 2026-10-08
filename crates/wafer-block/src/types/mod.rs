@@ -14,6 +14,7 @@ mod interface_spec;
 mod message_ext;
 mod request_action;
 mod schema;
+mod schema_ref;
 mod skill;
 
 pub use block_info::{BlockCategory, BlockInfo, BlockInfoError, BlockRuntime};
@@ -26,4 +27,5 @@ pub use interface_spec::{ActionSpec, InterfaceSpec};
 pub use message_ext::{hashmap_to_meta, meta_to_hashmap, MetaGet, MetaSet};
 pub use request_action::RequestAction;
 pub use schema::{CollectionSchema, FieldSchema, IndexSchema};
+pub use schema_ref::{decode_ref_name, encode_ref_name};
 pub use skill::{ExternalAsset, SkillTool};

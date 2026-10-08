@@ -25,6 +25,9 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+# `#/$defs/` pointer-segment encoding (`types::schema_ref`). Already in the
+# tree through `url`.
+percent-encoding = { workspace = true }
 wafer-block-macro = { workspace = true }
 schemars = { version = "1", optional = true }
 futures = { workspace = true }
