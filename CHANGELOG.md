@@ -2174,6 +2174,22 @@
 
 ### Fixed
 
+- `/openapi.json` no longer merges two same-named `$defs` entries whose text
+  is identical but whose references reach different definitions (two blocks
+  each with a recursive `Expr` over a different `Cond`). The merge published
+  the second `Expr` as a reference to the first block's `Cond` and left the
+  second `Cond` referenced by nothing. Whether two definitions share a
+  component is now decided by the body together with the bodies of
+  everything it reaches, transitively; a definition that differs anywhere in
+  that closure gets the hash-suffixed key, and the suffix hashes that closure
+  rather than the body alone.
+- `/openapi.json` publishes only valid `components.schemas` keys
+  (`^[a-zA-Z0-9.\-_]+$`). A `$defs` key or root title outside that alphabet
+  (`#[schemars(rename = "Product Status")]`, a hand-written `a/b`) is published
+  as the name with each invalid character replaced by `_` and a hash of the
+  original name appended (`Product_Status_<16 hex>`), so every `$ref` spells
+  its key verbatim. A name that was already valid keeps its key, as before.
+
 - A table's `id` source is cached from the first create into it, so the
   second create into an insert-only table is its `INSERT` alone. The id-policy
   probe (`introspect::build_id_policy`) answered `0` ("mint") both for a table
