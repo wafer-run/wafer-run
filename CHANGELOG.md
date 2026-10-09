@@ -4,6 +4,20 @@
 
 ### Breaking changes
 
+- `FilterOp` has a new operator, `ContainsIgnoreCase` (wire
+  `contains_ignore_case`): the text search a person types. Its `value` is
+  plain text — `%`, `_` and `\` match only themselves — and ASCII letters
+  match in either case on every backend. `wafer-sql-utils` renders it as
+  `LOWER(col) LIKE LOWER(?) ESCAPE '\'` with the text LIKE-escaped, so a
+  caller no longer escapes by hand; plain `Like` folded ASCII case on SQLite
+  and D1 but not on PostgreSQL. A `match` over `FilterOp` needs the new arm.
+  `FilterOp::as_wire` is the canonical wire spelling (the inverse of
+  `parse_wire`), so a client that encodes filters no longer keeps its own
+  operator table.
+  `FilterOp::as_sql` is removed: nothing called it, and SQL is rendered
+  by `wafer-sql-utils`, where an operator is not one keyword
+  (`ContainsIgnoreCase` renders `LOWER(col) LIKE LOWER(?) ESCAPE '\'`).
+
 - `wafer-block-s3` registers its `wafer-run/s3` block only with the new
   `block` feature, as `wafer-block-postgres` does since #427: linking the
   crate for `S3StorageService` alone no longer adds a block whose `Init`

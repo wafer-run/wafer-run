@@ -209,7 +209,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `set_strict_schema`); `create`/`get` (a taken id refused, the row
 /// untouched) and `schema_columns`; a table that numbers its own rows
 /// ([`pk_int`]) filling the id of every create path; `count`/`sum` across the full
-/// [`FilterOp`] surface; `list` (filter, sort, limit, offset, projection,
+/// [`FilterOp`] surface; `ContainsIgnoreCase` text search (`%`, `_` and `\`
+/// literal, ASCII letter case ignored, a non-string value matching nothing);
+/// `list` (filter, sort, limit, offset, projection,
 /// OR-group `filter_tree`, `total_count`, and pages over a tied sort key
 /// ordered by the primary key — single-column, composite, or none);
 /// `update`/`update_where`/
@@ -248,6 +250,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_create_get(svc).await;
     check_generated_ids(svc).await;
     check_count_and_sum(svc).await;
+    check_contains_ignore_case(svc).await;
     check_list(svc).await;
     check_list_tiebreak(svc).await;
     check_update_family(svc).await;
@@ -1119,6 +1122,109 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
     assert!(
         groups.is_empty(),
         "aggregate on a non-existent table has no groups: {groups:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ContainsIgnoreCase — literal, case-insensitive substring search
+// ---------------------------------------------------------------------------
+
+/// [`FilterOp::ContainsIgnoreCase`] is the text search a person types, so it
+/// must mean the same thing on every backend: the characters of `value` are
+/// literal (`%`, `_` and `\` are not wildcards or escapes) and ASCII letter
+/// case is ignored. Plain `LIKE` gives neither: its `%`/`_` are wildcards,
+/// and it folds ASCII case on SQLite and D1 but not on PostgreSQL.
+async fn check_contains_ignore_case(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_search".to_string(),
+        columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+    let rows = [
+        ("s1", Some("a_b")),
+        ("s2", Some("axb")),
+        ("s3", Some("100% off")),
+        ("s4", Some("1000 off")),
+        ("s5", Some(r"back\slash")),
+        ("s6", Some("Alice@Example.COM")),
+        ("s7", Some("Café")),
+        ("s8", None),
+    ];
+    for (id, name) in rows {
+        let mut data = row([("id", serde_json::json!(id))]);
+        if let Some(name) = name {
+            data.insert("name".to_string(), serde_json::json!(name));
+        }
+        svc.create("conf_search", data)
+            .await
+            .expect("create must succeed");
+    }
+
+    let matching = |value: serde_json::Value| async move {
+        let opts = ListOptions {
+            filters: vec![filt("name", FilterOp::ContainsIgnoreCase, value)],
+            sort: vec![SortField {
+                field: "id".to_string(),
+                desc: false,
+            }],
+            ..Default::default()
+        };
+        svc.list("conf_search", &opts)
+            .await
+            .expect("list with ContainsIgnoreCase")
+            .records
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        matching(serde_json::json!("a_b")).await,
+        ["s1"],
+        "`_` is literal, not a one-character wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("0% o")).await,
+        ["s3"],
+        "`%` is literal, not a wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!(r"k\s")).await,
+        ["s5"],
+        "`\\` is literal, not an escape"
+    );
+    assert_eq!(
+        matching(serde_json::json!("alice@example.com")).await,
+        ["s6"],
+        "ASCII case is ignored in the value's direction"
+    );
+    assert_eq!(
+        matching(serde_json::json!("EXAMPLE.cOm")).await,
+        ["s6"],
+        "ASCII case is ignored in either direction"
+    );
+    assert_eq!(
+        matching(serde_json::json!("café")).await,
+        ["s7"],
+        "a non-ASCII letter matches itself"
+    );
+    assert_eq!(
+        matching(serde_json::json!("CAFé")).await,
+        ["s7"],
+        "ASCII letters next to a non-ASCII one still ignore case"
+    );
+    assert_eq!(
+        matching(serde_json::json!("")).await,
+        ["s1", "s2", "s3", "s4", "s5", "s6", "s7"],
+        "an empty value matches every non-NULL field"
+    );
+    assert_eq!(
+        matching(serde_json::json!(1000)).await,
+        Vec::<String>::new(),
+        "a value that is not a string matches nothing"
     );
 }
 

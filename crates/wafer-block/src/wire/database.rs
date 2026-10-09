@@ -35,7 +35,9 @@ pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhauste
 pub struct FilterDef {
     /// Column name to filter on.
     pub field: String,
-    /// Comparison operator (`eq`, `ne`, `lt`, `gt`, `like`, …). Defaults to `eq`.
+    /// Comparison operator, spelled as [`FilterOp::parse_wire`](crate::db::FilterOp::parse_wire)
+    /// accepts it (`eq`, `neq`, `lt`, `gt`, `like`, `contains_ignore_case`, …).
+    /// Defaults to `eq`.
     #[serde(default = "default_operator")]
     pub operator: String,
     /// JSON value compared against the column.

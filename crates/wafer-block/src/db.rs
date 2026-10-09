@@ -104,7 +104,7 @@ pub enum ColumnCompareOp {
 
 impl ColumnCompareOp {
     /// The column form of `op`, or `None` for an operator that has none
-    /// (`Like`, `In`, `IsNull`, `IsNotNull`).
+    /// (`Like`, `ContainsIgnoreCase`, `In`, `IsNull`, `IsNotNull`).
     #[must_use]
     pub fn from_filter_op(op: &FilterOp) -> Option<Self> {
         match op {
@@ -114,7 +114,11 @@ impl ColumnCompareOp {
             FilterOp::GreaterEqual => Some(Self::GreaterEqual),
             FilterOp::LessThan => Some(Self::LessThan),
             FilterOp::LessEqual => Some(Self::LessEqual),
-            FilterOp::Like | FilterOp::In | FilterOp::IsNull | FilterOp::IsNotNull => None,
+            FilterOp::Like
+            | FilterOp::ContainsIgnoreCase
+            | FilterOp::In
+            | FilterOp::IsNull
+            | FilterOp::IsNotNull => None,
         }
     }
 
@@ -167,6 +171,17 @@ pub enum FilterOp {
     LessEqual,
     /// `field LIKE value` (backend-specific pattern syntax).
     Like,
+    /// `field` contains `value` as a substring, compared character for
+    /// character with ASCII letter case ignored: the text search a person
+    /// types.
+    ///
+    /// `value` is plain text, not a pattern — `%`, `_` and `\` in it match
+    /// only themselves. ASCII letters match in either case on every backend
+    /// (both sides go through SQL `LOWER`, which SQLite and D1 apply to ASCII
+    /// only and PostgreSQL to every letter its locale knows). An empty
+    /// `value` matches every non-`NULL` `field`; a `NULL` `field` never
+    /// matches. A `value` that is not a JSON string matches no row.
+    ContainsIgnoreCase,
     /// `field IN (value…)` where `value` is a JSON array.
     In,
     /// `field IS NULL` (ignores `value`).
@@ -195,6 +210,7 @@ impl FilterOp {
             "lt" | "<" | "less_than" => Ok(Self::LessThan),
             "lte" | "<=" | "less_equal" => Ok(Self::LessEqual),
             "like" => Ok(Self::Like),
+            "contains_ignore_case" => Ok(Self::ContainsIgnoreCase),
             "in" => Ok(Self::In),
             "is_null" => Ok(Self::IsNull),
             "is_not_null" => Ok(Self::IsNotNull),
@@ -205,19 +221,22 @@ impl FilterOp {
         }
     }
 
-    /// Render the operator as its SQL keyword form.
-    pub fn as_sql(&self) -> &'static str {
+    /// The canonical `database@v1` wire spelling of this operator — the one
+    /// a client sends, and one that [`parse_wire`](Self::parse_wire) accepts.
+    #[must_use]
+    pub fn as_wire(&self) -> &'static str {
         match self {
-            Self::Equal => "=",
-            Self::NotEqual => "!=",
-            Self::GreaterThan => ">",
-            Self::GreaterEqual => ">=",
-            Self::LessThan => "<",
-            Self::LessEqual => "<=",
-            Self::Like => "LIKE",
-            Self::In => "IN",
-            Self::IsNull => "IS NULL",
-            Self::IsNotNull => "IS NOT NULL",
+            Self::Equal => "eq",
+            Self::NotEqual => "neq",
+            Self::GreaterThan => "gt",
+            Self::GreaterEqual => "gte",
+            Self::LessThan => "lt",
+            Self::LessEqual => "lte",
+            Self::Like => "like",
+            Self::ContainsIgnoreCase => "contains_ignore_case",
+            Self::In => "in",
+            Self::IsNull => "is_null",
+            Self::IsNotNull => "is_not_null",
         }
     }
 }
@@ -248,6 +267,28 @@ mod tests {
             FilterOp::parse_wire("is_null"),
             Ok(FilterOp::IsNull)
         ));
+    }
+
+    #[test]
+    fn as_wire_round_trips_through_parse_wire() {
+        let every_op = [
+            FilterOp::Equal,
+            FilterOp::NotEqual,
+            FilterOp::GreaterThan,
+            FilterOp::GreaterEqual,
+            FilterOp::LessThan,
+            FilterOp::LessEqual,
+            FilterOp::Like,
+            FilterOp::ContainsIgnoreCase,
+            FilterOp::In,
+            FilterOp::IsNull,
+            FilterOp::IsNotNull,
+        ];
+        for op in every_op {
+            let parsed = FilterOp::parse_wire(op.as_wire())
+                .unwrap_or_else(|e| panic!("{op:?} wire form must parse: {e}"));
+            assert_eq!(parsed, op);
+        }
     }
 
     #[test]
@@ -286,6 +327,7 @@ mod tests {
         }
         for op in [
             FilterOp::Like,
+            FilterOp::ContainsIgnoreCase,
             FilterOp::In,
             FilterOp::IsNull,
             FilterOp::IsNotNull,
