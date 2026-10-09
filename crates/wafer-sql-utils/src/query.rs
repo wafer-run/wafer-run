@@ -88,10 +88,16 @@ pub(crate) fn predicate_on(left: Expr, filter: &Filter, backend: Backend) -> Sim
             //   on SQLite too, but needs a computed upper bound and is wrong
             //   under a PostgreSQL locale collation.
             // - PostgreSQL: `col LIKE ? ESCAPE '\'` binding
-            //   `<text, LIKE-escaped>%`. PostgreSQL's LIKE is case-sensitive,
-            //   and a plan made for the bound pattern (a custom plan, the
-            //   default) turns its fixed prefix into an index range on an
-            //   index with `text_pattern_ops` or the `C` collation.
+            //   `<text, LIKE-escaped>%`. PostgreSQL's LIKE is case-sensitive.
+            //   A custom plan, made for the bound pattern, turns its fixed
+            //   prefix into an index range on an index with
+            //   `text_pattern_ops` or the `C` collation. A generic plan
+            //   cannot see the pattern and gets no range on `col`; under
+            //   `plan_cache_mode = auto` a prepared statement may switch to
+            //   one after its fifth execution.
+            // An empty `text` is the pattern `*` / `%`, which starts with a
+            // wildcard: every non-NULL row matches, with no index range on
+            // `col` (SQLite's optimisation needs a literal head).
             // A NUL cannot be matched: PostgreSQL text cannot hold one, and
             // SQLite's GLOB stops reading a pattern at the first NUL, which
             // would cut the trailing `*` off. Such a value matches nothing.

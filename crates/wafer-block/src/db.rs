@@ -185,7 +185,9 @@ pub enum FilterOp {
     /// matches. A `value` that is not a JSON string matches no row.
     ContainsIgnoreCase,
     /// `field` begins with `value`, compared character for character with
-    /// case significant: the prefix of a key or path.
+    /// case significant: the prefix of a key or path. `field` must be a text
+    /// column: PostgreSQL refuses the query on any other type, while SQLite
+    /// and D1 compare the field's text form.
     ///
     /// `value` is plain text, not a pattern — no character in it is a
     /// wildcard or an escape. Every letter, ASCII or not, must match in the
@@ -197,7 +199,12 @@ pub enum FilterOp {
     /// Each backend gets a form its planner can serve from an index on
     /// `field` (see `wafer-sql-utils`): SQLite and D1 a `GLOB` (an index with
     /// the default `BINARY` collation), PostgreSQL a `LIKE` (an index with
-    /// `text_pattern_ops` or the `C` collation).
+    /// `text_pattern_ops` or the `C` collation, when the statement runs on a
+    /// custom plan made for the bound value; under PostgreSQL's default
+    /// `plan_cache_mode = auto` a prepared statement may switch to a generic
+    /// plan after five executions, which gets no range on `field`). An empty
+    /// `value` gets no index range on any backend: it scans every row the
+    /// other predicates leave.
     StartsWith,
     /// `field IN (value…)` where `value` is a JSON array.
     In,

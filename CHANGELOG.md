@@ -9,11 +9,13 @@
   wildcard or an escape — and letter case is significant on every backend;
   plain `LIKE 'prefix%'` ignored ASCII case on SQLite and D1. A value
   containing NUL, or that is not a string, matches no row. `wafer-sql-utils`
-  renders it per dialect, in a form the planner serves from an index on the
-  column: SQLite/D1 `col GLOB ?` (GLOB metacharacters wrapped as `[*]`,
-  `[?]`, `[[]`, index with the default BINARY collation), PostgreSQL
+  renders it per dialect, in a form the planner can serve from an index on
+  the (text) column: SQLite/D1 `col GLOB ?` (GLOB metacharacters wrapped as
+  `[*]`, `[?]`, `[[]`, index with the default BINARY collation), PostgreSQL
   `col LIKE ? ESCAPE '\'` (LIKE-escaped, index with `text_pattern_ops` or
-  the `C` collation). A `match` over `FilterOp` needs the new arm.
+  the `C` collation on a custom plan; a generic plan gets no range on the
+  column). An empty prefix gets no index range. A `match` over `FilterOp`
+  needs the new arm.
   Because a predicate's SQL can now depend on the dialect, the filter
   builders take the `Backend` they render for: `query::build_condition`,
   `query::build_condition_tree` and `query::tree_to_simple_expr` gain a
