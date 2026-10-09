@@ -130,7 +130,7 @@ fn filter_schema() -> serde_json::Value {
         "type": "object",
         "properties": {
             "field": { "type": "string" },
-            "operator": { "type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "like", "contains_ignore_case", "in", "is_null", "is_not_null"], "default": "eq" },
+            "operator": { "type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "like", "contains_ignore_case", "starts_with", "in", "is_null", "is_not_null"], "default": "eq" },
             "value": {},
             "column": { "type": "string", "description": "Compare `field` to this column of the same row instead of to `value` (eq/neq/gt/gte/lt/lte only; not accepted by ops that take flat filters)." }
         },

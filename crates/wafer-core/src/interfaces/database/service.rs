@@ -493,7 +493,8 @@ impl AggregateSpec {
 
     /// Render this validated spec into a
     /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
-    /// for `table`.
+    /// for `table`, to be rendered in `backend`'s dialect (the `CASE`
+    /// predicates are built for it).
     ///
     /// Builds the `!Send` sea-query expressions (the `CaseWhenSum` and
     /// `SumWhere` `CASE` predicates via [`wafer_sql_utils::query::tree_to_simple_expr`]); the
@@ -505,6 +506,7 @@ impl AggregateSpec {
     pub fn into_grouped_config(
         self,
         table: String,
+        backend: wafer_sql_utils::Backend,
     ) -> wafer_sql_utils::aggregate::GroupedQueryConfig {
         use wafer_sql_utils::aggregate::{
             AggFunc, AggregateColumn, DateBucketGroup, GroupedQueryConfig,
@@ -555,7 +557,7 @@ impl AggregateSpec {
                 // handler.
                 AggregateColumnSpec::CaseWhenSum { when, alias } => AggregateColumn::case_when_sum(
                     alias,
-                    wafer_sql_utils::query::tree_to_simple_expr(&when),
+                    wafer_sql_utils::query::tree_to_simple_expr(&when, backend),
                 ),
                 AggregateColumnSpec::SumWhere {
                     field,
@@ -567,7 +569,7 @@ impl AggregateSpec {
                     ..AggregateColumn::sum_where(
                         alias,
                         field,
-                        wafer_sql_utils::query::tree_to_simple_expr(&when),
+                        wafer_sql_utils::query::tree_to_simple_expr(&when, backend),
                     )
                 },
                 AggregateColumnSpec::CountGroups { alias } => AggregateColumn::count_groups(alias),
