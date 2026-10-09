@@ -104,7 +104,8 @@ pub enum ColumnCompareOp {
 
 impl ColumnCompareOp {
     /// The column form of `op`, or `None` for an operator that has none
-    /// (`Like`, `ContainsIgnoreCase`, `In`, `IsNull`, `IsNotNull`).
+    /// (`Like`, `ContainsIgnoreCase`, `StartsWith`, `In`, `IsNull`,
+    /// `IsNotNull`).
     #[must_use]
     pub fn from_filter_op(op: &FilterOp) -> Option<Self> {
         match op {
@@ -116,6 +117,7 @@ impl ColumnCompareOp {
             FilterOp::LessEqual => Some(Self::LessEqual),
             FilterOp::Like
             | FilterOp::ContainsIgnoreCase
+            | FilterOp::StartsWith
             | FilterOp::In
             | FilterOp::IsNull
             | FilterOp::IsNotNull => None,
@@ -182,6 +184,21 @@ pub enum FilterOp {
     /// `value` matches every non-`NULL` `field`; a `NULL` `field` never
     /// matches. A `value` that is not a JSON string matches no row.
     ContainsIgnoreCase,
+    /// `field` begins with `value`, compared character for character with
+    /// case significant: the prefix of a key or path.
+    ///
+    /// `value` is plain text, not a pattern — no character in it is a
+    /// wildcard or an escape. Every letter, ASCII or not, must match in the
+    /// same case on every backend (plain `LIKE` ignores ASCII case on SQLite
+    /// and D1). An empty `value` matches every non-`NULL` `field`; a `NULL`
+    /// `field` never matches. A `value` that is not a JSON string, or that
+    /// contains a NUL character, matches no row.
+    ///
+    /// Each backend gets a form its planner can serve from an index on
+    /// `field` (see `wafer-sql-utils`): SQLite and D1 a `GLOB` (an index with
+    /// the default `BINARY` collation), PostgreSQL a `LIKE` (an index with
+    /// `text_pattern_ops` or the `C` collation).
+    StartsWith,
     /// `field IN (value…)` where `value` is a JSON array.
     In,
     /// `field IS NULL` (ignores `value`).
@@ -211,6 +228,7 @@ impl FilterOp {
             "lte" | "<=" | "less_equal" => Ok(Self::LessEqual),
             "like" => Ok(Self::Like),
             "contains_ignore_case" => Ok(Self::ContainsIgnoreCase),
+            "starts_with" => Ok(Self::StartsWith),
             "in" => Ok(Self::In),
             "is_null" => Ok(Self::IsNull),
             "is_not_null" => Ok(Self::IsNotNull),
@@ -234,6 +252,7 @@ impl FilterOp {
             Self::LessEqual => "lte",
             Self::Like => "like",
             Self::ContainsIgnoreCase => "contains_ignore_case",
+            Self::StartsWith => "starts_with",
             Self::In => "in",
             Self::IsNull => "is_null",
             Self::IsNotNull => "is_not_null",
@@ -280,6 +299,7 @@ mod tests {
             FilterOp::LessEqual,
             FilterOp::Like,
             FilterOp::ContainsIgnoreCase,
+            FilterOp::StartsWith,
             FilterOp::In,
             FilterOp::IsNull,
             FilterOp::IsNotNull,
@@ -328,6 +348,7 @@ mod tests {
         for op in [
             FilterOp::Like,
             FilterOp::ContainsIgnoreCase,
+            FilterOp::StartsWith,
             FilterOp::In,
             FilterOp::IsNull,
             FilterOp::IsNotNull,

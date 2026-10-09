@@ -26,7 +26,7 @@ fn agg_select(
         .expr_as(expr, Alias::new(alias))
         .from(DynCol(table.into()));
 
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
     if let Some(extra) = extra_condition {
@@ -144,7 +144,7 @@ pub fn build_daily_count(
         .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("cnt"))
         .from(DynCol(table.into()));
 
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
 
@@ -499,7 +499,7 @@ pub fn build_grouped_query(
     }
 
     // WHERE
-    if let Some(cond) = build_condition(&cfg.filters) {
+    if let Some(cond) = build_condition(&cfg.filters, backend) {
         query.cond_where(cond);
     }
 
@@ -528,7 +528,11 @@ pub fn build_grouped_query(
                     alias: filter.field.clone(),
                 });
             };
-            cond = cond.add(crate::query::predicate_on(Expr::expr(expr.clone()), filter));
+            cond = cond.add(crate::query::predicate_on(
+                Expr::expr(expr.clone()),
+                filter,
+                backend,
+            ));
         }
         query.cond_having(cond);
     }

@@ -251,6 +251,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_generated_ids(svc).await;
     check_count_and_sum(svc).await;
     check_contains_ignore_case(svc).await;
+    check_starts_with(svc).await;
     check_list(svc).await;
     check_list_tiebreak(svc).await;
     check_update_family(svc).await;
@@ -1223,6 +1224,167 @@ async fn check_contains_ignore_case(svc: &dyn DatabaseService) {
     );
     assert_eq!(
         matching(serde_json::json!(1000)).await,
+        Vec::<String>::new(),
+        "a value that is not a string matches nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// StartsWith — literal, case-sensitive prefix
+// ---------------------------------------------------------------------------
+
+/// [`FilterOp::StartsWith`] is the prefix of a key or path, so it must mean
+/// the same thing on every backend: the characters of `value` are literal
+/// (no LIKE or GLOB wildcard, class or escape) and letter case is
+/// significant. Plain `LIKE 'prefix%'` gives neither: its `%`/`_` are
+/// wildcards, and it ignores ASCII case on SQLite and D1.
+async fn check_starts_with(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_prefix".to_string(),
+        columns: vec![pk("id"), Column::new("key", DataType::Text).null()],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+    let rows = [
+        ("p01", Some("a/b.txt")),
+        ("p02", Some("a/B.txt")),
+        ("p03", Some("a/b/c.txt")),
+        ("p04", Some("a_b")),
+        ("p05", Some("axb")),
+        ("p06", Some("100%/x")),
+        ("p07", Some("1000/x")),
+        ("p08", Some(r"back\slash")),
+        ("p09", Some("star*/x")),
+        ("p10", Some("starry/x")),
+        ("p11", Some("q?/x")),
+        ("p12", Some("qq/x")),
+        ("p13", Some("[ab]/x")),
+        ("p14", Some("a]/x")),
+        ("p15", Some("Café/x")),
+        ("p16", Some("CAFÉ/x")),
+        ("p17", Some("-n")),
+        ("p18", None),
+    ];
+    for (id, key) in rows {
+        let mut data = row([("id", serde_json::json!(id))]);
+        if let Some(key) = key {
+            data.insert("key".to_string(), serde_json::json!(key));
+        }
+        svc.create("conf_prefix", data)
+            .await
+            .expect("create must succeed");
+    }
+
+    let matching = |value: serde_json::Value| async move {
+        let opts = ListOptions {
+            filters: vec![filt("key", FilterOp::StartsWith, value)],
+            sort: vec![SortField {
+                field: "id".to_string(),
+                desc: false,
+            }],
+            ..Default::default()
+        };
+        svc.list("conf_prefix", &opts)
+            .await
+            .expect("list with StartsWith")
+            .records
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        matching(serde_json::json!("a/b")).await,
+        ["p01", "p03"],
+        "ASCII case is significant"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a/B")).await,
+        ["p02"],
+        "ASCII case is significant in the other direction"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a/b.txt")).await,
+        ["p01"],
+        "a value that is the whole field matches it"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a/b.txtx")).await,
+        Vec::<String>::new(),
+        "a value longer than the field does not match"
+    );
+    assert_eq!(
+        matching(serde_json::json!("b.txt")).await,
+        Vec::<String>::new(),
+        "the value is anchored at the start of the field"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a_")).await,
+        ["p04"],
+        "`_` is literal, not a one-character wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("100%")).await,
+        ["p06"],
+        "`%` is literal, not a wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!(r"back\s")).await,
+        ["p08"],
+        "`\\` is literal, not an escape"
+    );
+    assert_eq!(
+        matching(serde_json::json!("star*")).await,
+        ["p09"],
+        "`*` is literal, not a GLOB wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("q?")).await,
+        ["p11"],
+        "`?` is literal, not a GLOB wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("[ab]")).await,
+        ["p13"],
+        "`[` opens no character class"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a]")).await,
+        ["p14"],
+        "`]` is literal"
+    );
+    assert_eq!(
+        matching(serde_json::json!("Café")).await,
+        ["p15"],
+        "a non-ASCII letter matches itself"
+    );
+    assert_eq!(
+        matching(serde_json::json!("CAFé")).await,
+        Vec::<String>::new(),
+        "case is significant for every letter, ASCII or not"
+    );
+    assert_eq!(
+        matching(serde_json::json!("-")).await,
+        ["p17"],
+        "a leading `-` is an ordinary character"
+    );
+    assert_eq!(
+        matching(serde_json::json!("")).await,
+        [
+            "p01", "p02", "p03", "p04", "p05", "p06", "p07", "p08", "p09", "p10", "p11", "p12",
+            "p13", "p14", "p15", "p16", "p17"
+        ],
+        "an empty value matches every non-NULL field"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a\u{0}")).await,
+        Vec::<String>::new(),
+        "a value containing NUL matches nothing"
+    );
+    assert_eq!(
+        matching(serde_json::json!(100)).await,
         Vec::<String>::new(),
         "a value that is not a string matches nothing"
     );

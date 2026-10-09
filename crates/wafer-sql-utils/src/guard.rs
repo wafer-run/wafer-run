@@ -40,10 +40,15 @@ pub enum CapGuard {
 }
 
 /// `(SELECT {aggregate} FROM {table} WHERE {filters})` as an expression.
-fn aggregate_subquery(table: &str, aggregate: SimpleExpr, filters: &[Filter]) -> SimpleExpr {
+fn aggregate_subquery(
+    table: &str,
+    aggregate: SimpleExpr,
+    filters: &[Filter],
+    backend: Backend,
+) -> SimpleExpr {
     let mut sub = Query::select();
     sub.expr(aggregate).from(DynCol(table.into()));
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         sub.cond_where(cond);
     }
     SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
@@ -54,12 +59,17 @@ fn aggregate_subquery(table: &str, aggregate: SimpleExpr, filters: &[Filter]) ->
 /// The subqueries name `table` in their own `FROM`, so an unqualified column
 /// in a guard's filters resolves to the counted rows, never to the row an
 /// enclosing `UPDATE` is writing.
-fn guard_holds(table: &str, guard: &CapGuard) -> Result<SimpleExpr, SqlBuildError> {
+fn guard_holds(
+    table: &str,
+    guard: &CapGuard,
+    backend: Backend,
+) -> Result<SimpleExpr, SqlBuildError> {
     Ok(match guard {
         CapGuard::CountBelow { filters, cap } => Expr::expr(aggregate_subquery(
             table,
             Func::count(Expr::col(Asterisk)).into(),
             filters,
+            backend,
         ))
         .lt(*cap),
         CapGuard::SumAtMost {
@@ -73,7 +83,7 @@ fn guard_holds(table: &str, guard: &CapGuard) -> Result<SimpleExpr, SqlBuildErro
                 Func::sum(Expr::col(DynCol(field.into()))).into(),
                 Expr::val(0_i64).into(),
             ]);
-            Expr::expr(aggregate_subquery(table, sum.into(), filters))
+            Expr::expr(aggregate_subquery(table, sum.into(), filters, backend))
                 .add(*add)
                 .lte(*cap)
         }
@@ -81,13 +91,17 @@ fn guard_holds(table: &str, guard: &CapGuard) -> Result<SimpleExpr, SqlBuildErro
 }
 
 /// Every guard as one AND-combined predicate; `None` when there are none.
-fn guard_condition(table: &str, guards: &[CapGuard]) -> Result<Option<Cond>, SqlBuildError> {
+fn guard_condition(
+    table: &str,
+    guards: &[CapGuard],
+    backend: Backend,
+) -> Result<Option<Cond>, SqlBuildError> {
     if guards.is_empty() {
         return Ok(None);
     }
     let mut cond = Cond::all();
     for guard in guards {
-        cond = cond.add(guard_holds(table, guard)?);
+        cond = cond.add(guard_holds(table, guard, backend)?);
     }
     Ok(Some(cond))
 }
@@ -117,7 +131,7 @@ pub fn build_guard_probe(
         // `CASE` whose branches are all bound parameters gives Postgres
         // nothing to infer their type from, and it reads them as text.
         let verdict = sea_query::CaseStatement::new()
-            .case(guard_holds(table, guard)?, Expr::cust("1"))
+            .case(guard_holds(table, guard, backend)?, Expr::cust("1"))
             .finally(Expr::cust("0"));
         select.expr_as(verdict, DynCol(guard_probe_column(index)));
     }
@@ -147,7 +161,7 @@ pub fn build_insert_guarded(
     for (_, value) in data {
         select.expr(SimpleExpr::from(json_to_sea_value(value)));
     }
-    if let Some(cond) = guard_condition(table, guards)? {
+    if let Some(cond) = guard_condition(table, guards, backend)? {
         select.cond_where(cond);
     }
 
@@ -185,10 +199,10 @@ pub fn build_update_guarded(
     for (col, val) in data {
         query.value(DynCol(col.clone()), json_to_sea_value(val));
     }
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
-    if let Some(cond) = guard_condition(table, guards)? {
+    if let Some(cond) = guard_condition(table, guards, backend)? {
         query.cond_where(cond);
     }
     let (sql, values) = crate::render_update(query, backend);

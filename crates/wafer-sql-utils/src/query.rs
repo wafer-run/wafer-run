@@ -1,6 +1,6 @@
 use sea_query::{
-    Asterisk, BinOper, Cond, Expr, Func, InsertStatement, LikeExpr, Order, Query, SelectStatement,
-    SimpleExpr, UpdateStatement,
+    extension::sqlite::SqliteExpr, Asterisk, BinOper, Cond, Expr, Func, InsertStatement, LikeExpr,
+    Order, Query, SelectStatement, SimpleExpr, UpdateStatement,
 };
 use wafer_block::db::{
     ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
@@ -12,11 +12,15 @@ use crate::{ident::DynCol, value::json_to_sea_value, Backend, SqlBuildError};
 ///
 /// Field names reach sea-query via [`DynCol`], which quotes them, so this is
 /// injection-safe without a separate identifier validation step. Malformed
-/// operand shapes (`In` with a non-array, `Like` or `ContainsIgnoreCase` with
-/// a non-string) render an always-false `1=0` predicate — narrow, never widen
-/// (see the inline notes).
-pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
-    predicate_on(Expr::col(DynCol(filter.field.clone())), filter)
+/// operand shapes (`In` with a non-array, `Like`, `ContainsIgnoreCase` or
+/// `StartsWith` with a non-string) render an always-false `1=0` predicate —
+/// narrow, never widen (see the inline notes).
+///
+/// `backend` is the dialect the predicate will be rendered for: most
+/// operators render the same SQL on every backend, but `StartsWith` takes a
+/// different form on each (see its arm in [`predicate_on`]).
+pub(crate) fn leaf_expr(filter: &Filter, backend: Backend) -> SimpleExpr {
+    predicate_on(Expr::col(DynCol(filter.field.clone())), filter, backend)
 }
 
 /// [`leaf_expr`]'s predicate — `filter`'s operator and value — applied to an
@@ -24,7 +28,7 @@ pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
 /// names. A grouped query's `HAVING` uses it to compare an aggregate's own
 /// expression (`COUNT(*) > 0`): Postgres does not resolve an output alias in
 /// `HAVING`, so the alias cannot stand in for it.
-pub(crate) fn predicate_on(left: Expr, filter: &Filter) -> SimpleExpr {
+pub(crate) fn predicate_on(left: Expr, filter: &Filter, backend: Backend) -> SimpleExpr {
     let col = left;
     match filter.operator {
         FilterOp::IsNull => col.is_null(),
@@ -72,6 +76,34 @@ pub(crate) fn predicate_on(left: Expr, filter: &Filter) -> SimpleExpr {
             // Fail-safe, as for `Like`: a non-string value matches nothing.
             None => Expr::cust("1=0"),
         },
+        FilterOp::StartsWith => match filter.value.as_str() {
+            // A case-sensitive, literal prefix, in the form each planner can
+            // serve from an index on `col`:
+            // - SQLite/D1: `col GLOB ?` binding `<text, GLOB-escaped>*`. GLOB
+            //   compares characters exactly (plain LIKE ignores ASCII case
+            //   there, and `PRAGMA case_sensitive_like` is per connection),
+            //   and SQLite's LIKE/GLOB optimisation turns the literal head of
+            //   the pattern into a range scan on an index with the default
+            //   BINARY collation. A range `col >= ? AND col < ?` would work
+            //   on SQLite too, but needs a computed upper bound and is wrong
+            //   under a PostgreSQL locale collation.
+            // - PostgreSQL: `col LIKE ? ESCAPE '\'` binding
+            //   `<text, LIKE-escaped>%`. PostgreSQL's LIKE is case-sensitive,
+            //   and a plan made for the bound pattern (a custom plan, the
+            //   default) turns its fixed prefix into an index range on an
+            //   index with `text_pattern_ops` or the `C` collation.
+            // A NUL cannot be matched: PostgreSQL text cannot hold one, and
+            // SQLite's GLOB stops reading a pattern at the first NUL, which
+            // would cut the trailing `*` off. Such a value matches nothing.
+            Some(text) if !text.contains('\0') => match backend {
+                Backend::Sqlite => col.glob(Expr::val(format!("{}*", escape_glob(text)))),
+                Backend::Postgres => {
+                    col.like(LikeExpr::new(format!("{}%", escape_like(text))).escape('\\'))
+                }
+            },
+            // Fail-safe, as for `Like`: a non-string value matches nothing.
+            Some(_) | None => Expr::cust("1=0"),
+        },
         FilterOp::Like => {
             if let Some(pattern) = filter.value.as_str() {
                 // Explicit ESCAPE clause: SQLite/D1's LIKE has no default
@@ -107,6 +139,24 @@ fn escape_like(text: &str) -> String {
     out
 }
 
+/// `text` with every GLOB metacharacter — `*`, `?` and `[` — wrapped in a
+/// one-character class (`[*]`, `[?]`, `[[]`), so each matches only itself.
+/// SQLite's GLOB has no escape character; `]` outside a class is already
+/// literal.
+fn escape_glob(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '*' | '?' | '[') {
+            out.push('[');
+            out.push(c);
+            out.push(']');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Render one [`ColumnFilter`] leaf — `field <op> column` — to a sea-query
 /// predicate. Both columns reach sea-query via [`DynCol`], which quotes them.
 fn column_compare_expr(filter: &ColumnFilter) -> SimpleExpr {
@@ -122,15 +172,15 @@ fn column_compare_expr(filter: &ColumnFilter) -> SimpleExpr {
     }
 }
 
-/// Convert a slice of Filters into a sea_query Cond (AND-combined).
-/// Returns None if filters is empty.
-pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
+/// Convert a slice of Filters into a sea_query Cond (AND-combined), for
+/// rendering in `backend`'s dialect. Returns None if filters is empty.
+pub fn build_condition(filters: &[Filter], backend: Backend) -> Option<Cond> {
     if filters.is_empty() {
         return None;
     }
     let mut cond = Cond::all();
     for filter in filters {
-        cond = cond.add(leaf_expr(filter));
+        cond = cond.add(leaf_expr(filter, backend));
     }
     Some(cond)
 }
@@ -138,18 +188,19 @@ pub fn build_condition(filters: &[Filter]) -> Option<Cond> {
 /// Convert a predicate **tree** into a sea_query `Cond`. The top-level slice
 /// is AND-combined; `All` nodes render `Cond::all()`, `Any` nodes
 /// `Cond::any()`, value leaves render via [`leaf_expr`] and column-to-column
-/// leaves as `field <op> column`. Empty slice → `None`.
+/// leaves as `field <op> column`, for rendering in `backend`'s dialect.
+/// Empty slice → `None`.
 ///
 /// Bounds (depth / node count) are enforced by the caller (the database
 /// handler) before conversion, so this function assumes already-validated
 /// input and cannot itself fail.
-pub fn build_condition_tree(nodes: &[FilterTree]) -> Option<Cond> {
+pub fn build_condition_tree(nodes: &[FilterTree], backend: Backend) -> Option<Cond> {
     if nodes.is_empty() {
         return None;
     }
     let mut cond = Cond::all();
     for node in nodes {
-        cond = cond.add(node_to_cond(node));
+        cond = cond.add(node_to_cond(node, backend));
     }
     Some(cond)
 }
@@ -166,27 +217,28 @@ pub fn build_condition_tree(nodes: &[FilterTree]) -> Option<Cond> {
 /// `CASE WHEN` built from the same tree render identical predicates. An empty
 /// forest folds to an always-true constant (an empty `AND`); callers that
 /// require a non-empty predicate (the aggregate handler) reject empty input
-/// upstream. Bounds are enforced before conversion, so this cannot fail.
+/// upstream. Bounds are enforced before conversion, so this cannot fail. The
+/// expression is for rendering in `backend`'s dialect.
 #[must_use]
-pub fn tree_to_simple_expr(nodes: &[FilterTree]) -> SimpleExpr {
-    SimpleExpr::from(build_condition_tree(nodes).unwrap_or_else(Cond::all))
+pub fn tree_to_simple_expr(nodes: &[FilterTree], backend: Backend) -> SimpleExpr {
+    SimpleExpr::from(build_condition_tree(nodes, backend).unwrap_or_else(Cond::all))
 }
 
-fn node_to_cond(node: &FilterTree) -> Cond {
+fn node_to_cond(node: &FilterTree, backend: Backend) -> Cond {
     match node {
-        FilterTree::Leaf(f) => Cond::all().add(leaf_expr(f)),
+        FilterTree::Leaf(f) => Cond::all().add(leaf_expr(f, backend)),
         FilterTree::ColumnCompare(f) => Cond::all().add(column_compare_expr(f)),
         FilterTree::All(children) => {
             let mut c = Cond::all();
             for child in children {
-                c = c.add(node_to_cond(child));
+                c = c.add(node_to_cond(child, backend));
             }
             c
         }
         FilterTree::Any(children) => {
             let mut c = Cond::any();
             for child in children {
-                c = c.add(node_to_cond(child));
+                c = c.add(node_to_cond(child, backend));
             }
             c
         }
@@ -341,7 +393,7 @@ fn select_with_projection(
     }
     query.from(DynCol(table.into()));
 
-    if let Some(cond) = build_condition(&opts.filters) {
+    if let Some(cond) = build_condition(&opts.filters, backend) {
         query.cond_where(cond);
     }
     if let Some(extra) = extra_condition {
@@ -510,7 +562,7 @@ pub fn build_update_where(
     for (col, val) in data {
         query.value(DynCol(col.clone()), json_to_sea_value(val));
     }
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
 
@@ -543,7 +595,7 @@ pub fn build_increment_field_where(
     let increment_expr: SimpleExpr = Expr::col(col_dyn.clone()).add(delta);
     query.value(col_dyn, increment_expr);
 
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
 
@@ -567,7 +619,7 @@ pub fn build_delete_where(table: &str, filters: &[Filter], backend: Backend) -> 
     let mut query = Query::delete();
     query.from_table(DynCol(table.into()));
 
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
 
@@ -587,7 +639,7 @@ pub fn build_delete_where_returning(
     let mut query = Query::delete();
     query.from_table(DynCol(table.into()));
 
-    if let Some(cond) = build_condition(filters) {
+    if let Some(cond) = build_condition(filters, backend) {
         query.cond_where(cond);
     }
 
@@ -881,7 +933,8 @@ mod tests {
             operator: FilterOp::In,
             value: serde_json::json!("active"),
         }];
-        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let cond = build_condition(&filters, Backend::Sqlite)
+            .expect("non-empty filters yield a condition");
         let stmt = build_delete_where_with(cond);
         assert!(
             stmt.contains("1 = 0") || stmt.contains("1=0"),
@@ -904,7 +957,8 @@ mod tests {
             operator: FilterOp::Like,
             value: serde_json::json!(42),
         }];
-        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let cond = build_condition(&filters, Backend::Sqlite)
+            .expect("non-empty filters yield a condition");
         let stmt = build_delete_where_with(cond);
         assert!(
             stmt.contains("1 = 0") || stmt.contains("1=0"),
@@ -924,7 +978,8 @@ mod tests {
             operator: FilterOp::Like,
             value: serde_json::json!("%alice%"),
         }];
-        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let cond = build_condition(&filters, Backend::Sqlite)
+            .expect("non-empty filters yield a condition");
         let stmt = build_delete_where_with(cond);
         assert!(
             stmt.to_uppercase().contains("LIKE"),
@@ -943,7 +998,8 @@ mod tests {
             operator: FilterOp::Like,
             value: serde_json::json!("a\\_b"),
         }];
-        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let cond = build_condition(&filters, Backend::Sqlite)
+            .expect("non-empty filters yield a condition");
         let stmt = build_delete_where_with(cond);
         assert!(
             stmt.contains("ESCAPE '\\'"),
@@ -963,7 +1019,8 @@ mod tests {
             operator: FilterOp::Like,
             value: serde_json::json!("a\\_b"),
         }];
-        let cond = build_condition(&filters).expect("non-empty filters yield a condition");
+        let cond = build_condition(&filters, Backend::Postgres)
+            .expect("non-empty filters yield a condition");
         let mut query = Query::delete();
         query.from_table(DynCol("t".into())).cond_where(cond);
         let (sql, _) = crate::render_delete(query, Backend::Postgres);
@@ -985,7 +1042,7 @@ mod tests {
         value: serde_json::Value,
         backend: Backend,
     ) -> (String, Vec<sea_query::Value>) {
-        let cond = build_condition(&contains_ignore_case(value))
+        let cond = build_condition(&contains_ignore_case(value), backend)
             .expect("non-empty filters yield a condition");
         let mut query = Query::delete();
         query.from_table(DynCol("t".into())).cond_where(cond);
@@ -1027,6 +1084,112 @@ mod tests {
         assert!(sql.contains("1=0") || sql.contains("1 = 0"), "{sql}");
         assert!(!sql.to_uppercase().contains("LIKE"), "{sql}");
         assert!(values.is_empty(), "{values:?}");
+    }
+
+    fn render_starts_with(
+        value: serde_json::Value,
+        backend: Backend,
+    ) -> (String, Vec<sea_query::Value>) {
+        let filters = vec![Filter {
+            field: "key".into(),
+            operator: FilterOp::StartsWith,
+            value,
+        }];
+        let cond = build_condition(&filters, backend).expect("non-empty filters yield a condition");
+        let mut query = Query::delete();
+        query.from_table(DynCol("t".into())).cond_where(cond);
+        crate::render_delete(query, backend)
+    }
+
+    #[test]
+    fn starts_with_renders_glob_on_sqlite_and_like_on_postgres() {
+        // SQLite: GLOB is case-sensitive (LIKE is not), every GLOB
+        // metacharacter in the text sits in a one-character class, and `*`
+        // ends the pattern. LIKE metacharacters are ordinary for GLOB.
+        let (sql, values) = render_starts_with(serde_json::json!(r"a*?[]%_\B"), Backend::Sqlite);
+        assert!(sql.contains(r#""key" GLOB ?"#), "SQLite: {sql}");
+        assert!(!sql.to_uppercase().contains("LIKE"), "SQLite: {sql}");
+        assert_eq!(
+            values,
+            vec![sea_query::Value::from(r"a[*][?][[]]%_\B*".to_string())]
+        );
+
+        // Postgres: LIKE is case-sensitive; LIKE metacharacters are escaped
+        // and `%` ends the pattern. GLOB metacharacters are ordinary for LIKE.
+        let (sql, values) = render_starts_with(serde_json::json!(r"a*?[]%_\B"), Backend::Postgres);
+        assert!(
+            sql.contains(r#""key" LIKE $1 ESCAPE E'\\'"#),
+            "Postgres: {sql}"
+        );
+        assert_eq!(
+            values,
+            vec![sea_query::Value::from(r"a*?[]\%\_\\B%".to_string())]
+        );
+    }
+
+    #[test]
+    fn starts_with_a_nul_or_a_non_string_value_matches_nothing() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            for value in [serde_json::json!("a\u{0}b"), serde_json::json!(7)] {
+                let (sql, values) = render_starts_with(value, backend);
+                assert!(sql.contains("1=0") || sql.contains("1 = 0"), "{sql}");
+                assert!(values.is_empty(), "{values:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn starts_with_on_sqlite_is_served_by_an_index_range() {
+        // The point of GLOB over `substr(key, 1, n) = ?`: SQLite's LIKE/GLOB
+        // optimisation turns the bound pattern's literal head into a range
+        // on an index with the default BINARY collation — the same plan a
+        // literal pattern gets.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (id TEXT PRIMARY KEY, bucket TEXT, key TEXT);
+             CREATE INDEX t_bucket_key ON t (bucket, key);",
+        )
+        .unwrap();
+        let opts = ListOptions {
+            filters: vec![
+                Filter {
+                    field: "bucket".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!("b1"),
+                },
+                Filter {
+                    field: "key".into(),
+                    operator: FilterOp::StartsWith,
+                    value: serde_json::json!("photos/2026"),
+                },
+            ],
+            ..Default::default()
+        };
+        let stmt = build_select("t", &opts, &["id"], Backend::Sqlite).expect("renders");
+        let params: Vec<String> = stmt
+            .values
+            .iter()
+            .map(|v| match v {
+                sea_query::Value::String(Some(s)) => s.to_string(),
+                other => panic!("only string bindings expected: {other:?}"),
+            })
+            .collect();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", stmt.sql))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(
+                |step| step.contains("USING INDEX t_bucket_key (bucket=? AND key>? AND key<?)")
+            ),
+            "the prefix must be an index range: {plan:?}\n{}",
+            stmt.sql
+        );
     }
 
     /// Render a standalone `DELETE FROM t WHERE <cond>` so the fail-safe tests
@@ -1082,7 +1245,7 @@ mod tests {
 
     #[test]
     fn build_condition_tree_empty_is_none() {
-        assert!(build_condition_tree(&[]).is_none());
+        assert!(build_condition_tree(&[], Backend::Sqlite).is_none());
     }
 
     #[test]
@@ -1100,7 +1263,7 @@ mod tests {
                 value: serde_json::json!(18),
             }),
         ];
-        let cond = build_condition_tree(&tree).expect("some");
+        let cond = build_condition_tree(&tree, Backend::Sqlite).expect("some");
         let mut q = sea_query::Query::select();
         q.column(sea_query::Asterisk)
             .from(crate::ident::DynCol("t".into()))
@@ -1125,7 +1288,7 @@ mod tests {
                 value: serde_json::json!("%a%"),
             }),
         ])];
-        let cond = build_condition_tree(&tree).expect("some");
+        let cond = build_condition_tree(&tree, Backend::Sqlite).expect("some");
         let mut q = sea_query::Query::select();
         q.column(sea_query::Asterisk)
             .from(crate::ident::DynCol("t".into()))
@@ -1142,7 +1305,7 @@ mod tests {
             operator: FilterOp::GreaterEqual,
             value: serde_json::json!(400),
         })];
-        let expr = tree_to_simple_expr(&tree);
+        let expr = tree_to_simple_expr(&tree, Backend::Sqlite);
         let mut q = sea_query::Query::select();
         q.expr(expr).from(DynCol("t".into()));
         let (sql, _) = crate::render_select(q, Backend::Sqlite);
@@ -1165,7 +1328,7 @@ mod tests {
                 value: serde_json::json!(2),
             }),
         ])];
-        let expr = tree_to_simple_expr(&tree);
+        let expr = tree_to_simple_expr(&tree, Backend::Sqlite);
         let mut q = sea_query::Query::select();
         q.expr(expr).from(DynCol("t".into()));
         let (sql, _) = crate::render_select(q, Backend::Sqlite);
@@ -1176,7 +1339,7 @@ mod tests {
     fn tree_to_simple_expr_empty_folds_to_constant_and_does_not_panic() {
         // Empty forest → always-true constant (empty AND). Callers reject
         // empty upstream; this only guarantees totality.
-        let expr = tree_to_simple_expr(&[]);
+        let expr = tree_to_simple_expr(&[], Backend::Sqlite);
         let mut q = sea_query::Query::select();
         q.expr(expr).from(DynCol("t".into()));
         let (sql, _) = crate::render_select(q, Backend::Sqlite);
@@ -1205,7 +1368,7 @@ mod tests {
                 }),
             ]),
         ];
-        let cond = build_condition_tree(&tree).expect("some");
+        let cond = build_condition_tree(&tree, Backend::Sqlite).expect("some");
         let mut q = sea_query::Query::select();
         q.column(sea_query::Asterisk)
             .from(crate::ident::DynCol("t".into()))
@@ -1236,7 +1399,7 @@ mod tests {
                 let mut q = sea_query::Query::select();
                 q.column(sea_query::Asterisk)
                     .from(crate::ident::DynCol("orders".into()))
-                    .cond_where(build_condition_tree(&tree).expect("some"));
+                    .cond_where(build_condition_tree(&tree, backend).expect("some"));
                 let (sql, values) = crate::render_select(q, backend);
                 assert_eq!(
                     sql,

@@ -136,7 +136,7 @@ fn convert_node(
 /// A leaf whose `field` fails [`check_name`] is rejected as
 /// `InvalidArgument`. The column form is rejected too when it also carries a
 /// non-null `value` (the two are mutually exclusive), when its operator has no
-/// column form (`like`, `contains_ignore_case`, `in`, `is_null`,
+/// column form (`like`, `contains_ignore_case`, `starts_with`, `in`, `is_null`,
 /// `is_not_null`), or when its `column` fails [`check_name`].
 fn convert_leaf(f: wire::FilterDef) -> Result<FilterTree, WaferError> {
     let operator = FilterOp::parse_wire(&f.operator).map_err(|e| invalid(e.to_string()))?;

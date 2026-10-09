@@ -36,7 +36,8 @@ pub struct FilterDef {
     /// Column name to filter on.
     pub field: String,
     /// Comparison operator, spelled as [`FilterOp::parse_wire`](crate::db::FilterOp::parse_wire)
-    /// accepts it (`eq`, `neq`, `lt`, `gt`, `like`, `contains_ignore_case`, …).
+    /// accepts it (`eq`, `neq`, `lt`, `gt`, `like`, `contains_ignore_case`,
+    /// `starts_with`, …).
     /// Defaults to `eq`.
     #[serde(default = "default_operator")]
     pub operator: String,

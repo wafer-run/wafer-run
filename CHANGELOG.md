@@ -4,6 +4,22 @@
 
 ### Breaking changes
 
+- `FilterOp` has a new operator, `StartsWith` (wire `starts_with`): the
+  prefix of a key or path. Its `value` is plain text — no character is a
+  wildcard or an escape — and letter case is significant on every backend;
+  plain `LIKE 'prefix%'` ignored ASCII case on SQLite and D1. A value
+  containing NUL, or that is not a string, matches no row. `wafer-sql-utils`
+  renders it per dialect, in a form the planner serves from an index on the
+  column: SQLite/D1 `col GLOB ?` (GLOB metacharacters wrapped as `[*]`,
+  `[?]`, `[[]`, index with the default BINARY collation), PostgreSQL
+  `col LIKE ? ESCAPE '\'` (LIKE-escaped, index with `text_pattern_ops` or
+  the `C` collation). A `match` over `FilterOp` needs the new arm.
+  Because a predicate's SQL can now depend on the dialect, the filter
+  builders take the `Backend` they render for: `query::build_condition`,
+  `query::build_condition_tree` and `query::tree_to_simple_expr` gain a
+  `backend` argument, and so does `AggregateSpec::into_grouped_config` in
+  `wafer-core` (it builds `CASE` predicates).
+
 - `FilterOp` has a new operator, `ContainsIgnoreCase` (wire
   `contains_ignore_case`): the text search a person types. Its `value` is
   plain text — `%`, `_` and `\` match only themselves — and ASCII letters

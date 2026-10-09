@@ -1121,7 +1121,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             let extra_cond = opts
                 .filter_tree
                 .as_deref()
-                .and_then(wafer_sql_utils::query::build_condition_tree);
+                .and_then(|tree| wafer_sql_utils::query::build_condition_tree(tree, Self::BACKEND));
 
             let count_stmt = (!opts.skip_count).then(|| {
                 wafer_sql_utils::aggregate::build_count_with_condition(
@@ -1673,7 +1673,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .collect();
         self.require_columns(table, &columns).await?;
         let stmt = {
-            let cfg = spec.into_grouped_config(table.to_string());
+            let cfg = spec.into_grouped_config(table.to_string(), Self::BACKEND);
             wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)?
         };
         // An aggregate row holds computed values and group keys, not stored
