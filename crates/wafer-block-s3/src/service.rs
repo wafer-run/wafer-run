@@ -363,7 +363,7 @@ impl StorageService for S3StorageService {
 
         let content_type = resp
             .content_type()
-            .unwrap_or("application/octet-stream")
+            .unwrap_or(wafer_core::mime::UNKNOWN)
             .to_string();
 
         let content_length = resp.content_length().unwrap_or(0);
@@ -437,7 +437,7 @@ impl StorageService for S3StorageService {
 
         let content_type = resp
             .content_type()
-            .unwrap_or("application/octet-stream")
+            .unwrap_or(wafer_core::mime::UNKNOWN)
             .to_string();
         let content_length = resp.content_length().unwrap_or(0);
         let last_modified = resp
