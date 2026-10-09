@@ -2188,6 +2188,17 @@
 
 ### Fixed
 
+- `wafer_core::mime` declares `charset=utf-8` on every textual type. `svg`
+  is now `image/svg+xml; charset=utf-8` and `map` is
+  `application/json; charset=utf-8`; `rs` and `toml` are now
+  `text/plain; charset=utf-8` instead of `application/octet-stream`, so a
+  browser shows them instead of downloading them. The table's fallback is
+  the new public constant `wafer_core::mime::UNKNOWN`
+  (`application/octet-stream`). `wafer-run/local-storage`, which derives
+  every object's type from its key, and `wafer-run/web`, which falls back to
+  the table when stored metadata names no type (or `UNKNOWN`), pick up the
+  new types. `wafer-run/web` and `wafer-run/s3` (an object with no stored
+  type) name that fallback as `mime::UNKNOWN`.
 - `/openapi.json` no longer merges two same-named `$defs` entries whose text
   is identical but whose references reach different definitions (two blocks
   each with a recursive `Expr` over a different `Cond`). The merge published

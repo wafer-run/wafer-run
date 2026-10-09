@@ -132,9 +132,10 @@ impl WebBlock {
         // caller sees the real failure instead of a synthetic 404.
         match try_serve_static(ctx, &config.folder, key, &config.index_file).await {
             Ok((data, info)) => {
-                // Use content_type from storage metadata, fall back to extension-based detection
+                // The type storage recorded, unless it recorded none or the
+                // unknown type: then the one table, by the key's extension.
                 let content_type = if info.content_type.is_empty()
-                    || info.content_type == "application/octet-stream"
+                    || info.content_type == wafer_core::mime::UNKNOWN
                 {
                     wafer_core::mime::mime_for_ext(Path::new(key)).to_string()
                 } else {
