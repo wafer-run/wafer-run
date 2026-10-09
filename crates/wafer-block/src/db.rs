@@ -239,24 +239,6 @@ impl FilterOp {
             Self::IsNotNull => "is_not_null",
         }
     }
-
-    /// Render the operator as its SQL keyword form. `ContainsIgnoreCase` is
-    /// a `LIKE` over both sides lowered (see `wafer-sql-utils`), so its
-    /// keyword is `LIKE` too.
-    pub fn as_sql(&self) -> &'static str {
-        match self {
-            Self::Equal => "=",
-            Self::NotEqual => "!=",
-            Self::GreaterThan => ">",
-            Self::GreaterEqual => ">=",
-            Self::LessThan => "<",
-            Self::LessEqual => "<=",
-            Self::Like | Self::ContainsIgnoreCase => "LIKE",
-            Self::In => "IN",
-            Self::IsNull => "IS NULL",
-            Self::IsNotNull => "IS NOT NULL",
-        }
-    }
 }
 
 /// A sort directive for a database query.
