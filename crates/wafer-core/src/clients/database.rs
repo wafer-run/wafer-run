@@ -47,21 +47,6 @@ pub const LIST_ALL_MAX_ROWS: u32 = 10_000;
 
 // --- Helpers ---
 
-fn filter_op_str(op: &FilterOp) -> &'static str {
-    match op {
-        FilterOp::Equal => "eq",
-        FilterOp::NotEqual => "neq",
-        FilterOp::GreaterThan => "gt",
-        FilterOp::GreaterEqual => "gte",
-        FilterOp::LessThan => "lt",
-        FilterOp::LessEqual => "lte",
-        FilterOp::Like => "like",
-        FilterOp::In => "in",
-        FilterOp::IsNull => "is_null",
-        FilterOp::IsNotNull => "is_not_null",
-    }
-}
-
 /// Encode flat client-side [`Filter`]s as all-leaf wire [`FilterNode`]s. The
 /// client never builds AND/OR groups; the tree shape exists so the wire is
 /// uniform and group-capable callers (a later task) reuse the same field.
@@ -71,7 +56,7 @@ fn to_wire_filters(filters: &[Filter]) -> Vec<FilterNode> {
         .map(|f| {
             FilterNode::Leaf(WireFilterDef {
                 field: f.field.clone(),
-                operator: filter_op_str(&f.operator).to_string(),
+                operator: f.operator.as_wire().to_string(),
                 value: f.value.clone(),
                 column: None,
             })
@@ -89,13 +74,13 @@ pub(crate) fn filter_tree_to_wire_node(tree: &FilterTree) -> FilterNode {
     match tree {
         FilterTree::Leaf(f) => FilterNode::Leaf(WireFilterDef {
             field: f.field.clone(),
-            operator: filter_op_str(&f.operator).to_string(),
+            operator: f.operator.as_wire().to_string(),
             value: f.value.clone(),
             column: None,
         }),
         FilterTree::ColumnCompare(f) => FilterNode::Leaf(WireFilterDef {
             field: f.field.clone(),
-            operator: filter_op_str(&f.operator.as_filter_op()).to_string(),
+            operator: f.operator.as_filter_op().as_wire().to_string(),
             value: serde_json::Value::Null,
             column: Some(f.column.clone()),
         }),

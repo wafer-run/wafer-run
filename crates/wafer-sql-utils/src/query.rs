@@ -1,6 +1,6 @@
 use sea_query::{
-    Asterisk, Cond, Expr, InsertStatement, LikeExpr, Order, Query, SelectStatement, SimpleExpr,
-    UpdateStatement,
+    Asterisk, BinOper, Cond, Expr, Func, InsertStatement, LikeExpr, Order, Query, SelectStatement,
+    SimpleExpr, UpdateStatement,
 };
 use wafer_block::db::{
     ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
@@ -12,8 +12,9 @@ use crate::{ident::DynCol, value::json_to_sea_value, Backend, SqlBuildError};
 ///
 /// Field names reach sea-query via [`DynCol`], which quotes them, so this is
 /// injection-safe without a separate identifier validation step. Malformed
-/// operand shapes (`In` with a non-array, `Like` with a non-string) render an
-/// always-false `1=0` predicate — narrow, never widen (see the inline notes).
+/// operand shapes (`In` with a non-array, `Like` or `ContainsIgnoreCase` with
+/// a non-string) render an always-false `1=0` predicate — narrow, never widen
+/// (see the inline notes).
 pub(crate) fn leaf_expr(filter: &Filter) -> SimpleExpr {
     predicate_on(Expr::col(DynCol(filter.field.clone())), filter)
 }
@@ -47,6 +48,30 @@ pub(crate) fn predicate_on(left: Expr, filter: &Filter) -> SimpleExpr {
         FilterOp::GreaterEqual => col.gte(json_to_sea_value(&filter.value)),
         FilterOp::LessThan => col.lt(json_to_sea_value(&filter.value)),
         FilterOp::LessEqual => col.lte(json_to_sea_value(&filter.value)),
+        FilterOp::ContainsIgnoreCase => match filter.value.as_str() {
+            // `LOWER(col) LIKE LOWER(?) ESCAPE '\'` with the bound pattern
+            // `%<text, LIKE-escaped>%`. The escape makes every character of
+            // `text` literal. Case: plain LIKE folds ASCII on SQLite/D1 and
+            // nothing on Postgres, so both sides go through the same SQL
+            // `LOWER` — whatever a backend folds, it folds on both sides
+            // (ASCII on SQLite/D1, the locale's letters on Postgres). Lowering
+            // `text` here instead would fold by Rust's rules, which match
+            // neither backend's. sea-query's `LikeExpr` only carries a string
+            // pattern, so the `pattern ESCAPE char` operand it builds is
+            // assembled here around `LOWER(pattern)`; the query builder
+            // renders it exactly as it renders a `LikeExpr` with an escape.
+            Some(text) => {
+                let pattern = Func::lower(Expr::val(format!("%{}%", escape_like(text))));
+                let escaped = SimpleExpr::Binary(
+                    Box::new(pattern.into()),
+                    BinOper::Escape,
+                    Box::new(SimpleExpr::Constant('\\'.into())),
+                );
+                Expr::expr(Func::lower(col)).binary(BinOper::Like, escaped)
+            }
+            // Fail-safe, as for `Like`: a non-string value matches nothing.
+            None => Expr::cust("1=0"),
+        },
         FilterOp::Like => {
             if let Some(pattern) = filter.value.as_str() {
                 // Explicit ESCAPE clause: SQLite/D1's LIKE has no default
@@ -67,6 +92,19 @@ pub(crate) fn predicate_on(left: Expr, filter: &Filter) -> SimpleExpr {
             }
         }
     }
+}
+
+/// `text` with every LIKE metacharacter — `%`, `_` and the escape character
+/// `\` — prefixed by `\`, so under `ESCAPE '\'` each matches only itself.
+fn escape_like(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Render one [`ColumnFilter`] leaf — `field <op> column` — to a sea-query
@@ -933,6 +971,62 @@ mod tests {
             sql.contains("ESCAPE E'\\\\'"),
             "Postgres LIKE must also emit an explicit ESCAPE clause: {sql}"
         );
+    }
+
+    fn contains_ignore_case(value: serde_json::Value) -> Vec<Filter> {
+        vec![Filter {
+            field: "email".into(),
+            operator: FilterOp::ContainsIgnoreCase,
+            value,
+        }]
+    }
+
+    fn render_contains(
+        value: serde_json::Value,
+        backend: Backend,
+    ) -> (String, Vec<sea_query::Value>) {
+        let cond = build_condition(&contains_ignore_case(value))
+            .expect("non-empty filters yield a condition");
+        let mut query = Query::delete();
+        query.from_table(DynCol("t".into())).cond_where(cond);
+        crate::render_delete(query, backend)
+    }
+
+    #[test]
+    fn contains_ignore_case_lowers_both_sides_under_an_escape_clause() {
+        // Both sides go through the same SQL `LOWER`, so whatever a backend
+        // folds it folds on both sides; the pattern is bound, never inlined.
+        let (sql, values) = render_contains(serde_json::json!("A_b"), Backend::Sqlite);
+        assert!(
+            sql.contains(r#"LOWER("email") LIKE LOWER(?) ESCAPE '\'"#),
+            "SQLite: {sql}"
+        );
+        assert_eq!(values, vec![sea_query::Value::from(r"%A\_b%".to_string())]);
+
+        let (sql, values) = render_contains(serde_json::json!("A_b"), Backend::Postgres);
+        assert!(
+            sql.contains(r#"LOWER("email") LIKE LOWER($1) ESCAPE E'\\'"#),
+            "Postgres: {sql}"
+        );
+        assert_eq!(values, vec![sea_query::Value::from(r"%A\_b%".to_string())]);
+    }
+
+    #[test]
+    fn contains_ignore_case_escapes_every_like_metacharacter() {
+        // `%`, `_` and the escape character itself are literal text.
+        let (_, values) = render_contains(serde_json::json!(r"100%_\x"), Backend::Sqlite);
+        assert_eq!(
+            values,
+            vec![sea_query::Value::from(r"%100\%\_\\x%".to_string())]
+        );
+    }
+
+    #[test]
+    fn contains_ignore_case_with_non_string_value_matches_nothing() {
+        let (sql, values) = render_contains(serde_json::json!(42), Backend::Sqlite);
+        assert!(sql.contains("1=0") || sql.contains("1 = 0"), "{sql}");
+        assert!(!sql.to_uppercase().contains("LIKE"), "{sql}");
+        assert!(values.is_empty(), "{values:?}");
     }
 
     /// Render a standalone `DELETE FROM t WHERE <cond>` so the fail-safe tests
