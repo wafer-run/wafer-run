@@ -54,6 +54,8 @@ fn llm_error_to_block_error(e: LlmError) -> (ErrorCode, String) {
         LlmError::RateLimited => (ErrorCode::Unavailable, "rate limited".to_string()),
         LlmError::Unauthorized => (ErrorCode::Unauthenticated, "unauthorized".to_string()),
         LlmError::Network(msg) => (ErrorCode::Unavailable, format!("network: {msg}")),
+        // The reason is written for the caller (see the variant): returned as is.
+        LlmError::EngineUnavailable(msg) => (ErrorCode::Unavailable, msg),
         LlmError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
     }
 }
@@ -292,5 +294,16 @@ mod tests {
         let (code, msg) = llm_error_to_block_error(LlmError::Network("connection refused".into()));
         assert_eq!(code, ErrorCode::Unavailable);
         assert_eq!(msg, "network: connection refused");
+    }
+
+    /// An engine that cannot take the request is unavailable (a 503 at the
+    /// HTTP edge), and the caller is told why, word for word.
+    #[test]
+    fn an_unavailable_engine_says_why() {
+        let (code, msg) = llm_error_to_block_error(LlmError::EngineUnavailable(
+            "no open page has the model 'm' loaded — load it first".into(),
+        ));
+        assert_eq!(code, ErrorCode::Unavailable);
+        assert_eq!(msg, "no open page has the model 'm' loaded — load it first");
     }
 }

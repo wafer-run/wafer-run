@@ -57,6 +57,8 @@ fn image_error_to_block_error(e: ImageError) -> (ErrorCode, String) {
         ImageError::BackendError(msg) => (ErrorCode::Internal, msg),
         ImageError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
         ImageError::Network(msg) => (ErrorCode::Unavailable, format!("network: {msg}")),
+        // The reason is written for the caller (see the variant): returned as is.
+        ImageError::EngineUnavailable(msg) => (ErrorCode::Unavailable, msg),
         ImageError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
     }
 }
@@ -269,5 +271,16 @@ mod tests {
             image_error_to_block_error(ImageError::Network("connection refused".into()));
         assert_eq!(code, ErrorCode::Unavailable);
         assert_eq!(msg, "network: connection refused");
+    }
+
+    /// An engine that cannot take the request is unavailable (a 503 at the
+    /// HTTP edge), and the caller is told why, word for word.
+    #[test]
+    fn an_unavailable_engine_says_why() {
+        let (code, msg) = image_error_to_block_error(ImageError::EngineUnavailable(
+            "no open page has the model 'm' loaded — load it first".into(),
+        ));
+        assert_eq!(code, ErrorCode::Unavailable);
+        assert_eq!(msg, "no open page has the model 'm' loaded — load it first");
     }
 }

@@ -4,6 +4,17 @@
 
 ### Breaking changes
 
+- `VectorError`, `LlmError` and `ImageError` have a new variant,
+  `EngineUnavailable(String)`: the engine that runs the model cannot take
+  the request now, for a reason the caller can act on (a browser runtime
+  with no open page running the engine, or none holding the model). The
+  handlers map it to `ErrorCode::Unavailable` (503 at the HTTP edge) and
+  return its message as it is, so a backend writes that message for the
+  caller — no paths, hosts or driver text. `VectorError::Unavailable` keeps
+  meaning a store fault and keeps its scrubbed message. `LlmError` and
+  `ImageError` are `#[non_exhaustive]`; a `match` over `VectorError` needs
+  the new arm.
+
 - `FilterOp` has a new operator, `StartsWith` (wire `starts_with`): the
   prefix of a key or path. Its `value` is plain text — no character is a
   wildcard or an escape — and letter case is significant on every backend;

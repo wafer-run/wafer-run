@@ -57,6 +57,9 @@ fn vector_error_to_wafer(e: VectorError) -> WaferError {
                 "vector store temporarily unavailable",
             )
         }
+        // Transient too, but the message is the reason, written for the
+        // caller (see the variant), so it is returned rather than scrubbed.
+        VectorError::EngineUnavailable(msg) => WaferError::new(ErrorCode::Unavailable, msg),
         VectorError::Internal(msg) => {
             tracing::error!(error = %msg, "vector internal error");
             WaferError::new(ErrorCode::Internal, "internal vector error")
@@ -319,5 +322,16 @@ mod tests {
         ));
         assert_eq!(w.code, ErrorCode::Unavailable);
         assert_eq!(w.message, "vector store temporarily unavailable");
+    }
+
+    /// An embedding engine that cannot take the request is unavailable (a
+    /// 503 at the HTTP edge), and the caller is told why.
+    #[test]
+    fn an_unavailable_engine_is_transient_and_says_why() {
+        let w = vector_error_to_wafer(VectorError::EngineUnavailable(
+            "no open page runs the embedding engine".into(),
+        ));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.message, "no open page runs the embedding engine");
     }
 }
