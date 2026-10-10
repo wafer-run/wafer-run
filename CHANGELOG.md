@@ -1696,6 +1696,18 @@
 
 ### Security
 
+- The llm and image handlers no longer return a provider's transport error
+  text to the caller. `LlmError::Network` and `ImageError::Network` still map
+  to `ErrorCode::Unavailable` (503 at the HTTP edge), but their message is
+  now the fixed `llm::handler::PROVIDER_UNREACHABLE` ("the model provider
+  could not be reached") or `image::handler::PROVIDER_UNREACHABLE` ("the
+  image provider could not be reached"), both new public constants, instead
+  of `network: <provider text>`. That text can name hosts, addresses and
+  URLs; the handlers log it with `tracing::warn!`, as the vector handler
+  does for a store `Unavailable`. `EngineUnavailable` keeps its message, so
+  an `Unavailable` from these handlers carries either an engine's reason
+  written for the caller or the fixed text, and an edge can pass it through.
+  A consumer that matched on `network:` must match on the constant instead.
 - A string column default reaches PostgreSQL DDL as an `E'…'` escape string
   with every backslash and quote doubled. It was a plain `'…'` literal with
   only quotes doubled, which reads the value correctly only while the
