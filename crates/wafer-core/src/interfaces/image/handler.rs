@@ -50,13 +50,29 @@ fn decode_for_model<T: serde::de::DeserializeOwned>(
     )
 }
 
+/// The caller-facing message for [`ImageError::Network`]. The provider's
+/// own transport text stays in the server log.
+pub const PROVIDER_UNREACHABLE: &str = "the image provider could not be reached";
+
+/// Map a service-level `ImageError` onto a wire `ErrorCode` + message.
+///
+/// Both [`ImageError::Network`] and [`ImageError::EngineUnavailable`] map to
+/// `Unavailable`, so the message is what tells them apart, and only the
+/// second carries text written for the caller. A network failure's text is
+/// the provider client's own (it can name hosts, addresses and URLs), so it
+/// is logged and the caller gets the fixed [`PROVIDER_UNREACHABLE`]. An
+/// edge that passes `Unavailable` through therefore never shows a caller
+/// provider text.
 fn image_error_to_block_error(e: ImageError) -> (ErrorCode, String) {
     match e {
         ImageError::NotSupported => (ErrorCode::Unimplemented, "not supported".to_string()),
         ImageError::InvalidRequest(msg) => (ErrorCode::InvalidArgument, msg),
         ImageError::BackendError(msg) => (ErrorCode::Internal, msg),
         ImageError::ModelNotFound(msg) => (ErrorCode::NotFound, msg),
-        ImageError::Network(msg) => (ErrorCode::Unavailable, format!("network: {msg}")),
+        ImageError::Network(msg) => {
+            tracing::warn!(error = %msg, "image provider unreachable");
+            (ErrorCode::Unavailable, PROVIDER_UNREACHABLE.to_string())
+        }
         // The reason is written for the caller (see the variant): returned as is.
         ImageError::EngineUnavailable(msg) => (ErrorCode::Unavailable, msg),
         ImageError::Cancelled => (ErrorCode::Cancelled, "cancelled".to_string()),
@@ -264,13 +280,15 @@ mod tests {
     use super::*;
 
     /// A provider that cannot be reached is unavailable (a 503 at the HTTP
-    /// edge), not an internal fault.
+    /// edge), not an internal fault, and the provider client's text (which
+    /// names hosts) is not what the caller reads.
     #[test]
-    fn a_network_error_is_unavailable() {
-        let (code, msg) =
-            image_error_to_block_error(ImageError::Network("connection refused".into()));
+    fn a_network_error_is_unavailable_and_scrubbed() {
+        let (code, msg) = image_error_to_block_error(ImageError::Network(
+            "error sending request for url (http://10.0.0.5:7860/sdapi/v1/txt2img)".into(),
+        ));
         assert_eq!(code, ErrorCode::Unavailable);
-        assert_eq!(msg, "network: connection refused");
+        assert_eq!(msg, PROVIDER_UNREACHABLE);
     }
 
     /// An engine that cannot take the request is unavailable (a 503 at the

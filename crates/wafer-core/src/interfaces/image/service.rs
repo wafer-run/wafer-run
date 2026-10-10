@@ -38,6 +38,10 @@ pub enum ImageError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
     /// Network-level failure (e.g. upstream provider).
+    ///
+    /// The message is the provider client's own text and is only logged:
+    /// the caller is told, with `ErrorCode::Unavailable`, that the provider
+    /// could not be reached, never what this message says.
     #[error("network error: {0}")]
     Network(String),
     /// The engine that runs the model cannot take this request now, and the
