@@ -39,9 +39,12 @@ pub enum ImageError {
     ModelNotFound(String),
     /// Network-level failure (e.g. upstream provider).
     ///
-    /// The message is the provider client's own text and is only logged:
-    /// the caller is told, with `ErrorCode::Unavailable`, that the provider
-    /// could not be reached, never what this message says.
+    /// The message is the provider client's own text. wafer-core's
+    /// `image::handler` only logs it: a caller of the block is told, with
+    /// `ErrorCode::Unavailable` and the handler's `PROVIDER_UNREACHABLE`,
+    /// that the provider could not be reached, never what this message says.
+    /// Code that calls the service directly gets the message itself and must
+    /// not return it to its own caller either.
     #[error("network error: {0}")]
     Network(String),
     /// The engine that runs the model cannot take this request now, and the
