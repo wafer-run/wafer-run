@@ -48,6 +48,17 @@ pub enum LlmError {
     /// Network-level failure (e.g. upstream provider).
     #[error("network error: {0}")]
     Network(String),
+    /// The engine that runs the model cannot take this request now, and the
+    /// message says why in words a caller can act on — for example a browser
+    /// runtime whose models run in a page, with no open page running the
+    /// engine, or none holding the model the request needs. Retrying after
+    /// that is put right (a tab opened, the model loaded) may succeed.
+    ///
+    /// The message is returned to the caller as it is (with
+    /// `ErrorCode::Unavailable`), so it must be written for them: no paths,
+    /// hosts or driver text.
+    #[error("engine unavailable: {0}")]
+    EngineUnavailable(String),
     /// Operation was cancelled via its `CancellationToken`.
     #[error("cancelled")]
     Cancelled,

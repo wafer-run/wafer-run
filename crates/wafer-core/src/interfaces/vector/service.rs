@@ -79,6 +79,17 @@ pub enum VectorError {
     /// backend classifies its driver's errors into this variant.
     #[error("vector store unavailable: {0}")]
     Unavailable(String),
+    /// The engine that runs the embedding model cannot take this request now, and the
+    /// message says why in words a caller can act on — for example a browser
+    /// runtime whose models run in a page, with no open page running the
+    /// engine, or none holding the embedding model the request needs. Retrying after
+    /// that is put right (a tab opened, the embedding model loaded) may succeed.
+    ///
+    /// The message is returned to the caller as it is (with
+    /// `ErrorCode::Unavailable`), so it must be written for them: no paths,
+    /// hosts or driver text.
+    #[error("embedding engine unavailable: {0}")]
+    EngineUnavailable(String),
     /// Backend-internal failure.
     #[error("internal vector store error: {0}")]
     Internal(String),
