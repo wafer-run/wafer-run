@@ -220,6 +220,27 @@ run_wasm() {
         --manifest-path crates/wafer-core/tests/wasm32_crypto_block/Cargo.toml
     node crates/wafer-core/tests/wasm32_crypto_block/run.mjs \
         "$crypto_dir/wasm32-unknown-unknown/release/wasm32_crypto_block_fixture.wasm"
+
+    # The wasm32 spawn wrapper (`wafer_block::spawn::set_spawn_wrapper`)
+    # exists only on wasm32-unknown-unknown, and a task spawned there needs a
+    # JS microtask queue, which the fixtures above stub out. So its tests run
+    # under wasm-bindgen-test-runner on node; the runner must be the version
+    # of `wasm-bindgen` in Cargo.lock, or it refuses the test binary.
+    echo "==> Spawn wrapper on wasm32 (wasm-bindgen-test-runner, node)"
+    local wbg_lock
+    wbg_lock=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+    if ! command -v wasm-bindgen-test-runner >/dev/null; then
+        echo "error: wasm-bindgen-test-runner is required; cargo install wasm-bindgen-cli --version $wbg_lock --locked" >&2
+        exit 1
+    fi
+    local wbg_runner
+    wbg_runner=$(wasm-bindgen-test-runner --version | awk '{ print $2 }')
+    if [ "$wbg_runner" != "$wbg_lock" ]; then
+        echo "error: wasm-bindgen-test-runner is $wbg_runner but Cargo.lock has wasm-bindgen $wbg_lock; cargo install wasm-bindgen-cli --version $wbg_lock --locked" >&2
+        exit 1
+    fi
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+        cargo test --locked -p wafer-block --target wasm32-unknown-unknown --test spawn_wrapper
 }
 
 run_bindings() {

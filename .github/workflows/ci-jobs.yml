@@ -167,12 +167,20 @@ jobs:
         with:
           prefix-key: wasm
 
-      # Runs the argon2 memory-bound and crypto-block fixtures (run_wasm in
+      # Runs the argon2 memory-bound and crypto-block fixtures, and the
+      # spawn-wrapper tests under wasm-bindgen-test-runner (run_wasm in
       # scripts/check.sh).
       - name: Install Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+
+      # Runs the spawn-wrapper tests (run_wasm in scripts/check.sh). The
+      # version is wasm-bindgen's in Cargo.lock (0.2.128); the runner refuses
+      # a test binary built by any other, and check.sh says so if they drift.
+      # rust-cache keeps ~/.cargo/bin, so this compiles once per lock change.
+      - name: Install wasm-bindgen-test-runner
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
 
       # Covers: guest SDK on wasm32-wasip1, wafer-run with
       # --no-default-features (wasmi off), the wafer-core wasm-component
@@ -180,7 +188,8 @@ jobs:
       # wasm32-unknown-unknown with --features wasmi), the wasm32 compile
       # fixtures, wafer-block-crypto on wasm32-unknown-unknown, the argon2
       # memory bound measured on wasm32 under node, and the crypto block
-      # awaiting its service on wasm32 under node. See run_wasm in
+      # awaiting its service on wasm32 under node, and the spawn wrapper's
+      # tests under wasm-bindgen-test-runner. See run_wasm in
       # scripts/check.sh.
       - name: Wasm & feature builds
         run: ./scripts/check.sh wasm

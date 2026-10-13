@@ -1834,6 +1834,23 @@
 
 ### Added
 
+- `wafer_block::spawn::set_spawn_wrapper` (wasm32-unknown-unknown only):
+  install a `fn(SpawnedTask) -> SpawnedTask` that `spawn_producer` — and so
+  every `OutputStream::from_producer` — passes each task through, on the
+  spawning call's stack, before `spawn_local`. A wasm32 adapter that scopes
+  state to the request being polled (Cloudflare's request-current service
+  bundle) uses it to give a producer the scope it was spawned in: a
+  `spawn_local` task is polled from the JS microtask queue, never inside
+  the request's poll, so without it a producer reaches none of that state,
+  before or after its first chunk. Any other caller of `spawn_producer`
+  (a deferred-task runner spawning through it, for one) is wrapped too.
+  Returns the wrapper it replaces; `None`
+  removes it. Native and wasm32-wasip1 have no wrapper. A producer must
+  finish its work before its terminal: nothing keeps a request alive for
+  it afterwards. The tests run under `wasm-bindgen-test-runner` on node in
+  `scripts/check.sh wasm`, which now needs `wasm-bindgen-cli` at the lock's
+  `wasm-bindgen` version.
+
 - `wafer_block::http_codec` decides whether an HTTP response streams, and
   opens it. `open_response(output)` reads the stream's leading meta and
   answers `OpenedResponse::Streamed(StreamedHttpResponse { status, headers,

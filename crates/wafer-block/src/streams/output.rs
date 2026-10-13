@@ -787,7 +787,8 @@ impl OutputStream {
     /// `Error` terminal (see [`OutputSink`]), so the consumer never mistakes a
     /// cut-off body for a complete one.
     ///
-    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser.
+    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser
+    /// (through the installed spawn wrapper, if any; see [`crate::spawn`]).
     /// Not available on wasm32-wasip1 (WASI) — use `GuestResult::respond` directly.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_producer<F, Fut>(f: F) -> Self
@@ -804,6 +805,13 @@ impl OutputStream {
     }
 
     /// Creates a streaming `OutputStream` driven by a producer closure (wasm32 browser variant).
+    ///
+    /// The producer task is handed to the thread's installed
+    /// [spawn wrapper](crate::spawn::set_spawn_wrapper), if any, on this
+    /// call's stack, before it is spawned: an adapter that scopes state to
+    /// the request being polled uses it to give the producer that request's
+    /// state. The producer must finish its work before its terminal; see the
+    /// [`spawn`](crate::spawn) module docs.
     #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
     pub fn from_producer<F, Fut>(f: F) -> Self
     where
