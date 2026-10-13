@@ -302,12 +302,22 @@ pub(crate) fn new_streaming_channel(
 /// and dropping the stream still cancels it. The only buffer added is the
 /// events read ahead: each one read out of the channel frees its slot there,
 /// and nothing else is read until the consumer asks.
+///
+/// A consumer that hands the stream on can also change what the rest of the
+/// producer's events mean to the next consumer with
+/// [`Self::rewrite_produced`], in the same way: in place, as they are read.
 pub struct OutputStream {
     /// Events put back by [`Self::prepend`], yielded before `rx`.
     prelude: VecDeque<StreamEvent>,
+    /// Applied to each event as it is read from `rx`; see
+    /// [`Self::rewrite_produced`].
+    rewrite: Option<Rewrite>,
     rx: ReceiverStream<StreamEvent>,
     cancel: CancellationToken,
 }
+
+/// An event rewrite installed by [`OutputStream::rewrite_produced`].
+type Rewrite = Box<dyn FnMut(StreamEvent) -> Option<StreamEvent> + Send>;
 
 impl OutputStream {
     /// Private helper: allocates a pre-filled channel from a fixed-size array of
@@ -324,6 +334,7 @@ impl OutputStream {
         }
         Self {
             prelude: VecDeque::new(),
+            rewrite: None,
             rx: ReceiverStream::new(rx),
             cancel: CancellationToken::new(),
         }
@@ -400,6 +411,7 @@ impl OutputStream {
         let (rx, sink, cancel) = new_streaming_channel(capacity);
         let stream = Self {
             prelude: VecDeque::new(),
+            rewrite: None,
             rx: ReceiverStream::new(rx),
             cancel: cancel.clone(),
         };
@@ -431,9 +443,8 @@ impl OutputStream {
     ///
     /// Waits for the producer like a read does.
     pub async fn peek(&mut self) -> Option<&StreamEvent> {
-        use futures::StreamExt;
         if self.prelude.is_empty() {
-            let next = self.rx.next().await?;
+            let next = self.next_produced().await?;
             self.prelude.push_back(next);
         }
         self.prelude.front()
@@ -457,15 +468,14 @@ impl OutputStream {
     /// arrived, so a call dropped while waiting for the producer — under a
     /// `timeout` or a `select!` — leaves every event on the stream.
     pub async fn take_leading_meta(&mut self) -> Vec<MetaEntry> {
-        use futures::StreamExt;
         let mut positioned = self
             .prelude
             .iter()
             .any(|event| !matches!(event, StreamEvent::Meta(_)));
         while !positioned {
-            // `rx.next()` loses nothing when dropped, and the event it
-            // returns goes onto the stream before the next await.
-            let Some(event) = self.rx.next().await else {
+            // `next_produced()` loses nothing when dropped, and the event
+            // it returns goes onto the stream before the next await.
+            let Some(event) = self.next_produced().await else {
                 break;
             };
             positioned = !matches!(event, StreamEvent::Meta(_));
@@ -480,6 +490,54 @@ impl OutputStream {
         meta
     }
 
+    /// Rewrite every event read from the producer from now on: `rewrite`
+    /// gets each one as it is read and returns the event to yield in its
+    /// place, or `None` to skip it. Events already read ahead — put back by
+    /// [`Self::prepend`], or read by [`Self::peek`] /
+    /// [`Self::take_leading_meta`] — are not rewritten. A second call
+    /// rewrites what the first one yields.
+    ///
+    /// For a consumer that hands the stream on and decides what the rest of
+    /// the producer's events mean — the flow executor, which forwards a
+    /// streamed response after its head and decides what may still follow
+    /// it. Like [`Self::prepend`] it changes the stream in place: no task
+    /// and no channel are added, an event is read (and rewritten) only when
+    /// the consumer asks for one, so backpressure still reaches the
+    /// producer, and dropping the stream still cancels it.
+    pub fn rewrite_produced(
+        &mut self,
+        mut rewrite: impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + 'static,
+    ) {
+        self.rewrite = Some(match self.rewrite.take() {
+            None => Box::new(rewrite),
+            Some(mut earlier) => Box::new(move |event| earlier(event).and_then(&mut rewrite)),
+        });
+    }
+
+    /// Poll the next event from the producer's channel, rewritten (events
+    /// the rewrite skips are consumed and never yielded).
+    fn poll_produced(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamEvent>> {
+        loop {
+            let Some(event) = futures::ready!(Pin::new(&mut self.rx).poll_next(cx)) else {
+                return Poll::Ready(None);
+            };
+            match &mut self.rewrite {
+                None => return Poll::Ready(Some(event)),
+                Some(rewrite) => {
+                    if let Some(event) = rewrite(event) {
+                        return Poll::Ready(Some(event));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The next event from the producer's channel, rewritten. Cancel-safe:
+    /// an event is returned from the same poll that reads it.
+    async fn next_produced(&mut self) -> Option<StreamEvent> {
+        std::future::poll_fn(|cx| self.poll_produced(cx)).await
+    }
+
     /// Test-only: build an `OutputStream` over a raw event channel, bypassing
     /// [`OutputSink`] entirely. Used to synthesize protocol-violating streams
     /// (e.g. ending without a terminal event) that the sink can no longer
@@ -490,6 +548,7 @@ impl OutputStream {
     pub(crate) fn from_raw_receiver(rx: mpsc::Receiver<StreamEvent>) -> Self {
         Self {
             prelude: VecDeque::new(),
+            rewrite: None,
             rx: ReceiverStream::new(rx),
             cancel: CancellationToken::new(),
         }
@@ -513,7 +572,7 @@ impl Stream for OutputStream {
         if let Some(event) = self.prelude.pop_front() {
             return Poll::Ready(Some(event));
         }
-        Pin::new(&mut self.rx).poll_next(cx)
+        self.poll_produced(cx)
     }
 }
 
@@ -1102,6 +1161,79 @@ mod tests {
                 .is_some_and(|sent| sent.is_ok()),
             "reading from the channel frees its slot"
         );
+    }
+
+    /// `rewrite_produced` rewrites the events not yet read, in order, and
+    /// skips those it maps to `None`; events already read ahead are yielded
+    /// as they were. A second rewrite applies to what the first yields.
+    #[tokio::test]
+    async fn rewrite_produced_rewrites_what_is_still_to_be_read() {
+        let (mut stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        sink.send_chunk(b"one".to_vec()).await.unwrap();
+        sink.send_meta(entry("late", "meta")).await.unwrap();
+        sink.send_chunk(b"two".to_vec()).await.unwrap();
+        sink.complete(vec![entry("trailing", "meta")])
+            .await
+            .unwrap();
+
+        // Positioned on the first chunk: the meta and `one` are read ahead.
+        let meta = stream.take_leading_meta().await;
+        stream.prepend(meta.into_iter().map(StreamEvent::Meta));
+        stream.rewrite_produced(|event| match event {
+            StreamEvent::Meta(_) => None,
+            StreamEvent::Complete { .. } => Some(StreamEvent::Complete { meta: vec![] }),
+            other => Some(other),
+        });
+        stream.rewrite_produced(|event| match event {
+            StreamEvent::Chunk(bytes) => Some(StreamEvent::Chunk(bytes.to_ascii_uppercase())),
+            other => Some(other),
+        });
+
+        let events: Vec<StreamEvent> = stream.collect().await;
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Meta(entry("resp.content_type", "text/event-stream")),
+                StreamEvent::Chunk(b"one".to_vec()),
+                StreamEvent::Chunk(b"TWO".to_vec()),
+                StreamEvent::Complete { meta: vec![] },
+            ]
+        );
+    }
+
+    /// A rewrite reads nothing ahead — with a one-slot channel the producer
+    /// stays blocked until the consumer asks for an event, even when the
+    /// rewrite skips events — and dropping the stream still cancels the
+    /// producer.
+    #[tokio::test]
+    async fn rewrite_produced_keeps_backpressure_and_cancellation() {
+        use futures::FutureExt;
+        let (mut stream, sink, cancel) = OutputStream::new_streaming_with_capacity(1);
+        stream.rewrite_produced(|event| match event {
+            StreamEvent::Meta(_) => None,
+            other => Some(other),
+        });
+        sink.send_meta(entry("skipped", "1")).await.unwrap(); // fills the one slot
+        assert!(
+            sink.send_chunk(b"one".to_vec()).now_or_never().is_none(),
+            "installing a rewrite reads nothing: the producer must wait"
+        );
+        let producer = async {
+            sink.send_chunk(b"one".to_vec()).await.unwrap();
+        };
+        let (first, ()) = futures::join!(stream.next(), producer);
+        assert_eq!(first, Some(StreamEvent::Chunk(b"one".to_vec())));
+        sink.send_chunk(b"two".to_vec()).await.unwrap(); // fills the slot again
+        assert!(
+            sink.send_chunk(b"three".to_vec()).now_or_never().is_none(),
+            "the rewrite did not read ahead"
+        );
+        assert!(!cancel.is_cancelled());
+        drop(stream);
+        assert!(cancel.is_cancelled(), "dropping the stream cancels");
     }
 
     /// A `take_leading_meta` dropped while it waits for the producer — the

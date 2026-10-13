@@ -1805,6 +1805,15 @@
   No transport uses `open_response` yet; nothing here changes how a
   response is served.
 
+- `OutputStream::rewrite_produced(f)` rewrites every event read from the
+  producer from then on — `f` returns the event to yield in its place, or
+  `None` to skip it — in place, as `prepend` does: no task and no channel,
+  an event is read (and rewritten) only when the consumer asks, so
+  backpressure and drop-to-cancel are kept. Events already read ahead are
+  not rewritten; a second rewrite applies to what the first yields. The
+  flow executor uses it to decide what a forwarded stream's events mean
+  after its head.
+
 - `OutputStream::prepend(events)` puts events back at the front of a stream
   in place, and `OutputStream::peek` / `OutputStream::take_leading_meta` read
   ahead through it, leaving the stream on the first event they did not
