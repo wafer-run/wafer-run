@@ -15,6 +15,45 @@
   `ImageError` are `#[non_exhaustive]`; a `match` over `VectorError` needs
   the new arm.
 
+- A flow forwards its terminal step's streamed response instead of
+  collecting it. The terminal step is the top-level step that ends the flow
+  — the last one, or one a `next` jumped to — with no `next` of its own and
+  no `each` or `parallel`; a transfer target's terminal step is terminal for
+  the chain. When its block's leading meta `declares_streaming`
+  (`wafer_block::http_codec`: the `resp.stream` marker, or a
+  `text/event-stream` / `application/octet-stream` content type) and a body
+  chunk follows, `Wafer::run` returns as soon as that head is read: the
+  output leads with the flow message's `resp.*` entries as `Meta` events —
+  the step's leading meta laid over the middleware's with the same rules as
+  a collected response's, so CORS and security headers are on it, and the
+  marker and `resp.content_length` survive — followed by the step's own
+  stream. Backpressure reaches the producer and dropping the output cancels
+  it. Before, the flow collected every step, so a streaming response — SSE
+  through `site-main`, on every platform — reached the caller only once it
+  had ended, as one chunk with trailing meta. Consequences for a caller of
+  a flow:
+  - what the producer does after its first chunk reaches the caller as
+    stream events: an `Error` terminal after the head is an `Error` event
+    after the chunks already sent, not a flow error (and not subject to
+    `on_error`); `Meta` after the body is too late to be a header;
+  - the step's `block_end` span and every chain flow's `flow_end` hook fire
+    when the head is read, so their durations are time-to-headers for a
+    streamed response; the flow's timeout bounds that much, and a producer
+    still sending after it is not interrupted;
+  - leading meta no transport can send fails the flow closed at head time
+    (`Internal`, with the middleware's headers carried, the producer
+    cancelled) — as for a collected step, but without waiting for a body
+    that may never end.
+  Every other step output — a non-terminal step, a fan-out, a parallel
+  step and its branches, a step with `next`, an output with no streaming
+  declaration or with no body before its terminal — is collected exactly as
+  before. A caller that collects the flow's output (`collect_buffered`,
+  `collect_http_response`, the embed/Node/FFI JSON boundary) still gets the
+  same body and head for a stream that ends in `Complete`; what the producer
+  sent after its first chunk reaches it as the producer sent it — late
+  `Meta` is no longer laid over the middleware's headers, and an `Error`
+  terminal is the producer's error, without the middleware's headers.
+
 - `FilterOp` has a new operator, `StartsWith` (wire `starts_with`): the
   prefix of a key or path. Its `value` is plain text — no character is a
   wildcard or an escape — and letter case is significant on every backend;

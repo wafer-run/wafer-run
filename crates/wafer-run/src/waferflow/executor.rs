@@ -122,6 +122,44 @@
 //! the record of what responding steps wrote, so the target's boundary
 //! applies the same rule; a transfer to an unknown flow errors with the
 //! carried headers.
+//!
+//! # Streamed responses
+//!
+//! A flow that runs out of steps answers with its last body and the flow
+//! message's `resp.*` entries — collected. One step's response is not
+//! collected: the **terminal step**'s, when it streams. The terminal step is
+//! a top-level step with no `next` and nothing after it — the last step, or
+//! one a `next` jumped to — and no `each` or `parallel` (a fan-out's body is
+//! assembled from several outputs). A step with `next` entries is never
+//! terminal: flow validation gives every `next` list a default entry naming
+//! a step or a flow, so the step always routes on, and its conditions are
+//! evaluated against its output, which must be collected first. A transfer
+//! target's terminal step is terminal for the chain.
+//!
+//! When the terminal step's output declares streaming in its leading meta
+//! (`wafer_block::http_codec::declares_streaming`: the `resp.stream` marker,
+//! or a `text/event-stream` / `application/octet-stream` content type) and a
+//! body chunk follows, the flow answers with that stream as it is produced:
+//! - the leading meta is checked and laid over the flow message exactly as a
+//!   collected response's meta is (unsendable meta fails the flow closed,
+//!   as above, and cancels the producer; the overlay rules apply), and the
+//!   flow's response leads with the message's `resp.*` entries — the same
+//!   ones a collected terminal carries, so middleware CORS and security
+//!   headers are on it — followed by the step's chunks and terminal;
+//! - the stream is the step's own: backpressure reaches the producer, and
+//!   dropping the flow's output cancels it;
+//! - what the producer sends after its first chunk is the caller's to
+//!   interpret: an `Error` terminal reaches the caller as a stream event, not
+//!   as a flow error, and `Meta` after the body or on the `Complete` comes
+//!   too late to be a header;
+//! - the `block_end` span of the step and the `flow_end` hook of every flow
+//!   of the chain fire when the head is known — the leading meta and first
+//!   chunk read — not when the body ends, and the flow's timeout bounds that
+//!   much: a producer still sending after it is not interrupted, as a block
+//!   already running never is.
+//!
+//! Any other terminal step output — no streaming declaration, or a terminal
+//! before any body — is collected as every other step's is.
 
 use std::{
     collections::HashMap,
@@ -133,10 +171,12 @@ use std::{
 
 use wafer_block::{
     core_types::*,
+    http_codec::{declares_streaming, InvalidResponseMeta},
     streams::{
         input::InputStream,
         output::{BufferedResponse, OutputStream, TerminalNotResponse},
     },
+    StreamEvent,
 };
 use wafer_flow::{Accumulator, OnError};
 
@@ -236,9 +276,34 @@ enum InvocationOutcome {
     NoOutput,
 }
 
-/// A terminal that stops the flow before it runs out of steps. Kept typed
-/// until the flow boundary so [`ShortCircuit::into_output`] can carry the
-/// flow's response headers onto it (see the module docs).
+/// What a step does with its block's output (see the module docs, "Streamed
+/// responses").
+#[derive(Clone, Copy)]
+enum ResponseMode {
+    /// Collect it to its terminal: every step but the flow's terminal one.
+    Collect,
+    /// Forward it as the flow's response, unbuffered, when its leading meta
+    /// declares streaming and a body chunk follows; collect it otherwise.
+    /// Only the terminal step of the main step list.
+    ForwardStream,
+}
+
+/// A step block's output, as the dispatch scaffold hands it back.
+enum StepOutput {
+    /// Collected to its terminal.
+    Collected(Result<BufferedResponse, TerminalNotResponse>),
+    /// A [`ResponseMode::ForwardStream`] output that declared streaming:
+    /// its leading meta, taken off the stream, and the stream, positioned
+    /// on its first body chunk.
+    Streaming {
+        meta: Vec<MetaEntry>,
+        output: OutputStream,
+    },
+}
+
+/// A terminal that ends the flow where it is. Kept typed until the flow
+/// boundary so [`ShortCircuit::into_output`] can carry the flow's response
+/// headers onto it (see the module docs).
 enum ShortCircuit {
     /// A step failed under `on_error = "stop"`, or the executor raised an
     /// error of its own.
@@ -247,6 +312,10 @@ enum ShortCircuit {
     Halt(BufferedResponse),
     /// A step dropped the request; carries the drop's response meta.
     Drop(Vec<MetaEntry>),
+    /// The terminal step's streamed response: the step's stream positioned
+    /// on its first body chunk, its leading meta already laid over the flow
+    /// message.
+    Stream(OutputStream),
 }
 
 impl ShortCircuit {
@@ -268,8 +337,31 @@ impl ShortCircuit {
                 meta: with_carried(buf.meta),
             }),
             Self::Drop(meta) => OutputStream::drop_request_with_meta(with_carried(meta)),
+            // Not a short-circuit of the response: the step completed the
+            // flow, so the response carries the whole flow message's
+            // response meta, exactly as a buffered terminal does.
+            Self::Stream(mut output) => {
+                output.prepend(
+                    response_meta_of(&state.msg)
+                        .into_iter()
+                        .map(StreamEvent::Meta),
+                );
+                output
+            }
         }
     }
+}
+
+/// The flow's response meta: the `resp.*` entries of the flow message, which
+/// the HTTP codec renders as the status, content type, headers and cookies.
+/// A flow that runs out of steps answers its last body with them as trailing
+/// meta; a streamed terminal step's response leads with them.
+fn response_meta_of(msg: &Message) -> Vec<MetaEntry> {
+    msg.meta
+        .iter()
+        .filter(|e| e.key.starts_with("resp."))
+        .cloned()
+        .collect()
 }
 
 /// Take the body buffer out of its `Arc` for a consumer that needs owned
@@ -336,7 +428,22 @@ pub(crate) async fn execute<'w>(
     while current < steps.len() {
         let step = &steps[current];
 
-        if let Err(short_circuit) = run_step(&env, step, &mut state).await {
+        // The step that ends the flow — no `next` to route on, and nothing
+        // after it: the last step, or one a `next` jumped to (which ends the
+        // flow too, see `routed` below) — may forward its block's streamed
+        // response. A fan-out or a parallel step collects: its body is
+        // assembled from several outputs. (See the module docs.)
+        let terminal = step.next.is_none()
+            && (routed || current + 1 == steps.len())
+            && step.each.is_none()
+            && step.parallel.is_none();
+        let mode = if terminal {
+            ResponseMode::ForwardStream
+        } else {
+            ResponseMode::Collect
+        };
+
+        if let Err(short_circuit) = run_step(&env, step, &mut state, mode).await {
             return FlowOutcome::Done(short_circuit.into_output(&state));
         }
 
@@ -426,16 +533,10 @@ pub(crate) async fn execute<'w>(
         }
     }
 
-    // Terminal result — respond with the last accumulated body.
-    // Extract response meta (resp.*) from the message so the HTTP listener
-    // can set content-type, status, headers, cookies, etc.
-    let resp_meta: Vec<MetaEntry> = state
-        .msg
-        .meta
-        .iter()
-        .filter(|e| e.key.starts_with("resp."))
-        .cloned()
-        .collect();
+    // Terminal result — respond with the last accumulated body, carrying the
+    // flow message's response meta so the HTTP listener can set the
+    // content type, status, headers and cookies.
+    let resp_meta = response_meta_of(&state.msg);
     FlowOutcome::Done(OutputStream::respond_with_meta(
         unwrap_body(state.body),
         resp_meta,
@@ -478,7 +579,8 @@ fn check_cancel_deadline(env: &StepEnv<'_>) -> Result<(), ShortCircuit> {
 
 /// Execute one step: parallel branches first (if any), then the step's own
 /// block — fanned out per item when `each` is present. `Err` carries the
-/// terminal that short-circuits the whole flow.
+/// terminal that ends the whole flow. `mode` applies to a single invocation
+/// only: a fan-out always collects.
 ///
 /// Returns a boxed future ([`BoxFuture`]) to break the async-recursion cycle
 /// step → parallel branch → step at the signature level.
@@ -486,6 +588,7 @@ fn run_step<'a>(
     env: &'a StepEnv<'a>,
     step: &'a CompiledStep,
     state: &'a mut ExecState,
+    mode: ResponseMode,
 ) -> BoxFuture<'a, Result<(), ShortCircuit>> {
     Box::pin(async move {
         check_budget(env)?;
@@ -499,7 +602,7 @@ fn run_step<'a>(
             run_each(env, step, each, state).await
         } else {
             let is_pipeline = step.input.is_some();
-            let outcome = run_invocation(env, step, state).await?;
+            let outcome = run_invocation(env, step, state, mode).await?;
             if is_pipeline {
                 let output = match outcome {
                     InvocationOutcome::Responded => {
@@ -569,7 +672,7 @@ async fn run_each(
             .acc
             .set("each", serde_json::json!({ "item": item, "index": index }));
 
-        let outcome = run_invocation(env, step, state).await?;
+        let outcome = run_invocation(env, step, state, ResponseMode::Collect).await?;
         results.push(match outcome {
             InvocationOutcome::Responded => {
                 serde_json::from_slice(&state.body).unwrap_or(serde_json::Value::Null)
@@ -682,7 +785,7 @@ async fn run_branch_steps(
                 ),
             )));
         }
-        run_step(env, step, state).await?;
+        run_step(env, step, state, ResponseMode::Collect).await?;
     }
     Ok(())
 }
@@ -690,11 +793,13 @@ async fn run_branch_steps(
 /// Resolve the step's input template (if any), dispatch its block, and apply
 /// the resulting terminal to `state`. `Err` carries a flow short-circuit
 /// (block missing, unresolvable input, Error under `on_error = "stop"`,
-/// Drop, Halt, or a malformed stream).
+/// Drop, Halt, or a malformed stream), or — under
+/// [`ResponseMode::ForwardStream`] — the step's streamed response.
 async fn run_invocation(
     env: &StepEnv<'_>,
     step: &CompiledStep,
     state: &mut ExecState,
+    mode: ResponseMode,
 ) -> Result<InvocationOutcome, ShortCircuit> {
     check_cancel_deadline(env)?;
 
@@ -750,9 +855,10 @@ async fn run_invocation(
 
     // --- Execute block (lazy init + observability via the shared
     //     dispatch scaffold, panic recovery via run_block_with_recovery,
-    //     stream collection inside the observed window). Init failure
-    //     comes back as a typed error so the flow short-circuits via the
-    //     standard error path. ---
+    //     stream collection — or, for a streamed terminal response, the
+    //     read of its leading meta — inside the observed window). Init
+    //     failure comes back as a typed error so the flow short-circuits via
+    //     the standard error path. ---
     // The block gets a lazily-cloned view of the shared body: the buffer is
     // copied only if the block polls its input, and `state.body` keeps the
     // original for middleware (Continue) blocks — which don't produce a
@@ -780,15 +886,21 @@ async fn run_invocation(
         state.msg.clone(),
         step_input,
         |msg, input| async {
-            crate::runtime::run_block_with_recovery(target.block.as_ref(), &ctx, msg, input)
-                .await
-                .collect_buffered()
-                .await
+            let output =
+                crate::runtime::run_block_with_recovery(target.block.as_ref(), &ctx, msg, input)
+                    .await;
+            match mode {
+                ResponseMode::Collect => StepOutput::Collected(output.collect_buffered().await),
+                ResponseMode::ForwardStream => open_terminal_output(output).await,
+            }
         },
     )
     .await;
     let buf = match scaffold_result {
-        Ok(buf) => buf,
+        Ok(StepOutput::Collected(buf)) => buf,
+        Ok(StepOutput::Streaming { meta, output }) => {
+            return Err(forward_stream(step, state, meta, output))
+        }
         Err(init_failure) => return Err(ShortCircuit::Error(init_failure)),
     };
 
@@ -808,13 +920,7 @@ async fn run_invocation(
         Err(TerminalNotResponse::Malformed) => Vec::new(),
     };
     if let Some(invalid) = response_meta::first_unsendable(produced) {
-        return Err(ShortCircuit::Error(WaferError::new(
-            ErrorCode::Internal,
-            format!(
-                "block '{}' in step '{}' produced unsendable response meta: {}",
-                step.block_label, step.id, invalid
-            ),
-        )));
+        return Err(unsendable_meta_error(step, &invalid));
     }
 
     // --- Process result ---
@@ -870,4 +976,48 @@ async fn run_invocation(
             ),
         ))),
     }
+}
+
+/// Read a terminal step's output up to its first body event: a streaming
+/// declaration in its leading meta ([`declares_streaming`], the rule every
+/// transport decides by) followed by a body chunk is forwarded; anything
+/// else — no declaration, or a terminal before any body — is collected to
+/// exactly what [`OutputStream::collect_buffered`] makes of it unread.
+async fn open_terminal_output(mut output: OutputStream) -> StepOutput {
+    let meta = output.take_leading_meta().await;
+    if declares_streaming(&meta) && matches!(output.peek().await, Some(StreamEvent::Chunk(_))) {
+        return StepOutput::Streaming { meta, output };
+    }
+    output.prepend(meta.into_iter().map(StreamEvent::Meta));
+    StepOutput::Collected(output.collect_buffered().await)
+}
+
+/// End the flow with the terminal step's streamed response: its leading
+/// `meta` is checked and laid over the flow message exactly as a collected
+/// response's meta is, and the stream (positioned on its first chunk) is
+/// the flow's response. Unsendable leading meta fails the flow closed
+/// before any of it is applied, and dropping `output` cancels the producer.
+fn forward_stream(
+    step: &CompiledStep,
+    state: &mut ExecState,
+    meta: Vec<MetaEntry>,
+    output: OutputStream,
+) -> ShortCircuit {
+    if let Some(invalid) = response_meta::first_unsendable(&meta) {
+        return unsendable_meta_error(step, &invalid);
+    }
+    response_meta::apply_response(&mut state.responder_record, &mut state.msg.meta, meta);
+    ShortCircuit::Stream(output)
+}
+
+/// The flow error for a step whose output carries response meta no
+/// transport can send (see the module docs).
+fn unsendable_meta_error(step: &CompiledStep, invalid: &InvalidResponseMeta) -> ShortCircuit {
+    ShortCircuit::Error(WaferError::new(
+        ErrorCode::Internal,
+        format!(
+            "block '{}' in step '{}' produced unsendable response meta: {}",
+            step.block_label, step.id, invalid
+        ),
+    ))
 }
