@@ -34,7 +34,7 @@ use wafer_block::{
     core_types::MetaEntry,
     http_codec::{
         classify_response_meta, cookie_id, CookieId, InvalidResponseMeta, InvalidResponseMetaKind,
-        ResponseMetaPart, BODY_RESPONSE_HEADERS,
+        ResponseMetaPart, BODY_RESPONSE_HEADERS, META_RESP_CONTENT_LENGTH, META_RESP_STREAM,
     },
     meta::META_RESP_COOKIE_PREFIX,
 };
@@ -231,15 +231,26 @@ pub(super) fn overlay(base: &mut Vec<MetaEntry>, top: Vec<MetaEntry>) -> Vec<Wri
 /// in its place).
 pub(crate) type ResponderRecord = HashMap<String, Vec<MetaEntry>>;
 
+/// The response-meta keys that describe a response's body to the transport
+/// rather than being headers: the streaming marker and the declared length
+/// (`wafer_block::http_codec`). They describe the body of the response that
+/// set them, so a later responding step's body never inherits them.
+const BODY_HINTS: &[&str] = &[META_RESP_STREAM, META_RESP_CONTENT_LENGTH];
+
 /// Lay a responding step's meta (`top`) over the flow message `msg_meta`
 /// and record what it wrote in `record`. What an entry displaced is
 /// resolved to middleware entries: a displaced entry an earlier responder
 /// wrote contributes the middleware entries IT displaced.
+///
+/// A response replaces the flow's body, so the [`BODY_HINTS`] an earlier
+/// response left on the message are removed first: only `top`'s own
+/// describe the new body.
 pub(super) fn apply_response(
     record: &mut ResponderRecord,
     msg_meta: &mut Vec<MetaEntry>,
     top: Vec<MetaEntry>,
 ) {
+    msg_meta.retain(|e| !BODY_HINTS.contains(&e.key.as_str()));
     for written in overlay(msg_meta, top) {
         let middleware: Vec<MetaEntry> = written
             .displaced

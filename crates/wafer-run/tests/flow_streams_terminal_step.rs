@@ -69,6 +69,18 @@ enum Script {
     UnsendableSse,
     /// SSE: `data: one`, then waits for the gate, then an `Error` terminal.
     SseThenError,
+    /// SSE that sends more response meta after its first chunk: an
+    /// `Access-Control-Allow-Origin: *` `Meta`, then a `Complete` loosening
+    /// `X-Frame-Options`.
+    SseWithLateMeta,
+    /// SSE: `data: one`, then at once an `Error(Unavailable)`.
+    SseErrorAfterBody,
+    /// SSE: `data: one`, then an `Error` whose meta holds a header no
+    /// transport can send.
+    SseUnsendableErrorAfterBody,
+    /// A collected download that declares its length (3) and the stream
+    /// marker: `abc`, `Complete`.
+    SizedDownload,
     /// HTML whose content type leads the body (no streaming declaration):
     /// `<p>`, `hi</p>`, `Complete`.
     LeadingMetaHtml,
@@ -140,6 +152,40 @@ impl Block for Producer {
                     let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
                     cancel.cancelled().await;
                     probe.cancelled.notify_one();
+                }
+                Script::SseWithLateMeta => {
+                    let _ = sink.send_meta(sse()).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    let _ = sink
+                        .send_meta(entry("resp.header.Access-Control-Allow-Origin", "*"))
+                        .await;
+                    let _ = sink.complete(vec![loosened_framing()]).await;
+                }
+                Script::SseErrorAfterBody => {
+                    let _ = sink.send_meta(sse()).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    let _ = sink
+                        .error(WaferError::new(
+                            ErrorCode::Unavailable,
+                            "upstream went away",
+                        ))
+                        .await;
+                }
+                Script::SseUnsendableErrorAfterBody => {
+                    let _ = sink.send_meta(sse()).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    let mut err = WaferError::new(ErrorCode::Unavailable, "upstream went away");
+                    err.meta.push(entry("resp.header.X-Bad", "a\nb"));
+                    let _ = sink.error(err).await;
+                }
+                Script::SizedDownload => {
+                    let _ = sink.send_meta(entry("resp.stream", "1")).await;
+                    let _ = sink
+                        .send_meta(entry("resp.content_type", "image/png"))
+                        .await;
+                    let _ = sink.send_meta(entry("resp.content_length", "3")).await;
+                    let _ = sink.send_chunk(b"abc".to_vec()).await;
+                    let _ = sink.complete(Vec::new()).await;
                 }
                 Script::LeadingMetaHtml => {
                     let _ = sink
@@ -220,6 +266,13 @@ const FIXTURES: &[(&str, Script)] = &[
     ("test/sse-then-error", Script::SseThenError),
     ("test/download", Script::GatedDownload),
     ("test/html", Script::LeadingMetaHtml),
+    ("test/sse-late-meta", Script::SseWithLateMeta),
+    ("test/sse-error-after-body", Script::SseErrorAfterBody),
+    (
+        "test/sse-unsendable-error-after-body",
+        Script::SseUnsendableErrorAfterBody,
+    ),
+    ("test/sized-download", Script::SizedDownload),
     ("test/sse-error-before-body", Script::SseErrorBeforeBody),
 ];
 
@@ -718,6 +771,11 @@ async fn a_producer_error_after_the_head_reaches_the_caller_as_an_item() {
         StreamEvent::Error(err) => {
             assert_eq!(err.code, ErrorCode::Unavailable);
             assert_eq!(err.message, "upstream went away");
+            assert_eq!(
+                value(&err.meta, "resp.header.X-Frame-Options"),
+                Some("DENY"),
+                "the error carries the middleware's headers: {err:?}"
+            );
         }
         other => panic!("expected the producer's Error, got {other:?}"),
     }
@@ -774,4 +832,183 @@ async fn a_terminal_step_that_does_not_stream_is_collected() {
         }
         other => panic!("the flow fails with the step's error, got {other:?}"),
     }
+}
+
+/// A flow over `[security-headers, block]`, under the block's own name.
+fn behind_security_headers(block: &str) -> serde_json::Value {
+    json!({
+        "id": block,
+        "steps": [
+            { "id": "security-headers", "block": "wafer-run/security-headers" },
+            { "id": "step", "block": block },
+        ],
+    })
+}
+
+/// The `meta` object of an `embed::output_to_json` result.
+async fn embed_json(wafer: &Wafer, flow: &str) -> serde_json::Value {
+    let out = run(wafer, flow, b"").await;
+    let json = tokio::time::timeout(PROMPTLY, wafer_run::embed::output_to_json(out))
+        .await
+        .expect("the flow's output encodes promptly");
+    serde_json::from_str(&json).expect("embed JSON")
+}
+
+fn http_header<'a>(
+    parts: &'a wafer_block::http_codec::HttpResponseParts,
+    name: &str,
+) -> Vec<&'a str> {
+    parts
+        .headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+        .collect()
+}
+
+/// Fails on #442's first head. Meta a streamed terminal sends after its
+/// first chunk cannot change the head for a caller that collects the
+/// response either — the HTTP codec's collector or the embed (Node, FFI,
+/// Go) boundary: it is dropped, as a streaming transport drops it, so the
+/// step can neither loosen the middleware's `X-Frame-Options` nor add a
+/// header.
+#[tokio::test]
+async fn late_meta_cannot_change_a_streamed_head_for_a_collecting_caller() {
+    let (wafer, _) = runtime(&[behind_security_headers("test/sse-late-meta")]).await;
+
+    let out = run(&wafer, "test/sse-late-meta", b"").await;
+    let parts = tokio::time::timeout(PROMPTLY, collect_http_response(out))
+        .await
+        .expect("collects promptly");
+    assert_eq!(parts.status, 200, "{parts:?}");
+    assert_eq!(
+        http_header(&parts, "X-Frame-Options"),
+        vec!["DENY"],
+        "{parts:?}"
+    );
+    assert!(
+        http_header(&parts, "Access-Control-Allow-Origin").is_empty(),
+        "{parts:?}"
+    );
+    assert_eq!(parts.body, b"data: one\n\n");
+
+    let json = embed_json(&wafer, "test/sse-late-meta").await;
+    assert_eq!(json["action"], "respond", "{json}");
+    assert_eq!(
+        json["meta"]["resp.header.X-Frame-Options"], "DENY",
+        "{json}"
+    );
+    assert!(
+        json["meta"]
+            .get("resp.header.Access-Control-Allow-Origin")
+            .is_none(),
+        "{json}"
+    );
+}
+
+/// Fails on #442's first head. An `Error` after a streamed terminal's head
+/// carries the middleware's response headers to a collecting caller, as a
+/// flow error does — and one whose own meta cannot be sent is the flow's
+/// `Internal` error naming the step, without that meta.
+#[tokio::test]
+async fn an_error_after_the_head_keeps_the_middleware_headers_for_a_collecting_caller() {
+    let (wafer, _) = runtime(&[
+        behind_security_headers("test/sse-error-after-body"),
+        behind_security_headers("test/sse-unsendable-error-after-body"),
+    ])
+    .await;
+
+    for (flow, status, code, message) in [
+        (
+            "test/sse-error-after-body",
+            503,
+            "Unavailable",
+            "upstream went away",
+        ),
+        (
+            // Refused by the flow, which names the step, as it does for a
+            // step's unsendable meta before the head.
+            "test/sse-unsendable-error-after-body",
+            500,
+            "Internal",
+            "in step 'step' produced unsendable response meta",
+        ),
+    ] {
+        let out = run(&wafer, flow, b"").await;
+        let parts = tokio::time::timeout(PROMPTLY, collect_http_response(out))
+            .await
+            .expect("collects promptly");
+        assert_eq!(parts.status, status, "{flow}: {parts:?}");
+        assert_eq!(
+            http_header(&parts, "X-Frame-Options"),
+            vec!["DENY"],
+            "{flow}: {parts:?}"
+        );
+        assert_eq!(
+            http_header(&parts, "X-Content-Type-Options"),
+            vec!["nosniff"],
+            "{flow}: {parts:?}"
+        );
+        assert!(http_header(&parts, "X-Bad").is_empty(), "{flow}: {parts:?}");
+
+        let json = embed_json(&wafer, flow).await;
+        assert_eq!(json["action"], "error", "{flow}: {json}");
+        assert_eq!(json["error"]["code"], code, "{flow}: {json}");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(message)),
+            "{flow}: {json}"
+        );
+        assert_eq!(
+            json["meta"]["resp.header.X-Frame-Options"], "DENY",
+            "{flow}: {json}"
+        );
+        assert!(
+            json["meta"].get("resp.header.X-Bad").is_none(),
+            "{flow}: {json}"
+        );
+    }
+}
+
+/// Fails on #442's first head. A streamed terminal does not inherit the
+/// body hints of an earlier responding step: the collected download before
+/// it declared a length of 3 and the stream marker, which describe that
+/// step's body, not the SSE stream's.
+#[tokio::test]
+async fn a_streamed_terminal_does_not_inherit_an_earlier_responders_body_hints() {
+    let (wafer, probe) = runtime(&[json!({
+        "id": "site",
+        "steps": [
+            { "id": "security-headers", "block": "wafer-run/security-headers" },
+            { "id": "download", "block": "test/sized-download" },
+            { "id": "events", "block": "test/sse" },
+        ],
+    })])
+    .await;
+
+    let mut out = run(&wafer, "site", b"").await;
+    let (meta, first) = read_head(&mut out).await;
+    assert_streamed_sse_head(&meta, &first);
+    assert_eq!(value(&meta, "resp.content_length"), None, "{meta:?}");
+    assert_eq!(value(&meta, "resp.stream"), None, "{meta:?}");
+
+    // And the codec opens it as the open-ended stream it is.
+    out.prepend(
+        meta.into_iter()
+            .map(StreamEvent::Meta)
+            .chain([StreamEvent::Chunk(first)]),
+    );
+    let OpenedResponse::Streamed(response) = open_response(out).await else {
+        panic!("the SSE terminal opens streamed");
+    };
+    assert_eq!(response.content_length, None);
+    probe.gate.notify_one();
+    let body: Vec<u8> = tokio::time::timeout(PROMPTLY, response.body.collect::<Vec<_>>())
+        .await
+        .expect("the body ends promptly")
+        .into_iter()
+        .flat_map(|item| item.expect("a clean body"))
+        .collect();
+    assert_eq!(body, b"data: one\n\ndata: two\n\n");
 }

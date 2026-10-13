@@ -196,13 +196,16 @@ mod bindings {
             let msg: Message = serde_json::from_str(&message_json)
                 .map_err(|e| Error::from_reason(format!("invalid Message JSON: {e}")))?;
 
-            let input = wafer_run::InputStream::empty();
-            let output = {
-                let inner = self.inner.read().await;
-                inner.run(&flow_id, msg, input).await
-            };
-
-            Ok(wafer_run::embed::output_to_json(output).await)
+            // The read guard is held until the result is encoded: a flow's
+            // streamed response is still being produced by its block while
+            // it is encoded, and `stop()` must not stop the block under it.
+            let inner = self.inner.read().await;
+            let output = inner
+                .run(&flow_id, msg, wafer_run::InputStream::empty())
+                .await;
+            let json = wafer_run::embed::output_to_json(output).await;
+            drop(inner);
+            Ok(json)
         }
 
         /// Get info about all registered flows as a JSON array.
@@ -246,6 +249,106 @@ mod bindings {
                     .join("; ");
                 Ok(Some(msg))
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{
+            sync::{atomic::AtomicBool, Arc},
+            time::Duration,
+        };
+
+        use tokio::sync::{Notify, RwLock};
+        use wafer_run::{
+            Block, BlockInfo, Context, InputStream, InstanceMode, Message, MetaEntry, OutputStream,
+            StaticConfigSource, Wafer,
+        };
+
+        use super::WaferRuntime;
+
+        /// Streams SSE: `one`, then waits for `gate`, then `two` and `Complete`.
+        /// `opened` is notified once `one` is sent.
+        struct GatedSse {
+            opened: Arc<Notify>,
+            gate: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl Block for GatedSse {
+            fn info(&self) -> BlockInfo {
+                BlockInfo::new("test/sse", "0.0.1", "http-handler@v1", "gated SSE fixture")
+                    .instance_mode(InstanceMode::Singleton)
+            }
+
+            async fn handle(
+                &self,
+                _ctx: &dyn Context,
+                _msg: Message,
+                _input: InputStream,
+            ) -> OutputStream {
+                let (opened, gate) = (self.opened.clone(), self.gate.clone());
+                OutputStream::from_producer(move |sink, _cancel| async move {
+                    let _ = sink
+                        .send_meta(MetaEntry {
+                            key: "resp.content_type".into(),
+                            value: "text/event-stream".into(),
+                        })
+                        .await;
+                    let _ = sink.send_chunk(b"one;".to_vec()).await;
+                    opened.notify_one();
+                    gate.notified().await;
+                    let _ = sink.send_chunk(b"two".to_vec()).await;
+                    let _ = sink.complete(Vec::new()).await;
+                })
+            }
+        }
+
+        /// `stop()` waits for a `run` whose flow is still streaming its response
+        /// from a block: the runtime is not shut down under the producer.
+        #[tokio::test]
+        async fn stop_waits_for_a_run_still_streaming_its_response() {
+            let (opened, gate) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+            let mut wafer = Wafer::new(Arc::new(StaticConfigSource::default())).expect("wafer");
+            wafer
+                .register_block(
+                    "test/sse",
+                    Arc::new(GatedSse {
+                        opened: opened.clone(),
+                        gate: gate.clone(),
+                    }),
+                )
+                .expect("register");
+            wafer
+                .add_flow_json(
+                    r#"{ "id": "sse", "name": "sse", "version": "0.0.1",
+                         "steps": [ { "id": "events", "block": "test/sse" } ] }"#,
+                )
+                .expect("flow");
+            let rt = WaferRuntime {
+                inner: Arc::new(RwLock::new(wafer)),
+                started: Arc::new(AtomicBool::new(false)),
+            };
+            rt.start().await.expect("start");
+
+            let run = rt.run("sse".into(), r#"{"kind":"test","meta":[]}"#.into());
+            let stop_after_head = async {
+                opened.notified().await;
+                let stop = rt.stop();
+                tokio::pin!(stop);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(300), &mut stop)
+                        .await
+                        .is_err(),
+                    "stop() must wait for the run still encoding a streamed response"
+                );
+                gate.notify_one();
+                stop.await;
+            };
+            let (json, ()) = tokio::join!(run, stop_after_head);
+            let json: serde_json::Value = serde_json::from_str(&json.expect("run")).expect("JSON");
+            assert_eq!(json["action"], "respond", "{json}");
+            assert_eq!(json["body"], "one;two", "{json}");
         }
     }
 }

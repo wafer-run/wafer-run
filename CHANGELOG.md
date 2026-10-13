@@ -32,14 +32,20 @@
   through `site-main`, on every platform — reached the caller only once it
   had ended, as one chunk with trailing meta. Consequences for a caller of
   a flow:
-  - what the producer does after its first chunk reaches the caller as
-    stream events: an `Error` terminal after the head is an `Error` event
-    after the chunks already sent, not a flow error (and not subject to
-    `on_error`); `Meta` after the body is too late to be a header;
+  - after the first chunk the head is final, by one rule for every
+    consumer — a streaming transport, or a caller that collects the
+    response: the flow drops `Meta` events and the `Complete`'s meta (a
+    producer cannot loosen a security header or add one after its head);
+    an `Error` terminal is an `Error` event after the chunks already sent
+    (not a flow error, and not subject to `on_error`) carrying the
+    middleware's response headers as a flow error does — one whose own meta
+    cannot be sent becomes the flow's `Internal` error naming the step —
+    and a `Halt`, `Drop` or `Continue`, which cannot follow a body, becomes
+    such an `Internal` error;
   - the step's `block_end` span and every chain flow's `flow_end` hook fire
     when the head is read, so their durations are time-to-headers for a
-    streamed response; the flow's timeout bounds that much, and a producer
-    still sending after it is not interrupted;
+    streamed response. The flow's timeout is checked before each step, as
+    before: it does not bound a running step, its head or its body;
   - leading meta no transport can send fails the flow closed at head time
     (`Internal`, with the middleware's headers carried, the producer
     cancelled) — as for a collected step, but without waiting for a body
@@ -48,11 +54,17 @@
   step and its branches, a step with `next`, an output with no streaming
   declaration or with no body before its terminal — is collected exactly as
   before. A caller that collects the flow's output (`collect_buffered`,
-  `collect_http_response`, the embed/Node/FFI JSON boundary) still gets the
-  same body and head for a stream that ends in `Complete`; what the producer
-  sent after its first chunk reaches it as the producer sent it — late
-  `Meta` is no longer laid over the middleware's headers, and an `Error`
-  terminal is the producer's error, without the middleware's headers.
+  `collect_http_response`, the embed/Node/FFI JSON boundary) gets the body
+  and the head the flow decided at the first chunk; meta the producer sent
+  after it, which used to be laid over the head, is dropped.
+  A responding step's meta now also removes the `resp.stream` marker and
+  `resp.content_length` an earlier responding step left on the flow
+  message: they describe that step's body, so a later (streamed) response
+  never leads with another body's declared length.
+  `wafer-run-node`'s `run` holds the runtime's read lock until the result
+  is encoded, as `wafer-ffi` does, so `stop()` waits for a flow whose
+  response is still streaming from a block instead of stopping the block
+  under it.
 
 - `FilterOp` has a new operator, `StartsWith` (wire `starts_with`): the
   prefix of a key or path. Its `value` is plain text — no character is a

@@ -78,6 +78,11 @@
 //! never an unrelated cookie that happens to share its `resp.set_cookie.*`
 //! key.
 //!
+//! A responding step replaces the flow's body, so the body hints an earlier
+//! responder left — the `resp.stream` marker and `resp.content_length` —
+//! are removed before its meta is laid over: a streamed terminal never
+//! leads with another step's declared length.
+//!
 //! # Short-circuit terminals keep the middleware's response headers
 //!
 //! A flow that stops early — a step's `Error` under `on_error = "stop"`, a
@@ -148,15 +153,22 @@
 //!   headers are on it — followed by the step's chunks and terminal;
 //! - the stream is the step's own: backpressure reaches the producer, and
 //!   dropping the flow's output cancels it;
-//! - what the producer sends after its first chunk is the caller's to
-//!   interpret: an `Error` terminal reaches the caller as a stream event, not
-//!   as a flow error, and `Meta` after the body or on the `Complete` comes
-//!   too late to be a header;
+//! - after its first chunk, the flow decides what the producer's events
+//!   mean, with one rule for every consumer — a streaming transport that has
+//!   sent the head, or a caller that collects the whole response: the head
+//!   is final, so `Meta` after the first chunk and the meta of the
+//!   `Complete` are dropped (logged), never laid over the head — a producer
+//!   cannot loosen a security header after it either; an `Error` terminal
+//!   reaches the caller as a stream event (not as a flow error, and whatever
+//!   `on_error` says) carrying the middleware's response headers as a
+//!   short-circuit error does (an error whose own meta cannot be sent
+//!   becomes `Internal`); and a `Halt`, `Drop` or `Continue` — which cannot
+//!   follow a body — becomes such an `Internal` error;
 //! - the `block_end` span of the step and the `flow_end` hook of every flow
 //!   of the chain fire when the head is known — the leading meta and first
-//!   chunk read — not when the body ends, and the flow's timeout bounds that
-//!   much: a producer still sending after it is not interrupted, as a block
-//!   already running never is.
+//!   chunk read — not when the body ends. The flow's timeout is checked
+//!   before each step: it does not bound a running step, its head or its
+//!   body, streamed or collected.
 //!
 //! Any other terminal step output — no streaming declaration, or a terminal
 //! before any body — is collected as every other step's is.
@@ -314,8 +326,8 @@ enum ShortCircuit {
     Drop(Vec<MetaEntry>),
     /// The terminal step's streamed response: the step's stream positioned
     /// on its first body chunk, its leading meta already laid over the flow
-    /// message.
-    Stream(OutputStream),
+    /// message. `step` names the step for errors after the head.
+    Stream { output: OutputStream, step: String },
 }
 
 impl ShortCircuit {
@@ -340,7 +352,11 @@ impl ShortCircuit {
             // Not a short-circuit of the response: the step completed the
             // flow, so the response carries the whole flow message's
             // response meta, exactly as a buffered terminal does.
-            Self::Stream(mut output) => {
+            // After the head, the producer's events are rewritten by one
+            // rule (see the module docs, "Streamed responses").
+            Self::Stream { mut output, step } => {
+                let carried = response_meta::carried(&state.msg.meta, &state.responder_record);
+                output.rewrite_produced(after_head(carried, step));
                 output.prepend(
                     response_meta_of(&state.msg)
                         .into_iter()
@@ -349,6 +365,56 @@ impl ShortCircuit {
                 output
             }
         }
+    }
+}
+
+/// What the events of a streamed terminal step's response become after its
+/// head (see the module docs, "Streamed responses"): chunks and the end of
+/// the body pass, late meta is dropped, and an error — the producer's own,
+/// or one for a terminal that cannot follow a body — carries the
+/// middleware's response headers (`carried`), as a short-circuit error does.
+fn after_head(
+    carried: Vec<MetaEntry>,
+    step: String,
+) -> impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + 'static {
+    move |event| {
+        let error = match event {
+            StreamEvent::Chunk(_) => return Some(event),
+            StreamEvent::Meta(entry) => {
+                tracing::warn!(
+                    key = %entry.key,
+                    "{step}: response meta after the first body chunk is dropped: the head is \
+                     final"
+                );
+                return None;
+            }
+            StreamEvent::Complete { meta } => {
+                if !meta.is_empty() {
+                    tracing::warn!(
+                        entries = meta.len(),
+                        "{step}: trailing response meta of a streamed response is dropped: the \
+                         head is final"
+                    );
+                }
+                return Some(StreamEvent::Complete { meta: Vec::new() });
+            }
+            StreamEvent::Error(err) => match response_meta::first_unsendable(&err.meta) {
+                None => *err,
+                Some(invalid) => WaferError::new(
+                    ErrorCode::Internal,
+                    format!("{step} produced unsendable response meta: {invalid}"),
+                ),
+            },
+            StreamEvent::Halt { .. } | StreamEvent::Drop { .. } | StreamEvent::Continue(_) => {
+                WaferError::new(
+                    ErrorCode::Internal,
+                    format!("{step} ended its streamed response with a terminal that cannot follow a body"),
+                )
+            }
+        };
+        let mut meta = carried.clone();
+        response_meta::overlay(&mut meta, error.meta);
+        Some(StreamEvent::Error(Box::new(WaferError { meta, ..error })))
     }
 }
 
@@ -1007,7 +1073,10 @@ fn forward_stream(
         return unsendable_meta_error(step, &invalid);
     }
     response_meta::apply_response(&mut state.responder_record, &mut state.msg.meta, meta);
-    ShortCircuit::Stream(output)
+    ShortCircuit::Stream {
+        output,
+        step: format!("block '{}' in step '{}'", step.block_label, step.id),
+    }
 }
 
 /// The flow error for a step whose output carries response meta no
