@@ -28,7 +28,10 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+    },
     task::Poll,
     time::Duration,
 };
@@ -109,21 +112,58 @@ pub fn http_to_message(
 ///   buffering. Framing is `Content-Length` when the producer declared
 ///   [`wafer_block::http_codec::META_RESP_CONTENT_LENGTH`] (the codec's
 ///   [`StreamedBody`](wafer_block::http_codec::StreamedBody) enforces it, so
-///   hyper never sends more or fewer bytes as if the body were whole), and
-///   chunked otherwise.
+///   hyper never sends more or fewer bytes as if the body were whole).
+///   Otherwise it is chunked on an HTTP/1.1 request, and close-delimited on
+///   an HTTP/1.0 one (HTTP/1.0 has no chunked encoding: the body ends when
+///   the connection closes).
 ///
 /// Once a streamed head is sent nothing can change its status. A body that
 /// does not end cleanly — an `Error` terminal, a producer that stops without
-/// one, a length that does not match — aborts the response: hyper closes the
-/// connection without the chunked terminator (or short of the
-/// `Content-Length`), so the client sees a truncated body, never a whole one.
+/// one, a length that does not match — aborts the response: hyper ends the
+/// connection without the chunked terminator, or short of the
+/// `Content-Length`. A close-delimited body has no terminator, so there an
+/// ordinary close would read as the clean end of the whole body; the
+/// `wafer-run/http-listener` block therefore **resets** (TCP RST) every
+/// connection whose streamed body aborted, so the client — or a proxy in
+/// front, such as nginx, which speaks HTTP/1.0 upstream by default — sees an
+/// error on every framing, never a whole response. An embedder serving this
+/// response from its own server gets the abort as hyper's connection error
+/// and must reset an HTTP/1.0 connection itself to keep that guarantee.
 /// A client that goes away drops the body, which cancels the producer.
 pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Response<Body> {
+    render_response(output, None).await
+}
+
+/// [`wafer_output_to_response`], marking `abort` when a streamed body
+/// aborts so the listener resets the connection.
+async fn render_response(
+    output: OutputStream,
+    abort: Option<ConnectionAbort>,
+) -> axum::http::Response<Body> {
     match http_codec::open_response(output).await {
         OpenedResponse::Buffered(output) => {
             buffered_response(http_codec::collect_http_response(output).await)
         }
-        OpenedResponse::Streamed(response) => streamed_response(response),
+        OpenedResponse::Streamed(response) => streamed_response(response, abort),
+    }
+}
+
+/// Set when a streamed response body on the connection aborted. The
+/// connection's socket ([`WriteStallTimeout`]) then closes with a reset
+/// instead of a FIN: on a close-delimited (HTTP/1.0) body a FIN is the
+/// body's clean end, so only a reset tells the client the body is
+/// truncated. Shared by the connection's socket and, through a request
+/// extension, every request it serves.
+#[derive(Clone, Default)]
+struct ConnectionAbort(Arc<AtomicBool>);
+
+impl ConnectionAbort {
+    fn mark(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_marked(&self) -> bool {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -135,19 +175,27 @@ fn buffered_response(parts: http_codec::HttpResponseParts) -> axum::http::Respon
 }
 
 /// The streamed response: its head now, its body as the producer sends it.
-fn streamed_response(response: StreamedHttpResponse) -> axum::http::Response<Body> {
+/// A body `Err` marks `abort` before hyper sees it, so the connection is
+/// reset once hyper drops it.
+fn streamed_response(
+    response: StreamedHttpResponse,
+    abort: Option<ConnectionAbort>,
+) -> axum::http::Response<Body> {
     use futures::StreamExt;
 
     let mut builder = response_head(response.status, &response.headers);
     if let Some(length) = response.content_length {
         builder = builder.header(axum::http::header::CONTENT_LENGTH, length);
     }
-    let body = response.body.map(|item| {
+    let body = response.body.map(move |item| {
         item.map(axum::body::Bytes::from).map_err(|error| {
             tracing::warn!(
                 error = %error,
                 "wafer-run/http-listener streamed response ended without a clean end; aborting it"
             );
+            if let Some(abort) = &abort {
+                abort.mark();
+            }
             StreamAbort(error)
         })
     });
@@ -649,6 +697,7 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
         body_failure.clone(),
     );
 
+    let abort = parts.extensions.get::<ConnectionAbort>().cloned();
     let uri = &parts.uri;
     // SEC-07: the peer address is the `ConnectInfo` extension `serve_connection`
     // inserts on every request of the connection. Default to it; trust
@@ -680,7 +729,7 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
     // Built first: the output may still be reading the body while it runs.
     // For a streamed response this is its head; a body failure after it can
     // no longer change the status (see the fn doc).
-    let response = wafer_output_to_response(output).await;
+    let response = render_response(output, abort).await;
     match body_failure.get() {
         Some(failure) => failure.response(&limits),
         None => response,
@@ -773,18 +822,24 @@ async fn handle_accept_error(e: &std::io::Error) {
 /// cannot hold the connection (and its slot) open. The clock runs only while
 /// a write, flush or shutdown is blocked on a full socket buffer; any
 /// progress resets it, so a slow but reading client is never cut off.
+///
+/// It also owns the connection's close: dropped after a streamed response
+/// body aborted ([`ConnectionAbort`]), it resets the connection instead of
+/// closing it cleanly.
 struct WriteStallTimeout {
     stream: TcpStream,
     timeout: Duration,
     stalled: Option<Pin<Box<tokio::time::Sleep>>>,
+    abort: ConnectionAbort,
 }
 
 impl WriteStallTimeout {
-    fn new(stream: TcpStream, timeout: Duration) -> Self {
+    fn new(stream: TcpStream, timeout: Duration, abort: ConnectionAbort) -> Self {
         Self {
             stream,
             timeout,
             stalled: None,
+            abort,
         }
     }
 
@@ -809,6 +864,18 @@ impl WriteStallTimeout {
                 "response write made no progress within write_timeout_secs",
             ))),
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for WriteStallTimeout {
+    fn drop(&mut self) {
+        // hyper sends no FIN on the error path (it drops the IO without a
+        // shutdown), so with a zero linger the close below is the RST.
+        if self.abort.is_marked() {
+            if let Err(e) = self.stream.set_zero_linger() {
+                tracing::debug!(error = %e, "wafer-run/http-listener could not reset an aborted connection");
+            }
         }
     }
 }
@@ -881,16 +948,19 @@ async fn serve_connection(
     mut closing: watch::Receiver<()>,
     _slot: OwnedSemaphorePermit,
 ) {
+    let abort = ConnectionAbort::default();
+    let request_abort = abort.clone();
     let service = hyper::service::service_fn(move |mut req: hyper::Request<Incoming>| {
         req.extensions_mut()
             .insert(axum::extract::ConnectInfo(peer));
+        req.extensions_mut().insert(request_abort.clone());
         app.clone().oneshot(req.map(Body::new))
     });
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_read_timeout);
-    let io = WriteStallTimeout::new(stream, limits.write_timeout);
+    let io = WriteStallTimeout::new(stream, limits.write_timeout, abort);
     let conn = builder.serve_connection(TokioIo::new(io), service);
     tokio::pin!(conn);
     let result = tokio::select! {

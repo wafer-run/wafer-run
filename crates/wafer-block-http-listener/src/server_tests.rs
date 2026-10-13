@@ -67,12 +67,18 @@ type Collected = Result<usize, wafer_block::ErrorCode>;
 /// `resp.content_length` of 5, 5 and 0 and send `abcde`, `abcde` + `fgh` and
 /// `x`.
 ///
+/// Streamed responses that read the request body inside the producer, each
+/// recording what they read in [`TestRuntime::collected`]:
+/// `/body-then-stream` reads the body first and then streams one event and
+/// waits to be cancelled, whatever the body did; `/stream-then-body` streams
+/// one event first, then reads the body and ends with its failure, if any.
+///
 /// Anything else answers with the client IP the listener put on the message.
 /// Every path except `/collect` and `/first-chunk` reads the whole body first
 /// and ignores how it ended.
 #[derive(Default)]
 struct TestRuntime {
-    collected: parking_lot::Mutex<Vec<Collected>>,
+    collected: Arc<parking_lot::Mutex<Vec<Collected>>>,
     /// Lets `/sse` and `/sse-error` go on past their first event.
     release: Arc<Notify>,
     /// Notified when a streaming producer's cancel token fires.
@@ -122,6 +128,34 @@ impl wafer_block::Runtime for TestRuntime {
                     Ok(bytes) => OutputStream::respond(format!("{} bytes", bytes.len()).into()),
                     Err(e) => OutputStream::error(e),
                 };
+            }
+            "/body-then-stream" => {
+                let (collected, cancelled) = (self.collected.clone(), self.cancelled.clone());
+                return OutputStream::from_producer(|sink, cancel| async move {
+                    let body = input.collect_to_bytes().await;
+                    collected
+                        .lock()
+                        .push(body.as_ref().map(Vec::len).map_err(|e| e.code));
+                    send_sse_head(&sink).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    cancel.cancelled().await;
+                    cancelled.notify_one();
+                });
+            }
+            "/stream-then-body" => {
+                let collected = self.collected.clone();
+                return OutputStream::from_producer(|sink, _cancel| async move {
+                    send_sse_head(&sink).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    let body = input.collect_to_bytes().await;
+                    collected
+                        .lock()
+                        .push(body.as_ref().map(Vec::len).map_err(|e| e.code));
+                    let _ = match body {
+                        Ok(_) => sink.complete(Vec::new()).await,
+                        Err(e) => sink.error(e).await,
+                    };
+                });
             }
             "/first-chunk" => {
                 return match input.next().await {
@@ -1221,4 +1255,146 @@ async fn stop_aborts_an_open_stream_after_the_grace_period() {
         .await
         .expect("the aborted stream's connection is closed");
     assert!(!rest.contains("\r\n0\r\n\r\n"), "{rest}");
+}
+
+/// How a read to the end of a connection ended.
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectionEnd {
+    /// A clean close (FIN): to a close-delimited body, its whole end.
+    Closed,
+    /// A read error — a reset.
+    Reset(std::io::ErrorKind),
+}
+
+/// Read until the connection ends, returning what arrived and how it ended,
+/// or fail after `within`.
+async fn read_to_end_of_connection(
+    stream: &mut (impl AsyncRead + Unpin),
+    within: Duration,
+) -> (String, ConnectionEnd) {
+    let mut got = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    let end = tokio::time::timeout(within, async {
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) => return ConnectionEnd::Closed,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) => return ConnectionEnd::Reset(e.kind()),
+            }
+        }
+    })
+    .await
+    .expect("the connection ends");
+    (String::from_utf8_lossy(&got).into_owned(), end)
+}
+
+/// HTTP/1.0 has no chunked encoding, so a streamed body of unknown length is
+/// close-delimited: a clean close is its end. A producer error after the
+/// head must therefore reset the connection, so the client (or a proxy that
+/// speaks HTTP/1.0 upstream, as nginx does by default) sees an error, never
+/// a whole response.
+#[tokio::test]
+async fn an_error_after_the_head_resets_an_http10_connection() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /sse-error HTTP/1.0\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    let lower = head.to_ascii_lowercase();
+    assert!(head.starts_with("HTTP/1.0 200"), "{head}");
+    assert!(!lower.contains("transfer-encoding"), "{head}");
+    assert!(!lower.contains("content-length"), "{head}");
+
+    server.runtime.release.notify_one();
+    let (rest, end) = read_to_end_of_connection(&mut stream, Duration::from_secs(5)).await;
+    assert_eq!(
+        end,
+        ConnectionEnd::Reset(std::io::ErrorKind::ConnectionReset),
+        "an aborted close-delimited body must end in a reset, not a clean close: {head}{rest}"
+    );
+}
+
+/// Control for the reset: an HTTP/1.0 stream that completes ends in a clean
+/// close after its whole body.
+#[tokio::test]
+async fn a_complete_http10_stream_ends_in_a_clean_close() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /sse HTTP/1.0\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    assert!(head.starts_with("HTTP/1.0 200"), "{head}");
+
+    server.runtime.release.notify_one();
+    let (rest, end) = read_to_end_of_connection(&mut stream, Duration::from_secs(5)).await;
+    assert_eq!(end, ConnectionEnd::Closed, "{head}{rest}");
+    assert!(rest.ends_with("data: two\n\n"), "{head}{rest}");
+}
+
+/// A request-body failure before a streamed response's head replaces the
+/// response (here 413) and cancels its producer.
+#[tokio::test]
+async fn a_body_failure_before_a_streamed_head_is_answered_and_cancels_the_producer() {
+    let server = Server::start(serde_json::json!({ "max_body_bytes": 8 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(
+            b"POST /body-then-stream HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n\
+              5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("response arrives");
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    assert!(!response.contains("data: one"), "{response}");
+    assert_eq!(
+        server.collected(1).await,
+        vec![Err(wafer_block::ErrorCode::ResourceExhausted)]
+    );
+    producer_cancelled(
+        &server,
+        Duration::from_secs(2),
+        "the body failed before the head",
+    )
+    .await;
+}
+
+/// A request-body failure after a streamed head cannot change the committed
+/// status: the client keeps its 200, the block reads the failure, and the
+/// body aborts instead of ending cleanly.
+#[tokio::test]
+async fn a_body_failure_after_a_streamed_head_leaves_the_status_committed() {
+    let server = Server::start(serde_json::json!({ "max_body_bytes": 8 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(
+            b"POST /stream-then-body HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    stream
+        .write_all(b"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        server.collected(1).await,
+        vec![Err(wafer_block::ErrorCode::ResourceExhausted)]
+    );
+    let (rest, end) = read_to_end_of_connection(&mut stream, Duration::from_secs(5)).await;
+    assert!(!rest.contains("413"), "{head}{rest}");
+    assert!(!rest.contains("\r\n0\r\n\r\n"), "{head}{rest}");
+    assert_eq!(
+        end,
+        ConnectionEnd::Reset(std::io::ErrorKind::ConnectionReset),
+        "{head}{rest}"
+    );
 }

@@ -14,8 +14,10 @@
   after it as the producer sends it. Every other response is collected and
   sent whole, byte for byte as before. What changes for a streamed response:
   - Framing is `Content-Length` when the producer declared
-    `resp.content_length`, and chunked otherwise; it used to be the
-    collected body's `Content-Length`.
+    `resp.content_length`; otherwise chunked on an HTTP/1.1 request and
+    close-delimited on an HTTP/1.0 one (no chunked encoding there: the
+    body ends when the connection closes). It used to be the collected
+    body's `Content-Length`.
   - Backpressure reaches the producer: a client that reads slowly blocks
     the producer's `send_chunk` instead of the body being held in memory,
     and `write_timeout_secs` still drops a client that stops reading. A
@@ -24,9 +26,15 @@
     producer.
   - The status is committed with the head. A producer that ends without a
     clean `Complete` (an `Error`, no terminal, a body that contradicts its
-    declared length) no longer turns into a `500`: the connection is closed
-    without the chunked terminator, or short of the `Content-Length`, so the
-    client sees a truncated body. A request-body failure (`max_body_bytes`,
+    declared length) no longer turns into a `500`: the listener **resets**
+    the connection (TCP RST), without the chunked terminator or short of
+    the `Content-Length`. The reset is what makes the abort visible on a
+    close-delimited HTTP/1.0 body, where a clean close would be the body's
+    whole end — nginx speaks HTTP/1.0 upstream by default — so the client
+    or proxy sees an error, never a whole response. An embedder calling
+    `wafer_output_to_response` from its own server gets the abort as
+    hyper's connection error and must reset an HTTP/1.0 connection itself.
+    A request-body failure (`max_body_bytes`,
     `body_read_timeout_secs`, an unreadable body) after the head can no
     longer turn the response into a `413`/`408`/`400`; the block still
     reads it as an `Err` from its input.
