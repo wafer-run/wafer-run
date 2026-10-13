@@ -192,7 +192,9 @@ impl Wafer {
     ///
     /// Observability: each flow fires `flow_start` when entered and
     /// `flow_end` once the chain has finished, last-entered first, so a
-    /// transferring flow's duration encloses its target's.
+    /// transferring flow's duration encloses its target's. A chain that ends
+    /// in a streamed response has finished once the response's head is
+    /// known, not when its body ends (see the executor's module docs).
     pub(crate) async fn run_plan(
         &self,
         plan: FlowPlan<'_>,

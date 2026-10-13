@@ -15,6 +15,57 @@
   `ImageError` are `#[non_exhaustive]`; a `match` over `VectorError` needs
   the new arm.
 
+- A flow forwards its terminal step's streamed response instead of
+  collecting it. The terminal step is the top-level step that ends the flow
+  — the last one, or one a `next` jumped to — with no `next` of its own and
+  no `each` or `parallel`; a transfer target's terminal step is terminal for
+  the chain. When its block's leading meta `declares_streaming`
+  (`wafer_block::http_codec`: the `resp.stream` marker, or a
+  `text/event-stream` / `application/octet-stream` content type) and a body
+  chunk follows, `Wafer::run` returns as soon as that head is read: the
+  output leads with the flow message's `resp.*` entries as `Meta` events —
+  the step's leading meta laid over the middleware's with the same rules as
+  a collected response's, so CORS and security headers are on it, and the
+  marker and `resp.content_length` survive — followed by the step's own
+  stream. Backpressure reaches the producer and dropping the output cancels
+  it. Before, the flow collected every step, so a streaming response — SSE
+  through `site-main`, on every platform — reached the caller only once it
+  had ended, as one chunk with trailing meta. Consequences for a caller of
+  a flow:
+  - after the first chunk the head is final, by one rule for every
+    consumer — a streaming transport, or a caller that collects the
+    response: the flow drops `Meta` events and the `Complete`'s meta (a
+    producer cannot loosen a security header or add one after its head);
+    an `Error` terminal is an `Error` event after the chunks already sent
+    (not a flow error, and not subject to `on_error`) carrying the
+    middleware's response headers as a flow error does — one whose own meta
+    cannot be sent becomes the flow's `Internal` error naming the step —
+    and a `Halt`, `Drop` or `Continue`, which cannot follow a body, becomes
+    such an `Internal` error;
+  - the step's `block_end` span and every chain flow's `flow_end` hook fire
+    when the head is read, so their durations are time-to-headers for a
+    streamed response. The flow's timeout is checked before each step, as
+    before: it does not bound a running step, its head or its body;
+  - leading meta no transport can send fails the flow closed at head time
+    (`Internal`, with the middleware's headers carried, the producer
+    cancelled) — as for a collected step, but without waiting for a body
+    that may never end.
+  Every other step output — a non-terminal step, a fan-out, a parallel
+  step and its branches, a step with `next`, an output with no streaming
+  declaration or with no body before its terminal — is collected exactly as
+  before. A caller that collects the flow's output (`collect_buffered`,
+  `collect_http_response`, the embed/Node/FFI JSON boundary) gets the body
+  and the head the flow decided at the first chunk; meta the producer sent
+  after it, which used to be laid over the head, is dropped.
+  A responding step's meta now also removes the `resp.stream` marker and
+  `resp.content_length` an earlier responding step left on the flow
+  message: they describe that step's body, so a later (streamed) response
+  never leads with another body's declared length.
+  `wafer-run-node`'s `run` holds the runtime's read lock until the result
+  is encoded, as `wafer-ffi` does, so `stop()` waits for a flow whose
+  response is still streaming from a block instead of stopping the block
+  under it.
+
 - `FilterOp` has a new operator, `StartsWith` (wire `starts_with`): the
   prefix of a key or path. Its `value` is plain text — no character is a
   wildcard or an escape — and letter case is significant on every backend;
@@ -1765,6 +1816,15 @@
   itself (under a byte cap, say) exactly as `collect_http_response` does.
   No transport uses `open_response` yet; nothing here changes how a
   response is served.
+
+- `OutputStream::rewrite_produced(f)` rewrites every event read from the
+  producer from then on — `f` returns the event to yield in its place, or
+  `None` to skip it — in place, as `prepend` does: no task and no channel,
+  an event is read (and rewritten) only when the consumer asks, so
+  backpressure and drop-to-cancel are kept. Events already read ahead are
+  not rewritten; a second rewrite applies to what the first yields. The
+  flow executor uses it to decide what a forwarded stream's events mean
+  after its head.
 
 - `OutputStream::prepend(events)` puts events back at the front of a stream
   in place, and `OutputStream::peek` / `OutputStream::take_leading_meta` read

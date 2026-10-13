@@ -138,6 +138,12 @@ impl ObservabilityBus {
     }
 
     /// Register a callback fired immediately after each block runs, with its elapsed duration.
+    ///
+    /// Inside a flow, a step's block has run once its output is collected —
+    /// or, for a terminal step whose response the flow streams, once the
+    /// response's head (leading meta and first chunk) is read: the duration
+    /// is then time-to-headers, not the time to the end of the body (see the
+    /// flow executor's module docs).
     pub fn on_block_end(
         &self,
         h: impl Fn(&ObservabilityContext, Duration) + MaybeSend + MaybeSync + 'static,
@@ -152,6 +158,10 @@ impl ObservabilityBus {
     }
 
     /// Register a callback fired at the end of every flow execution.
+    ///
+    /// A flow that ends in a streamed response has ended once the response's
+    /// head is known: the duration is time-to-headers (see the flow
+    /// executor's module docs).
     pub fn on_flow_end(&self, h: impl Fn(&str, Duration) + MaybeSend + MaybeSync + 'static) {
         push(&self.flow_end_handlers, Arc::new(h));
     }
