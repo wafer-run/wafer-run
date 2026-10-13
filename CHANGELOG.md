@@ -1736,17 +1736,25 @@
   answered as `unsendable_response` before any header goes out, and its
   producer is cancelled. `StreamedBody` reads straight from the producer's
   stream, so backpressure reaches the producer and dropping the body
-  cancels it; an `Error` terminal, a `Halt` after the body started, or a
-  stream with no terminal ends it in a final `Err`, which a transport
-  answers by aborting the body. The decision moves here from impresspress
-  with the same rule: `META_RESP_STREAM` (`"resp.stream"`, value
+  cancels it; an `Error`, `Halt`, `Drop` or `Continue` terminal after the
+  body started, or a stream with no terminal, ends it in a final `Err`,
+  which a transport answers by aborting the body. The decision moves here
+  from impresspress: `META_RESP_STREAM` (`"resp.stream"`, value
   `STREAM_MARKER_VALUE`), `has_stream_marker`, `is_streaming_content_type`
   (`text/event-stream`, `application/octet-stream`) and `declares_streaming`.
+  One change from impresspress's `wants_streaming`: the content type read is
+  the last one in the leading meta (the one the response carries), whatever
+  the other entries hold. impresspress read the first, and none at all when
+  any entry could not be sent — so an SSE response with an unsendable header
+  was collected whole, which for an open-ended stream is never, instead of
+  being answered with the 500 at once.
   New `META_RESP_CONTENT_LENGTH` (`"resp.content_length"`): a streaming
   producer that knows its body's length declares it in the leading meta, and
   it becomes `StreamedHttpResponse::content_length`, so a transport can send
   `Content-Length` instead of chunked framing; like the marker it is never a
-  header. A streamed response without a content type is
+  header. `StreamedBody` enforces it — a chunk that would overrun it is an
+  `Err` in its place, a body that ends short of it ends in an `Err` — so no
+  transport counts bytes itself. A streamed response without a content type is
   `application/octet-stream` (`DEFAULT_STREAMED_CONTENT_TYPE`).
   `terminal_to_http_response` renders a terminal the caller collected
   itself (under a byte cap, say) exactly as `collect_http_response` does.
@@ -1757,8 +1765,10 @@
   in place, and `OutputStream::peek` / `OutputStream::take_leading_meta` read
   ahead through it, leaving the stream on the first event they did not
   consume. The stream keeps its producer, channel and cancellation token:
-  reading ahead neither cancels the producer nor adds a buffer between it and
-  the consumer, and dropping the stream still cancels it. This replaces
+  reading ahead neither cancels the producer nor adds a buffer beyond the
+  events read ahead, and dropping the stream still cancels it.
+  `take_leading_meta` is cancel-safe: dropped while it waits, it leaves the
+  events it read on the stream. This replaces
   re-pumping a stream through a new `from_producer` task to look at its
   head.
 

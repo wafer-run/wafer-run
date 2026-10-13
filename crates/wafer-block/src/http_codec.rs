@@ -906,8 +906,11 @@ pub const STREAM_MARKER_VALUE: &str = "1";
 /// streams, where it becomes [`StreamedHttpResponse::content_length`]: a
 /// transport frames the body with that `Content-Length` instead of chunked
 /// encoding, so a client sees the size (a download's progress bar, a `HEAD`
-/// answer). A transport that sends the header and then gets a body of
-/// another length must fail the response, not end it as if whole.
+/// answer). The [`StreamedBody`] enforces it, so a transport needs no
+/// counter of its own: a chunk that would overrun the length is an `Err`
+/// item in its place, and a body that ends short of it ends in an `Err`;
+/// either way the transport aborts the response rather than ending it as if
+/// whole.
 ///
 /// It is **never** a header: [`classify_response_meta`] does not recognize
 /// the key (`Content-Length` itself is transport-owned and refused as a
@@ -931,21 +934,23 @@ pub fn is_streaming_content_type(content_type: &str) -> bool {
     lower.starts_with("text/event-stream") || lower.starts_with("application/octet-stream")
 }
 
-/// The response content type among `meta`, as [`classify_response_meta`]
-/// classifies it ([`META_RESP_CONTENT_TYPE`], or any case of
-/// `resp.header.content-type`); the first one when there are several.
-///
-/// `None` as well when `meta` holds an entry no transport can send: such a
-/// response is answered with [`unsendable_response`] before any header goes
-/// out, whichever way it is served.
+/// The response content type `meta` declares: the value of its **last**
+/// content-type entry ([`META_RESP_CONTENT_TYPE`], or any case of
+/// `resp.header.content-type`) — the one a rendered response carries, since
+/// the later write wins. Read per entry, whatever the other entries hold,
+/// and whether or not the value itself can be sent: the decision must not
+/// depend on sendability, or a response with an unsendable entry would be
+/// collected whole (an endless SSE stream, never) before its 500 went out.
+/// [`open_response`] refuses unsendable leading meta at head time instead.
 fn leading_content_type(meta: &[MetaEntry]) -> Option<&str> {
-    response_meta_parts(meta)
-        .ok()?
-        .into_iter()
-        .find_map(|part| match part {
-            ResponseMetaPart::ContentType(content_type) => Some(content_type),
-            _ => None,
-        })
+    meta.iter().rev().find_map(|entry| {
+        let is_content_type = entry.key == META_RESP_CONTENT_TYPE
+            || entry
+                .key
+                .strip_prefix(META_RESP_HEADER_PREFIX)
+                .is_some_and(|name| name.eq_ignore_ascii_case("content-type"));
+        is_content_type.then_some(entry.value.as_str())
+    })
 }
 
 /// True when `leading_meta` carries the [`META_RESP_STREAM`] marker with the
@@ -965,7 +970,10 @@ pub fn has_stream_marker(leading_meta: &[MetaEntry]) -> bool {
 /// meta — the `Meta` events before its first body event, see
 /// [`OutputStream::take_leading_meta`] — declares it, by the
 /// [`META_RESP_STREAM`] marker ([`has_stream_marker`]) or by a content type
-/// [`is_streaming_content_type`] matches.
+/// [`is_streaming_content_type`] matches. The content type read is the last
+/// one in the meta — the one the response would carry — whatever the other
+/// entries hold: a declaration whose meta cannot be sent still declares, and
+/// [`open_response`] answers it with the 500 at once.
 ///
 /// A buffered response ([`OutputStream::respond_with_meta`]) carries its meta
 /// on the trailing `Complete`, so it has no leading meta and never matches.
@@ -1027,19 +1035,28 @@ pub struct StreamedHttpResponse {
 /// producer's [`OutputStream`], so backpressure reaches the producer and
 /// dropping the body (a client that went away) cancels it.
 ///
-/// - Each `Chunk` is an `Ok` item; a `Meta` event after the body started is
-///   dropped (too late to be a header).
-/// - A `Complete`, `Drop` or `Continue` terminal ends the body. Meta on a
-///   `Complete` arrived too late to be sent and is logged at `debug`.
-/// - Three endings are a final `Err`, because the bytes before them are a
+/// - Each `Chunk` is an `Ok` item. A `Meta` event after the body started,
+///   and meta on the `Complete` terminal, arrived too late to be a header:
+///   it is dropped and logged at `warn` (a late `Set-Cookie` that never
+///   reaches the client is a producer bug someone needs to see).
+/// - A `Complete` terminal ends the body.
+/// - Every other ending is a final `Err`, because the bytes before it are a
 ///   truncated prefix: an `Error` terminal; a `Halt`, which carries a whole
-///   response of its own and cannot follow a body already being sent; and a
-///   stream that ends with no terminal at all.
+///   response of its own; a `Drop` or `Continue`, which carry no body and
+///   cannot follow one ([`OutputSink`](crate::streams::output::OutputSink)
+///   refuses all three after a chunk, so they come only from a non-sink
+///   producer); and a stream that ends with no terminal at all.
+/// - With a declared [`StreamedHttpResponse::content_length`], a chunk that
+///   would overrun it is an `Err` in its place, and a `Complete` that comes
+///   short of it is an `Err`: the transport aborts rather than sending more,
+///   or fewer, bytes than its `Content-Length` promised.
 ///
 /// Nothing follows the final item.
 pub struct StreamedBody {
     /// `None` once the body has ended.
     output: Option<OutputStream>,
+    /// Bytes still owed under a declared content length.
+    remaining: Option<u64>,
 }
 
 impl std::fmt::Debug for StreamedBody {
@@ -1059,24 +1076,65 @@ impl Stream for StreamedBody {
         };
         let ending = loop {
             match futures::ready!(Pin::new(&mut *output).poll_next(cx)) {
-                Some(StreamEvent::Chunk(bytes)) => return Poll::Ready(Some(Ok(bytes))),
-                Some(StreamEvent::Meta(_)) => {}
+                Some(StreamEvent::Chunk(bytes)) => match self.remaining {
+                    None => return Poll::Ready(Some(Ok(bytes))),
+                    Some(remaining) => match remaining.checked_sub(bytes.len() as u64) {
+                        Some(left) => {
+                            self.remaining = Some(left);
+                            return Poll::Ready(Some(Ok(bytes)));
+                        }
+                        None => {
+                            break Some(WaferError::new(
+                                ErrorCode::Internal,
+                                "the streamed body overran its declared content length",
+                            ))
+                        }
+                    },
+                },
+                Some(StreamEvent::Meta(entry)) => {
+                    tracing::warn!(
+                        key = %entry.key,
+                        "streamed response: meta arrived after the head was sent; dropped"
+                    );
+                }
                 Some(StreamEvent::Complete { meta }) => {
                     if !meta.is_empty() {
-                        tracing::debug!(
+                        tracing::warn!(
                             entries = meta.len(),
                             "streamed response: meta on the Complete terminal arrived after \
                              the head was sent; dropped"
                         );
                     }
-                    break None;
+                    match self.remaining {
+                        Some(short) if short > 0 => {
+                            break Some(WaferError::new(
+                                ErrorCode::Internal,
+                                format!(
+                                    "the streamed body ended {short} bytes short of its declared \
+                                     content length"
+                                ),
+                            ))
+                        }
+                        _ => break None,
+                    }
                 }
-                Some(StreamEvent::Drop { .. } | StreamEvent::Continue(_)) => break None,
                 Some(StreamEvent::Error(err)) => break Some(*err),
                 Some(StreamEvent::Halt { .. }) => {
                     break Some(WaferError::new(
                         ErrorCode::Internal,
                         "a Halt terminal cannot follow a streamed body",
+                    ))
+                }
+                Some(StreamEvent::Drop { .. }) => {
+                    break Some(WaferError::new(
+                        ErrorCode::Internal,
+                        "a Drop terminal cannot follow a streamed body",
+                    ))
+                }
+                Some(StreamEvent::Continue(_)) => {
+                    break Some(WaferError::new(
+                        ErrorCode::Internal,
+                        "a Continue terminal cannot follow a streamed body",
                     ))
                 }
                 None => break Some(WaferError::from(TerminalNotResponse::Malformed)),
@@ -1099,7 +1157,8 @@ impl Stream for StreamedBody {
 /// - `status`: [`resolve_status`] over the leading meta, default `200`;
 /// - `headers`: rendered as a buffered response's are, `Content-Type`
 ///   defaulting to [`DEFAULT_STREAMED_CONTENT_TYPE`];
-/// - `content_length`: [`META_RESP_CONTENT_LENGTH`], if declared;
+/// - `content_length`: [`META_RESP_CONTENT_LENGTH`], if declared (the body
+///   enforces it);
 /// - `body`: the rest of the stream, the first chunk included.
 ///
 /// Everything else is [`OpenedResponse::Buffered`], with the stream exactly
@@ -1135,6 +1194,7 @@ pub async fn open_response(mut output: OutputStream) -> OpenedResponse {
         content_length,
         body: StreamedBody {
             output: Some(output),
+            remaining: content_length,
         },
     })
 }
@@ -2136,10 +2196,28 @@ mod tests {
         // The marker with another value does not opt in.
         assert!(!declares_streaming(&[entry(META_RESP_STREAM, "0")]));
         assert!(!has_stream_marker(&[entry(META_RESP_STREAM, "true")]));
-        // A content type beside an unsendable entry is not read.
-        assert!(!declares_streaming(&[
+    }
+
+    /// The decision reads the content type the response would carry — the
+    /// last one — whatever the other entries hold, and whether or not the
+    /// value itself can be sent.
+    #[test]
+    fn declares_streaming_reads_the_last_content_type_whatever_else_the_meta_holds() {
+        assert!(declares_streaming(&[
             sse_meta(),
             entry("resp.header.X-Bad", "a\nb")
+        ]));
+        assert!(declares_streaming(&[entry(
+            META_RESP_CONTENT_TYPE,
+            "text/event-stream\n"
+        )]));
+        assert!(declares_streaming(&[
+            entry("resp.header.Content-Type", "text/html"),
+            sse_meta()
+        ]));
+        assert!(!declares_streaming(&[
+            sse_meta(),
+            entry("resp.header.Content-Type", "text/html")
         ]));
     }
 
@@ -2368,25 +2446,18 @@ mod tests {
         }
     }
 
-    /// Leading meta no transport can send fails closed before the head: the
-    /// 500 `unsendable_response` renders, keeping the sendable security
-    /// headers and adding `no-store`; the producer is cancelled.
-    #[tokio::test]
-    async fn a_declared_stream_with_unsendable_leading_meta_is_a_500() {
-        // The marker declares it: `declares_streaming` reads no content type
-        // from meta holding an unsendable entry.
-        let leading = vec![
-            marker(),
-            sse_meta(),
-            entry("resp.header.Content-Security-Policy", "default-src 'none'"),
-            entry("resp.header.Cache-Control", "max-age=60"),
-            entry("resp.header.X-Bad", "a\r\nInjected: 1"),
-        ];
+    /// Leading meta no transport can send fails closed before the head, with
+    /// a producer that never ends: the 500 `unsendable_response` renders at
+    /// once, keeping the sendable security headers and adding `no-store`, and
+    /// the producer is cancelled.
+    async fn assert_unsendable_500_at_head(leading: Vec<MetaEntry>) {
         let (stream, sink, cancel) = OutputStream::new_streaming();
         for entry in &leading {
             sink.send_meta(entry.clone()).await.unwrap();
         }
         sink.send_chunk(b"data: one\n\n".to_vec()).await.unwrap();
+        // `sink` stays alive and never sends a terminal: the producer of an
+        // open-ended stream.
 
         let opened = buffered(open_live(stream).await);
         assert!(
@@ -2394,7 +2465,12 @@ mod tests {
             "the producer of a response answered with a 500 is cancelled"
         );
         let invalid = response_meta_parts(&leading).unwrap_err();
-        let parts = collect_http_response(opened).await;
+        let parts = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            collect_http_response(opened),
+        )
+        .await
+        .expect("the 500 renders without waiting for the producer");
         assert_eq!(parts, unsendable_response(&leading, &invalid));
         assert_eq!(parts.status, 500);
         assert_eq!(header(&parts.headers, "cache-control"), Some("no-store"));
@@ -2403,6 +2479,73 @@ mod tests {
             Some("default-src 'none'")
         );
         assert_eq!(header(&parts.headers, "x-bad"), None);
+        drop(sink);
+    }
+
+    fn unsendable_leading_meta() -> Vec<MetaEntry> {
+        vec![
+            sse_meta(),
+            entry("resp.header.Content-Security-Policy", "default-src 'none'"),
+            entry("resp.header.Cache-Control", "max-age=60"),
+            entry("resp.header.X-Bad", "a\r\nInjected: 1"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_marker_declared_stream_with_unsendable_leading_meta_is_a_500_at_head() {
+        let mut leading = unsendable_leading_meta();
+        leading.insert(0, marker());
+        assert_unsendable_500_at_head(leading).await;
+    }
+
+    /// No marker: the SSE content type alone declares the stream, so an
+    /// unsendable header beside it is still answered before the head — not
+    /// after collecting a body that never ends.
+    #[tokio::test]
+    async fn an_sse_stream_with_unsendable_leading_meta_is_a_500_at_head() {
+        assert_unsendable_500_at_head(unsendable_leading_meta()).await;
+    }
+
+    /// An SSE content type whose own value cannot be sent still declares the
+    /// stream, and is answered with the 500 at once.
+    #[tokio::test]
+    async fn an_unsendable_sse_content_type_is_a_500_at_head() {
+        let mut leading = unsendable_leading_meta();
+        leading[0] = entry(META_RESP_CONTENT_TYPE, "text/event-stream\r\nX: 1");
+        leading.pop();
+        assert_unsendable_500_at_head(leading).await;
+    }
+
+    /// Two content types: the decision follows the last, which is the one
+    /// the response carries — both ways round.
+    #[tokio::test]
+    async fn the_last_content_type_decides_and_is_the_one_sent() {
+        let html_then_sse = streamed(
+            open_response(events_stream(vec![
+                StreamEvent::Meta(entry("resp.header.Content-Type", "text/html")),
+                StreamEvent::Meta(sse_meta()),
+                chunk(b"data: x\n\n"),
+                complete(),
+            ]))
+            .await,
+        );
+        assert_eq!(
+            header(&html_then_sse.headers, "content-type"),
+            Some("text/event-stream")
+        );
+
+        let make = || {
+            events_stream(vec![
+                StreamEvent::Meta(sse_meta()),
+                StreamEvent::Meta(entry("resp.header.Content-Type", "text/html")),
+                chunk(b"<p>hi</p>"),
+                complete(),
+            ])
+        };
+        let sse_then_html = buffered(open_response(make()).await);
+        let parts = collect_http_response(sse_then_html).await;
+        assert_eq!(header(&parts.headers, "content-type"), Some("text/html"));
+        assert_eq!(parts, collect_http_response(make()).await);
     }
 
     async fn streamed_body_of(rest: Vec<StreamEvent>) -> Vec<Result<Vec<u8>, WaferError>> {
@@ -2425,16 +2568,61 @@ mod tests {
         assert_eq!(items, vec![b"head".to_vec(), b"two".to_vec()]);
     }
 
+    /// A `Drop` or `Continue` carries no body, so one after body bytes — a
+    /// non-sink producer's protocol violation — ends the body in an `Err`,
+    /// as a `Halt` does.
     #[tokio::test]
-    async fn a_streamed_body_ends_cleanly_on_drop_and_continue() {
+    async fn a_streamed_body_ends_in_err_on_drop_and_continue() {
         for terminal in [
             StreamEvent::Drop { meta: vec![] },
             StreamEvent::Continue(Message::new("next")),
         ] {
             let items = streamed_body_of(vec![terminal]).await;
-            assert_eq!(items.len(), 1, "{items:?}");
+            assert_eq!(items.len(), 2, "{items:?}");
             assert!(items[0].is_ok());
+            assert!(items[1].is_err());
         }
+    }
+
+    async fn length_checked_body(
+        declared: &str,
+        chunks: &[&[u8]],
+    ) -> Vec<Result<Vec<u8>, WaferError>> {
+        let mut events = vec![
+            StreamEvent::Meta(marker()),
+            StreamEvent::Meta(entry(META_RESP_CONTENT_LENGTH, declared)),
+        ];
+        events.extend(chunks.iter().map(|c| chunk(c)));
+        events.push(complete());
+        let response = streamed(open_response(events_stream(events)).await);
+        body_items(response.body).await
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_of_its_declared_length_ends_cleanly() {
+        let items = length_checked_body("6", &[b"abc", b"def"]).await;
+        let items: Vec<Vec<u8>> = items.into_iter().map(Result::unwrap).collect();
+        assert_eq!(items, vec![b"abc".to_vec(), b"def".to_vec()]);
+    }
+
+    /// A chunk that would overrun the declared length is an `Err` in its
+    /// place: the transport has sent fewer bytes than its `Content-Length`
+    /// and aborts, instead of a transport cutting the chunk and ending as
+    /// if whole.
+    #[tokio::test]
+    async fn a_chunk_overrunning_the_declared_length_is_an_err_in_its_place() {
+        let items = length_checked_body("4", &[b"abc", b"def"]).await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].as_deref().ok(), Some(&b"abc"[..]));
+        assert!(items[1].is_err(), "the overrunning chunk is not sent");
+    }
+
+    #[tokio::test]
+    async fn a_body_ending_short_of_its_declared_length_ends_in_err() {
+        let items = length_checked_body("7", &[b"abc", b"def"]).await;
+        assert_eq!(items.len(), 3, "{items:?}");
+        assert!(items[..2].iter().all(Result::is_ok));
+        assert!(items[2].is_err(), "a short body must not end cleanly");
     }
 
     /// Every ending that leaves the bytes sent a truncated prefix is a final
