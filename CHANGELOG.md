@@ -1726,6 +1726,42 @@
 
 ### Added
 
+- `wafer_block::http_codec` decides whether an HTTP response streams, and
+  opens it. `open_response(output)` reads the stream's leading meta and
+  answers `OpenedResponse::Streamed(StreamedHttpResponse { status, headers,
+  content_length, body })` when that meta `declares_streaming` and a body
+  chunk follows, or `OpenedResponse::Buffered(output)` — the stream as it
+  was — for everything else, which `collect_http_response` renders as
+  before. A streaming declaration whose leading meta cannot be sent is
+  answered as `unsendable_response` before any header goes out, and its
+  producer is cancelled. `StreamedBody` reads straight from the producer's
+  stream, so backpressure reaches the producer and dropping the body
+  cancels it; an `Error` terminal, a `Halt` after the body started, or a
+  stream with no terminal ends it in a final `Err`, which a transport
+  answers by aborting the body. The decision moves here from impresspress
+  with the same rule: `META_RESP_STREAM` (`"resp.stream"`, value
+  `STREAM_MARKER_VALUE`), `has_stream_marker`, `is_streaming_content_type`
+  (`text/event-stream`, `application/octet-stream`) and `declares_streaming`.
+  New `META_RESP_CONTENT_LENGTH` (`"resp.content_length"`): a streaming
+  producer that knows its body's length declares it in the leading meta, and
+  it becomes `StreamedHttpResponse::content_length`, so a transport can send
+  `Content-Length` instead of chunked framing; like the marker it is never a
+  header. A streamed response without a content type is
+  `application/octet-stream` (`DEFAULT_STREAMED_CONTENT_TYPE`).
+  `terminal_to_http_response` renders a terminal the caller collected
+  itself (under a byte cap, say) exactly as `collect_http_response` does.
+  No transport uses `open_response` yet; nothing here changes how a
+  response is served.
+
+- `OutputStream::prepend(events)` puts events back at the front of a stream
+  in place, and `OutputStream::peek` / `OutputStream::take_leading_meta` read
+  ahead through it, leaving the stream on the first event they did not
+  consume. The stream keeps its producer, channel and cancellation token:
+  reading ahead neither cancels the producer nor adds a buffer between it and
+  the consumer, and dropping the stream still cancels it. This replaces
+  re-pumping a stream through a new `from_producer` task to look at its
+  head.
+
 - `wafer-flow` has a `json-schema` feature: the flow document types derive
   `schemars::JsonSchema`, and `wafer_flow::json_schema()` returns the JSON
   Schema (draft 2020-12) a WaferFlow document must satisfy to parse —

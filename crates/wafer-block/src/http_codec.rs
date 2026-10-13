@@ -21,21 +21,35 @@
 //!    [`resolve_error_status`] — status resolution: explicit
 //!    [`META_RESP_STATUS`] override wins, then error-code-derived, then the
 //!    caller's default.
-//! 5. [`collect_http_response`] / [`buffered_to_http_response`] /
-//!    [`error_to_http_response`] — buffered
+//! 5. [`open_response`] — the streaming decision ([`declares_streaming`]):
+//!    a response whose leading meta declares it streams is opened as a
+//!    [`StreamedHttpResponse`] (status and headers now, the body as a
+//!    [`StreamedBody`] as the producer sends it); any other is handed back
+//!    for buffering.
+//! 6. [`collect_http_response`] / [`terminal_to_http_response`] /
+//!    [`buffered_to_http_response`] / [`error_to_http_response`] — buffered
 //!    terminal-event mapping from an [`OutputStream`] to a transport-neutral
 //!    [`HttpResponseParts`] that thin platform glue turns into an
 //!    `axum`/`worker`/`web_sys` response.
 //!
 //! ## Canonical meta keys
 //!
-//! Only the canonical response meta keys from [`crate::meta`] are honored:
-//! [`META_RESP_STATUS`], [`META_RESP_HEADER_PREFIX`]`*`,
-//! [`META_RESP_COOKIE_PREFIX`]`*`, [`META_RESP_CONTENT_TYPE`]. Legacy aliases
+//! Only the canonical response meta keys are honored — those from
+//! [`crate::meta`], [`META_RESP_STATUS`], [`META_RESP_HEADER_PREFIX`]`*`,
+//! [`META_RESP_COOKIE_PREFIX`]`*`, [`META_RESP_CONTENT_TYPE`], and the two
+//! streaming hints that are never headers, [`META_RESP_STREAM`] and
+//! [`META_RESP_CONTENT_LENGTH`]. Legacy aliases
 //! that pre-consolidation adapters tolerated (`http.status`, `resp.cookie.*`,
 //! `http.resp.header.*`, `http.resp.set-cookie.*`, a literal `Content-Type`
 //! meta key) are **not** recognized — same key, same format, everywhere. See
 //! the `legacy_keys_are_ignored` test for the pinned drift table.
+
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+use futures::stream::Stream;
 
 use crate::{
     core_types::{ErrorCode, Message, MetaEntry, WaferError},
@@ -44,6 +58,7 @@ use crate::{
         META_REQ_RESOURCE, META_RESP_CONTENT_TYPE, META_RESP_COOKIE_PREFIX,
         META_RESP_HEADER_PREFIX, META_RESP_STATUS,
     },
+    stream::StreamEvent,
     streams::output::{BufferedResponse, OutputStream, TerminalNotResponse},
     types::{MetaGet, RequestAction},
 };
@@ -783,11 +798,23 @@ pub fn error_to_http_response(err: &WaferError) -> HttpResponseParts {
 }
 
 /// Collect a WAFER [`OutputStream`] and map its terminal event to a
-/// transport-neutral [`HttpResponseParts`].
+/// transport-neutral [`HttpResponseParts`]: the canonical renderer of a
+/// **buffered** response.
 ///
 /// Buffered: the full output body is read into memory before any bytes are
-/// produced (streaming consumers classify meta per-event via
-/// [`classify_response_meta`] instead). The terminal-event mapping:
+/// produced. A transport that streams calls [`open_response`] first and
+/// collects only what it answers [`OpenedResponse::Buffered`]. The mapping is
+/// [`terminal_to_http_response`]'s.
+pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
+    terminal_to_http_response(output.collect_buffered().await)
+}
+
+/// Map a collected terminal — what [`OutputStream::collect_buffered`]
+/// returns — to a transport-neutral [`HttpResponseParts`]. For a transport
+/// that collects the stream itself (under a byte cap, say) and must render
+/// the result exactly as [`collect_http_response`] does.
+///
+/// The terminal-event mapping:
 ///
 /// - `Complete` and `Halt` → **identical** handling via
 ///   [`buffered_to_http_response`] (status override or `200`, meta headers,
@@ -804,8 +831,10 @@ pub fn error_to_http_response(err: &WaferError) -> HttpResponseParts {
 /// - `Malformed` → `500` with a plain `internal server error` body; logged
 ///   at `tracing::error` (stream ended without a terminal event — protocol
 ///   violation).
-pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
-    match output.collect_buffered().await {
+pub fn terminal_to_http_response(
+    terminal: Result<BufferedResponse, TerminalNotResponse>,
+) -> HttpResponseParts {
+    match terminal {
         Ok(buf) | Err(TerminalNotResponse::Halt(buf)) => buffered_to_http_response(buf),
 
         Err(TerminalNotResponse::Error(err)) => error_to_http_response(&err),
@@ -846,6 +875,306 @@ pub async fn collect_http_response(output: OutputStream) -> HttpResponseParts {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Streamed responses
+// ---------------------------------------------------------------------------
+
+/// Response-meta key a block sets, with the value [`STREAM_MARKER_VALUE`],
+/// to have its response streamed whatever its content type.
+///
+/// For large downloads whose content type (`image/*`, `application/pdf`, …)
+/// is not one [`is_streaming_content_type`] matches but which must not be
+/// held whole in memory. It is consumed by [`declares_streaming`] and is
+/// **never** a header: [`classify_response_meta`] does not recognize the key,
+/// so every transport leaves it off the wire.
+///
+/// It also says the response is a **definite** one — a download whose status
+/// is known from its leading meta — rather than an open-ended stream (SSE)
+/// that only declares a streaming content type; see [`has_stream_marker`].
+pub const META_RESP_STREAM: &str = "resp.stream";
+
+/// The value [`META_RESP_STREAM`] carries to opt into streaming.
+pub const STREAM_MARKER_VALUE: &str = "1";
+
+/// Response-meta key a streaming block sets to the exact length of the body
+/// it is about to send, in bytes (a decimal `u64`), when it knows it — a
+/// download knows its object's size.
+///
+/// Honored only in the leading meta of a response [`open_response`]
+/// streams, where it becomes [`StreamedHttpResponse::content_length`]: a
+/// transport frames the body with that `Content-Length` instead of chunked
+/// encoding, so a client sees the size (a download's progress bar, a `HEAD`
+/// answer). A transport that sends the header and then gets a body of
+/// another length must fail the response, not end it as if whole.
+///
+/// It is **never** a header: [`classify_response_meta`] does not recognize
+/// the key (`Content-Length` itself is transport-owned and refused as a
+/// header). A buffered response ignores it — its length is the collected
+/// body's. A value that is not a decimal `u64` makes a streamed response
+/// [`unsendable_response`].
+pub const META_RESP_CONTENT_LENGTH: &str = "resp.content_length";
+
+/// The `Content-Type` a streamed response carries when its meta names none:
+/// opaque bytes, not the [`DEFAULT_RESPONSE_CONTENT_TYPE`] a buffered
+/// response defaults to.
+pub const DEFAULT_STREAMED_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// True for content types whose response streams to the client as it is
+/// produced instead of being collected first: Server-Sent Events
+/// (`text/event-stream`) and generic byte streams
+/// (`application/octet-stream`). ASCII case-insensitive; parameters
+/// (`; charset=utf-8`) are allowed.
+pub fn is_streaming_content_type(content_type: &str) -> bool {
+    let lower = content_type.to_ascii_lowercase();
+    lower.starts_with("text/event-stream") || lower.starts_with("application/octet-stream")
+}
+
+/// The response content type among `meta`, as [`classify_response_meta`]
+/// classifies it ([`META_RESP_CONTENT_TYPE`], or any case of
+/// `resp.header.content-type`); the first one when there are several.
+///
+/// `None` as well when `meta` holds an entry no transport can send: such a
+/// response is answered with [`unsendable_response`] before any header goes
+/// out, whichever way it is served.
+fn leading_content_type(meta: &[MetaEntry]) -> Option<&str> {
+    response_meta_parts(meta)
+        .ok()?
+        .into_iter()
+        .find_map(|part| match part {
+            ResponseMetaPart::ContentType(content_type) => Some(content_type),
+            _ => None,
+        })
+}
+
+/// True when `leading_meta` carries the [`META_RESP_STREAM`] marker with the
+/// value [`STREAM_MARKER_VALUE`].
+///
+/// The marker tells a **definite** streamed response — a download or share
+/// whose final status is already known from its leading meta — from an
+/// **open-ended** one (SSE, a chat) that declares only a streaming content
+/// type and has no definite status or end. A consumer can use the split to
+/// record the first kind as it is opened and leave the second alone, since
+/// collecting it to learn its outcome would defeat streaming.
+pub fn has_stream_marker(leading_meta: &[MetaEntry]) -> bool {
+    MetaGet::get(leading_meta, META_RESP_STREAM) == Some(STREAM_MARKER_VALUE)
+}
+
+/// The single streaming decision: a response streams iff its **leading**
+/// meta — the `Meta` events before its first body event, see
+/// [`OutputStream::take_leading_meta`] — declares it, by the
+/// [`META_RESP_STREAM`] marker ([`has_stream_marker`]) or by a content type
+/// [`is_streaming_content_type`] matches.
+///
+/// A buffered response ([`OutputStream::respond_with_meta`]) carries its meta
+/// on the trailing `Complete`, so it has no leading meta and never matches.
+pub fn declares_streaming(leading_meta: &[MetaEntry]) -> bool {
+    has_stream_marker(leading_meta)
+        || leading_content_type(leading_meta).is_some_and(is_streaming_content_type)
+}
+
+/// What [`open_response`] made of an [`OutputStream`].
+pub enum OpenedResponse {
+    /// The response declared streaming and has a body: serve its status and
+    /// headers now and its body as the producer sends it.
+    Streamed(StreamedHttpResponse),
+    /// Serve the response buffered: [`collect_http_response`] (or
+    /// [`terminal_to_http_response`] over a collection of the caller's own)
+    /// renders it. The stream is the one [`open_response`] was given, its
+    /// leading meta put back, so it collects to exactly what the original
+    /// would have — or, when the leading meta of a response that declared
+    /// streaming cannot be sent, an error stream that renders as
+    /// [`unsendable_response`] (the producer is cancelled).
+    Buffered(OutputStream),
+}
+
+impl std::fmt::Debug for OpenedResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Streamed(response) => f.debug_tuple("Streamed").field(response).finish(),
+            Self::Buffered(_) => f.write_str("Buffered(..)"),
+        }
+    }
+}
+
+/// The head of a streamed response and its body.
+///
+/// A transport sends `status` and `headers` (appending each pair in order:
+/// `Set-Cookie` may repeat), then the `body` items as they come. Once the
+/// head is sent nothing can change the status, so an `Err` body item is the
+/// only way left to say the body is not whole: the transport aborts the
+/// response (a cut connection, a chunked body without its last chunk)
+/// instead of ending it cleanly.
+#[derive(Debug)]
+pub struct StreamedHttpResponse {
+    /// HTTP status code: the leading meta's [`META_RESP_STATUS`], or `200`.
+    pub status: u16,
+    /// Header pairs in application order, rendered from the leading meta as a
+    /// buffered response's are, with `Content-Type` defaulting to
+    /// [`DEFAULT_STREAMED_CONTENT_TYPE`].
+    pub headers: Vec<(String, String)>,
+    /// The exact body length from [`META_RESP_CONTENT_LENGTH`], when the
+    /// producer declared it. `None`: the length is unknown and the transport
+    /// frames the body as it ends (chunked encoding).
+    pub content_length: Option<u64>,
+    /// The body.
+    pub body: StreamedBody,
+}
+
+/// The body of a [`StreamedHttpResponse`]: a
+/// `Stream<Item = Result<Vec<u8>, WaferError>>` read straight from the
+/// producer's [`OutputStream`], so backpressure reaches the producer and
+/// dropping the body (a client that went away) cancels it.
+///
+/// - Each `Chunk` is an `Ok` item; a `Meta` event after the body started is
+///   dropped (too late to be a header).
+/// - A `Complete`, `Drop` or `Continue` terminal ends the body. Meta on a
+///   `Complete` arrived too late to be sent and is logged at `debug`.
+/// - Three endings are a final `Err`, because the bytes before them are a
+///   truncated prefix: an `Error` terminal; a `Halt`, which carries a whole
+///   response of its own and cannot follow a body already being sent; and a
+///   stream that ends with no terminal at all.
+///
+/// Nothing follows the final item.
+pub struct StreamedBody {
+    /// `None` once the body has ended.
+    output: Option<OutputStream>,
+}
+
+impl std::fmt::Debug for StreamedBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamedBody")
+            .field("ended", &self.output.is_none())
+            .finish()
+    }
+}
+
+impl Stream for StreamedBody {
+    type Item = Result<Vec<u8>, WaferError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let Some(output) = self.output.as_mut() else {
+            return Poll::Ready(None);
+        };
+        let ending = loop {
+            match futures::ready!(Pin::new(&mut *output).poll_next(cx)) {
+                Some(StreamEvent::Chunk(bytes)) => return Poll::Ready(Some(Ok(bytes))),
+                Some(StreamEvent::Meta(_)) => {}
+                Some(StreamEvent::Complete { meta }) => {
+                    if !meta.is_empty() {
+                        tracing::debug!(
+                            entries = meta.len(),
+                            "streamed response: meta on the Complete terminal arrived after \
+                             the head was sent; dropped"
+                        );
+                    }
+                    break None;
+                }
+                Some(StreamEvent::Drop { .. } | StreamEvent::Continue(_)) => break None,
+                Some(StreamEvent::Error(err)) => break Some(*err),
+                Some(StreamEvent::Halt { .. }) => {
+                    break Some(WaferError::new(
+                        ErrorCode::Internal,
+                        "a Halt terminal cannot follow a streamed body",
+                    ))
+                }
+                None => break Some(WaferError::from(TerminalNotResponse::Malformed)),
+            }
+        };
+        // Ended: drop the stream now (its producer is done, or is cancelled
+        // by the drop), so nothing is read after the final item.
+        self.output = None;
+        Poll::Ready(ending.map(Err))
+    }
+}
+
+/// Open an [`OutputStream`] as an HTTP response: decide whether it streams,
+/// and if so render its head now.
+///
+/// Reads the stream's leading meta ([`OutputStream::take_leading_meta`]). The
+/// response is [`OpenedResponse::Streamed`] when that meta
+/// [`declares_streaming`] and the next event is a body `Chunk` — the head is
+/// committed only once the producer has its first bytes:
+/// - `status`: [`resolve_status`] over the leading meta, default `200`;
+/// - `headers`: rendered as a buffered response's are, `Content-Type`
+///   defaulting to [`DEFAULT_STREAMED_CONTENT_TYPE`];
+/// - `content_length`: [`META_RESP_CONTENT_LENGTH`], if declared;
+/// - `body`: the rest of the stream, the first chunk included.
+///
+/// Everything else is [`OpenedResponse::Buffered`], with the stream exactly
+/// as it was: no streaming declaration (a buffered response has no leading
+/// meta), or a declaration followed by a terminal before any body (an empty
+/// stream renders as the short buffered response it is).
+///
+/// A streaming declaration whose leading meta holds an entry no transport can
+/// send — or a [`META_RESP_CONTENT_LENGTH`] that is not a decimal `u64` — is
+/// answered before any header goes out, as [`OpenedResponse::Buffered`] of an
+/// error stream that renders as [`unsendable_response`]; the producer's
+/// stream is dropped, which cancels it.
+pub async fn open_response(mut output: OutputStream) -> OpenedResponse {
+    let meta = output.take_leading_meta().await;
+    if !declares_streaming(&meta) || !matches!(output.peek().await, Some(StreamEvent::Chunk(_))) {
+        output.prepend(meta.into_iter().map(StreamEvent::Meta));
+        return OpenedResponse::Buffered(output);
+    }
+    let head = headers_from_meta(&meta).and_then(|headers| Ok((headers, content_length(&meta)?)));
+    let (mut headers, content_length) = match head {
+        Ok(head) => head,
+        Err(invalid) => return OpenedResponse::Buffered(unsendable_stream(&meta, &invalid)),
+    };
+    if !headers.iter().any(|(name, _)| name == "Content-Type") {
+        headers.push((
+            "Content-Type".to_string(),
+            DEFAULT_STREAMED_CONTENT_TYPE.to_string(),
+        ));
+    }
+    OpenedResponse::Streamed(StreamedHttpResponse {
+        status: resolve_status(&meta, 200),
+        headers,
+        content_length,
+        body: StreamedBody {
+            output: Some(output),
+        },
+    })
+}
+
+/// The [`META_RESP_CONTENT_LENGTH`] of `meta`: `Ok(None)` when absent, `Err`
+/// (unsendable) when it is not a decimal `u64`.
+fn content_length(meta: &[MetaEntry]) -> Result<Option<u64>, InvalidResponseMeta> {
+    let Some(value) = MetaGet::get(meta, META_RESP_CONTENT_LENGTH) else {
+        return Ok(None);
+    };
+    // `u64::from_str` takes a leading `+`; a length is digits only.
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(content_length_invalid());
+    }
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| content_length_invalid())
+}
+
+fn content_length_invalid() -> InvalidResponseMeta {
+    InvalidResponseMeta {
+        key: META_RESP_CONTENT_LENGTH.to_string(),
+        reason: "content length is not a decimal u64",
+        kind: InvalidResponseMetaKind::Unsendable,
+    }
+}
+
+/// A stream [`collect_http_response`] renders exactly as
+/// [`unsendable_response`]`(meta, invalid)`: an `Internal` error terminal
+/// carrying [`unsendable_response_meta`]. Logs as `unsendable_response` does.
+fn unsendable_stream(meta: &[MetaEntry], invalid: &InvalidResponseMeta) -> OutputStream {
+    tracing::error!(
+        key = %invalid.key,
+        reason = invalid.reason,
+        "HTTP boundary: response meta cannot be sent; answering 500"
+    );
+    let mut err = WaferError::new(ErrorCode::Internal, "internal server error");
+    err.meta = unsendable_response_meta(meta);
+    OutputStream::error(err)
 }
 
 /// Render classified response meta into header pairs (`Status` parts are
@@ -1694,5 +2023,532 @@ mod tests {
         let parts = collect_http_response(stream).await;
         assert_eq!(parts.status, 500);
         assert_eq!(parts.body, b"internal server error");
+    }
+
+    // -- streamed responses -----------------------------------------------
+
+    /// A stream of exactly `events`, then the end of the channel: a stream
+    /// with no terminal when `events` holds none.
+    fn events_stream(events: Vec<StreamEvent>) -> OutputStream {
+        let (tx, rx) = tokio::sync::mpsc::channel(events.len().max(1));
+        for event in events {
+            tx.try_send(event).unwrap();
+        }
+        OutputStream::from_raw_receiver(rx)
+    }
+
+    fn sse_meta() -> MetaEntry {
+        entry(META_RESP_CONTENT_TYPE, "text/event-stream")
+    }
+
+    fn marker() -> MetaEntry {
+        entry(META_RESP_STREAM, STREAM_MARKER_VALUE)
+    }
+
+    fn chunk(bytes: &[u8]) -> StreamEvent {
+        StreamEvent::Chunk(bytes.to_vec())
+    }
+
+    fn complete() -> StreamEvent {
+        StreamEvent::Complete { meta: vec![] }
+    }
+
+    fn streamed(opened: OpenedResponse) -> StreamedHttpResponse {
+        match opened {
+            OpenedResponse::Streamed(response) => response,
+            OpenedResponse::Buffered(_) => panic!("expected a streamed response"),
+        }
+    }
+
+    fn buffered(opened: OpenedResponse) -> OutputStream {
+        match opened {
+            OpenedResponse::Buffered(stream) => stream,
+            OpenedResponse::Streamed(response) => {
+                panic!("expected a buffered response, got {response:?}")
+            }
+        }
+    }
+
+    /// Every item of `body`, bounded so a body that never ends fails the
+    /// test instead of hanging it.
+    async fn body_items(body: StreamedBody) -> Vec<Result<Vec<u8>, WaferError>> {
+        use futures::StreamExt;
+        let items: Vec<_> = body.take(64).collect().await;
+        assert!(items.len() < 64, "the body never ended: {items:?}");
+        items
+    }
+
+    /// `open_response` over a stream whose producer is still running: it must
+    /// return without waiting for the producer to end.
+    async fn open_live(output: OutputStream) -> OpenedResponse {
+        tokio::time::timeout(std::time::Duration::from_secs(5), open_response(output))
+            .await
+            .expect("open_response waited for a producer that is still running")
+    }
+
+    fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn streaming_content_types_are_sse_and_octet_stream_only() {
+        assert!(is_streaming_content_type("text/event-stream"));
+        assert!(is_streaming_content_type("application/octet-stream"));
+        assert!(is_streaming_content_type(
+            "TEXT/EVENT-STREAM; charset=utf-8"
+        ));
+        assert!(!is_streaming_content_type("image/png"));
+        assert!(!is_streaming_content_type("application/json"));
+    }
+
+    #[test]
+    fn declares_streaming_on_the_marker_whatever_the_content_type() {
+        assert!(declares_streaming(&[
+            marker(),
+            entry(META_RESP_CONTENT_TYPE, "image/png")
+        ]));
+        assert!(declares_streaming(&[marker()]));
+        assert!(has_stream_marker(&[marker()]));
+    }
+
+    #[test]
+    fn declares_streaming_on_a_streaming_content_type_under_either_key() {
+        assert!(declares_streaming(&[sse_meta()]));
+        assert!(declares_streaming(&[entry(
+            "resp.header.CONTENT-TYPE",
+            "application/octet-stream"
+        )]));
+        assert!(!has_stream_marker(&[sse_meta()]));
+    }
+
+    #[test]
+    fn declares_streaming_is_false_for_the_buffered_shape() {
+        // A buffered response has no leading meta at all.
+        assert!(!declares_streaming(&[]));
+        // A content type that is not a streaming one does not stream.
+        assert!(!declares_streaming(&[entry(
+            META_RESP_CONTENT_TYPE,
+            "application/json"
+        )]));
+        // The marker with another value does not opt in.
+        assert!(!declares_streaming(&[entry(META_RESP_STREAM, "0")]));
+        assert!(!has_stream_marker(&[entry(META_RESP_STREAM, "true")]));
+        // A content type beside an unsendable entry is not read.
+        assert!(!declares_streaming(&[
+            sse_meta(),
+            entry("resp.header.X-Bad", "a\nb")
+        ]));
+    }
+
+    #[test]
+    fn the_streaming_hints_are_never_headers() {
+        let meta = [marker(), entry(META_RESP_CONTENT_LENGTH, "12")];
+        assert!(response_meta_parts(&meta).unwrap().is_empty());
+        assert!(response_meta_entries(&meta).unwrap().is_empty());
+    }
+
+    /// An SSE response opens with its head as soon as it has a first chunk:
+    /// status and headers from the leading meta, the body still coming from
+    /// the live producer, which is not cancelled.
+    #[tokio::test]
+    async fn an_sse_response_opens_streamed_before_its_producer_ends() {
+        let (stream, sink, cancel) = OutputStream::new_streaming();
+        sink.send_meta(sse_meta()).await.unwrap();
+        sink.send_meta(entry("resp.header.X-Frame-Options", "DENY"))
+            .await
+            .unwrap();
+        sink.send_chunk(b"data: one\n\n".to_vec()).await.unwrap();
+
+        let response = streamed(open_live(stream).await);
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers,
+            vec![
+                ("Content-Type".to_string(), "text/event-stream".to_string()),
+                ("X-Frame-Options".to_string(), "DENY".to_string()),
+            ]
+        );
+        assert_eq!(response.content_length, None);
+        assert!(
+            !cancel.is_cancelled(),
+            "an open response keeps its producer"
+        );
+
+        sink.send_chunk(b"data: two\n\n".to_vec())
+            .await
+            .expect("the body still reads from the producer");
+        sink.complete(vec![]).await.unwrap();
+        let items = body_items(response.body).await;
+        let items: Vec<Vec<u8>> = items.into_iter().map(Result::unwrap).collect();
+        assert_eq!(
+            items,
+            vec![b"data: one\n\n".to_vec(), b"data: two\n\n".to_vec()]
+        );
+    }
+
+    /// Dropping a streamed response — a client that went away — cancels the
+    /// producer and closes its channel.
+    #[tokio::test]
+    async fn dropping_a_streamed_response_cancels_its_producer() {
+        let (stream, sink, cancel) = OutputStream::new_streaming();
+        sink.send_meta(sse_meta()).await.unwrap();
+        sink.send_chunk(b"data: one\n\n".to_vec()).await.unwrap();
+        let response = streamed(open_live(stream).await);
+        assert!(!cancel.is_cancelled());
+        drop(response);
+        assert!(cancel.is_cancelled());
+        assert!(sink.send_chunk(b"data: two\n\n".to_vec()).await.is_err());
+    }
+
+    /// The marker streams a download whatever its content type, which is
+    /// sent as is; the marker itself is not a header.
+    #[tokio::test]
+    async fn a_marker_declared_download_opens_streamed_with_its_own_content_type() {
+        let response = streamed(
+            open_response(events_stream(vec![
+                StreamEvent::Meta(marker()),
+                StreamEvent::Meta(entry(META_RESP_CONTENT_TYPE, "image/png")),
+                StreamEvent::Meta(entry(
+                    "resp.header.Content-Disposition",
+                    "attachment; filename=\"a.png\"",
+                )),
+                StreamEvent::Meta(entry(META_RESP_STATUS, "206")),
+                chunk(b"png"),
+                complete(),
+            ]))
+            .await,
+        );
+        assert_eq!(response.status, 206);
+        assert_eq!(
+            response.headers,
+            vec![
+                ("Content-Type".to_string(), "image/png".to_string()),
+                (
+                    "Content-Disposition".to_string(),
+                    "attachment; filename=\"a.png\"".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_streamed_response_without_a_content_type_is_octet_stream() {
+        let response = streamed(
+            open_response(events_stream(vec![
+                StreamEvent::Meta(marker()),
+                chunk(b"bytes"),
+                complete(),
+            ]))
+            .await,
+        );
+        assert_eq!(
+            header(&response.headers, "content-type"),
+            Some(DEFAULT_STREAMED_CONTENT_TYPE)
+        );
+    }
+
+    /// The content-length hint becomes the response's length, and is not a
+    /// header.
+    #[tokio::test]
+    async fn a_declared_content_length_is_carried_to_the_response() {
+        let response = streamed(
+            open_response(events_stream(vec![
+                StreamEvent::Meta(marker()),
+                StreamEvent::Meta(entry(META_RESP_CONTENT_LENGTH, "5")),
+                chunk(b"bytes"),
+                complete(),
+            ]))
+            .await,
+        );
+        assert_eq!(response.content_length, Some(5));
+        assert_eq!(header(&response.headers, "content-length"), None);
+        let max = u64::MAX.to_string();
+        let response = streamed(
+            open_response(events_stream(vec![
+                StreamEvent::Meta(marker()),
+                StreamEvent::Meta(entry(META_RESP_CONTENT_LENGTH, &max)),
+                chunk(b"bytes"),
+                complete(),
+            ]))
+            .await,
+        );
+        assert_eq!(response.content_length, Some(u64::MAX));
+    }
+
+    /// A content length that is not a decimal `u64` fails the response
+    /// closed before its head, as an unsendable header does.
+    #[tokio::test]
+    async fn an_invalid_content_length_is_unsendable() {
+        for value in ["", "+5", "-1", "1.0", "0x10", " 5", "18446744073709551616"] {
+            let meta = vec![
+                marker(),
+                entry("resp.header.X-Frame-Options", "DENY"),
+                entry(META_RESP_CONTENT_LENGTH, value),
+            ];
+            let mut events: Vec<StreamEvent> =
+                meta.iter().cloned().map(StreamEvent::Meta).collect();
+            events.extend([chunk(b"bytes"), complete()]);
+            let parts =
+                collect_http_response(buffered(open_response(events_stream(events)).await)).await;
+            assert_eq!(
+                parts,
+                unsendable_response(&meta, &content_length_invalid()),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// A response whose meta is all trailing — every buffered helper's shape
+    /// — is buffered, even when its content type is a streaming one, and
+    /// renders exactly as it did before `open_response` read it.
+    #[tokio::test]
+    async fn a_trailing_streaming_content_type_is_buffered() {
+        let make =
+            || OutputStream::respond_with_meta(b"data: x\n\n".to_vec(), vec![sse_meta(), marker()]);
+        let opened = buffered(open_response(make()).await);
+        assert_eq!(
+            collect_http_response(opened).await,
+            collect_http_response(make()).await
+        );
+    }
+
+    /// Leading meta that declares nothing is put back: the buffered render is
+    /// byte-identical to rendering the original stream.
+    #[tokio::test]
+    async fn leading_meta_without_a_declaration_is_buffered_unchanged() {
+        let make = || {
+            events_stream(vec![
+                StreamEvent::Meta(entry(META_RESP_CONTENT_TYPE, "text/html")),
+                StreamEvent::Meta(entry(META_RESP_STATUS, "201")),
+                StreamEvent::Meta(entry("resp.set_cookie.a", "a=1")),
+                chunk(b"<p>"),
+                StreamEvent::Meta(entry("resp.header.X-Late", "1")),
+                chunk(b"hi</p>"),
+                StreamEvent::Complete {
+                    meta: vec![entry("resp.header.ETag", "\"v1\"")],
+                },
+            ])
+        };
+        let opened = buffered(open_response(make()).await);
+        let parts = collect_http_response(opened).await;
+        assert_eq!(parts, collect_http_response(make()).await);
+        assert_eq!(parts.status, 201);
+        assert_eq!(parts.body, b"<p>hi</p>");
+        assert_eq!(header(&parts.headers, "x-late"), Some("1"));
+    }
+
+    /// A stream that declares streaming but ends before any body renders as
+    /// the short buffered response it is — whatever terminal it ends with.
+    #[tokio::test]
+    async fn a_declared_stream_with_no_body_is_buffered() {
+        let cases: Vec<Box<dyn Fn() -> OutputStream>> = vec![
+            Box::new(|| events_stream(vec![StreamEvent::Meta(sse_meta()), complete()])),
+            Box::new(|| {
+                events_stream(vec![
+                    StreamEvent::Meta(marker()),
+                    StreamEvent::Error(Box::new(WaferError::new(ErrorCode::NotFound, "gone"))),
+                ])
+            }),
+            Box::new(|| {
+                events_stream(vec![
+                    StreamEvent::Meta(sse_meta()),
+                    StreamEvent::Meta(entry(META_RESP_STATUS, "202")),
+                ])
+            }),
+        ];
+        for make in cases {
+            let opened = buffered(open_response(make()).await);
+            assert_eq!(
+                collect_http_response(opened).await,
+                collect_http_response(make()).await
+            );
+        }
+    }
+
+    /// Leading meta no transport can send fails closed before the head: the
+    /// 500 `unsendable_response` renders, keeping the sendable security
+    /// headers and adding `no-store`; the producer is cancelled.
+    #[tokio::test]
+    async fn a_declared_stream_with_unsendable_leading_meta_is_a_500() {
+        // The marker declares it: `declares_streaming` reads no content type
+        // from meta holding an unsendable entry.
+        let leading = vec![
+            marker(),
+            sse_meta(),
+            entry("resp.header.Content-Security-Policy", "default-src 'none'"),
+            entry("resp.header.Cache-Control", "max-age=60"),
+            entry("resp.header.X-Bad", "a\r\nInjected: 1"),
+        ];
+        let (stream, sink, cancel) = OutputStream::new_streaming();
+        for entry in &leading {
+            sink.send_meta(entry.clone()).await.unwrap();
+        }
+        sink.send_chunk(b"data: one\n\n".to_vec()).await.unwrap();
+
+        let opened = buffered(open_live(stream).await);
+        assert!(
+            cancel.is_cancelled(),
+            "the producer of a response answered with a 500 is cancelled"
+        );
+        let invalid = response_meta_parts(&leading).unwrap_err();
+        let parts = collect_http_response(opened).await;
+        assert_eq!(parts, unsendable_response(&leading, &invalid));
+        assert_eq!(parts.status, 500);
+        assert_eq!(header(&parts.headers, "cache-control"), Some("no-store"));
+        assert_eq!(
+            header(&parts.headers, "content-security-policy"),
+            Some("default-src 'none'")
+        );
+        assert_eq!(header(&parts.headers, "x-bad"), None);
+    }
+
+    async fn streamed_body_of(rest: Vec<StreamEvent>) -> Vec<Result<Vec<u8>, WaferError>> {
+        let mut events = vec![StreamEvent::Meta(sse_meta()), chunk(b"head")];
+        events.extend(rest);
+        body_items(streamed(open_response(events_stream(events)).await).body).await
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_forwards_chunks_and_drops_late_meta() {
+        let items = streamed_body_of(vec![
+            StreamEvent::Meta(entry("resp.header.X-Late", "1")),
+            chunk(b"two"),
+            StreamEvent::Complete {
+                meta: vec![entry("resp.header.X-Trailing", "1")],
+            },
+        ])
+        .await;
+        let items: Vec<Vec<u8>> = items.into_iter().map(Result::unwrap).collect();
+        assert_eq!(items, vec![b"head".to_vec(), b"two".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_ends_cleanly_on_drop_and_continue() {
+        for terminal in [
+            StreamEvent::Drop { meta: vec![] },
+            StreamEvent::Continue(Message::new("next")),
+        ] {
+            let items = streamed_body_of(vec![terminal]).await;
+            assert_eq!(items.len(), 1, "{items:?}");
+            assert!(items[0].is_ok());
+        }
+    }
+
+    /// Every ending that leaves the bytes sent a truncated prefix is a final
+    /// `Err`, so a transport aborts the body instead of ending it cleanly.
+    #[tokio::test]
+    async fn a_streamed_body_ends_in_err_on_error_halt_and_a_missing_terminal() {
+        let error = streamed_body_of(vec![
+            chunk(b"partial"),
+            StreamEvent::Error(Box::new(WaferError::new(
+                ErrorCode::Unavailable,
+                "read failed",
+            ))),
+        ])
+        .await;
+        assert_eq!(error.len(), 3, "{error:?}");
+        assert_eq!(
+            error[2].as_ref().unwrap_err().message,
+            "read failed",
+            "the producer's error is the final item"
+        );
+
+        let halt = streamed_body_of(vec![StreamEvent::Halt {
+            body: b"a whole other response".to_vec(),
+            meta: vec![],
+        }])
+        .await;
+        assert_eq!(halt.len(), 2, "{halt:?}");
+        assert!(
+            halt[1].is_err(),
+            "a Halt after the body started must not end cleanly"
+        );
+
+        let missing = streamed_body_of(vec![chunk(b"partial")]).await;
+        assert_eq!(missing.len(), 3, "{missing:?}");
+        assert!(
+            missing[2].is_err(),
+            "a body with no terminal must not end cleanly"
+        );
+    }
+
+    /// A producer that stops mid-body without a terminal hands the body
+    /// wafer-block's dropped-sink `Error`, which ends it in an `Err`.
+    #[tokio::test]
+    async fn a_streamed_body_ends_in_err_when_its_producer_stops_without_a_terminal() {
+        let output = OutputStream::from_producer(|sink, _cancel| async move {
+            sink.send_meta(sse_meta()).await.ok();
+            sink.send_chunk(b"partial".to_vec()).await.ok();
+        });
+        let items = body_items(streamed(open_response(output).await).body).await;
+        assert!(
+            items.last().is_some_and(Result::is_err),
+            "a producer cut off mid-body must not end cleanly: {items:?}"
+        );
+    }
+
+    /// Nothing is read after a body's final item.
+    #[tokio::test]
+    async fn a_streamed_body_yields_nothing_after_its_end() {
+        use futures::StreamExt;
+        let mut body = streamed(
+            open_response(events_stream(vec![
+                StreamEvent::Meta(sse_meta()),
+                chunk(b"head"),
+                StreamEvent::Error(Box::new(WaferError::new(ErrorCode::Internal, "x"))),
+                chunk(b"after the terminal"),
+            ]))
+            .await,
+        )
+        .body;
+        assert!(body.next().await.unwrap().is_ok());
+        assert!(body.next().await.unwrap().is_err());
+        assert!(body.next().await.is_none());
+        assert!(body.next().await.is_none());
+    }
+
+    /// `terminal_to_http_response` over a collection is what
+    /// `collect_http_response` renders for the stream, for every terminal.
+    #[tokio::test]
+    async fn terminal_to_http_response_renders_as_collect_http_response() {
+        let cases: Vec<Box<dyn Fn() -> OutputStream>> = vec![
+            Box::new(|| {
+                OutputStream::respond_with_meta(
+                    b"body".to_vec(),
+                    vec![entry(META_RESP_STATUS, "201")],
+                )
+            }),
+            Box::new(|| {
+                OutputStream::halt(b"halted".to_vec(), vec![entry(META_RESP_STATUS, "403")])
+            }),
+            Box::new(|| OutputStream::error(WaferError::new(ErrorCode::PermissionDenied, "nope"))),
+            Box::new(|| {
+                OutputStream::drop_request_with_meta(vec![entry(
+                    "resp.header.Access-Control-Allow-Origin",
+                    "https://a.example",
+                )])
+            }),
+            Box::new(|| OutputStream::continue_with(Message::new("next"))),
+            Box::new(|| events_stream(vec![chunk(b"no terminal")])),
+            Box::new(|| {
+                OutputStream::respond_with_meta(
+                    b"x".to_vec(),
+                    vec![entry("resp.header.X-Bad", "\n")],
+                )
+            }),
+        ];
+        for make in cases {
+            assert_eq!(
+                terminal_to_http_response(make().collect_buffered().await),
+                collect_http_response(make()).await
+            );
+        }
+        let malformed =
+            terminal_to_http_response(events_stream(vec![chunk(b"x")]).collect_buffered().await);
+        assert_eq!(malformed.status, 500);
+        assert_eq!(malformed.body, b"internal server error");
     }
 }
