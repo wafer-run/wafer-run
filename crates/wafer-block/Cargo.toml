@@ -59,5 +59,11 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-futures = "0.4"
 
+# `tests/spawn_wrapper.rs`: the spawn wrapper exists only here, and its tests
+# need a JS microtask queue, so they run under `wasm-bindgen-test-runner` on
+# Node (`scripts/check.sh wasm`).
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [lints]
 workspace = true

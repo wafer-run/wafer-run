@@ -804,6 +804,13 @@ impl OutputStream {
     }
 
     /// Creates a streaming `OutputStream` driven by a producer closure (wasm32 browser variant).
+    ///
+    /// The producer task is handed to the thread's installed
+    /// [spawn wrapper](crate::spawn::set_spawn_wrapper), if any, on this
+    /// call's stack, before it is spawned: an adapter that scopes state to
+    /// the request being polled uses it to give the producer that request's
+    /// state. The producer must finish its work before its terminal; see the
+    /// [`spawn`](crate::spawn) module docs.
     #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
     pub fn from_producer<F, Fut>(f: F) -> Self
     where
