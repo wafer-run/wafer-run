@@ -1842,7 +1842,9 @@
   bundle) uses it to give a producer the scope it was spawned in: a
   `spawn_local` task is polled from the JS microtask queue, never inside
   the request's poll, so without it a producer reaches none of that state,
-  before or after its first chunk. Returns the wrapper it replaces; `None`
+  before or after its first chunk. Any other caller of `spawn_producer`
+  (a deferred-task runner spawning through it, for one) is wrapped too.
+  Returns the wrapper it replaces; `None`
   removes it. Native and wasm32-wasip1 have no wrapper. A producer must
   finish its work before its terminal: nothing keeps a request alive for
   it afterwards. The tests run under `wasm-bindgen-test-runner` on node in

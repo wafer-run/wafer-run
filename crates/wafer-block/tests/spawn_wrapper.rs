@@ -5,8 +5,8 @@
 //! microtask queue: `scripts/check.sh wasm` runs them, as CI does.
 //!
 //! The "request scope" here is a thread-local marker that a wrapper captures
-//! at spawn time and re-installs around every poll of the task — the shape a
-//! Cloudflare or browser adapter gives its own request-current state. Every
+//! at spawn time and re-installs around every poll of the task — the shape
+//! e.g. Cloudflare's adapter gives its own request-current state. Every
 //! stream is read from outside any marker, so a producer that sees one can
 //! only have been given it by the wrapper.
 #![cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]

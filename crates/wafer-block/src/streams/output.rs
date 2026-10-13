@@ -787,7 +787,8 @@ impl OutputStream {
     /// `Error` terminal (see [`OutputSink`]), so the consumer never mistakes a
     /// cut-off body for a complete one.
     ///
-    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser.
+    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser
+    /// (through the installed spawn wrapper, if any; see [`crate::spawn`]).
     /// Not available on wasm32-wasip1 (WASI) — use `GuestResult::respond` directly.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_producer<F, Fut>(f: F) -> Self
