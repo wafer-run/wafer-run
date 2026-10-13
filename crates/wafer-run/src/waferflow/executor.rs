@@ -376,7 +376,7 @@ impl ShortCircuit {
 fn after_head(
     carried: Vec<MetaEntry>,
     step: String,
-) -> impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + 'static {
+) -> impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + Sync + 'static {
     move |event| {
         let error = match event {
             StreamEvent::Chunk(_) => return Some(event),

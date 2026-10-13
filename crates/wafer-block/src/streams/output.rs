@@ -316,8 +316,18 @@ pub struct OutputStream {
     cancel: CancellationToken,
 }
 
-/// An event rewrite installed by [`OutputStream::rewrite_produced`].
-type Rewrite = Box<dyn FnMut(StreamEvent) -> Option<StreamEvent> + Send>;
+/// An event rewrite installed by [`OutputStream::rewrite_produced`]. `Send +
+/// Sync` so the stream keeps the auto-traits it has without one (pinned
+/// below).
+type Rewrite = Box<dyn FnMut(StreamEvent) -> Option<StreamEvent> + Send + Sync>;
+
+// `OutputStream` is `Send + Sync` on every target: its events, channel and
+// token are, and a rewrite must not take either away — a consumer may hold
+// the stream across an await in a `Send` future or share a reference to it.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<OutputStream>();
+};
 
 impl OutputStream {
     /// Private helper: allocates a pre-filled channel from a fixed-size array of
@@ -506,7 +516,7 @@ impl OutputStream {
     /// producer, and dropping the stream still cancels it.
     pub fn rewrite_produced(
         &mut self,
-        mut rewrite: impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + 'static,
+        mut rewrite: impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + Sync + 'static,
     ) {
         self.rewrite = Some(match self.rewrite.take() {
             None => Box::new(rewrite),
