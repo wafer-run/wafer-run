@@ -1398,3 +1398,56 @@ async fn a_body_failure_after_a_streamed_head_leaves_the_status_committed() {
         "{head}{rest}"
     );
 }
+
+/// A stream still open when `shutdown_grace_secs` runs out is cut with a
+/// reset: on HTTP/1.0 a clean close would read as the whole body.
+#[tokio::test]
+async fn stop_resets_an_open_http10_stream_after_the_grace_period() {
+    let server = Server::start(serde_json::json!({ "shutdown_grace_secs": 1 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /sse-hang HTTP/1.0\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    assert!(head.starts_with("HTTP/1.0 200"), "{head}");
+
+    tokio::time::timeout(Duration::from_secs(5), server.stop())
+        .await
+        .expect("Stop must return once the grace period runs out");
+    let (rest, end) = read_to_end_of_connection(&mut stream, Duration::from_secs(5)).await;
+    assert!(
+        matches!(end, ConnectionEnd::Reset(_)),
+        "a stream cut at the end of the grace period must be reset, not closed: \
+         {end:?} after {head}{rest}"
+    );
+}
+
+/// A stream whose client stops reading is cut after `write_timeout_secs`
+/// with a reset: on HTTP/1.0 a clean close would read as the whole body.
+#[tokio::test]
+async fn a_stalled_http10_stream_is_reset_after_write_timeout() {
+    let server = Server::start(serde_json::json!({ "write_timeout_secs": 1 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /flood HTTP/1.0\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    // Read nothing until the listener has given up on the stalled write.
+    producer_cancelled(
+        &server,
+        Duration::from_secs(10),
+        "the stalled reader's connection was dropped",
+    )
+    .await;
+    let (body, end) = read_to_end_of_connection(&mut stream, Duration::from_secs(10)).await;
+    assert!(
+        body.len() < FLOOD_CHUNKS * FLOOD_CHUNK_BYTES,
+        "the whole body was delivered, so the write never stalled"
+    );
+    assert!(
+        matches!(end, ConnectionEnd::Reset(_)),
+        "a stream cut by the write timeout must be reset, not closed: {end:?} after {} bytes",
+        body.len()
+    );
+}

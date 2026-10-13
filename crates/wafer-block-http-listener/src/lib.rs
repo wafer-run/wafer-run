@@ -25,6 +25,7 @@
 //! router).
 
 use std::{
+    collections::HashMap,
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
@@ -124,9 +125,12 @@ pub fn http_to_message(
 /// `Content-Length`. A close-delimited body has no terminator, so there an
 /// ordinary close would read as the clean end of the whole body; the
 /// `wafer-run/http-listener` block therefore **resets** (TCP RST) every
-/// connection whose streamed body aborted, so the client — or a proxy in
-/// front, such as nginx, which speaks HTTP/1.0 upstream by default — sees an
-/// error on every framing, never a whole response. An embedder serving this
+/// connection it cuts mid-response — a streamed body that aborted, a write
+/// that stalled past `write_timeout_secs`, a response still open when
+/// `shutdown_grace_secs` runs out — so the client, or a proxy in front such
+/// as nginx (which speaks HTTP/1.0 upstream by default), sees an error on
+/// every framing, never a whole response. A response hyper itself refuses
+/// (a `400` for a malformed request head) is not reset, so it is delivered. An embedder serving this
 /// response from its own server gets the abort as hyper's connection error
 /// and must reset an HTTP/1.0 connection itself to keep that guarantee.
 /// A client that goes away drops the body, which cancels the producer.
@@ -148,7 +152,9 @@ async fn render_response(
     }
 }
 
-/// Set when a streamed response body on the connection aborted. The
+/// Set when the listener cuts the connection mid-response: its streamed
+/// response body aborted, a write stalled past `write_timeout_secs`, or the
+/// response was still open when `shutdown_grace_secs` ran out. The
 /// connection's socket ([`WriteStallTimeout`]) then closes with a reset
 /// instead of a FIN: on a close-delimited (HTTP/1.0) body a FIN is the
 /// body's clean end, so only a reset tells the client the body is
@@ -383,11 +389,12 @@ const DEFAULT_BODY_READ_TIMEOUT_SECS: u64 = 120;
 const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
 
 /// Default time a response write may make no progress — 60 s. A client that
-/// stops reading its response is dropped after this, freeing its slot.
+/// stops reading its response is dropped after this, freeing its slot; the
+/// connection is reset, so the cut body never reads as whole.
 const DEFAULT_WRITE_TIMEOUT_SECS: u64 = 60;
 
 /// Default time a stopping listener gives open connections to finish their
-/// in-flight request — 10 s. Connections still open after it are aborted,
+/// in-flight request — 10 s. Connections still open after it are reset,
 /// which is how an open-ended streamed response (SSE) ends at shutdown.
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
 
@@ -750,21 +757,29 @@ async fn serve(
     // the signal to finish its in-flight request and close.
     let (closing_tx, closing_rx) = watch::channel(());
     let mut connections = JoinSet::new();
+    // Each open connection's abort flag, so the grace expiry can mark the
+    // connections it cuts.
+    let mut aborts: HashMap<tokio::task::Id, ConnectionAbort> = HashMap::new();
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
             // Reap finished connection tasks so the set holds only live ones.
-            Some(_) = connections.join_next() => {}
+            Some(finished) = connections.join_next_with_id() => {
+                aborts.remove(&finished_task_id(&finished));
+            }
             accepted = accept_within_cap(&listener, &slots) => match accepted {
                 Ok((stream, peer, slot)) => {
-                    connections.spawn(serve_connection(
+                    let abort = ConnectionAbort::default();
+                    let task = connections.spawn(serve_connection(
                         stream,
                         peer,
                         app.clone(),
                         limits,
                         closing_rx.clone(),
                         slot,
+                        abort.clone(),
                     ));
+                    aborts.insert(task.id(), abort);
                 }
                 Err(e) => handle_accept_error(&e).await,
             },
@@ -773,16 +788,34 @@ async fn serve(
     drop(listener);
     drop(closing_tx);
     let drained = tokio::time::timeout(limits.shutdown_grace, async {
-        while connections.join_next().await.is_some() {}
+        while let Some(finished) = connections.join_next_with_id().await {
+            aborts.remove(&finished_task_id(&finished));
+        }
     })
     .await;
     if drained.is_err() {
         tracing::warn!(
             open = connections.len(),
             grace_secs = limits.shutdown_grace.as_secs(),
-            "wafer-run/http-listener connections still open after shutdown_grace_secs; aborting them"
+            "wafer-run/http-listener connections still open after shutdown_grace_secs; resetting them"
         );
+        // Graceful h1 shutdown has already closed every idle connection, so
+        // each one left is cut mid-response: reset it, or a close-delimited
+        // (HTTP/1.0) body cut here would read as whole.
+        for abort in aborts.values() {
+            abort.mark();
+        }
         connections.shutdown().await;
+    }
+}
+
+/// The task id of a finished connection task, however it finished.
+fn finished_task_id(
+    finished: &Result<(tokio::task::Id, ()), tokio::task::JoinError>,
+) -> tokio::task::Id {
+    match finished {
+        Ok((id, ())) => *id,
+        Err(e) => e.id(),
     }
 }
 
@@ -823,9 +856,10 @@ async fn handle_accept_error(e: &std::io::Error) {
 /// a write, flush or shutdown is blocked on a full socket buffer; any
 /// progress resets it, so a slow but reading client is never cut off.
 ///
-/// It also owns the connection's close: dropped after a streamed response
-/// body aborted ([`ConnectionAbort`]), it resets the connection instead of
-/// closing it cleanly.
+/// It also owns the connection's close: dropped after the listener cut the
+/// connection mid-response ([`ConnectionAbort`] — a stall it timed out
+/// itself among them), it resets the connection instead of closing it
+/// cleanly.
 struct WriteStallTimeout {
     stream: TcpStream,
     timeout: Duration,
@@ -859,10 +893,15 @@ impl WriteStallTimeout {
             .stalled
             .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
         match stalled.as_mut().poll(cx) {
-            Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "response write made no progress within write_timeout_secs",
-            ))),
+            // The listener cuts this connection mid-response: reset it, or a
+            // close-delimited (HTTP/1.0) body cut here would read as whole.
+            Poll::Ready(()) => Poll::Ready(Err({
+                self.abort.mark();
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "response write made no progress within write_timeout_secs",
+                )
+            })),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -947,8 +986,8 @@ async fn serve_connection(
     limits: RequestLimits,
     mut closing: watch::Receiver<()>,
     _slot: OwnedSemaphorePermit,
+    abort: ConnectionAbort,
 ) {
-    let abort = ConnectionAbort::default();
     let request_abort = abort.clone();
     let service = hyper::service::service_fn(move |mut req: hyper::Request<Incoming>| {
         req.extensions_mut()
@@ -1086,7 +1125,8 @@ impl Block for HttpListenerBlock {
             ConfigVar::new(
                 "write_timeout_secs",
                 "Seconds a response write may make no progress (the client is \
-                 not reading) before the connection is dropped. A slow client \
+                 not reading) before the connection is reset (never closed \
+                 cleanly, so the cut body cannot read as whole). A slow client \
                  that keeps reading is not affected, and neither is an idle \
                  stream (an SSE connection waiting for its next event). \
                  1 to 86400.",
@@ -1097,7 +1137,7 @@ impl Block for HttpListenerBlock {
                 "shutdown_grace_secs",
                 "Seconds a stopping listener gives open connections to finish \
                  their in-flight request; connections still open after it are \
-                 aborted, and a streamed response still open (an SSE \
+                 reset, and a streamed response still open (an SSE \
                  subscription) is cut off then, cancelling its producer. Stop \
                  returns once they are gone. 1 to 86400.",
                 &DEFAULT_SHUTDOWN_GRACE_SECS.to_string(),
