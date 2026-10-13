@@ -4,17 +4,23 @@
 
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::Notify,
 };
 use wafer_block::{
-    http_codec::META_HTTP_PATH, meta::META_REQ_CLIENT_IP, Block, InputStream, LifecycleEvent,
-    LifecycleType, Message, MetaEntry, OutputStream,
+    http_codec::{META_HTTP_PATH, META_RESP_CONTENT_LENGTH, META_RESP_STREAM, STREAM_MARKER_VALUE},
+    meta::{META_REQ_CLIENT_IP, META_RESP_CONTENT_TYPE},
+    Block, ErrorCode, InputStream, LifecycleEvent, LifecycleType, Message, MetaEntry, OutputSink,
+    OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -26,6 +32,13 @@ use crate::{
 /// A response body far larger than loopback socket buffers, so a client
 /// that does not read it leaves the server's write blocked.
 const BIG_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Chunks `/flood` offers its client: 64 MiB in all, far more than socket
+/// and hyper buffers hold.
+const FLOOD_CHUNKS: usize = 1_000;
+
+/// Size of each `/flood` chunk.
+const FLOOD_CHUNK_BYTES: usize = 64 * 1024;
 
 /// What `/collect` read from its request body: the length of a whole body,
 /// or the code of the stream's failure.
@@ -40,14 +53,58 @@ type Collected = Result<usize, wafer_block::ErrorCode>;
 /// send beside a valid header, `/owned-headers` with transport-owned headers
 /// and a lower-case `content-type`, `/xff` with the request's
 /// `X-Forwarded-For` header as the message carries it, `/cut-off` with a
-/// producer that sends part of a body and ends without a terminal event;
-/// anything else answers
-/// with the client IP the listener put on the message. Every path except
-/// `/collect` and `/first-chunk` reads the whole body first and ignores how
-/// it ended.
+/// producer that sends part of a body and ends without a terminal event.
+///
+/// Streamed responses (leading meta declaring streaming), each from a
+/// producer that signals [`TestRuntime::cancelled`] when its cancel token
+/// fires: `/sse` sends one event, waits for [`TestRuntime::release`], then
+/// sends a second and completes; `/sse-hang` sends one event and waits to be
+/// cancelled; `/sse-error` sends one event, waits for `release`, then ends
+/// with an `Error`; `/sse-bad-header` declares SSE beside a header no
+/// transport can send and never ends; `/flood` offers [`FLOOD_CHUNKS`] chunks,
+/// counting each one its sink accepted in [`TestRuntime::sent`];
+/// `/length-exact`, `/length-overrun` and `/length-zero` declare a
+/// `resp.content_length` of 5, 5 and 0 and send `abcde`, `abcde` + `fgh` and
+/// `x`.
+///
+/// Anything else answers with the client IP the listener put on the message.
+/// Every path except `/collect` and `/first-chunk` reads the whole body first
+/// and ignores how it ended.
 #[derive(Default)]
 struct TestRuntime {
     collected: parking_lot::Mutex<Vec<Collected>>,
+    /// Lets `/sse` and `/sse-error` go on past their first event.
+    release: Arc<Notify>,
+    /// Notified when a streaming producer's cancel token fires.
+    cancelled: Arc<Notify>,
+    /// Chunks `/flood` has handed to its sink.
+    sent: Arc<AtomicUsize>,
+}
+
+fn meta(key: &str, value: &str) -> MetaEntry {
+    MetaEntry {
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
+/// An SSE producer's head: the content type that declares it streams.
+async fn send_sse_head(sink: &OutputSink) {
+    sink.send_meta(meta(META_RESP_CONTENT_TYPE, "text/event-stream"))
+        .await
+        .expect("send the SSE content type");
+}
+
+/// A download's head: the streaming marker, a content type that would not
+/// stream on its own, and the declared body length.
+async fn send_length_head(sink: &OutputSink, length: &str) {
+    for entry in [
+        meta(META_RESP_STREAM, STREAM_MARKER_VALUE),
+        meta(META_RESP_CONTENT_TYPE, "text/plain"),
+        meta(META_RESP_CONTENT_LENGTH, length),
+    ] {
+        sink.send_meta(entry).await.expect("send the download head");
+    }
 }
 
 #[wafer_async_trait]
@@ -123,6 +180,85 @@ impl wafer_block::Runtime for TestRuntime {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 OutputStream::respond(b"hang done".to_vec())
             }
+            "/sse" => {
+                let release = self.release.clone();
+                OutputStream::from_producer(|sink, _cancel| async move {
+                    send_sse_head(&sink).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    release.notified().await;
+                    let _ = sink.send_chunk(b"data: two\n\n".to_vec()).await;
+                    let _ = sink.complete(Vec::new()).await;
+                })
+            }
+            "/sse-hang" => {
+                let cancelled = self.cancelled.clone();
+                OutputStream::from_producer(|sink, cancel| async move {
+                    send_sse_head(&sink).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    cancel.cancelled().await;
+                    cancelled.notify_one();
+                })
+            }
+            "/sse-error" => {
+                let release = self.release.clone();
+                OutputStream::from_producer(|sink, _cancel| async move {
+                    send_sse_head(&sink).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    release.notified().await;
+                    let _ = sink
+                        .error(WaferError::new(ErrorCode::Internal, "upstream failed"))
+                        .await;
+                })
+            }
+            "/sse-bad-header" => {
+                let cancelled = self.cancelled.clone();
+                OutputStream::from_producer(|sink, cancel| async move {
+                    send_sse_head(&sink).await;
+                    let _ = sink.send_meta(meta("resp.header.X-Bad", "a\nb")).await;
+                    let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+                    cancel.cancelled().await;
+                    cancelled.notify_one();
+                })
+            }
+            "/flood" => {
+                let (sent, cancelled) = (self.sent.clone(), self.cancelled.clone());
+                OutputStream::from_producer(|sink, cancel| async move {
+                    sink.send_meta(meta(META_RESP_CONTENT_TYPE, "application/octet-stream"))
+                        .await
+                        .expect("send the content type");
+                    for _ in 0..FLOOD_CHUNKS {
+                        if sink
+                            .send_chunk(vec![b'x'; FLOOD_CHUNK_BYTES])
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        sent.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if cancel.is_cancelled() {
+                        cancelled.notify_one();
+                    } else {
+                        let _ = sink.complete(Vec::new()).await;
+                    }
+                })
+            }
+            "/length-exact" => OutputStream::from_producer(|sink, _cancel| async move {
+                send_length_head(&sink, "5").await;
+                let _ = sink.send_chunk(b"abcde".to_vec()).await;
+                let _ = sink.complete(Vec::new()).await;
+            }),
+            "/length-overrun" => OutputStream::from_producer(|sink, _cancel| async move {
+                send_length_head(&sink, "5").await;
+                let _ = sink.send_chunk(b"abcde".to_vec()).await;
+                let _ = sink.send_chunk(b"fgh".to_vec()).await;
+                let _ = sink.complete(Vec::new()).await;
+            }),
+            "/length-zero" => OutputStream::from_producer(|sink, _cancel| async move {
+                send_length_head(&sink, "0").await;
+                let _ = sink.send_chunk(b"x".to_vec()).await;
+                let _ = sink.complete(Vec::new()).await;
+            }),
             _ => OutputStream::respond(msg.get_meta(META_REQ_CLIENT_IP).as_bytes().to_vec()),
         }
     }
@@ -233,6 +369,43 @@ async fn read_until_closed(
         Ok(_) => Some(String::from_utf8_lossy(&buf).into_owned()),
         Err(_) => None,
     }
+}
+
+/// Read until `needle` has arrived, or fail after `within` (or on close).
+async fn read_until(
+    stream: &mut (impl AsyncRead + Unpin),
+    needle: &str,
+    within: Duration,
+) -> String {
+    let deadline = Instant::now() + within;
+    let mut got = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    while !String::from_utf8_lossy(&got).contains(needle) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let n = tokio::time::timeout(left, stream.read(&mut buf))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{needle:?} did not arrive within {within:?}; got {:?}",
+                    String::from_utf8_lossy(&got)
+                )
+            })
+            .expect("read");
+        assert!(
+            n > 0,
+            "closed before {needle:?} arrived: {:?}",
+            String::from_utf8_lossy(&got)
+        );
+        got.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8_lossy(&got).into_owned()
+}
+
+/// Wait for a streaming producer to see its cancel token fire.
+async fn producer_cancelled(server: &Server, within: Duration, why: &str) {
+    tokio::time::timeout(within, server.runtime.cancelled.notified())
+        .await
+        .unwrap_or_else(|_| panic!("the producer was not cancelled within {within:?}: {why}"));
 }
 
 /// A trusted proxy that appends its hop as a separate `X-Forwarded-For`
@@ -736,4 +909,316 @@ async fn stop_aborts_connections_left_after_the_grace_period() {
         .await
         .expect("the aborted connection is closed");
     assert!(response.is_empty(), "{response}");
+}
+
+// ---------------------------------------------------------------------------
+// Streamed responses
+// ---------------------------------------------------------------------------
+
+/// An SSE response reaches the client as its producer sends it: the head and
+/// the first event arrive while the producer is still waiting to send the
+/// second, and the body ends with a clean chunked terminator once it
+/// completes.
+#[tokio::test]
+async fn sse_first_event_arrives_before_the_stream_ends() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /sse HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    let lower = head.to_ascii_lowercase();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        lower.contains("\r\ncontent-type: text/event-stream\r\n"),
+        "{head}"
+    );
+    assert!(
+        lower.contains("\r\ntransfer-encoding: chunked\r\n"),
+        "{head}"
+    );
+    assert!(!lower.contains("content-length"), "{head}");
+    assert!(!head.contains("data: two"), "{head}");
+
+    server.runtime.release.notify_one();
+    let rest = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("the stream ends once its producer completes");
+    assert!(rest.contains("data: two"), "{rest}");
+    assert!(rest.ends_with("\r\n0\r\n\r\n"), "{rest}");
+}
+
+/// A client that goes away in the middle of a stream cancels its producer,
+/// even one that is idle between events.
+#[tokio::test]
+async fn client_disconnect_mid_stream_cancels_the_producer() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /sse-hang HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    drop(stream);
+    producer_cancelled(
+        &server,
+        Duration::from_secs(2),
+        "the client disconnected mid-stream",
+    )
+    .await;
+}
+
+/// A client that stops reading holds the producer back: the producer blocks
+/// once the bounded output channel and the socket buffers are full, instead
+/// of being drained into memory. Once the client goes away it is cancelled.
+#[tokio::test]
+async fn a_slow_reader_backpressures_the_producer() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /flood HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    read_until(&mut stream, "\r\n\r\n", Duration::from_secs(2)).await;
+
+    // Stop reading and let the buffers between the producer and the client
+    // fill.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let settled = server.runtime.sent.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let later = server.runtime.sent.load(Ordering::SeqCst);
+    assert_eq!(
+        settled, later,
+        "the producer kept sending to a client that reads nothing"
+    );
+    assert!(
+        later < FLOOD_CHUNKS / 4,
+        "{later} of {FLOOD_CHUNKS} chunks were accepted from a producer whose client reads nothing"
+    );
+
+    drop(stream);
+    producer_cancelled(
+        &server,
+        Duration::from_secs(5),
+        "the client of a stalled stream went away",
+    )
+    .await;
+}
+
+/// A producer error after the head aborts the response: the connection is
+/// closed without the chunked terminator, so the client can tell the body is
+/// truncated, never a clean end on a kept-alive connection.
+#[tokio::test]
+async fn an_error_after_the_head_aborts_the_body() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    // Keep-alive: a clean end would leave the connection open.
+    stream
+        .write_all(b"GET /sse-error HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    server.runtime.release.notify_one();
+    let rest = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("the server must close a connection whose streamed body failed");
+    let whole = format!("{head}{rest}");
+    assert!(!whole.contains("\r\n0\r\n\r\n"), "{whole}");
+}
+
+/// A body that runs past its declared length on a chunk boundary is aborted,
+/// never sent as a whole response holding the first 5 bytes on a kept-alive
+/// connection.
+#[tokio::test]
+async fn a_body_overrunning_its_declared_length_on_a_chunk_boundary_is_aborted() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    // Keep-alive: a clean end would leave the connection open.
+    stream
+        .write_all(b"GET /length-overrun HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("the server must close a connection whose body overran its length");
+    assert!(!response.contains("abcde"), "{response}");
+}
+
+/// A body of exactly its declared length is sent with that `Content-Length`
+/// (not chunked) and ends cleanly: the connection serves the next request.
+/// (A buffering listener passes this too; it is the control for the overrun
+/// test above, proving the length check aborts only a body that is wrong.)
+#[tokio::test]
+async fn a_body_of_its_declared_length_is_sent_with_its_content_length() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /length-exact HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until(&mut stream, "\r\n\r\nabcde", Duration::from_secs(2)).await;
+    let lower = response.to_ascii_lowercase();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(lower.contains("\r\ncontent-length: 5\r\n"), "{response}");
+    assert!(
+        lower.contains("\r\ncontent-type: text/plain\r\n"),
+        "{response}"
+    );
+    assert!(!lower.contains("transfer-encoding"), "{response}");
+    assert!(response.ends_with("\r\n\r\nabcde"), "{response}");
+
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let next = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("the kept-alive connection answers the next request");
+    assert!(next.starts_with("HTTP/1.1 200"), "{next}");
+    assert!(next.ends_with("127.0.0.1"), "{next}");
+}
+
+/// A streamed response whose head cannot be sent is a uniform 500 before
+/// any of it goes out, and its producer is cancelled: an SSE stream beside an
+/// unsendable header (whose producer never ends, so collecting it first would
+/// never answer), and a body under a declared length of 0.
+#[tokio::test]
+async fn a_streamed_response_refused_at_its_head_is_a_500() {
+    let server = Server::start(serde_json::json!({})).await;
+    for path in ["/sse-bad-header", "/length-zero"] {
+        let mut stream = server.connect().await;
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let response = read_until_closed(&mut stream, Duration::from_secs(5))
+            .await
+            .unwrap_or_else(|| panic!("{path} must be answered"));
+        let lower = response.to_ascii_lowercase();
+        assert!(response.starts_with("HTTP/1.1 500"), "{path}: {response}");
+        assert!(
+            lower.contains("\r\ncache-control: no-store\r\n"),
+            "{path}: {response}"
+        );
+        assert!(!lower.contains("x-bad"), "{path}: {response}");
+        assert!(!response.contains("data: one"), "{path}: {response}");
+    }
+    producer_cancelled(
+        &server,
+        Duration::from_secs(2),
+        "the SSE stream was refused at its head",
+    )
+    .await;
+}
+
+/// `HEAD` on a streamed route answers the head without a body and cancels
+/// the producer; a declared length is the `Content-Length` it reports.
+#[tokio::test]
+async fn head_on_a_streamed_route_sends_the_head_and_cancels_the_producer() {
+    let server = Server::start(serde_json::json!({})).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"HEAD /sse-hang HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until(&mut stream, "\r\n\r\n", Duration::from_secs(2)).await;
+    let lower = head.to_ascii_lowercase();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        lower.contains("\r\ncontent-type: text/event-stream\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.ends_with("\r\n\r\n"),
+        "a HEAD answer has no body: {head}"
+    );
+    producer_cancelled(
+        &server,
+        Duration::from_secs(2),
+        "a HEAD answer sends no body",
+    )
+    .await;
+
+    stream
+        .write_all(b"HEAD /length-exact HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let head = read_until_closed(&mut stream, Duration::from_secs(5))
+        .await
+        .expect("the HEAD answer arrives and the connection closes");
+    let lower = head.to_ascii_lowercase();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(lower.contains("\r\ncontent-length: 5\r\n"), "{head}");
+    assert!(
+        head.ends_with("\r\n\r\n"),
+        "a HEAD answer has no body: {head}"
+    );
+}
+
+/// A client that stops reading a stream is dropped once its write makes no
+/// progress for `write_timeout_secs`, freeing its connection slot and
+/// cancelling the producer (a buffering listener frees the slot too, but only
+/// after the producer has run to its end).
+#[tokio::test]
+async fn a_stream_whose_client_stops_reading_is_dropped_after_write_timeout() {
+    let server = Server::start(serde_json::json!({
+        "write_timeout_secs": 1,
+        "max_connections": 1,
+    }))
+    .await;
+    let mut stalled = server.connect().await;
+    stalled
+        .write_all(b"GET /flood HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let mut next = server.connect().await;
+    next.write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let response = read_until_closed(&mut next, Duration::from_secs(10))
+        .await
+        .expect("the stalled reader's slot must be freed by the write timeout");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    producer_cancelled(
+        &server,
+        Duration::from_secs(5),
+        "the stalled reader's connection was dropped",
+    )
+    .await;
+    drop(stalled);
+}
+
+/// `Stop` gives an open stream the grace period, then cuts it off and
+/// cancels its producer.
+#[tokio::test]
+async fn stop_aborts_an_open_stream_after_the_grace_period() {
+    let server = Server::start(serde_json::json!({ "shutdown_grace_secs": 1 })).await;
+    let mut stream = server.connect().await;
+    stream
+        .write_all(b"GET /sse-hang HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .unwrap();
+    read_until(&mut stream, "data: one", Duration::from_secs(2)).await;
+
+    let stopping = Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), server.stop())
+        .await
+        .expect("Stop must return once the grace period runs out");
+    assert!(
+        stopping.elapsed() >= Duration::from_millis(900),
+        "Stop returned before the grace period: {:?}",
+        stopping.elapsed()
+    );
+    producer_cancelled(&server, Duration::from_secs(2), "the listener stopped").await;
+    let rest = read_until_closed(&mut stream, Duration::from_secs(2))
+        .await
+        .expect("the aborted stream's connection is closed");
+    assert!(!rest.contains("\r\n0\r\n\r\n"), "{rest}");
 }

@@ -4,6 +4,47 @@
 
 ### Breaking changes
 
+- The native HTTP listener (`wafer-run/http-listener`, and
+  `wafer_block_http_listener::wafer_output_to_response` for embedders)
+  streams a response whose leading meta declares streaming
+  (`http_codec::declares_streaming`: `text/event-stream`,
+  `application/octet-stream`, or the `resp.stream` marker) instead of
+  collecting it first. It goes through `http_codec::open_response`: the
+  status and headers go out with the producer's first chunk, and each chunk
+  after it as the producer sends it. Every other response is collected and
+  sent whole, byte for byte as before. What changes for a streamed response:
+  - Framing is `Content-Length` when the producer declared
+    `resp.content_length`, and chunked otherwise; it used to be the
+    collected body's `Content-Length`.
+  - Backpressure reaches the producer: a client that reads slowly blocks
+    the producer's `send_chunk` instead of the body being held in memory,
+    and `write_timeout_secs` still drops a client that stops reading. A
+    client that disconnects, a `HEAD` request (answered with the head
+    alone), and a listener that stops all drop the body, which cancels the
+    producer.
+  - The status is committed with the head. A producer that ends without a
+    clean `Complete` (an `Error`, no terminal, a body that contradicts its
+    declared length) no longer turns into a `500`: the connection is closed
+    without the chunked terminator, or short of the `Content-Length`, so the
+    client sees a truncated body. A request-body failure (`max_body_bytes`,
+    `body_read_timeout_secs`, an unreadable body) after the head can no
+    longer turn the response into a `413`/`408`/`400`; the block still
+    reads it as an `Err` from its input.
+  - A streamed response with leading meta no transport can send, or a body
+    byte under a declared `resp.content_length` of `0`, is the uniform
+    `500` before any header goes out, and its producer is cancelled — also
+    for an open-ended SSE stream that a collecting listener would never
+    have answered.
+  - A long-lived stream holds its connection for as long as it is open: an
+    SSE client takes one of the `max_connections` slots (default 1024) for
+    its whole subscription, and a stopping listener cuts it off when
+    `shutdown_grace_secs` runs out. `write_timeout_secs` does not cut an
+    idle stream, only a blocked write.
+  - A block dispatched directly (not through a flow) that streams before
+    reading its request body learns that its client disconnected only when
+    its next chunk cannot be written; hyper watches for the disconnect once
+    the request body has been read to its end, which a flow always does.
+
 - `VectorError`, `LlmError` and `ImageError` have a new variant,
   `EngineUnavailable(String)`: the engine that runs the model cannot take
   the request now, for a reason the caller can act on (a browser runtime
@@ -1814,8 +1855,8 @@
   `application/octet-stream` (`DEFAULT_STREAMED_CONTENT_TYPE`).
   `terminal_to_http_response` renders a terminal the caller collected
   itself (under a byte cap, say) exactly as `collect_http_response` does.
-  No transport uses `open_response` yet; nothing here changes how a
-  response is served.
+  The native HTTP listener serves every response through `open_response`
+  (see Breaking changes).
 
 - `OutputStream::rewrite_produced(f)` rewrites every event read from the
   producer from then on — `f` returns the event to yield in its place, or
