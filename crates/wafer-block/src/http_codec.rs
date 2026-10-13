@@ -906,11 +906,18 @@ pub const STREAM_MARKER_VALUE: &str = "1";
 /// streams, where it becomes [`StreamedHttpResponse::content_length`]: a
 /// transport frames the body with that `Content-Length` instead of chunked
 /// encoding, so a client sees the size (a download's progress bar, a `HEAD`
-/// answer). The [`StreamedBody`] enforces it, so a transport needs no
-/// counter of its own: a chunk that would overrun the length is an `Err`
-/// item in its place, and a body that ends short of it ends in an `Err`;
-/// either way the transport aborts the response rather than ending it as if
-/// whole.
+/// answer). [`open_response`] and the [`StreamedBody`] enforce it, so a
+/// transport that sends `Content-Length` and the body's `Ok` items, and
+/// aborts on an `Err`, needs no counter of its own — even one that stops
+/// polling the body once the length is met (hyper does):
+/// - a declared `0` with body bytes, or a first chunk already longer than
+///   the length, is answered with the 500 at head time;
+/// - a chunk that would overrun the length is an `Err` in its place;
+/// - the chunk that completes the length is held until the producer's
+///   terminal: on `Complete` it is yielded, and if more body bytes come
+///   first it becomes an `Err`, so the overrun is never a clean, truncated
+///   response;
+/// - a body that ends short of the length ends in an `Err`.
 ///
 /// It is **never** a header: [`classify_response_meta`] does not recognize
 /// the key (`Content-Length` itself is transport-owned and refused as a
@@ -1049,7 +1056,11 @@ pub struct StreamedHttpResponse {
 /// - With a declared [`StreamedHttpResponse::content_length`], a chunk that
 ///   would overrun it is an `Err` in its place, and a `Complete` that comes
 ///   short of it is an `Err`: the transport aborts rather than sending more,
-///   or fewer, bytes than its `Content-Length` promised.
+///   or fewer, bytes than its `Content-Length` promised. The chunk that
+///   completes the length is held back until the terminal (skipping `Meta`
+///   and empty chunks): a transport may never poll again once the length is
+///   met, so that chunk is yielded only on `Complete`, and is replaced by an
+///   `Err` when more body bytes follow it.
 ///
 /// Nothing follows the final item.
 pub struct StreamedBody {
@@ -1057,6 +1068,9 @@ pub struct StreamedBody {
     output: Option<OutputStream>,
     /// Bytes still owed under a declared content length.
     remaining: Option<u64>,
+    /// The chunk that completed the declared length, held until the terminal
+    /// shows nothing follows it.
+    held: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for StreamedBody {
@@ -1070,25 +1084,28 @@ impl std::fmt::Debug for StreamedBody {
 impl Stream for StreamedBody {
     type Item = Result<Vec<u8>, WaferError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(output) = self.output.as_mut() else {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let Some(output) = this.output.as_mut() else {
             return Poll::Ready(None);
         };
         let ending = loop {
             match futures::ready!(Pin::new(&mut *output).poll_next(cx)) {
-                Some(StreamEvent::Chunk(bytes)) => match self.remaining {
+                Some(StreamEvent::Chunk(bytes)) => match this.remaining {
                     None => return Poll::Ready(Some(Ok(bytes))),
+                    // An empty chunk changes nothing, before or after the
+                    // length is met.
+                    Some(_) if bytes.is_empty() => {}
                     Some(remaining) => match remaining.checked_sub(bytes.len() as u64) {
+                        Some(0) => {
+                            this.remaining = Some(0);
+                            this.held = Some(bytes);
+                        }
                         Some(left) => {
-                            self.remaining = Some(left);
+                            this.remaining = Some(left);
                             return Poll::Ready(Some(Ok(bytes)));
                         }
-                        None => {
-                            break Some(WaferError::new(
-                                ErrorCode::Internal,
-                                "the streamed body overran its declared content length",
-                            ))
-                        }
+                        None => break Some(overrun_error()),
                     },
                 },
                 Some(StreamEvent::Meta(entry)) => {
@@ -1105,7 +1122,12 @@ impl Stream for StreamedBody {
                              the head was sent; dropped"
                         );
                     }
-                    match self.remaining {
+                    if let Some(last) = this.held.take() {
+                        // Nothing followed the chunk that met the length.
+                        this.output = None;
+                        return Poll::Ready(Some(Ok(last)));
+                    }
+                    match this.remaining {
                         Some(short) if short > 0 => {
                             break Some(WaferError::new(
                                 ErrorCode::Internal,
@@ -1142,7 +1164,7 @@ impl Stream for StreamedBody {
         };
         // Ended: drop the stream now (its producer is done, or is cancelled
         // by the drop), so nothing is read after the final item.
-        self.output = None;
+        this.output = None;
         Poll::Ready(ending.map(Err))
     }
 }
@@ -1182,6 +1204,18 @@ pub async fn open_response(mut output: OutputStream) -> OpenedResponse {
         Ok(head) => head,
         Err(invalid) => return OpenedResponse::Buffered(unsendable_stream(&meta, &invalid)),
     };
+    if let Some(declared) = content_length {
+        match check_declared_length(&mut output, declared).await {
+            DeclaredLength::Fits => {}
+            DeclaredLength::Exceeded(invalid) => {
+                return OpenedResponse::Buffered(unsendable_stream(&meta, &invalid))
+            }
+            DeclaredLength::NoBody => {
+                output.prepend(meta.into_iter().map(StreamEvent::Meta));
+                return OpenedResponse::Buffered(output);
+            }
+        }
+    }
     if !headers.iter().any(|(name, _)| name == "Content-Type") {
         headers.push((
             "Content-Type".to_string(),
@@ -1195,6 +1229,7 @@ pub async fn open_response(mut output: OutputStream) -> OpenedResponse {
         body: StreamedBody {
             output: Some(output),
             remaining: content_length,
+            held: None,
         },
     })
 }
@@ -1213,6 +1248,75 @@ fn content_length(meta: &[MetaEntry]) -> Result<Option<u64>, InvalidResponseMeta
         .parse::<u64>()
         .map(Some)
         .map_err(|_| content_length_invalid())
+}
+
+/// What [`check_declared_length`] found before the head.
+enum DeclaredLength {
+    /// Nothing contradicts the declared length yet; [`StreamedBody`] checks
+    /// the rest.
+    Fits,
+    /// A first chunk already longer than the declared length, or a body byte
+    /// under a declared `0`: answered with the 500 at head time.
+    Exceeded(InvalidResponseMeta),
+    /// A declared `0` whose stream ends in something other than `Complete`
+    /// (an `Error`, a `Halt`, no terminal): there is no body to stream, so
+    /// the response renders buffered, as any declared stream that ends
+    /// before its body does.
+    NoBody,
+}
+
+/// Check the contradictions between a declared content length and the body
+/// that are known before the head is committed. `output` is positioned on
+/// its first chunk.
+///
+/// A declared `0` is checked to the terminal now, because a transport never
+/// polls a zero-length body: empty chunks are consumed, `Meta` events are
+/// kept in place, and the stream is left on the terminal.
+async fn check_declared_length(output: &mut OutputStream, declared: u64) -> DeclaredLength {
+    use futures::StreamExt;
+    if declared > 0 {
+        return match output.peek().await {
+            Some(StreamEvent::Chunk(first)) if first.len() as u64 > declared => {
+                DeclaredLength::Exceeded(body_exceeds_content_length())
+            }
+            _ => DeclaredLength::Fits,
+        };
+    }
+    let mut skipped_meta = Vec::new();
+    let found = loop {
+        match output.peek().await {
+            Some(StreamEvent::Chunk(bytes)) if bytes.is_empty() => {
+                output.next().await;
+            }
+            Some(StreamEvent::Meta(_)) => {
+                if let Some(event) = output.next().await {
+                    skipped_meta.push(event);
+                }
+            }
+            Some(StreamEvent::Chunk(_)) => {
+                break DeclaredLength::Exceeded(body_exceeds_content_length())
+            }
+            Some(StreamEvent::Complete { .. }) => break DeclaredLength::Fits,
+            _ => break DeclaredLength::NoBody,
+        }
+    };
+    output.prepend(skipped_meta);
+    found
+}
+
+fn body_exceeds_content_length() -> InvalidResponseMeta {
+    InvalidResponseMeta {
+        key: META_RESP_CONTENT_LENGTH.to_string(),
+        reason: "the body is longer than its declared content length",
+        kind: InvalidResponseMetaKind::Unsendable,
+    }
+}
+
+fn overrun_error() -> WaferError {
+    WaferError::new(
+        ErrorCode::Internal,
+        "the streamed body overran its declared content length",
+    )
 }
 
 fn content_length_invalid() -> InvalidResponseMeta {
@@ -2615,6 +2719,153 @@ mod tests {
         assert_eq!(items.len(), 2, "{items:?}");
         assert_eq!(items[0].as_deref().ok(), Some(&b"abc"[..]));
         assert!(items[1].is_err(), "the overrunning chunk is not sent");
+    }
+
+    fn declared_length_events(declared: &str, rest: Vec<StreamEvent>) -> Vec<StreamEvent> {
+        let mut events = vec![
+            StreamEvent::Meta(marker()),
+            StreamEvent::Meta(entry(META_RESP_CONTENT_LENGTH, declared)),
+        ];
+        events.extend(rest);
+        events
+    }
+
+    async fn declared_length_body(
+        declared: &str,
+        rest: Vec<StreamEvent>,
+    ) -> Vec<Result<Vec<u8>, WaferError>> {
+        let opened = open_response(events_stream(declared_length_events(declared, rest))).await;
+        body_items(streamed(opened).body).await
+    }
+
+    /// The chunk that meets the declared length exactly is held until the
+    /// terminal: when more bytes follow it, it is replaced by an `Err`. A
+    /// transport that stops polling once the length is met (hyper) would
+    /// otherwise send it and end a truncated body cleanly.
+    #[tokio::test]
+    async fn an_overrun_starting_on_a_chunk_boundary_is_an_err_in_place_of_the_last_chunk() {
+        let items =
+            declared_length_body("5", vec![chunk(b"abcde"), chunk(b"fgh"), complete()]).await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            items[0].is_err(),
+            "the chunk meeting the length is never sent"
+        );
+
+        let items = declared_length_body(
+            "5",
+            vec![chunk(b"ab"), chunk(b"cde"), chunk(b"fg"), complete()],
+        )
+        .await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].as_deref().ok(), Some(&b"ab"[..]));
+        assert!(items[1].is_err());
+    }
+
+    #[tokio::test]
+    async fn the_chunk_meeting_the_declared_length_is_yielded_on_complete() {
+        let items = declared_length_body("5", vec![chunk(b"abcde"), complete()]).await;
+        let items: Vec<Vec<u8>> = items.into_iter().map(Result::unwrap).collect();
+        assert_eq!(items, vec![b"abcde".to_vec()]);
+
+        // Meta and empty chunks between it and the terminal change nothing.
+        let items = declared_length_body(
+            "5",
+            vec![
+                chunk(b"abcde"),
+                chunk(b""),
+                StreamEvent::Meta(entry("resp.header.X-Late", "1")),
+                complete(),
+            ],
+        )
+        .await;
+        let items: Vec<Vec<u8>> = items.into_iter().map(Result::unwrap).collect();
+        assert_eq!(items, vec![b"abcde".to_vec()]);
+    }
+
+    /// While the producer has not sent its terminal, the chunk that met the
+    /// length is not yielded.
+    #[tokio::test]
+    async fn the_chunk_meeting_the_declared_length_waits_for_the_terminal() {
+        use futures::{FutureExt, StreamExt};
+        let (stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_meta(marker()).await.unwrap();
+        sink.send_meta(entry(META_RESP_CONTENT_LENGTH, "5"))
+            .await
+            .unwrap();
+        sink.send_chunk(b"abcde".to_vec()).await.unwrap();
+        let mut body = streamed(open_live(stream).await).body;
+        assert!(
+            body.next().now_or_never().is_none(),
+            "held until the producer's terminal"
+        );
+        sink.complete(vec![]).await.unwrap();
+        assert_eq!(body.next().await.unwrap().unwrap(), b"abcde");
+        assert!(body.next().await.is_none());
+    }
+
+    /// Contradictions known before the head — any body byte under a declared
+    /// `0`, a first chunk already longer than the declared length — are
+    /// answered with the 500 at once, and the producer is cancelled.
+    #[tokio::test]
+    async fn a_body_contradicting_its_declared_length_at_head_is_a_500() {
+        for (declared, events) in [
+            ("0", vec![chunk(b"x")]),
+            (
+                "0",
+                vec![chunk(b""), StreamEvent::Meta(entry("m", "1")), chunk(b"x")],
+            ),
+            ("3", vec![chunk(b"abcde")]),
+        ] {
+            let (stream, sink, cancel) = OutputStream::new_streaming();
+            let leading = vec![marker(), entry(META_RESP_CONTENT_LENGTH, declared)];
+            for entry in &leading {
+                sink.send_meta(entry.clone()).await.unwrap();
+            }
+            for event in events {
+                match event {
+                    StreamEvent::Chunk(bytes) => sink.send_chunk(bytes).await.unwrap(),
+                    StreamEvent::Meta(entry) => sink.send_meta(entry).await.unwrap(),
+                    _ => unreachable!(),
+                }
+            }
+            let opened = buffered(open_live(stream).await);
+            assert!(cancel.is_cancelled(), "declared {declared}");
+            assert_eq!(
+                collect_http_response(opened).await,
+                unsendable_response(&leading, &body_exceeds_content_length()),
+                "declared {declared}"
+            );
+            drop(sink);
+        }
+    }
+
+    /// A declared `0` with no body bytes streams an empty body that ends
+    /// cleanly; one that ends in an error before any byte renders buffered,
+    /// as any declared stream that ends before its body does.
+    #[tokio::test]
+    async fn a_declared_zero_length_is_checked_to_the_terminal() {
+        let items = declared_length_body(
+            "0",
+            vec![
+                chunk(b""),
+                StreamEvent::Meta(entry("resp.header.X-Late", "1")),
+                complete(),
+            ],
+        )
+        .await;
+        assert!(items.is_empty(), "{items:?}");
+
+        let opened = open_response(events_stream(declared_length_events(
+            "0",
+            vec![
+                chunk(b""),
+                StreamEvent::Error(Box::new(WaferError::new(ErrorCode::NotFound, "gone"))),
+            ],
+        )))
+        .await;
+        let parts = collect_http_response(buffered(opened)).await;
+        assert_eq!(parts.status, 404);
     }
 
     #[tokio::test]

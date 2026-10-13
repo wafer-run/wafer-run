@@ -1752,9 +1752,14 @@
   producer that knows its body's length declares it in the leading meta, and
   it becomes `StreamedHttpResponse::content_length`, so a transport can send
   `Content-Length` instead of chunked framing; like the marker it is never a
-  header. `StreamedBody` enforces it — a chunk that would overrun it is an
-  `Err` in its place, a body that ends short of it ends in an `Err` — so no
-  transport counts bytes itself. A streamed response without a content type is
+  header. `open_response` and `StreamedBody` enforce it, so a transport that
+  sends the `Ok` items and aborts on an `Err` counts no bytes itself — even
+  one that stops polling the body once the length is met, as hyper does: a
+  body byte under a declared `0`, or a first chunk already longer than the
+  length, is the 500 at head time; a chunk that would overrun it is an `Err`
+  in its place; the chunk that meets it is held until the terminal, and
+  replaced by an `Err` if more bytes follow; a body that ends short of it
+  ends in an `Err`. A streamed response without a content type is
   `application/octet-stream` (`DEFAULT_STREAMED_CONTENT_TYPE`).
   `terminal_to_http_response` renders a terminal the caller collected
   itself (under a byte cap, say) exactly as `collect_http_response` does.
