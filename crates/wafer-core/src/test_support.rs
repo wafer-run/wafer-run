@@ -57,3 +57,96 @@ impl Context for NoopContext {
 pub fn noop_context() -> Box<dyn Context> {
     Box::new(NoopContext)
 }
+
+/// A [`Context`] that admits every resource access and answers nothing else.
+/// For handler tests whose subject is what happens after authorization.
+#[derive(Clone)]
+struct AdmitAllContext;
+
+#[async_trait::async_trait]
+impl Context for AdmitAllContext {
+    async fn call_block(
+        &self,
+        block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        panic!("AdmitAllContext::call_block called unexpectedly: block_name={block_name}");
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        std::sync::Arc::new(self.clone())
+    }
+
+    fn check_resource_access(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_block::types::ResourceType,
+        _access: wafer_block::types::ResourceAccess,
+    ) -> Result<(), wafer_block::WaferError> {
+        Ok(())
+    }
+
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_block::types::ResourceType,
+        _access: wafer_block::types::ResourceAccess,
+    ) -> bool {
+        true
+    }
+}
+
+/// Construct a [`Context`] that admits every resource access.
+pub fn admit_all_context() -> Box<dyn Context> {
+    Box::new(AdmitAllContext)
+}
+
+/// A service stream that never yields and ignores its cancellation token —
+/// the worst case a relay must still let go of — and reports when it is
+/// dropped.
+pub struct Silent<T> {
+    dropped: Option<futures::channel::oneshot::Sender<()>>,
+    _item: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Silent<T> {
+    /// The stream, and the receiver its drop resolves.
+    pub fn new() -> (Self, futures::channel::oneshot::Receiver<()>) {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        (
+            Self {
+                dropped: Some(tx),
+                _item: std::marker::PhantomData,
+            },
+            rx,
+        )
+    }
+}
+
+impl<T> futures::Stream for Silent<T> {
+    type Item = T;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<T>> {
+        std::task::Poll::Pending
+    }
+}
+
+impl<T> Drop for Silent<T> {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.dropped.take() {
+            let _ = dropped.send(());
+        }
+    }
+}

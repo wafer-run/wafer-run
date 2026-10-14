@@ -7,7 +7,10 @@
 //! op (`load_model`) produces a `from_producer` stream: each service chunk is
 //! codec-encoded (MessagePack) and emitted as its own `Chunk` event, and
 //! cancellation from the consumer is forwarded straight through to the
-//! service's cancel token.
+//! service's cancel token. The relay does not rely on the service honouring
+//! it: it races each read of the service's stream against the same token and
+//! drops the stream when the consumer is gone
+//! ([`handler_util::next_unless_cancelled`](crate::interfaces::handler_util::next_unless_cancelled)).
 //!
 //! The service trait operates directly on the `wafer_block::wire::image`
 //! types (re-exported from `super::service`), so request/response values pass
@@ -15,7 +18,6 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
@@ -27,7 +29,9 @@ use wafer_block::{
 };
 
 use super::service::{ImageError, ImageService};
-use crate::interfaces::handler_util::{decode_and_authorize_model, to_output};
+use crate::interfaces::handler_util::{
+    cancelled, decode_and_authorize_model, next_unless_cancelled, to_output, Relayed,
+};
 
 /// Decode an `image.*` request that names a model and authorize the caller
 /// for `access` to that model in `block`'s namespace.
@@ -241,8 +245,16 @@ fn load_model(
     // The producer closure must be `'static`; clone the `Arc` into it.
     let service = Arc::clone(service);
     OutputStream::from_producer(move |sink, cancel| async move {
-        let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel);
-        while let Some(item) = stream.next().await {
+        let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel.clone());
+        loop {
+            let item = match next_unless_cancelled(&cancel, &mut stream).await {
+                Relayed::Item(item) => item,
+                Relayed::Ended => break,
+                Relayed::Cancelled => {
+                    cancelled(sink, "image.load_model").await;
+                    return;
+                }
+            };
             let progress = match item {
                 Ok(p) => p,
                 Err(e) => {
@@ -277,7 +289,10 @@ fn load_model(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::test_support::{admit_all_context, Silent};
 
     /// A provider that cannot be reached is unavailable (a 503 at the HTTP
     /// edge), not an internal fault, and the provider client's text (which
@@ -300,5 +315,88 @@ mod tests {
         ));
         assert_eq!(code, ErrorCode::Unavailable);
         assert_eq!(msg, "no open page has the model 'm' loaded — load it first");
+    }
+
+    struct Stuck(std::sync::Mutex<Option<Silent<Result<wire::LoadProgress, ImageError>>>>);
+
+    #[wafer_block::wafer_async_trait]
+    impl ImageService for Stuck {
+        async fn generate(
+            &self,
+            _req: wire::ImageRequest,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<wire::ImageResponse, ImageError> {
+            Err(ImageError::NotSupported)
+        }
+        async fn list_models(&self) -> Result<Vec<wire::ModelInfo>, ImageError> {
+            Ok(Vec::new())
+        }
+        async fn status(&self, _: &str, _: &str) -> Result<wire::ModelStatus, ImageError> {
+            Ok(wire::ModelStatus::ready())
+        }
+        fn load_model(
+            &self,
+            _backend_id: &str,
+            _model_id: &str,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> futures::stream::BoxStream<'static, Result<wire::LoadProgress, ImageError>> {
+            Box::pin(self.0.lock().unwrap().take().expect("one load"))
+        }
+    }
+
+    /// A load against a service whose stream never yields and ignores its
+    /// token, and the receiver that stream's drop resolves.
+    async fn stuck_load() -> (OutputStream, futures::channel::oneshot::Receiver<()>) {
+        let (load, load_dropped) = Silent::new();
+        let service: Arc<dyn ImageService> = Arc::new(Stuck(std::sync::Mutex::new(Some(load))));
+        let ctx = admit_all_context();
+        let out = handle_message(
+            &service,
+            ctx.as_ref(),
+            "wafer-run/image",
+            &Message::new(ServiceOp::IMAGE_LOAD_MODEL),
+            &codec::encode(&wire::LoadModelRequest {
+                backend_id: "b".into(),
+                model_id: "m".into(),
+            })
+            .expect("encode"),
+        )
+        .await;
+        (out, load_dropped)
+    }
+
+    /// A load relay whose consumer is gone lets go of the service's stream
+    /// even when the service ignores its token and never yields; see the
+    /// llm handler's test of the same name.
+    #[tokio::test]
+    async fn a_dropped_output_releases_a_silent_service_stream() {
+        let (out, load_dropped) = stuck_load().await;
+
+        drop(out);
+
+        tokio::time::timeout(Duration::from_secs(5), load_dropped)
+            .await
+            .expect("the load relay lets go of the service's stream")
+            .expect("the drop is reported");
+    }
+
+    /// A load cancelled through its token while a consumer still reads it
+    /// ends in an error, not in an empty `Complete`.
+    #[tokio::test]
+    async fn a_cancelled_relay_does_not_report_complete() {
+        use wafer_block::stream::StreamEvent;
+
+        let (mut out, _load_dropped) = stuck_load().await;
+
+        out.cancel_token().cancel();
+
+        let ending =
+            tokio::time::timeout(Duration::from_secs(5), futures::StreamExt::next(&mut out))
+                .await
+                .expect("the cancelled stream ends");
+        assert!(
+            matches!(&ending, Some(StreamEvent::Error(e)) if e.code == ErrorCode::Cancelled),
+            "a cancelled relay ends in a Cancelled error, got {ending:?}"
+        );
     }
 }

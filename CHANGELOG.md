@@ -2414,6 +2414,25 @@
 
 ### Fixed
 
+- The `llm.chat`, `llm.load_model` and `image.load_model` handlers stop
+  reading the service once their output is cancelled (dropped, or cancelled
+  through `OutputStream::cancel_token`), instead of waiting on its next item.
+  For `llm.chat` this covers the `chat_stream` setup await too. The service
+  is still handed the cancellation token, but a service that ignores it, or
+  is silent when it fires (a model thinking, a load between milestones), no
+  longer keeps the relay task and its stream alive until it next yields.
+  - A cancelled relay ends its stream with an `ErrorCode::Cancelled` error
+    (`"llm.chat: cancelled"`, `"llm.load_model: cancelled"`,
+    `"image.load_model: cancelled"`), whether the service honours the token
+    or not. Before, that code reached the caller only when the service ended
+    its own stream with `LlmError::Cancelled`. A cancel never reads as a
+    successful empty `Complete`, nor as the `Internal` "no terminal" fault a
+    dropped sink reports.
+  - For `LlmService` and `ImageService` implementers: once `cancel` fires,
+    the relay drops the service's stream (and `chat_stream`'s future) unread.
+    Cleanup on cancel belongs in a task that watches the token, or in
+    `Drop`, not after `cancelled().await` inside the stream body.
+
 - `wafer_core::mime` declares `charset=utf-8` on every textual type. `svg`
   is now `image/svg+xml; charset=utf-8` and `map` is
   `application/json; charset=utf-8`; `rs` and `toml` are now
