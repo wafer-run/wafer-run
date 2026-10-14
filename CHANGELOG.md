@@ -4,6 +4,24 @@
 
 ### Breaking changes
 
+- Every `AuthService` method that does work takes the `ctx` of the call it
+  serves, after `&self`: `require_user(ctx, msg)`,
+  `require_token(ctx, msg, scope)`, `require_role(ctx, msg, role)`,
+  `verify_org_admin(ctx, user, provider, org_ref)` and
+  `user_profile(ctx, user)`. The auth handler passes the auth block's own
+  frame for the message, so a service reaches the database or another
+  block through it, bound by the request's deadline and cancellation, with
+  `wafer-run/auth` as the caller. `init` and `grants` are unchanged, and so
+  are the `wafer_core::clients::auth` functions. Before, a service that had
+  to dispatch kept `ctx.clone_arc()` from `init`. That handle owns every
+  registered block, the `AuthBlock` that owns the service among them, so
+  the runtime was a reference cycle and no runtime built with such a
+  service was ever freed (about 13 MB per runtime build on a Cloudflare
+  isolate capped at 128 MB). An implementation updates each signature and
+  drops its stored context. `Context::clone_arc` now documents the rule:
+  the handle is for work that ends with the call that received it, never
+  for block or service state.
+
 - `VectorError`, `LlmError` and `ImageError` have a new variant,
   `EngineUnavailable(String)`: the engine that runs the model cannot take
   the request now, for a reason the caller can act on (a browser runtime

@@ -96,7 +96,9 @@ fn service_profile_to_wire(p: service::UserProfile) -> wire::UserProfileResponse
 /// the op's [`ResourceType::Auth`] resource before the service is touched.
 /// The credential ops (`require_*`) are open to any attributable caller;
 /// `user_profile` needs the auth block's grant or the admin block (see
-/// [`wafer_block::wrap::check_access`]).
+/// [`wafer_block::wrap::check_access`]). The same `ctx` is handed to the
+/// service method, which makes its own dispatches (the database, for a
+/// credential lookup) through it.
 pub async fn handle_message(
     service: &dyn AuthService,
     ctx: &dyn Context,
@@ -108,7 +110,7 @@ pub async fn handle_message(
             if let Err(out) = authorize(ctx, AUTH_REQUIRE_USER_RESOURCE) {
                 return out;
             }
-            match service.require_user(msg).await {
+            match service.require_user(ctx, msg).await {
                 Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
@@ -128,7 +130,7 @@ pub async fn handle_message(
                     ))
                 }
             };
-            match service.require_token(msg, scope).await {
+            match service.require_token(ctx, msg, scope).await {
                 Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
@@ -141,7 +143,7 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(e) => return OutputStream::error(e),
             };
-            match service.require_role(msg, role).await {
+            match service.require_role(ctx, msg, role).await {
                 Ok(u) => to_output(&wire::UserIdResponse { user_id: u.0 }),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }
@@ -162,7 +164,7 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            match service.user_profile(UserId(req.user_id)).await {
+            match service.user_profile(ctx, UserId(req.user_id)).await {
                 Ok(p) => to_output(service_profile_to_wire(p)),
                 Err(e) => OutputStream::error(err_to_wafer(e)),
             }

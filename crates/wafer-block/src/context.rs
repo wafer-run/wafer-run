@@ -140,9 +140,16 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
 
     /// Get an owned `Arc<dyn Context>` from a `&dyn Context`. Concrete
     /// implementations clone their inner Arc-shaped state to produce a
-    /// new owning handle. Use this when long-lived service objects need
-    /// to retain a Context handle past the lifetime of a borrow (e.g.
-    /// AuthServiceImpl populating a OnceLock from its `init` method).
+    /// new owning handle.
+    ///
+    /// The handle is for work that ends with the call that received the
+    /// context: a deferred task drained after the response, or the producer
+    /// of an output stream that finishes when the stream does. Never store
+    /// it in block or service state. The runtime's context owns every
+    /// registered block, so a handle kept by a block (or by a service a block
+    /// owns) is a reference cycle, and the runtime it belongs to is never
+    /// freed. A service that needs to reach other blocks takes the `ctx` of
+    /// each call as a parameter instead, as `AuthService` does.
     fn clone_arc(&self) -> std::sync::Arc<dyn Context>;
 
     /// Validate every registered block's declared `ConfigVar` against the

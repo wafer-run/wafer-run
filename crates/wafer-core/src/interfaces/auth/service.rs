@@ -3,7 +3,7 @@
 //! See docs/superpowers/specs/2026-04-21-auth-block-design.md §4.
 
 use thiserror::Error;
-use wafer_block::{Message, WaferError};
+use wafer_block::{context::Context, Message, WaferError};
 use wafer_block_macro::wafer_async_trait;
 
 /// Opaque user identifier. Wraps a uuid v7 string.
@@ -89,12 +89,22 @@ pub enum AuthError {
 }
 
 /// Cross-block auth contract. See spec §4.
+///
+/// Every method that does work receives the `ctx` of the call it serves:
+/// the auth block's own frame for that message, carrying the request's
+/// deadline, cancellation and caller. An implementation reaches other blocks
+/// (the database, the crypto service) through that `ctx` and keeps nothing of
+/// it once the method returns. Storing a context handle in the service (for
+/// example `ctx.clone_arc()` from [`AuthService::init`] into a `OnceLock`)
+/// closes a reference cycle: the context owns every registered block, one of
+/// which is the framework `AuthBlock` that owns this service, so the runtime
+/// is never freed. See `Context::clone_arc`.
 #[wafer_async_trait]
 pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// One-shot lifecycle hook. Invoked by the framework `AuthBlock` on
     /// `LifecycleType::Init`. Default implementation is a no-op; concrete
     /// implementations override this to apply migrations, run bootstrap, etc.
-    async fn init(&self, _ctx: &dyn wafer_block::context::Context) -> Result<(), AuthError> {
+    async fn init(&self, _ctx: &dyn Context) -> Result<(), AuthError> {
         Ok(())
     }
 
@@ -114,7 +124,7 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Fail-closed default: a service that does not implement authentication
     /// rejects every request as unauthorized.
-    async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+    async fn require_user(&self, _ctx: &dyn Context, _msg: &Message) -> Result<UserId, AuthError> {
         Err(AuthError::Unauthorized)
     }
 
@@ -122,7 +132,12 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Session cookies are rejected — scopes only apply to PATs.
     ///
     /// Fail-closed default: unauthorized.
-    async fn require_token(&self, _msg: &Message, _scope: TokenScope) -> Result<UserId, AuthError> {
+    async fn require_token(
+        &self,
+        _ctx: &dyn Context,
+        _msg: &Message,
+        _scope: TokenScope,
+    ) -> Result<UserId, AuthError> {
         Err(AuthError::Unauthorized)
     }
 
@@ -130,7 +145,12 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// bootstrap_tokens row as Admin.
     ///
     /// Fail-closed default: unauthorized.
-    async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+    async fn require_role(
+        &self,
+        _ctx: &dyn Context,
+        _msg: &Message,
+        _role: Role,
+    ) -> Result<UserId, AuthError> {
         Err(AuthError::Unauthorized)
     }
 
@@ -140,6 +160,7 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Fail-closed default: not an org admin.
     async fn verify_org_admin(
         &self,
+        _ctx: &dyn Context,
         _user: UserId,
         _provider: &str,
         _org_ref: &str,
@@ -150,7 +171,11 @@ pub trait AuthService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Look up the full profile for `user`.
     ///
     /// Fail-closed default: no profile.
-    async fn user_profile(&self, _user: UserId) -> Result<UserProfile, AuthError> {
+    async fn user_profile(
+        &self,
+        _ctx: &dyn Context,
+        _user: UserId,
+    ) -> Result<UserProfile, AuthError> {
         Err(AuthError::NotFound)
     }
 }
