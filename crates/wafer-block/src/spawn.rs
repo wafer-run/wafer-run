@@ -35,8 +35,21 @@
 //!
 //! **A spawned task must finish its work before its stream's terminal.** Once
 //! the consumer has read the terminal, nothing on the host keeps a request
-//! alive for the task: on Cloudflare Workers its next I/O is refused or never
-//! resolves, and the task is never polled again, holding what it captured.
+//! alive for the task, unless the host extends the request for it, as an
+//! adapter's after-response machinery may. Without such an extension, on
+//! Cloudflare Workers the task's next I/O is refused or never resolves, and
+//! the task is never polled again, holding what it captured.
+//!
+//! An extension is the host's, not this crate's: it is opt-in per task, taken
+//! while the request is still being dispatched (so before the consumer could
+//! have gone, not from the task once it sees a cancel), and released by the
+//! task when its work is done. It exists for the one case the rule above
+//! cannot cover: a producer cancelled because its consumer left has no
+//! terminal to finish before, yet may still owe one bounded write (an access
+//! record, the part of a reply it already handed over). The platform bounds
+//! it: on Workers, `waitUntil` keeps a request alive for at most 30 s after
+//! the client disconnects or the body ends. A stream still being read has no
+//! such bound, so an extension changes nothing while the consumer is there.
 //!
 //! Native and wasm32-wasip1 have no wrapper: native services are not scoped
 //! to a request, and `tokio::spawn` needs `Send`.
