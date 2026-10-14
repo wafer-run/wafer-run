@@ -94,6 +94,12 @@ pub trait LlmService: wafer_block::MaybeSend + wafer_block::MaybeSync + 'static 
     /// surface partial output. The stream ends naturally when generation
     /// completes. `cancel` is checked during long awaits by the impl and fires
     /// when the consumer drops the stream.
+    ///
+    /// Once `cancel` fires, the handler stops reading: it drops this stream
+    /// (and, for `chat_stream`, the future that would produce it) without
+    /// polling it again. Cleanup on cancel therefore belongs in a task that
+    /// watches the token, or in `Drop` — never after `cancel.cancelled()`
+    /// inside the stream, which is not read any more.
     async fn chat_stream(
         &self,
         req: ChatRequest,
@@ -112,6 +118,12 @@ pub trait LlmService: wafer_block::MaybeSend + wafer_block::MaybeSync + 'static 
     /// Stream of load-progress events, terminating with the final status or an
     /// error. Default impl emits a single `NotSupported` error — backends that
     /// only serve remote APIs don't need to override.
+    ///
+    /// Once `cancel` fires, the handler stops reading: it drops this stream
+    /// without
+    /// polling it again. Cleanup on cancel therefore belongs in a task that
+    /// watches the token, or in `Drop` — never after `cancel.cancelled()`
+    /// inside the stream, which is not read any more.
     fn load_model(
         &self,
         _backend_id: &str,

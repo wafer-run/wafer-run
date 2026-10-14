@@ -102,8 +102,8 @@ struct ScriptedLlm {
     models: Vec<ModelInfo>,
     /// Where `chat_stream` hands over the cancellation token it was given.
     handed: Arc<std::sync::Mutex<Option<futures::channel::oneshot::Sender<CancellationToken>>>>,
-    /// If set, `chat_stream` awaits the cancel token before yielding — used
-    /// to deterministically test cancellation.
+    /// If set, `chat_stream` returns a stream that never yields — used to
+    /// deterministically test cancellation.
     wait_for_cancel: bool,
 }
 
@@ -150,13 +150,12 @@ impl LlmService for ScriptedLlm {
     ) -> BoxStream<'static, Result<ChatChunk, LlmError>> {
         let chunks = self.chunks.clone();
         if let Some(handed) = self.handed.lock().unwrap().take() {
-            let _ = handed.send(cancel.clone());
+            let _ = handed.send(cancel);
         }
         if self.wait_for_cancel {
-            Box::pin(async_stream::stream! {
-                cancel.cancelled().await;
-                yield Err(LlmError::Cancelled);
-            })
+            // Never yields: a relay whose output is dropped stops reading and
+            // drops this stream unread (see `LlmService::chat_stream`).
+            Box::pin(futures::stream::pending())
         } else {
             Box::pin(futures::stream::iter(chunks.into_iter().map(Ok)))
         }
@@ -343,14 +342,18 @@ async fn dropping_chat_stream_cancels_service() {
     let body = wire_chat_request_bytes();
     let stream =
         handler::handle_message(&service, &granted(), LLM, &msg(ServiceOp::LLM_CHAT), &body).await;
-    // Consumer drop should cancel the service through the OutputStream cancel token.
-    drop(stream);
-
-    // The bounds only turn a hang into a failure.
+    // The bounds only turn a hang into a failure. Wait for the chat to reach
+    // the service first: a drop before that cancels the relay before it
+    // calls the service at all.
     let token = tokio::time::timeout(std::time::Duration::from_secs(5), handed)
         .await
         .expect("the chat reaches the service")
         .expect("the service hands over its token");
+    assert!(!token.is_cancelled(), "nothing has cancelled the chat yet");
+
+    // Consumer drop should cancel the service through the OutputStream cancel token.
+    drop(stream);
+
     tokio::time::timeout(std::time::Duration::from_secs(5), token.cancelled())
         .await
         .expect("the token the service was handed fires once the output is dropped");
