@@ -30,7 +30,7 @@ use wafer_block::{
 
 use super::service::{ImageError, ImageService};
 use crate::interfaces::handler_util::{
-    decode_and_authorize_model, next_unless_cancelled, to_output, Relayed,
+    cancelled, decode_and_authorize_model, next_unless_cancelled, to_output, Relayed,
 };
 
 /// Decode an `image.*` request that names a model and authorize the caller
@@ -250,8 +250,10 @@ fn load_model(
             let item = match next_unless_cancelled(&cancel, &mut stream).await {
                 Relayed::Item(item) => item,
                 Relayed::Ended => break,
-                // No terminal: see `Relayed::Cancelled`.
-                Relayed::Cancelled => return,
+                Relayed::Cancelled => {
+                    cancelled(sink, "image.load_model").await;
+                    return;
+                }
             };
             let progress = match item {
                 Ok(p) => p,
@@ -393,8 +395,8 @@ mod tests {
                 .await
                 .expect("the cancelled stream ends");
         assert!(
-            matches!(ending, Some(StreamEvent::Error(_))),
-            "a cancelled relay ends in an error, got {ending:?}"
+            matches!(&ending, Some(StreamEvent::Error(e)) if e.code == ErrorCode::Cancelled),
+            "a cancelled relay ends in a Cancelled error, got {ending:?}"
         );
     }
 }

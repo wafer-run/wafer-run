@@ -30,7 +30,7 @@ use wafer_block::{
 
 use super::service::{LlmError, LlmService};
 use crate::interfaces::handler_util::{
-    decode_and_authorize_model, next_unless_cancelled, to_output, Relayed,
+    cancelled, decode_and_authorize_model, next_unless_cancelled, to_output, Relayed,
 };
 
 /// Decode an `llm.*` request that names a model and authorize the caller for
@@ -150,14 +150,17 @@ fn chat(
             .run_until_cancelled(service.chat_stream(req, cancel.clone()))
             .await
         else {
+            cancelled(sink, "llm.chat").await;
             return;
         };
         loop {
             let item = match next_unless_cancelled(&cancel, &mut stream).await {
                 Relayed::Item(item) => item,
                 Relayed::Ended => break,
-                // No terminal: see `Relayed::Cancelled`.
-                Relayed::Cancelled => return,
+                Relayed::Cancelled => {
+                    cancelled(sink, "llm.chat").await;
+                    return;
+                }
             };
             // Each frame is a `wire::ChatChunk` directly. Service-level
             // `LlmError` is surfaced as a terminal stream error rather than
@@ -221,8 +224,10 @@ fn load_model(
             let item = match next_unless_cancelled(&cancel, &mut stream).await {
                 Relayed::Item(item) => item,
                 Relayed::Ended => break,
-                // No terminal: see `Relayed::Cancelled`.
-                Relayed::Cancelled => return,
+                Relayed::Cancelled => {
+                    cancelled(sink, "llm.load_model").await;
+                    return;
+                }
             };
             let progress = match item {
                 Ok(p) => p,
@@ -517,8 +522,11 @@ mod tests {
     }
 
     /// A stream cancelled through its token while a consumer still reads it
-    /// ends in an error, not in an empty `Complete`: a cut-off chat or load
-    /// must not read as a finished one.
+    /// ends in an `ErrorCode::Cancelled` error, not in an empty `Complete` (a
+    /// cut-off chat or load must not read as a finished one) and not in the
+    /// `Internal` "no terminal" error a dropped sink emits (a deliberate
+    /// cancel is not a producer fault). That holds for a chat cancelled in
+    /// its setup too.
     #[tokio::test]
     async fn a_cancelled_relay_does_not_report_complete() {
         use wafer_block::stream::StreamEvent;
@@ -529,13 +537,22 @@ mod tests {
         within("the chat reaches the service", chat_entered)
             .await
             .expect("entered");
+        let (stuck_setup, setup_entered, _setup_dropped, _unused) = Stuck::service(true);
+        let mut setup_out = run(&stuck_setup, ServiceOp::LLM_CHAT, &chat_body()).await;
+        within("the stuck chat reaches the service", setup_entered)
+            .await
+            .expect("entered");
 
-        for (name, out) in [("chat", &mut chat_out), ("load", &mut load_out)] {
+        for (name, out) in [
+            ("chat", &mut chat_out),
+            ("load", &mut load_out),
+            ("chat setup", &mut setup_out),
+        ] {
             out.cancel_token().cancel();
             let ending = within("the cancelled stream ends", futures::StreamExt::next(out)).await;
             assert!(
-                matches!(ending, Some(StreamEvent::Error(_))),
-                "{name}: a cancelled relay ends in an error, got {ending:?}"
+                matches!(&ending, Some(StreamEvent::Error(e)) if e.code == ErrorCode::Cancelled),
+                "{name}: a cancelled relay ends in a Cancelled error, got {ending:?}"
             );
         }
     }

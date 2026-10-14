@@ -2421,11 +2421,13 @@
   is still handed the cancellation token, but a service that ignores it, or
   is silent when it fires (a model thinking, a load between milestones), no
   longer keeps the relay task and its stream alive until it next yields.
-  - A cancelled relay now ends its stream without a terminal, so the stream
-    ends in the sink's "cancelled" error, as the storage and network relays
-    already did. Before, a service that honoured the token ended the stream
-    with its own `Cancelled` error; a cancel never reads as a successful
-    empty `Complete`.
+  - A cancelled relay ends its stream with an `ErrorCode::Cancelled` error
+    (`"llm.chat: cancelled"`, `"llm.load_model: cancelled"`,
+    `"image.load_model: cancelled"`), whether the service honours the token
+    or not. Before, that code reached the caller only when the service ended
+    its own stream with `LlmError::Cancelled`. A cancel never reads as a
+    successful empty `Complete`, nor as the `Internal` "no terminal" fault a
+    dropped sink reports.
   - For `LlmService` and `ImageService` implementers: once `cancel` fires,
     the relay drops the service's stream (and `chat_stream`'s future) unread.
     Cleanup on cancel belongs in a task that watches the token, or in

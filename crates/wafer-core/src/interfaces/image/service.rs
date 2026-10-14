@@ -85,8 +85,7 @@ pub trait ImageService: wafer_block::MaybeSend + wafer_block::MaybeSync + 'stati
     /// Default impl emits a single `NotSupported` error.
     ///
     /// Once `cancel` fires, the handler stops reading: it drops this stream
-    /// without
-    /// polling it again. Cleanup on cancel therefore belongs in a task that
+    /// without polling it again. Cleanup on cancel therefore belongs in a task that
     /// watches the token, or in `Drop` — never after `cancel.cancelled()`
     /// inside the stream, which is not read any more.
     fn load_model(

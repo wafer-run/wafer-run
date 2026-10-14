@@ -31,11 +31,24 @@ pub(crate) enum Relayed<T> {
     /// The service's stream ended: the relay sends its `Complete`.
     Ended,
     /// The handler's output was cancelled — dropped by its consumer, or
-    /// cancelled through `OutputStream::cancel_token`. The relay returns
-    /// without a terminal, so the dropped sink ends the stream with its
-    /// "cancelled" error: a consumer still reading never mistakes a cut-off
-    /// answer for a complete one.
+    /// cancelled through `OutputStream::cancel_token`. The relay ends the
+    /// stream with [`cancelled`]: an `ErrorCode::Cancelled` error, so a
+    /// consumer still reading never mistakes a cut-off answer for a complete
+    /// one, and a deliberate cancel is not reported as a producer fault (the
+    /// `Internal` "no terminal" error a dropped sink would emit).
     Cancelled,
+}
+
+/// End a relay's stream as cancelled: an `ErrorCode::Cancelled` error
+/// labelled with the op (`"llm.chat: cancelled"`). An in-process channel send
+/// that returns at once when the consumer is gone — not I/O.
+pub(crate) async fn cancelled(sink: wafer_block::streams::output::OutputSink, op: &str) {
+    let _ = sink
+        .error(WaferError::new(
+            ErrorCode::Cancelled,
+            format!("{op}: cancelled"),
+        ))
+        .await;
 }
 
 /// The next item of a service's stream, raced against `cancel` — the token
