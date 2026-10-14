@@ -1,6 +1,4 @@
 //! AuthService cross-block contract — implemented by my-org/auth.
-//!
-//! See docs/superpowers/specs/2026-04-21-auth-block-design.md §4.
 
 use thiserror::Error;
 use wafer_block::{context::Context, Message, WaferError};
@@ -88,7 +86,8 @@ pub enum AuthError {
     Internal(String),
 }
 
-/// Cross-block auth contract. See spec §4.
+/// Cross-block auth contract, served to other blocks by the framework
+/// `AuthBlock` (`service_blocks::auth`) through `interfaces::auth::handler`.
 ///
 /// Every method that does work receives the `ctx` of the call it serves:
 /// the auth block's own frame for that message, carrying the request's
