@@ -23,6 +23,27 @@ pub fn to_output<T: serde::Serialize>(val: T) -> OutputStream {
     }
 }
 
+/// The next item of a service's stream, or `None` when the stream ends or
+/// when the handler's own output has been dropped — `cancel` is the token
+/// `from_producer` pairs with that output.
+///
+/// The service is handed the same token and should end its stream on it, but
+/// a streaming handler does not depend on that: on cancel it stops reading
+/// and returns, and dropping the service's stream releases whatever the
+/// service holds for it. The terminal the handler then sends goes nowhere,
+/// because its consumer is gone.
+pub(crate) async fn next_unless_cancelled<S>(
+    cancel: &tokio_util::sync::CancellationToken,
+    stream: &mut S,
+) -> Option<S::Item>
+where
+    S: futures::Stream + Unpin,
+{
+    use futures::StreamExt;
+
+    cancel.run_until_cancelled(stream.next()).await.flatten()
+}
+
 /// Emit a two-frame streaming service response: a codec-encoded `header` frame,
 /// a [`wafer_block::stream::raw_frames_marker`] `Meta` event, then the body
 /// forwarded **verbatim** from `body`.

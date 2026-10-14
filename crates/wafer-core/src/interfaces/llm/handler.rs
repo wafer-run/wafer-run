@@ -7,7 +7,10 @@
 //! `load_model`) produce a `from_producer` stream: each service chunk is
 //! codec-encoded (MessagePack) and emitted as its own `Chunk` event, and
 //! cancellation from the consumer is forwarded straight through to the
-//! service's cancel token.
+//! service's cancel token. The relay does not rely on the service honouring
+//! it: it races each read of the service's stream against the same token and
+//! drops the stream when the consumer is gone
+//! ([`handler_util::next_unless_cancelled`](crate::interfaces::handler_util::next_unless_cancelled)).
 //!
 //! The service trait operates directly on the `wafer_block::wire::llm` types
 //! (re-exported from `super::service`), so request/response values pass
@@ -15,7 +18,6 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use wafer_block::{
     codec,
     common::{ErrorCode, ServiceOp},
@@ -27,7 +29,9 @@ use wafer_block::{
 };
 
 use super::service::{LlmError, LlmService};
-use crate::interfaces::handler_util::{decode_and_authorize_model, to_output};
+use crate::interfaces::handler_util::{
+    decode_and_authorize_model, next_unless_cancelled, to_output,
+};
 
 /// Decode an `llm.*` request that names a model and authorize the caller for
 /// `access` to that model in `block`'s namespace.
@@ -139,8 +143,8 @@ fn chat(
     // The producer closure must be `'static`; clone the `Arc` into it.
     let service = Arc::clone(service);
     OutputStream::from_producer(move |sink, cancel| async move {
-        let mut stream = service.chat_stream(req, cancel).await;
-        while let Some(item) = stream.next().await {
+        let mut stream = service.chat_stream(req, cancel.clone()).await;
+        while let Some(item) = next_unless_cancelled(&cancel, &mut stream).await {
             // Each frame is a `wire::ChatChunk` directly. Service-level
             // `LlmError` is surfaced as a terminal stream error rather than
             // a Result-wrapped chunk, matching the SDK's `next_chunk` decode
@@ -198,8 +202,8 @@ fn load_model(
     // The producer closure must be `'static`; clone the `Arc` into it.
     let service = Arc::clone(service);
     OutputStream::from_producer(move |sink, cancel| async move {
-        let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel);
-        while let Some(item) = stream.next().await {
+        let mut stream = service.load_model(&req.backend_id, &req.model_id, cancel.clone());
+        while let Some(item) = next_unless_cancelled(&cancel, &mut stream).await {
             let progress = match item {
                 Ok(p) => p,
                 Err(e) => {
@@ -324,5 +328,98 @@ mod tests {
         ));
         assert_eq!(code, ErrorCode::Unavailable);
         assert_eq!(msg, "no open page has the model 'm' loaded — load it first");
+    }
+
+    /// A relay whose consumer is gone lets go of the service's stream even
+    /// when the service ignores its cancellation token and never yields: the
+    /// relay itself races its read against the token. It used to wait on the
+    /// service's next item for good, holding the stream — and whatever the
+    /// service keeps alive for it — until the service spoke.
+    #[tokio::test]
+    async fn a_dropped_output_releases_a_silent_service_stream() {
+        use std::time::Duration;
+
+        use crate::test_support::{admit_all_context, Silent};
+
+        struct Stuck {
+            chat: std::sync::Mutex<Option<Silent<Result<wire::ChatChunk, LlmError>>>>,
+            load: std::sync::Mutex<Option<Silent<Result<wire::LoadProgress, LlmError>>>>,
+        }
+
+        #[wafer_block::wafer_async_trait]
+        impl LlmService for Stuck {
+            async fn chat_stream(
+                &self,
+                _req: wire::ChatRequest,
+                _cancel: tokio_util::sync::CancellationToken,
+            ) -> futures::stream::BoxStream<'static, Result<wire::ChatChunk, LlmError>>
+            {
+                Box::pin(self.chat.lock().unwrap().take().expect("one chat"))
+            }
+            async fn list_models(&self) -> Result<Vec<wire::ModelInfo>, LlmError> {
+                Ok(Vec::new())
+            }
+            async fn status(&self, _: &str, _: &str) -> Result<wire::ModelStatus, LlmError> {
+                Ok(wire::ModelStatus::ready())
+            }
+            fn load_model(
+                &self,
+                _backend_id: &str,
+                _model_id: &str,
+                _cancel: tokio_util::sync::CancellationToken,
+            ) -> futures::stream::BoxStream<'static, Result<wire::LoadProgress, LlmError>>
+            {
+                Box::pin(self.load.lock().unwrap().take().expect("one load"))
+            }
+        }
+
+        let (chat, chat_dropped) = Silent::new();
+        let (load, load_dropped) = Silent::new();
+        let service: Arc<dyn LlmService> = Arc::new(Stuck {
+            chat: std::sync::Mutex::new(Some(chat)),
+            load: std::sync::Mutex::new(Some(load)),
+        });
+        let ctx = admit_all_context();
+
+        let chat_out = handle_message(
+            &service,
+            ctx.as_ref(),
+            "wafer-run/llm",
+            &Message::new(ServiceOp::LLM_CHAT),
+            &codec::encode(&wire::ChatRequest {
+                backend_id: "b".into(),
+                model: "m".into(),
+                messages: vec![wire::ChatMessage::user("hi")],
+                params: wire::ChatParams::default(),
+                tools: Vec::new(),
+                extra: serde_json::Value::Null,
+            })
+            .expect("encode"),
+        )
+        .await;
+        let load_out = handle_message(
+            &service,
+            ctx.as_ref(),
+            "wafer-run/llm",
+            &Message::new(ServiceOp::LLM_LOAD_MODEL),
+            &codec::encode(&wire::LoadModelRequest {
+                backend_id: "b".into(),
+                model_id: "m".into(),
+            })
+            .expect("encode"),
+        )
+        .await;
+
+        drop(chat_out);
+        drop(load_out);
+
+        tokio::time::timeout(Duration::from_secs(5), chat_dropped)
+            .await
+            .expect("the chat relay lets go of the service's stream")
+            .expect("the drop is reported");
+        tokio::time::timeout(Duration::from_secs(5), load_dropped)
+            .await
+            .expect("the load relay lets go of the service's stream")
+            .expect("the drop is reported");
     }
 }

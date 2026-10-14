@@ -2414,6 +2414,13 @@
 
 ### Fixed
 
+- The `llm.chat`, `llm.load_model` and `image.load_model` handlers stop
+  reading the service's stream once their output is dropped, instead of
+  waiting on its next item. The service is still handed the cancellation
+  token, but a service that ignores it, or is silent when it fires (a model
+  thinking, a load between milestones), no longer keeps the relay task and
+  its stream alive until it next yields.
+
 - `wafer_core::mime` declares `charset=utf-8` on every textual type. `svg`
   is now `image/svg+xml; charset=utf-8` and `map` is
   `application/json; charset=utf-8`; `rs` and `toml` are now
