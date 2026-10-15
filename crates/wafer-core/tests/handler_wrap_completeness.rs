@@ -550,23 +550,37 @@ mod auth_fakes {
 
     #[async_trait::async_trait]
     impl AuthService for RecordingAuth {
-        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+        async fn require_user(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: &Message,
+        ) -> Result<UserId, AuthError> {
             self.record("require_user");
             Ok(UserId("u".into()))
         }
         async fn require_token(
             &self,
+            _ctx: &dyn wafer_block::context::Context,
             _msg: &Message,
             _scope: TokenScope,
         ) -> Result<UserId, AuthError> {
             self.record("require_token");
             Ok(UserId("u".into()))
         }
-        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+        async fn require_role(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: &Message,
+            _role: Role,
+        ) -> Result<UserId, AuthError> {
             self.record("require_role");
             Ok(UserId("u".into()))
         }
-        async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError> {
+        async fn user_profile(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            user: UserId,
+        ) -> Result<UserProfile, AuthError> {
             self.record("user_profile");
             Ok(UserProfile {
                 id: user,

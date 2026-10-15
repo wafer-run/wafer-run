@@ -46,10 +46,14 @@ impl AuthService for Auth {
     fn grants(&self) -> Vec<ResourceGrant> {
         vec![ResourceGrant::read(GRANTED, AUTH_USER_PROFILE_RESOURCE).typed(ResourceType::Auth)]
     }
-    async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+    async fn require_user(&self, _ctx: &dyn Context, _msg: &Message) -> Result<UserId, AuthError> {
         Ok(UserId("u1".into()))
     }
-    async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError> {
+    async fn user_profile(
+        &self,
+        _ctx: &dyn Context,
+        user: UserId,
+    ) -> Result<UserProfile, AuthError> {
         self.profile_reads.fetch_add(1, Ordering::SeqCst);
         Ok(UserProfile {
             id: user,

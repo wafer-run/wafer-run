@@ -4,6 +4,40 @@
 
 ### Breaking changes
 
+- Every `AuthService` method that does work takes the `ctx` of the call it
+  serves, after `&self`: `require_user(ctx, msg)`,
+  `require_token(ctx, msg, scope)`, `require_role(ctx, msg, role)`,
+  `verify_org_admin(ctx, user, provider, org_ref)` and
+  `user_profile(ctx, user)`. The auth handler passes the auth block's own
+  frame for the message, with `wafer-run/auth` as the caller of whatever the
+  service dispatches. `init` and `grants` are unchanged, and so are the
+  `wafer_core::clients::auth` functions. An implementation updates each
+  signature, reaches the database or another block through the `ctx` it is
+  given, and drops any context it stored.
+
+  Before, a service that had to dispatch kept `ctx.clone_arc()` from
+  `init`. That handle owns every registered block, the `AuthBlock` that owns
+  the service among them, so the runtime was a reference cycle and no
+  runtime built with such a service was ever freed (in impresspress's
+  Cloudflare build, about 13 MB per runtime against a 128 MB isolate).
+  `Context::clone_arc` now documents the rule: the handle is for work that
+  ends with the call that received it, never for block or service state.
+
+  This is a behaviour change, not only a signature change. The per-call
+  frame differs from the stored `Init` frame in four ways an implementation
+  can observe:
+  - its dispatches are bound by the request's deadline and cancellation; a
+    cancelled or late request's database call is refused with `Cancelled`
+    or `DeadlineExceeded`, where before it had neither;
+  - they no longer register a wait of auth's finished `Init` in the init
+    wait graph;
+  - `ctx.config_get` sees the caller's per-call config overrides (a flow
+    step's `config`) layered over the runtime's config, where the `Init`
+    frame had none; a secret the service reads through `config_get` can
+    therefore be set by that layer;
+  - call depth counts from the caller: the service's database call sits at
+    the caller's depth + 2 instead of 1, against the default maximum of 16.
+
 - `VectorError`, `LlmError` and `ImageError` have a new variant,
   `EngineUnavailable(String)`: the engine that runs the model cannot take
   the request now, for a reason the caller can act on (a browser runtime

@@ -48,6 +48,8 @@ pub(super) fn unpack_ptr_len(packed: i64) -> Result<(u32, u32), RuntimeError> {
 pub(super) struct WasmiHostState {
     /// Owned context handle — installed before each guest call via
     /// `ContextScope` (`Context::clone_arc`), cleared when the scope drops.
+    /// The store is pooled by the block it runs, so a handle left here would
+    /// be a cycle through the registered blocks; the clear is what breaks it.
     pub(super) context: Option<Arc<dyn Context>>,
     /// Maximum WASM linear-memory size for this store, in 64 KiB pages. The
     /// [`wasmi::ResourceLimiter`] impl denies any `memory.grow` that would
