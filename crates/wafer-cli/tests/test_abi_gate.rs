@@ -32,7 +32,7 @@ fn seed_project(dir: &std::path::Path, imports: &str) {
     std::fs::create_dir_all(dir.join("tests")).unwrap();
     std::fs::write(
         dir.join("target/block.wasm"),
-        util::block_wasm("acme/widget", imports),
+        util::v1_block_wasm("acme/widget", imports),
     )
     .unwrap();
     std::fs::write(dir.join("tests/smoke.json"), r#"{"kind":"run","meta":[]}"#).unwrap();
@@ -93,7 +93,7 @@ fn validate_rejects_removed_legacy_call_block_import() {
     std::fs::create_dir_all(tmp.path().join("target")).unwrap();
     std::fs::write(
         tmp.path().join("target/block.wasm"),
-        util::block_wasm(
+        util::v1_block_wasm(
             "acme/widget",
             r#"(import "wafer" "__wafer_host_call_block" (func (param i32 i32 i32 i32 i32 i32) (result i64)))"#,
         ),

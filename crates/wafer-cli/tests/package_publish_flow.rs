@@ -1,9 +1,10 @@
 //! End-to-end pipeline test for the wafer.toml-converged flow:
 //! `wafer new` → (simulated build) → `wafer package` → `wafer publish`.
 //!
-//! The real toolchain build is skipped (no cargo/wasm32 target in CI test
-//! env); instead a valid block.wasm is synthesized from WAT with the same
-//! exports + `__wafer_info` payload a real build would produce.
+//! The real toolchain build is skipped; instead block.wasm is a legacy v1
+//! guest synthesized from WAT (`util::v1_block_wasm`), which has the required
+//! exports and a JSON `__wafer_info`. What a current `#[wafer_block]` build
+//! produces (core ABI v2) is packaged by `core_abi.rs`.
 
 #[path = "util/mod.rs"]
 mod util;
@@ -45,7 +46,7 @@ fn new_package_publish_pipeline_converges_on_wafer_toml() {
     std::fs::create_dir_all(proj.join("target")).unwrap();
     std::fs::write(
         proj.join("target/block.wasm"),
-        util::block_wasm("acme/widget", ""),
+        util::v1_block_wasm("acme/widget", ""),
     )
     .unwrap();
     std::fs::write(proj.join("README.md"), "# widget\n").unwrap();
@@ -117,7 +118,7 @@ fn package_rejects_name_mismatch_against_wafer_toml() {
     std::fs::create_dir_all(proj.join("target")).unwrap();
     std::fs::write(
         proj.join("target/block.wasm"),
-        util::block_wasm("other/name", ""),
+        util::v1_block_wasm("other/name", ""),
     )
     .unwrap();
 

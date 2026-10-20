@@ -64,8 +64,10 @@ run_fmt() {
     # The wasm compile fixtures carry their own `[workspace]` table so
     # `cargo build --workspace` does not pick them up — which also puts them
     # outside `fmt --all` above. They are ordinary hand-written Rust that
-    # run_wasm builds, so format them by the same rule, named explicitly.
+    # run_wasm (or build-fixtures.sh, for the wafer-cli macro block) builds,
+    # so format them by the same rule, named explicitly.
     for fixture in \
+        crates/wafer-cli/tests/fixtures/macro_block \
         crates/wafer-block/tests/wasm_static_blocks \
         crates/wafer-block/tests/wasm_local_input_stream \
         crates/wafer-block-crypto/tests/wasm32_consumer \

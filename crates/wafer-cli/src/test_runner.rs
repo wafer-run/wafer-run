@@ -2,14 +2,18 @@ use std::path::Path;
 
 use anyhow::{bail, Context};
 use serde::Deserialize;
+use wafer_block::abi::{CallFrameRef, CoreCodec, GuestAction, GuestResult};
 use wasmi::{Engine, Module, Store};
 
 use crate::wasm_stubs;
 
-/// A test fixture file. The `kind` and `meta` fields match `wafer_block::Message`.
-/// The optional `data` field carries the body bytes to pass as the second argument
-/// to the block's `handle(msg, body)` — matching the `(Message, Vec<u8>)` ABI that
-/// `__wafer_handle` expects.
+/// A test fixture file, `tests/<name>.json`. The `kind` and `meta` fields
+/// match `wafer_block::Message`. The optional `data` field carries the body
+/// bytes passed as the second argument to the block's `handle(msg, body)`.
+///
+/// The runner sends `__wafer_handle` the frame the runtime sends
+/// ([`wafer_block::abi::CallFrameRef`]) in the codec the module negotiates,
+/// and decodes the reply as a [`wafer_block::abi::GuestResult`].
 #[derive(Debug, Deserialize)]
 struct TestFixture {
     kind: String,
@@ -26,7 +30,19 @@ struct TestFixture {
 /// ([`crate::wasm_stubs`]), which registers exactly the host-import set the
 /// runtime provides — including the streaming ABI and excluding the removed
 /// legacy `__wafer_host_call_block`. A block that links here links in
-/// production too.
+/// production too. Its core-ABI codec is negotiated the runtime's way
+/// ([`wasm_stubs::negotiate`]), so a guest declaring an unsupported version
+/// fails here as it would in production.
+///
+/// Each `tests/<name>.json` fixture ([`TestFixture`]) is one `handle` call.
+/// It passes when the guest returns a well-formed `GuestResult` and:
+///
+/// * if `tests/<name>.expected.json` exists, the result, written as JSON,
+///   equals it. The JSON is the `GuestResult` shape:
+///   `{"action":"Respond","response":{"data":[..bytes..],"meta":[]},"error":null,"message":null}`.
+///   `action` is `"Respond"`, `"Error"`, `"Drop"` or `"Continue"`;
+/// * if it does not, the action is not `"Error"`. A fixture that expects an
+///   error says so with an `.expected.json`.
 ///
 /// * `specific_path` — if Some, run only that one file; otherwise run all
 ///   `tests/*.json` files.
@@ -58,6 +74,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
     let linker = wasm_stubs::build_stub_linker::<()>(&engine)?;
     let mut store = Store::new(&engine, ());
     let instance = wasm_stubs::instantiate_and_start(&linker, &mut store, &module)?;
+    let codec = wasm_stubs::negotiate(&module, &instance, &mut store)?;
 
     // -----------------------------------------------------------------------
     // 4. Collect test files
@@ -116,7 +133,9 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
             .and_then(|n| n.to_str())
             .unwrap_or("<unknown>");
 
-        let result = run_single_test(test_path, test_name, &mut store, &alloc, &handle, &instance);
+        let result = run_single_test(
+            test_path, test_name, codec, &mut store, &alloc, &handle, &instance,
+        );
 
         match result {
             Ok(()) => {
@@ -157,6 +176,7 @@ pub fn run_tests(dir: &Path, specific_path: Option<&str>) -> anyhow::Result<()> 
 fn run_single_test(
     test_path: &Path,
     test_name: &str,
+    codec: CoreCodec,
     store: &mut Store<()>,
     alloc: &wasmi::TypedFunc<i32, i32>,
     handle: &wasmi::TypedFunc<(i32, i32), i64>,
@@ -180,9 +200,10 @@ fn run_single_test(
     };
     let body: Vec<u8> = fixture.data;
 
-    // Encode as the `(Message, Vec<u8>)` tuple that `__wafer_handle` expects.
-    let msg_bytes = serde_json::to_vec(&(&message, &body))
-        .with_context(|| format!("Failed to serialize (message, body) tuple for {test_name}"))?;
+    // Encode the frame the runtime sends `__wafer_handle`, in the module's codec.
+    let msg_bytes = codec
+        .encode(&CallFrameRef(&message, &body))
+        .map_err(|e| anyhow::anyhow!("Failed to encode the call frame for {test_name}: {e}"))?;
 
     // -----------------------------------------------------------------------
     // b. Allocate guest memory and write the message
@@ -210,19 +231,15 @@ fn run_single_test(
         wasm_stubs::read_packed_region(&memory, store, result_packed, "__wafer_handle")?;
 
     // -----------------------------------------------------------------------
-    // d. Parse as BlockResult
+    // d. Decode the GuestResult with the module's codec
     // -----------------------------------------------------------------------
-    let actual: serde_json::Value = serde_json::from_slice(&result_bytes).with_context(|| {
-        format!(
-            "__wafer_handle returned invalid JSON for {test_name}: {:?}",
-            String::from_utf8_lossy(&result_bytes)
+    let result: GuestResult = codec.decode(&result_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "__wafer_handle returned no valid {codec:?} GuestResult for {test_name}: {e}"
         )
     })?;
-
-    // Validate the result has an "action" field (new streaming protocol format)
-    if !actual.is_object() {
-        anyhow::bail!("__wafer_handle result is not a JSON object for {test_name}: {actual}");
-    }
+    let actual = serde_json::to_value(&result)
+        .with_context(|| format!("Failed to write the GuestResult of {test_name} as JSON"))?;
 
     // -----------------------------------------------------------------------
     // e. Check expected output if a .expected.json sibling exists
@@ -250,8 +267,10 @@ fn run_single_test(
         if actual != expected {
             bail!("Output mismatch for {test_name}:\n  expected: {expected}\n    actual: {actual}");
         }
+    } else if result.action == GuestAction::Error {
+        // No expected file: the call must not fail.
+        bail!("__wafer_handle returned action Error for {test_name}: {actual}");
     }
-    // If no expected file, passing means the block didn't trap (smoke test).
 
     Ok(())
 }
