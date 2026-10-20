@@ -36,7 +36,9 @@
 //! ([`CoreCodec::from_version_export`]), calls `__wafer_abi_version` after
 //! instantiation when it is exported, and refuses a version it does not
 //! speak ([`CoreCodec::check_declared`]), so the CLI accepts and decodes
-//! exactly what the runtime does.
+//! exactly the core-ABI frames the runtime does. The host-call codec
+//! ([`HOST_CODEC_EXPORT`]) is a separate negotiation that only the runtime
+//! performs; the CLI does not probe it.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
