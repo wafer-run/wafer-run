@@ -2450,6 +2450,25 @@
 
 ### Fixed
 
+- `wafer build`, `wafer package` and `wafer test` speak the runtime's core
+  ABI. They decoded every guest's `__wafer_info` and `__wafer_handle` output
+  as JSON, but a block built with the current `#[wafer_block]` macro speaks
+  v2 MessagePack, so packaging it failed with "expected value at line 1
+  column 1" and `wafer test` sent it a frame it could not decode. The codec
+  negotiation now lives in `wafer_block::abi::CoreCodec`, and the runtime's
+  wasmi loader and the CLI both call it: a v2 guest is decoded as
+  MessagePack, a legacy guest without `__wafer_abi_version` as JSON (v1 stays
+  supported), and a guest declaring any other version is refused with the
+  runtime's message.
+  - `wafer test` sends the runtime's `CallFrameRef` and decodes a typed
+    `GuestResult`. A fixture without an `.expected.json` fails when the
+    result's action is `Error`. An `.expected.json` is compared with the
+    result written as JSON, so it has the `GuestResult` shape: `action` is
+    `"Respond"`, `"Error"`, `"Drop"` or `"Continue"`, and `response`,
+    `error` and `message` are all present (`null` when unset). Existing
+    `.expected.json` files written for the old untyped comparison may need
+    updating.
+
 - The `llm.chat`, `llm.load_model` and `image.load_model` handlers stop
   reading the service once their output is cancelled (dropped, or cancelled
   through `OutputStream::cancel_token`), instead of waiting on its next item.

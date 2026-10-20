@@ -3,7 +3,7 @@
 # workspace's dependency versions.
 #
 # Each fixture (wasm32 compile fixtures, wasm guest fixtures, the wafer-cli
-# dev fixture, examples/wasmi-block) has its own `[workspace]` table and so
+# fixtures, examples/wasmi-block) has its own `[workspace]` table and so
 # its own committed Cargo.lock, which cargo resolves independently of the
 # root one. Left alone, those locks pin whatever was newest on the day they
 # were created: a fixture that exists to prove "this builds the way an

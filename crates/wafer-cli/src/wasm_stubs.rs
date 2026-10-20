@@ -28,7 +28,7 @@
 //! deterministic.
 
 use anyhow::{bail, Context};
-use wafer_block::ErrorCode;
+use wafer_block::{abi::CoreCodec, ErrorCode};
 use wasmi::{Caller, Engine, Instance, Linker, Memory, Module, Store};
 
 /// The runtime's negative-`ErrorCode` sentinel for an absent attachment.
@@ -343,6 +343,41 @@ pub fn instantiate_and_start<T>(
     }
 
     Ok(instance)
+}
+
+/// Negotiate the core-ABI codec of an instantiated module the way the
+/// runtime's wasmi loader does: [`CoreCodec::from_version_export`] on the
+/// module's exports, then, for a versioned guest, call its
+/// `__wafer_abi_version` and refuse a version the runtime does not speak
+/// ([`CoreCodec::check_declared`], the runtime's message).
+///
+/// Call it after [`instantiate_and_start`]: a TinyGo guest's exports work only
+/// once `_start` has initialised its runtime.
+pub fn negotiate<T>(
+    module: &Module,
+    instance: &Instance,
+    store: &mut Store<T>,
+) -> anyhow::Result<CoreCodec> {
+    let codec = CoreCodec::from_version_export(
+        module
+            .exports()
+            .any(|e| e.name() == wafer_block::abi::ABI_VERSION_EXPORT && e.ty().func().is_some()),
+    );
+    if codec == CoreCodec::V2Rmp {
+        let version_fn = instance
+            .get_typed_func::<(), i32>(&*store, wafer_block::abi::ABI_VERSION_EXPORT)
+            .with_context(|| {
+                format!(
+                    "Failed to get {} export (wrong signature?)",
+                    wafer_block::abi::ABI_VERSION_EXPORT
+                )
+            })?;
+        let version = version_fn
+            .call(&mut *store, ())
+            .with_context(|| format!("Failed to call {}", wafer_block::abi::ABI_VERSION_EXPORT))?;
+        CoreCodec::check_declared(version)?;
+    }
+    Ok(codec)
 }
 
 /// Unpack a `(ptr << 32 | len)` i64 returned by a guest export and copy the
