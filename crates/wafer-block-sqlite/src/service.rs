@@ -11,7 +11,9 @@ use wafer_core::{
         codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
-        service::{Column, DatabaseError, Record, RecordData, StatementBudget, Table},
+        service::{
+            Column, DatabaseError, Record, RecordData, StatementBudget, Table, TransactionError,
+        },
     },
 };
 use wafer_sql_utils::{ddl, introspect, Backend};
@@ -456,8 +458,10 @@ impl DbExec for SQLiteDatabaseService {
     /// One write-worker job: the transaction holds the only writable
     /// connection from `BEGIN IMMEDIATE` to `COMMIT`, so no other write
     /// interleaves with it, and returning early on a failed statement drops
-    /// the uncommitted [`rusqlite::Transaction`], which rolls it back.
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+    /// the uncommitted [`rusqlite::Transaction`], which rolls it back. SQLite
+    /// runs DDL inside the transaction, so a failed statement rolls back the
+    /// `CREATE`/`ALTER`/`DROP`s before it too.
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
         // `Some(json)` for a statement whose rows are decoded, `None` for one
         // whose affected count is the result.
         let statements: Vec<(Option<JsonColumns>, String, Vec<SqlValue>)> = ops
@@ -478,24 +482,24 @@ impl DbExec for SQLiteDatabaseService {
         self.on_write(move |db| {
             let tx = db
                 .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|e| step_error("begin transaction", &e))?;
+                .map_err(|e| TransactionError::whole(step_error("begin transaction", &e)))?;
             let mut results = Vec::with_capacity(statements.len());
-            for (returning, sql, params) in &statements {
+            for (index, (returning, sql, params)) in statements.iter().enumerate() {
                 let result = if let Some(json) = returning {
-                    TxResult::Returning(Self::fetch_rows(&tx, sql, params, json)?)
+                    Self::fetch_rows(&tx, sql, params, json).map(TxResult::Returning)
                 } else {
-                    let rows = tx
-                        .execute(sql, as_params(params).as_slice())
-                        .map_err(|e| statement_error(&e))?;
-                    TxResult::Execute(rows as i64)
+                    tx.execute(sql, as_params(params).as_slice())
+                        .map(|rows| TxResult::Execute(rows as i64))
+                        .map_err(|e| statement_error(&e))
                 };
-                results.push(result);
+                results.push(result.map_err(|e| TransactionError::at(index, e))?);
             }
             tx.commit()
-                .map_err(|e| step_error("commit transaction", &e))?;
+                .map_err(|e| TransactionError::whole(step_error("commit transaction", &e)))?;
             Ok(results)
         })
-        .await?
+        .await
+        .map_err(TransactionError::whole)?
     }
 }
 
@@ -591,6 +595,7 @@ forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,

@@ -20,8 +20,9 @@ use std::{
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-    RecordData, RecordList, StatementBudget, Table, UpsertSpec, WriteOp, WriteOutcome,
+    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
+    RawStatement, Record, RecordData, RecordList, StatementBudget, Table, TransactionError,
+    UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -175,6 +176,13 @@ impl DatabaseService for RecordingDb {
         self.note("exec_raw");
         Ok(0)
     }
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        self.note("exec_raw_transaction");
+        Ok(vec![0; statements.len()])
+    }
 
     async fn delete_where(
         &self,
@@ -317,6 +325,7 @@ wafer_core::forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,
@@ -486,6 +495,15 @@ async fn the_rest_of_the_surface_forwards() {
     dec.sum("t", "n", &[]).await.expect("sum");
     dec.query_raw("SELECT 1", &[]).await.expect("query_raw");
     dec.exec_raw("SELECT 1", &[]).await.expect("exec_raw");
+    assert_eq!(
+        dec.exec_raw_transaction(&[RawStatement {
+            query: "SELECT 1".into(),
+            args: vec![],
+        }])
+        .await
+        .expect("exec_raw_transaction"),
+        vec![0]
+    );
     dec.schema_table_exists("t").await.expect("ste");
     dec.schema_columns("t").await.expect("sc");
     dec.schema_drop_table("t").await.expect("sdt");
@@ -504,6 +522,7 @@ async fn the_rest_of_the_surface_forwards() {
             "sum".to_string(),
             "query_raw".to_string(),
             "exec_raw".to_string(),
+            "exec_raw_transaction".to_string(),
             "schema_table_exists".to_string(),
             "schema_columns".to_string(),
             "schema_drop_table".to_string(),

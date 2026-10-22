@@ -13,12 +13,12 @@
 use wafer_block::{
     wire::database::{
         AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, CountRequest,
-        CountResponse, CreateManyRequest, CreateManyResponse, CreateRequest, DeleteRequest,
-        DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest,
-        EnsureTableRequest, ExecRawRequest, ExecRawResponse, GetRequest,
-        IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse, ListRequest,
-        QueryRawRequest, Record, RecordList, SchemaOpResponse, SumRequest, SumResponse,
-        TableExistsRequest, TableExistsResponse, TakeWhereRequest, TakeWhereResponse,
+        CountResponse, CreateManyRequest, CreateManyResponse, CreateRequest, DdlTransactionRequest,
+        DdlTransactionResponse, DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse,
+        DeleteWhereRequest, DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse,
+        GetRequest, IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse,
+        ListRequest, QueryRawRequest, Record, RecordList, SchemaOpResponse, SumRequest,
+        SumResponse, TableExistsRequest, TableExistsResponse, TakeWhereRequest, TakeWhereResponse,
         UpdateGuardedRequest, UpdateGuardedResponse, UpdateRequest, UpdateWhereCountRequest,
         UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
@@ -176,6 +176,19 @@ pub fn ddl(request: &ExecRawRequest) -> Result<ExecRawResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_DDL, request)
 }
 
+/// Buffered: execute raw statements, DDL included, in order as ONE
+/// transaction on the same `__ddl__` channel and `ddl` capability as [`ddl`]:
+/// every statement commits or none does. A failed statement's error carries
+/// the backend's classification as its code, the backend's message, and the
+/// statement's position, which
+/// [`failed_statement_index`](crate::wire::database::failed_statement_index)
+/// reads.
+pub fn ddl_transaction(
+    request: &DdlTransactionRequest,
+) -> Result<DdlTransactionResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_DDL_TRANSACTION, request)
+}
+
 /// Buffered: create a table and its indexes if absent (structured schema op,
 /// authorized on the table name and `__schema__` — the `schema` capability,
 /// not raw `ddl`).
@@ -224,6 +237,7 @@ const SUPPORTED_DATABASE_OPS: &[&str] = &[
     ServiceOp::DATABASE_QUERY_RAW,
     ServiceOp::DATABASE_EXEC_RAW,
     ServiceOp::DATABASE_DDL,
+    ServiceOp::DATABASE_DDL_TRANSACTION,
     ServiceOp::DATABASE_ENSURE_TABLE,
     ServiceOp::DATABASE_ADD_COLUMN,
     ServiceOp::DATABASE_DROP_TABLE,

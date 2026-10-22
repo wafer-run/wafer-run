@@ -7,21 +7,21 @@ use wafer_block::context::Context;
 use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
-pub use wafer_block::wire::database::{Record, RecordData, RecordList};
+pub use wafer_block::wire::database::{RawStatement, Record, RecordData, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
         AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, BatchWrite,
         BatchWriteResult, ColumnDef, CountRequest, CountResponse, CreateManyRequest,
-        CreateManyResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
-        DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest, EnsureTableRequest,
-        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
-        IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse, ListRequest,
-        OnConflict, QueryRawRequest, SchemaOpResponse, SortFieldDef as WireSortFieldDef,
-        SumRequest, SumResponse, TableDef, TableExistsRequest, TableExistsResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateGuardedRequest, UpdateGuardedResponse,
-        UpdateRequest, UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest,
-        UpsertRequest, UpsertResponse,
+        CreateManyResponse, CreateRequest, DdlTransactionRequest, DdlTransactionResponse,
+        DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest,
+        DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse,
+        FilterDef as WireFilterDef, FilterNode, GetRequest, IncrementFieldWhereRequest,
+        InsertGuardedRequest, InsertGuardedResponse, ListRequest, OnConflict, QueryRawRequest,
+        SchemaOpResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TableDef,
+        TableExistsRequest, TableExistsResponse, TakeWhereRequest, TakeWhereResponse,
+        UpdateGuardedRequest, UpdateGuardedResponse, UpdateRequest, UpdateWhereCountRequest,
+        UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -415,6 +415,36 @@ dual_api! {
             Some("db")
         )?;
         let resp: ExecRawResponse = decode(&data)?;
+        Ok(resp.rows_affected)
+    }
+
+    /// Execute `statements` — DDL, and the DML that goes with it — in order,
+    /// as ONE transaction on the [`ddl`] channel (the `__ddl__` resource and
+    /// the `ddl` capability), returning each statement's affected-row count
+    /// in the same order. Every statement commits or none does.
+    ///
+    /// The whole call is admitted against the database's statement budget
+    /// before anything is sent. A refusal is `ResourceExhausted` or
+    /// `InvalidArgument` with the statement-budget detail code
+    /// (`wire::database::STATEMENT_BUDGET_EXHAUSTED` /
+    /// `STATEMENT_BUDGET_EXCEEDS_LIMIT`), and nothing ran.
+    ///
+    /// When a statement fails, the error's `code` is the backend's
+    /// classification of it (a duplicate key is `AlreadyExists` on every
+    /// backend), its `message` is the backend's own text, and
+    /// [`failed_statement_index`](wafer_block::wire::database::failed_statement_index)
+    /// reads the statement's position from it.
+    pub fn ddl_transaction(ctx, statements: &[RawStatement]) -> Result<Vec<i64>, WaferError> {
+        let req = DdlTransactionRequest { statements: statements.to_vec() };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_DDL_TRANSACTION,
+            &req,
+            Some(DDL_RESOURCE),
+            true,
+            Some("db")
+        )?;
+        let resp: DdlTransactionResponse = decode(&data)?;
         Ok(resp.rows_affected)
     }
 

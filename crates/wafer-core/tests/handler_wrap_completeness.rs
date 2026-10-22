@@ -81,8 +81,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, StatementBudget,
-        UpsertSpec,
+        AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
+        StatementBudget, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -240,6 +240,13 @@ mod db_fakes {
         ) -> Result<i64, DatabaseError> {
             self.record("exec_raw");
             Ok(0)
+        }
+        async fn exec_raw_transaction(
+            &self,
+            statements: &[RawStatement],
+        ) -> Result<Vec<i64>, TransactionError> {
+            self.record("exec_raw_transaction");
+            Ok(vec![0; statements.len()])
         }
         async fn delete_where(
             &self,
@@ -1020,6 +1027,12 @@ fn database_op_body(op: &str) -> Vec<u8> {
         ServiceOp::DATABASE_DDL => codec::encode(&wire::ExecRawRequest {
             query: "CREATE TABLE my_org__auth__widgets (id TEXT)".into(),
             args: vec![],
+        }),
+        ServiceOp::DATABASE_DDL_TRANSACTION => codec::encode(&wire::DdlTransactionRequest {
+            statements: vec![wire::RawStatement {
+                query: "CREATE TABLE my_org__auth__widgets (id TEXT)".into(),
+                args: vec![],
+            }],
         }),
         ServiceOp::DATABASE_UPSERT => codec::encode(&wire::UpsertRequest {
             collection: "my_org__auth__users".into(),

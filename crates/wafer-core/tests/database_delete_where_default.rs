@@ -8,8 +8,9 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use async_trait::async_trait;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, CapGuard, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-    RecordData, RecordList, StatementBudget, UpsertSpec, WriteOp, WriteOutcome,
+    AggregateSpec, CapGuard, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
+    RawStatement, Record, RecordData, RecordList, StatementBudget, TransactionError, UpsertSpec,
+    WriteOp, WriteOutcome,
 };
 use wafer_schema::{Column, Table};
 
@@ -150,6 +151,12 @@ impl DatabaseService for MemDb {
         _args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         Err(unused("exec_raw"))
+    }
+    async fn exec_raw_transaction(
+        &self,
+        _statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        Err(TransactionError::whole(unused("exec_raw_transaction")))
     }
     async fn take_where(
         &self,

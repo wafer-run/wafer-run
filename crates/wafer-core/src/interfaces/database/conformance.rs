@@ -93,15 +93,28 @@
 
 use std::collections::HashMap;
 
-use wafer_block::db::{
-    ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
+use wafer_block::{
+    codec,
+    common::ServiceOp,
+    context::Context,
+    db::{ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField},
+    streams::{
+        input::InputStream,
+        output::{OutputStream, TerminalNotResponse},
+    },
+    types::{ResourceAccess, ResourceType},
+    wire::database as wire,
+    ErrorCode, Message, WaferError,
 };
 use wafer_sql_utils::aggregate::CastType;
 
-use super::service::{
-    pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
-    DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, Record, StatementBudget, Table,
-    UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+use super::{
+    handler::handle_message,
+    service::{
+        pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
+        DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, RawStatement, Record,
+        StatementBudget, Table, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -270,6 +283,8 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_aggregate_paging(svc).await;
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
+    check_raw_transaction(svc).await;
+    check_raw_transaction_through_the_host_op(svc).await;
     check_rows_keep_their_column_order(svc).await;
     check_json_value_round_trip(svc).await;
     check_typed_values_round_trip(svc).await;
@@ -3778,6 +3793,354 @@ async fn check_raw_sql(svc: &dyn DatabaseService) {
         .expect("exec_raw delete");
     assert_eq!(deleted, 1, "exec_raw delete affected-row count");
     assert_eq!(svc.count("conf_exec", &[]).await.unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// exec_raw_transaction
+// ---------------------------------------------------------------------------
+
+/// A [`RawStatement`] with no bind arguments: the suite writes its values as
+/// literals (see the module docs).
+fn raw(query: &str) -> RawStatement {
+    RawStatement {
+        query: query.to_string(),
+        args: Vec::new(),
+    }
+}
+
+/// A table of a text primary key `id` and the nullable text `columns`.
+fn keyed_table(name: &str, columns: &[&str]) -> Table {
+    let mut all = vec![pk("id")];
+    all.extend(
+        columns
+            .iter()
+            .map(|column| Column::new(*column, DataType::Text).null()),
+    );
+    Table {
+        name: name.to_string(),
+        columns: all,
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    }
+}
+
+async fn assert_absent(svc: &dyn DatabaseService, table: &str, why: &str) {
+    assert!(
+        !svc.schema_table_exists(table)
+            .await
+            .expect("schema_table_exists"),
+        "{table} must not exist: {why}"
+    );
+}
+
+/// Drop each of `tables` if present, so a persistent database starts clean.
+async fn drop_all(svc: &dyn DatabaseService, tables: &[&str]) {
+    for table in tables {
+        svc.schema_drop_table(table)
+            .await
+            .expect("schema_drop_table (idempotent) must succeed");
+    }
+}
+
+/// `exec_raw_transaction` is all or nothing, DDL included, and a failure
+/// names the statement that failed, classified as every other op classifies
+/// it, with the backend's own message:
+/// - DML, an `ALTER TABLE` and two `CREATE TABLE`s before a refused fifth
+///   statement leave nothing behind, and the error is that statement's;
+/// - a duplicate key at index 0 (another writer's claim) is `AlreadyExists`
+///   at 0, and the DDL after it never lands;
+/// - a unique index the existing rows violate is `AlreadyExists` at its own
+///   index, so a caller can tell it from a claim at 0;
+/// - a transaction that commits returns each statement's count, and a typed
+///   read afterwards sees the column its DDL added, decoded by the column's
+///   declared type: the executor's schema cache was cleared.
+async fn check_raw_transaction(svc: &dyn DatabaseService) {
+    drop_all(
+        svc,
+        &[
+            "conf_tx_base",
+            "conf_tx_a",
+            "conf_tx_b",
+            "conf_tx_claims",
+            "conf_tx_after",
+            "conf_tx_dups",
+            "conf_tx_side",
+            "conf_tx_cache",
+        ],
+    )
+    .await;
+
+    // Nothing at all.
+    assert_eq!(
+        svc.exec_raw_transaction(&[])
+            .await
+            .expect("an empty transaction runs nothing"),
+        Vec::<i64>::new()
+    );
+
+    // DML and DDL, then a refused statement: all of it rolls back.
+    svc.ensure_schema_table(&keyed_table("conf_tx_base", &["name"]))
+        .await
+        .expect("create conf_tx_base");
+    let err = svc
+        .exec_raw_transaction(&[
+            raw("INSERT INTO conf_tx_base (id, name) VALUES ('b1', 'kept?')"),
+            raw("ALTER TABLE conf_tx_base ADD COLUMN extra TEXT"),
+            raw("CREATE TABLE conf_tx_a (id TEXT PRIMARY KEY)"),
+            raw("CREATE TABLE conf_tx_b (id TEXT PRIMARY KEY)"),
+            raw("CREATE TABLE conf_tx_a (id TEXT PRIMARY KEY)"),
+        ])
+        .await
+        .expect_err("creating conf_tx_a twice is refused");
+    assert_eq!(
+        err.statement,
+        Some(4),
+        "the fifth statement failed: {err:?}"
+    );
+    assert!(
+        matches!(&err.error, DatabaseError::Internal(msg)
+            if msg.contains("conf_tx_a") && msg.contains("already exists")),
+        "a duplicate table is a fault, with the backend's message: {err:?}"
+    );
+    assert_absent(svc, "conf_tx_a", "its CREATE rolled back").await;
+    assert_absent(svc, "conf_tx_b", "its CREATE rolled back").await;
+    assert_eq!(
+        svc.schema_columns("conf_tx_base")
+            .await
+            .expect("schema_columns"),
+        vec!["id".to_string(), "name".to_string()],
+        "the ALTER rolled back"
+    );
+    assert_eq!(
+        svc.count("conf_tx_base", &[]).await.expect("count"),
+        0,
+        "the INSERT rolled back"
+    );
+
+    // A duplicate key at index 0: the claim is taken, nothing after it lands.
+    svc.ensure_schema_table(&keyed_table("conf_tx_claims", &[]))
+        .await
+        .expect("create conf_tx_claims");
+    svc.create("conf_tx_claims", row([("id", serde_json::json!("f1"))]))
+        .await
+        .expect("seed the claim");
+    let err = svc
+        .exec_raw_transaction(&[
+            raw("INSERT INTO conf_tx_claims (id) VALUES ('f1')"),
+            raw("CREATE TABLE conf_tx_after (id TEXT PRIMARY KEY)"),
+        ])
+        .await
+        .expect_err("the claim is taken");
+    assert_eq!(err.statement, Some(0), "{err:?}");
+    assert!(
+        matches!(&err.error, DatabaseError::AlreadyExists(msg) if msg.contains("conf_tx_claims")),
+        "a taken key is AlreadyExists with the backend's message: {err:?}"
+    );
+    assert_absent(svc, "conf_tx_after", "the transaction stopped at its claim").await;
+    assert_eq!(
+        svc.count("conf_tx_claims", &[]).await.expect("count"),
+        1,
+        "the claim is the seeded row alone"
+    );
+
+    // A unique index the data refuses, after DDL: AlreadyExists at its index.
+    svc.ensure_schema_table(&keyed_table("conf_tx_dups", &["k"]))
+        .await
+        .expect("create conf_tx_dups");
+    for id in ["d1", "d2"] {
+        svc.create(
+            "conf_tx_dups",
+            row([
+                ("id", serde_json::json!(id)),
+                ("k", serde_json::json!("same")),
+            ]),
+        )
+        .await
+        .expect("seed conf_tx_dups");
+    }
+    let err = svc
+        .exec_raw_transaction(&[
+            raw("CREATE TABLE conf_tx_side (id TEXT PRIMARY KEY)"),
+            raw("CREATE UNIQUE INDEX conf_tx_dups_k ON conf_tx_dups (k)"),
+        ])
+        .await
+        .expect_err("the rows violate the index");
+    assert_eq!(err.statement, Some(1), "{err:?}");
+    assert!(
+        matches!(&err.error, DatabaseError::AlreadyExists(msg) if msg.contains("conf_tx_dups")),
+        "an index the data violates is AlreadyExists at its own index: {err:?}"
+    );
+    assert_absent(svc, "conf_tx_side", "its CREATE rolled back").await;
+
+    // A transaction that commits, and the column it added read back typed.
+    svc.ensure_schema_table(&keyed_table("conf_tx_cache", &["name"]))
+        .await
+        .expect("create conf_tx_cache");
+    svc.create(
+        "conf_tx_cache",
+        row([
+            ("id", serde_json::json!("c1")),
+            ("name", serde_json::json!("before")),
+        ]),
+    )
+    .await
+    .expect("seed conf_tx_cache");
+    // Read once, so a backend that caches the table's columns has them.
+    let before = svc.get("conf_tx_cache", "c1").await.expect("get before");
+    assert!(!before.data.contains_key("meta"));
+    let counts = svc
+        .exec_raw_transaction(&[
+            raw("ALTER TABLE conf_tx_cache ADD COLUMN meta JSON"),
+            raw("UPDATE conf_tx_cache SET meta = '{\"a\":1}' WHERE id = 'c1'"),
+            raw("INSERT INTO conf_tx_cache (id, name) VALUES ('c2', 'added')"),
+        ])
+        .await
+        .expect("the transaction commits");
+    // A DDL statement's count is the backend's own (SQLite repeats the last
+    // DML's), so only the DML counts are compared.
+    assert_eq!(counts.len(), 3, "one count per statement: {counts:?}");
+    assert_eq!(counts[1..], [1, 1], "each DML statement's affected rows");
+    let after = svc.get("conf_tx_cache", "c1").await.expect("get after");
+    assert_eq!(
+        after.data.get("meta"),
+        Some(&serde_json::json!({ "a": 1 })),
+        "the added JSON column reads back as JSON: {after:?}"
+    );
+    assert_eq!(svc.count("conf_tx_cache", &[]).await.expect("count"), 2);
+}
+
+/// A `Context` that grants every resource, so [`check_raw_transaction_through_the_host_op`]
+/// reaches the service through the database handler.
+struct GrantAllContext;
+
+#[wafer_block::wafer_async_trait]
+impl Context for GrantAllContext {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("the database handler makes no block calls")
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("the database handler does not clone its context")
+    }
+    fn check_resource_access(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> Result<(), WaferError> {
+        Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
+    }
+}
+
+/// Send `statements` as a `database.ddl_transaction` through the database
+/// handler, as a block's `db::ddl_transaction` does.
+async fn ddl_transaction_via_handler(
+    svc: &dyn DatabaseService,
+    statements: Vec<RawStatement>,
+) -> Result<Vec<i64>, WaferError> {
+    let body =
+        codec::encode(&wire::DdlTransactionRequest { statements }).expect("encode the request");
+    let msg = Message::new(ServiceOp::DATABASE_DDL_TRANSACTION);
+    match handle_message(svc, &GrantAllContext, &msg, &body)
+        .await
+        .collect_buffered()
+        .await
+    {
+        Ok(resp) => Ok(codec::decode::<wire::DdlTransactionResponse>(&resp.body)
+            .expect("decode the response")
+            .rows_affected),
+        Err(TerminalNotResponse::Error(e)) => Err(e),
+        Err(_) => panic!("the handler ended without a response or an error"),
+    }
+}
+
+/// Through the host op a block calls, a failed statement keeps what a
+/// migration runner needs: the classified code (a taken key is
+/// `AlreadyExists`), the statement's position, and the backend's message.
+/// The other ops scrub a duplicate key's message to a fixed string; this one
+/// must not.
+async fn check_raw_transaction_through_the_host_op(svc: &dyn DatabaseService) {
+    drop_all(svc, &["conf_tx_wire", "conf_tx_wire_after"]).await;
+    svc.ensure_schema_table(&keyed_table("conf_tx_wire", &[]))
+        .await
+        .expect("create conf_tx_wire");
+
+    let counts = ddl_transaction_via_handler(
+        svc,
+        vec![
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w1')"),
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w2')"),
+        ],
+    )
+    .await
+    .expect("the transaction commits");
+    assert_eq!(counts, vec![1, 1]);
+
+    let err = ddl_transaction_via_handler(
+        svc,
+        vec![
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w1')"),
+            raw("CREATE TABLE conf_tx_wire_after (id TEXT PRIMARY KEY)"),
+        ],
+    )
+    .await
+    .expect_err("w1 is taken");
+    assert_eq!(err.code, ErrorCode::AlreadyExists, "{err:?}");
+    assert_eq!(
+        wire::failed_statement_index(&err),
+        Some(0),
+        "the error names the statement: {err:?}"
+    );
+    assert!(
+        err.message.contains("conf_tx_wire"),
+        "the backend's message, not a fixed string: {err:?}"
+    );
+    assert_absent(
+        svc,
+        "conf_tx_wire_after",
+        "the transaction stopped at its claim",
+    )
+    .await;
+
+    let err = ddl_transaction_via_handler(
+        svc,
+        vec![
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w3')"),
+            raw("INSERT INTO conf_tx_wire_missing (id) VALUES ('w4')"),
+        ],
+    )
+    .await
+    .expect_err("no such table");
+    assert_eq!(err.code, ErrorCode::Internal, "{err:?}");
+    assert_eq!(wire::failed_statement_index(&err), Some(1), "{err:?}");
+    assert!(
+        err.message.contains("conf_tx_wire_missing"),
+        "the backend's message, not a scrubbed one: {err:?}"
+    );
+    assert_eq!(
+        svc.count("conf_tx_wire", &[]).await.expect("count"),
+        2,
+        "w3 rolled back"
+    );
 }
 
 // ---------------------------------------------------------------------------

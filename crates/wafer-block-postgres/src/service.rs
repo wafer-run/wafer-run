@@ -18,7 +18,7 @@ use wafer_core::{
         codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
-        service::{Column, DatabaseError, Record, RecordData, StatementBudget},
+        service::{Column, DatabaseError, Record, RecordData, StatementBudget, TransactionError},
     },
 };
 #[cfg(test)]
@@ -205,22 +205,31 @@ impl DbExec for PostgresDatabaseService {
     /// One pooled connection for the whole transaction. Returning early on a
     /// failed statement drops the uncommitted [`sqlx::Transaction`], which
     /// rolls it back (sqlx issues the `ROLLBACK` when the connection returns
-    /// to the pool).
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-        let mut tx = self.pool.begin().await.map_err(|e| sqlx_error(&e))?;
+    /// to the pool). PostgreSQL's DDL is transactional, so that rolls back
+    /// the `CREATE`/`ALTER`/`DROP`s before the failed statement too.
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| TransactionError::whole(sqlx_error(&e)))?;
         let mut results = Vec::with_capacity(ops.len());
-        for op in ops {
+        for (index, op) in ops.iter().enumerate() {
             let (sql, params) = op.sql_params();
             let result = match op {
-                TxOp::Execute { .. } => TxResult::Execute(execute(&mut tx, sql, params).await?),
-                TxOp::Returning { .. } => {
-                    let rows = fetch_all(&mut tx, sql, params).await?;
-                    TxResult::Returning(rows.iter().map(row_to_record).collect::<Result<_, _>>()?)
-                }
+                TxOp::Execute { .. } => execute(&mut tx, sql, params).await.map(TxResult::Execute),
+                TxOp::Returning { .. } => fetch_all(&mut tx, sql, params).await.and_then(|rows| {
+                    rows.iter()
+                        .map(row_to_record)
+                        .collect::<Result<_, _>>()
+                        .map(TxResult::Returning)
+                }),
             };
-            results.push(result);
+            results.push(result.map_err(|e| TransactionError::at(index, e))?);
         }
-        tx.commit().await.map_err(|e| sqlx_error(&e))?;
+        tx.commit()
+            .await
+            .map_err(|e| TransactionError::whole(sqlx_error(&e)))?;
         Ok(results)
     }
 
@@ -246,6 +255,7 @@ forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,

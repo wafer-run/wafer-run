@@ -27,6 +27,23 @@ pub const STATEMENT_BUDGET_EXCEEDS_LIMIT: &str = "database.statement_budget_exce
 /// way; a fresh invocation (a new request) may run it.
 pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhausted";
 
+/// Meta key ([`crate::WaferError::meta`]) of the error answering a
+/// `database.ddl_transaction` whose statement failed: the failing statement's
+/// zero-based position in [`DdlTransactionRequest::statements`], in decimal.
+/// Absent when the failure was not one statement's: a statement-budget
+/// refusal (nothing was sent), or opening or committing the transaction.
+/// Read it with [`failed_statement_index`].
+pub const META_FAILED_STATEMENT_INDEX: &str = "database.failed_statement_index";
+
+/// The failing statement's position a `database.ddl_transaction` error
+/// carries under [`META_FAILED_STATEMENT_INDEX`], or `None` when the error
+/// names no statement.
+#[must_use]
+pub fn failed_statement_index(err: &crate::WaferError) -> Option<usize> {
+    crate::MetaGet::get(err.meta.as_slice(), META_FAILED_STATEMENT_INDEX)
+        .and_then(|index| index.parse().ok())
+}
+
 // --- Filter / sort sub-types ---
 
 /// A single WHERE-clause predicate: `field <operator> value`, or
@@ -213,6 +230,25 @@ pub struct ExecRawRequest {
     /// Positional bind arguments for the placeholders.
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
+}
+
+/// One statement of a [`DdlTransactionRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawStatement {
+    /// One SQL statement, in the backend's dialect (DDL or DML), with the
+    /// backend's placeholders.
+    pub query: String,
+    /// Positional bind arguments for the placeholders.
+    #[serde(default)]
+    pub args: Vec<serde_json::Value>,
+}
+
+/// Request for `database.ddl_transaction`: run `statements`, in order, as ONE
+/// transaction. Every statement commits or none does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DdlTransactionRequest {
+    /// The statements, run in this order.
+    pub statements: Vec<RawStatement>,
 }
 
 /// One column of a [`TableDef`] / [`AddColumnRequest`].
@@ -865,6 +901,14 @@ pub struct TakeWhereResponse {
 pub struct ExecRawResponse {
     /// Number of rows affected by the statement.
     pub rows_affected: i64,
+}
+
+/// Response for `database.ddl_transaction`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DdlTransactionResponse {
+    /// Rows each statement affected, in the order of
+    /// [`DdlTransactionRequest::statements`].
+    pub rows_affected: Vec<i64>,
 }
 
 /// Response for `database.create_many`.

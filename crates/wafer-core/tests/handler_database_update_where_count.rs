@@ -126,8 +126,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, FilterOp, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, StatementBudget,
-        UpsertSpec,
+        AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
+        StatementBudget, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -284,6 +284,12 @@ mod db_fakes {
             _args: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
             Ok(0)
+        }
+        async fn exec_raw_transaction(
+            &self,
+            statements: &[RawStatement],
+        ) -> Result<Vec<i64>, TransactionError> {
+            Ok(vec![0; statements.len()])
         }
         async fn upsert(
             &self,
