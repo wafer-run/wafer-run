@@ -3845,7 +3845,16 @@ async fn drop_all(svc: &dyn DatabaseService, tables: &[&str]) {
 
 /// `exec_raw_transaction` is all or nothing, DDL included, and a failure
 /// names the statement that failed, classified as every other op classifies
-/// it, with the backend's own message:
+/// it, with the backend's own message.
+///
+/// The index assertions hold for a backend that can attribute a failure to
+/// one statement (native SQLite, PostgreSQL, sql.js). D1's `batch()` cannot
+/// (its failures carry no index, see [`TransactionError::statement`]), so a
+/// live D1 run of this check would need the backend to declare that.
+///
+/// [`TransactionError::statement`]: super::service::TransactionError::statement
+///
+/// The cases:
 /// - DML, an `ALTER TABLE` and two `CREATE TABLE`s before a refused fifth
 ///   statement leave nothing behind, and the error is that statement's;
 /// - a duplicate key at index 0 (another writer's claim) is `AlreadyExists`
@@ -3854,7 +3863,11 @@ async fn drop_all(svc: &dyn DatabaseService, tables: &[&str]) {
 ///   index, so a caller can tell it from a claim at 0;
 /// - a transaction that commits returns each statement's count, and a typed
 ///   read afterwards sees the column its DDL added, decoded by the column's
-///   declared type: the executor's schema cache was cleared.
+///   declared type: the executor's schema cache was cleared;
+/// - a table the cache knows is present, dropped by a transaction, reads as
+///   empty afterwards rather than failing on a stale "present": the cache was
+///   cleared on every backend, Postgres included (which decodes JSON by its
+///   column type and so does not need the cache for the read above).
 async fn check_raw_transaction(svc: &dyn DatabaseService) {
     drop_all(
         svc,
@@ -3867,6 +3880,7 @@ async fn check_raw_transaction(svc: &dyn DatabaseService) {
             "conf_tx_dups",
             "conf_tx_side",
             "conf_tx_cache",
+            "conf_tx_gone",
         ],
     )
     .await;
@@ -4008,6 +4022,24 @@ async fn check_raw_transaction(svc: &dyn DatabaseService) {
         "the added JSON column reads back as JSON: {after:?}"
     );
     assert_eq!(svc.count("conf_tx_cache", &[]).await.expect("count"), 2);
+
+    // A table the cache knows is present, dropped by a transaction.
+    svc.ensure_schema_table(&keyed_table("conf_tx_gone", &[]))
+        .await
+        .expect("create conf_tx_gone");
+    assert_eq!(
+        svc.count("conf_tx_gone", &[]).await.expect("count before"),
+        0
+    );
+    svc.exec_raw_transaction(&[raw("DROP TABLE conf_tx_gone")])
+        .await
+        .expect("the DROP commits");
+    assert_eq!(
+        svc.count("conf_tx_gone", &[])
+            .await
+            .expect("a dropped table reads as empty, not as a stale present one"),
+        0
+    );
 }
 
 /// A `Context` that grants every resource, so [`check_raw_transaction_through_the_host_op`]

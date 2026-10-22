@@ -178,11 +178,13 @@ pub fn ddl(request: &ExecRawRequest) -> Result<ExecRawResponse, WaferError> {
 
 /// Buffered: execute raw statements, DDL included, in order as ONE
 /// transaction on the same `__ddl__` channel and `ddl` capability as [`ddl`]:
-/// every statement commits or none does. A failed statement's error carries
-/// the backend's classification as its code, the backend's message, and the
-/// statement's position, which
+/// every statement commits or none does. A failure carries the backend's
+/// classification as its code and the backend's message (a transient
+/// `Unavailable` scrubbed) and, when the backend can attribute it to one
+/// statement, that statement's position, which
 /// [`failed_statement_index`](crate::wire::database::failed_statement_index)
-/// reads.
+/// reads. D1 cannot attribute a failure, so a missing position does not mean
+/// the failure was not a statement's.
 pub fn ddl_transaction(
     request: &DdlTransactionRequest,
 ) -> Result<DdlTransactionResponse, WaferError> {

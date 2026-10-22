@@ -649,11 +649,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// on one connection, so each sees the writes of the ones before it, and
     /// no other writer's statements interleave with them.
     ///
-    /// A statement's failure is returned as [`TransactionError::at`] its
-    /// position in `ops`, classified as the single-statement primitives
-    /// classify it (a duplicate key is [`DatabaseError::AlreadyExists`]); a
-    /// failure to open or commit the transaction is
-    /// [`TransactionError::whole`].
+    /// A failure is classified as the single-statement primitives classify it
+    /// (a duplicate key is [`DatabaseError::AlreadyExists`]). A backend that
+    /// knows which op failed returns [`TransactionError::at`] its position in
+    /// `ops`, as one that runs the statements one at a time on a connection
+    /// does. A backend whose atomic API reports one error for the whole
+    /// sequence (D1's `batch()`) returns [`TransactionError::whole`]; it must
+    /// not guess a position. A failure to open or commit the transaction is
+    /// [`TransactionError::whole`] everywhere.
     ///
     /// No default. Running the statements one by one, as
     /// [`run_batch`](Self::run_batch)'s default does, would leave the earlier

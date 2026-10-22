@@ -16,10 +16,14 @@
   - a test fake writes it out.
 
   `DbExec::run_transaction` now fails with a `TransactionError` instead of a
-  `DatabaseError`: the classified error plus the zero-based position of the
-  op that failed (`TransactionError::at(index, error)`), or no position for a
-  failure to open or commit the transaction (`TransactionError::whole`). A
-  backend's implementation reports the index of the statement it was running.
+  `DatabaseError`: the classified error plus, when the backend can attribute
+  the failure, the zero-based position of the op that failed
+  (`TransactionError::at(index, error)`). A backend that runs the statements
+  one at a time on a connection (native SQLite, PostgreSQL, sql.js) reports
+  the index of the statement it was running. One whose atomic API reports a
+  single error for the whole sequence (D1's `batch()`) returns
+  `TransactionError::whole(error)` and must not guess a position; so does
+  every backend for a failure to open or commit the transaction.
   Callers inside `DbExec` that do not expose positions (`create_many`,
   `batch`, the guarded writes) answer with the classified error alone, as
   before.
@@ -1896,15 +1900,18 @@
   (`BEGIN IMMEDIATE`) and PostgreSQL (transactional DDL). The schema cache is
   cleared once the transaction was sent, whether it committed or not.
 
-  A failed statement's error carries what a migration runner needs to tell a
-  taken claim from a refused statement: the backend's classification as the
-  code (a duplicate key is `AlreadyExists` on every backend), the backend's
-  own message, unscrubbed (the other database ops replace a duplicate key's
-  message with a fixed string), and the statement's position under the meta
-  key `database.failed_statement_index`, which
-  `wafer_block::wire::database::failed_statement_index` reads. A budget
-  refusal is `ResourceExhausted` or `InvalidArgument` with its
-  statement-budget detail code and no position, and sends nothing.
+  A failure carries the backend's classification as the code (a duplicate
+  key is `AlreadyExists` on every backend) and the backend's own message,
+  unscrubbed (the other database ops replace a duplicate key's message with a
+  fixed string); a transient `Unavailable`, whose text is the driver's, is
+  scrubbed as everywhere else. When the backend can attribute the failure to
+  one statement, the error also carries that statement's position under the
+  meta key `database.failed_statement_index`, which
+  `wafer_block::wire::database::failed_statement_index` reads. D1's `batch()`
+  cannot attribute a failure, so a missing position does not mean the
+  failure was not a statement's. A budget refusal is `ResourceExhausted` or
+  `InvalidArgument` with its statement-budget detail code and no position,
+  and sends nothing.
 
 - `wafer_block::spawn::set_spawn_wrapper` (wasm32-unknown-unknown only):
   install a `fn(SpawnedTask) -> SpawnedTask` that `spawn_producer` — and so

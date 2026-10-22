@@ -110,16 +110,23 @@ impl DatabaseError {
 
 /// Why a transaction ([`DatabaseService::exec_raw_transaction`],
 /// [`DbExec::run_transaction`](super::exec::DbExec::run_transaction)) did not
-/// commit: the classified [`DatabaseError`] and, when one statement failed,
-/// that statement's position.
+/// commit: the classified [`DatabaseError`] and, when the backend can
+/// attribute the failure to one statement, that statement's position.
 ///
 /// A failed transaction committed nothing, whichever statement failed.
 #[derive(Debug)]
 pub struct TransactionError {
     /// The zero-based position, in the statements the caller passed, of the
-    /// statement that failed. `None` when the failure was not one
-    /// statement's: the [`StatementBudget`] refused the transaction before
-    /// anything was sent, or opening or committing it failed.
+    /// statement that failed, when the backend can attribute the failure to
+    /// one statement. Native SQLite and PostgreSQL always can. A backend
+    /// whose atomic API reports one error for the whole sequence cannot:
+    /// Cloudflare D1's `batch()` names no statement, so every D1 failure is
+    /// `None`.
+    ///
+    /// `None` is therefore not "no statement failed". It is also the answer
+    /// when the [`StatementBudget`] refused the transaction before anything
+    /// was sent, or when opening or committing it failed; [`Self::error`]
+    /// says which.
     pub statement: Option<usize>,
     /// The failure, classified as every other operation classifies it: a
     /// statement that would duplicate a primary or unique key is
@@ -863,7 +870,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// before the first is sent: a call the backend could not finish in this
     /// invocation is refused with [`DatabaseError::ResourceExhausted`] or
     /// [`DatabaseError::StatementLimitExceeded`] and nothing is sent. A
-    /// failure names the statement that failed ([`TransactionError`]).
+    /// failure carries its classified error and, when the backend can
+    /// attribute it, the failing statement's position
+    /// ([`TransactionError::statement`]; D1 cannot).
     /// An empty `statements` runs nothing.
     ///
     /// Values are bound as given, as for [`exec_raw`](Self::exec_raw).

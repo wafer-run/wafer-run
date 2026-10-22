@@ -429,11 +429,14 @@ dual_api! {
     /// (`wire::database::STATEMENT_BUDGET_EXHAUSTED` /
     /// `STATEMENT_BUDGET_EXCEEDS_LIMIT`), and nothing ran.
     ///
-    /// When a statement fails, the error's `code` is the backend's
-    /// classification of it (a duplicate key is `AlreadyExists` on every
-    /// backend), its `message` is the backend's own text, and
+    /// When the transaction fails, the error's `code` is the backend's
+    /// classification of the failure (a duplicate key is `AlreadyExists` on
+    /// every backend) and its `message` is the backend's own text, except a
+    /// transient `Unavailable`, whose driver text is scrubbed.
     /// [`failed_statement_index`](wafer_block::wire::database::failed_statement_index)
-    /// reads the statement's position from it.
+    /// reads the failing statement's position when the backend could
+    /// attribute it; D1 cannot, so a missing position does not mean the
+    /// failure was not a statement's.
     pub fn ddl_transaction(ctx, statements: &[RawStatement]) -> Result<Vec<i64>, WaferError> {
         let req = DdlTransactionRequest { statements: statements.to_vec() };
         let data = svc!(

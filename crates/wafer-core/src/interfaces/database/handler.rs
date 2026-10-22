@@ -705,16 +705,19 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 
 /// The answer to a `database.ddl_transaction` that did not commit: the
 /// classified [`DatabaseError`]'s code (and its statement-budget detail code,
-/// as [`db_error_to_wafer`] sets it), the backend's own message, and, when one
-/// statement failed, its position under
+/// as [`db_error_to_wafer`] sets it), the backend's own message, and, when the
+/// backend attributed the failure to one statement, its position under
 /// [`wire::META_FAILED_STATEMENT_INDEX`].
 ///
-/// Unlike [`db_error_to_wafer`], nothing is scrubbed. The op is reachable only
-/// with the `ddl` capability, whose holder already runs any statement it likes
-/// on this database, and the statements are its own. It needs the text: a
-/// migration runner names the statement that failed and why, and a duplicate
-/// key keeps its constraint (`AlreadyExists` with the statement's index is
-/// how a runner tells another migrator's claim from a refused statement).
+/// Unlike [`db_error_to_wafer`], a failure the caller's statements caused is
+/// not scrubbed. The op is reachable only with the `ddl` capability, whose
+/// holder already runs any statement it likes on this database, and the
+/// statements are its own. It needs the text: a migration runner names the
+/// statement that failed and why, and a duplicate key keeps its constraint.
+///
+/// [`DatabaseError::Unavailable`] is the exception, scrubbed exactly as
+/// [`db_error_to_wafer`] scrubs it: its text is the driver's or the
+/// connection's (it can name hosts and files), not the caller's statements.
 fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
     let TransactionError { statement, error } = failed;
     let code = error.code();
@@ -724,9 +727,12 @@ fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
         DatabaseError::AlreadyExists(msg)
         | DatabaseError::InvalidArgument(msg)
         | DatabaseError::StatementLimitExceeded(msg)
-        | DatabaseError::Unavailable(msg)
         | DatabaseError::ResourceExhausted(msg)
         | DatabaseError::Internal(msg) => msg,
+        DatabaseError::Unavailable(msg) => {
+            tracing::warn!(error = %msg, "database temporarily unavailable");
+            "database temporarily unavailable".to_string()
+        }
         DatabaseError::Other(err) => err.to_string(),
     };
     let mut err = WaferError::new(code, message);
@@ -1732,8 +1738,9 @@ mod tests {
     }
 
     /// A transaction's statement failure answers with its classified code,
-    /// the backend's message unscrubbed, and the statement's position; a
-    /// budget refusal with its detail code and no position.
+    /// the backend's message unscrubbed (a transient fault's excepted), and
+    /// the statement's position; a budget refusal with its detail code and
+    /// no position.
     #[test]
     fn a_transaction_error_keeps_its_code_message_and_statement() {
         use wafer_block::wire::database::{
@@ -1771,6 +1778,16 @@ mod tests {
         assert_eq!(w.code, ErrorCode::InvalidArgument);
         assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXCEEDS_LIMIT));
         assert_eq!(failed_statement_index(&w), None);
+
+        // A transient fault's text is the driver's, not the caller's
+        // statements: scrubbed, as every other op scrubs it.
+        let w = transaction_error_to_wafer(TransactionError::at(
+            1,
+            DatabaseError::Unavailable("connect to db.internal:5432 refused".into()),
+        ));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.message, "database temporarily unavailable");
+        assert_eq!(failed_statement_index(&w), Some(1));
     }
 
     // `FilterOp::parse_wire` unit tests live next to the parser in

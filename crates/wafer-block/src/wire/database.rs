@@ -28,16 +28,21 @@ pub const STATEMENT_BUDGET_EXCEEDS_LIMIT: &str = "database.statement_budget_exce
 pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhausted";
 
 /// Meta key ([`crate::WaferError::meta`]) of the error answering a
-/// `database.ddl_transaction` whose statement failed: the failing statement's
-/// zero-based position in [`DdlTransactionRequest::statements`], in decimal.
-/// Absent when the failure was not one statement's: a statement-budget
-/// refusal (nothing was sent), or opening or committing the transaction.
-/// Read it with [`failed_statement_index`].
+/// `database.ddl_transaction` that failed: the failing statement's zero-based
+/// position in [`DdlTransactionRequest::statements`], in decimal, when the
+/// backend can attribute the failure to one statement. Native SQLite and
+/// PostgreSQL always can; Cloudflare D1's `batch()` reports one error for the
+/// whole sequence, so a D1 error never carries it.
+///
+/// Its absence is not "no statement failed": it is also absent for a
+/// statement-budget refusal (nothing was sent) and for a failure to open or
+/// commit the transaction. Read it with [`failed_statement_index`].
 pub const META_FAILED_STATEMENT_INDEX: &str = "database.failed_statement_index";
 
 /// The failing statement's position a `database.ddl_transaction` error
-/// carries under [`META_FAILED_STATEMENT_INDEX`], or `None` when the error
-/// names no statement.
+/// carries under [`META_FAILED_STATEMENT_INDEX`], or `None` when it carries
+/// none — which a caller must not read as "not a statement's failure" (see
+/// the key's docs).
 #[must_use]
 pub fn failed_statement_index(err: &crate::WaferError) -> Option<usize> {
     crate::MetaGet::get(err.meta.as_slice(), META_FAILED_STATEMENT_INDEX)
