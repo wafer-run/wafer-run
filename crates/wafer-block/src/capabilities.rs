@@ -259,7 +259,8 @@ pub struct BlockCapabilities {
     #[serde(default)]
     pub raw_sql: bool,
     /// Can issue RAW DDL via `db::ddl()` (an arbitrary `CREATE TABLE` /
-    /// `CREATE INDEX` / `DROP` statement).
+    /// `CREATE INDEX` / `DROP` statement) and `db::ddl_transaction()` (any
+    /// number of such statements, with their DML, as one transaction).
     /// Convention: blocks only DDL their own (`{org}__{block}__*`) tables; this
     /// is enforced by code review + the WRAP-grant audit script, not by parsing
     /// SQL. Default `false` to keep `none()` fully sandboxed; native blocks get
@@ -270,7 +271,8 @@ pub struct BlockCapabilities {
     pub ddl: bool,
     /// Structured schema operations — `database.ensure_table` /
     /// `database.add_column` / `database.drop_table` — on collections this
-    /// block may access; does NOT grant raw `database.ddl`.
+    /// block may access; does NOT grant raw `database.ddl` or
+    /// `database.ddl_transaction`.
     ///
     /// The ops take a validated `TableDef`/`ColumnDef` and the host builds the
     /// statement, so a block that only needs its own tables created gets this

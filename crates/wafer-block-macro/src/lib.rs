@@ -585,7 +585,8 @@ pub fn wafer_async_trait(
 ///
 /// Boolean flags: `crypto`, `network`, `raw_sql`, `ddl`, `schema`, `config`
 ///
-/// `ddl` opens the raw `database.ddl` statement channel; `schema` opens only
+/// `ddl` opens the raw statement channel (`database.ddl` and
+/// `database.ddl_transaction`); `schema` opens only
 /// the structured `database.ensure_table` / `add_column` / `drop_table` ops.
 /// They are independent — declare `schema` alone for a block that just needs
 /// its own tables.

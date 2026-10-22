@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
-pub use wafer_block::wire::database::RecordData;
+pub use wafer_block::wire::database::{RawStatement, RecordData};
 use wafer_block::wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
@@ -104,6 +104,69 @@ impl DatabaseError {
             | Self::Unavailable(_)
             | Self::Internal(_)
             | Self::Other(_) => None,
+        }
+    }
+}
+
+/// Why a transaction ([`DatabaseService::exec_raw_transaction`],
+/// [`DbExec::run_transaction`](super::exec::DbExec::run_transaction)) did not
+/// commit: the classified [`DatabaseError`] and, when the backend can
+/// attribute the failure to one statement, that statement's position.
+///
+/// A failed transaction committed nothing, whichever statement failed.
+#[derive(Debug)]
+pub struct TransactionError {
+    /// The zero-based position, in the statements the caller passed, of the
+    /// statement that failed, when the backend can attribute the failure to
+    /// one statement. Native SQLite and PostgreSQL always can. A backend
+    /// whose atomic API reports one error for the whole sequence cannot:
+    /// Cloudflare D1's `batch()` names no statement, so every D1 failure is
+    /// `None`.
+    ///
+    /// `None` is therefore not "no statement failed". It is also the answer
+    /// when the [`StatementBudget`] refused the transaction before anything
+    /// was sent, or when opening or committing it failed; [`Self::error`]
+    /// says which.
+    pub statement: Option<usize>,
+    /// The failure, classified as every other operation classifies it: a
+    /// statement that would duplicate a primary or unique key is
+    /// [`DatabaseError::AlreadyExists`] on every backend, a transient fault
+    /// [`DatabaseError::Unavailable`], and so on. Its text is the backend's
+    /// own message.
+    pub error: DatabaseError,
+}
+
+impl std::fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.statement {
+            Some(index) => write!(f, "statement {index}: {}", self.error),
+            None => write!(f, "{}", self.error),
+        }
+    }
+}
+
+impl std::error::Error for TransactionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl TransactionError {
+    /// A failure that is not one statement's (see [`Self::statement`]).
+    #[must_use]
+    pub const fn whole(error: DatabaseError) -> Self {
+        Self {
+            statement: None,
+            error,
+        }
+    }
+
+    /// The statement at `index` failed with `error`.
+    #[must_use]
+    pub const fn at(index: usize, error: DatabaseError) -> Self {
+        Self {
+            statement: Some(index),
+            error,
         }
     }
 }
@@ -791,6 +854,35 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// JSON text.
     async fn exec_raw(&self, query: &str, args: &[serde_json::Value])
         -> Result<i64, DatabaseError>;
+
+    /// Run `statements`, in order, as ONE transaction and return each one's
+    /// affected-row count, in the same order (a DDL statement's count is
+    /// whatever the backend reports for it; SQLite repeats the previous
+    /// statement's). Every statement commits or none
+    /// does — DDL included, on every backend: native SQLite and the SQLite
+    /// family run DDL inside a transaction, and so does PostgreSQL. So a
+    /// statement that cannot run inside a transaction (`PRAGMA`, `VACUUM`,
+    /// PostgreSQL's `CREATE INDEX CONCURRENTLY`, a `BEGIN` or `COMMIT` of the
+    /// caller's own) has no place here.
+    ///
+    /// The whole call is admitted against the
+    /// [`statement_budget`](Self::statement_budget), one statement each,
+    /// before the first is sent: a call the backend could not finish in this
+    /// invocation is refused with [`DatabaseError::ResourceExhausted`] or
+    /// [`DatabaseError::StatementLimitExceeded`] and nothing is sent. A
+    /// failure carries its classified error and, when the backend can
+    /// attribute it, the failing statement's position
+    /// ([`TransactionError::statement`]; D1 cannot).
+    /// An empty `statements` runs nothing.
+    ///
+    /// Values are bound as given, as for [`exec_raw`](Self::exec_raw).
+    ///
+    /// No default: a decorator that inherited a statement-by-statement loop
+    /// would leave the statements before a failing one applied.
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError>;
 
     /// Bulk-delete all records matching filters in a single query.
     ///

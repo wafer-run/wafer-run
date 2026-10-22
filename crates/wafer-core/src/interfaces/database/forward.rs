@@ -44,7 +44,7 @@
 //! - `forward_to DbExec;` — the implementor is a SQL backend that implements
 //!   [`DbExec`](super::exec::DbExec); `forward` entries call the shared
 //!   executor's default of the same name, qualified so they cannot recurse into
-//!   the method being defined. `DbExec` provides twenty-five of the operations;
+//!   the method being defined. `DbExec` provides twenty-six of the operations;
 //!   the other four must be `custom` or `inherit`.
 //! - `forward_to <method>();` — the implementor is a decorator with an inherent
 //!   `fn <method>(&self) -> &dyn DatabaseService` returning the wrapped
@@ -98,6 +98,7 @@
 //!             sum: forward,
 //!             query_raw: forward,
 //!             exec_raw: forward,
+//!             exec_raw_transaction: forward,
 //!             delete_where: forward,
 //!             delete_where_count: forward,
 //!             take_where: forward,
@@ -219,6 +220,7 @@
 //!             sum: forward,
 //!             query_raw: forward,
 //!             exec_raw: forward,
+//!             exec_raw_transaction: forward,
 //!             delete_where: forward,
 //!             delete_where_count: forward,
 //!             take_where: inherit,
@@ -311,6 +313,7 @@ macro_rules! __forward_database_ledger {
             sum: $m_sum:ident,
             query_raw: $m_query_raw:ident,
             exec_raw: $m_exec_raw:ident,
+            exec_raw_transaction: $m_exec_raw_transaction:ident,
             delete_where: $m_delete_where:ident,
             delete_where_count: $m_delete_where_count:ident,
             take_where: $m_take_where:ident,
@@ -346,6 +349,7 @@ macro_rules! __forward_database_ledger {
                 (sum, $m_sum)
                 (query_raw, $m_query_raw)
                 (exec_raw, $m_exec_raw)
+                (exec_raw_transaction, $m_exec_raw_transaction)
                 (delete_where, $m_delete_where)
                 (delete_where_count, $m_delete_where_count)
                 (take_where, $m_take_where)
@@ -376,7 +380,8 @@ macro_rules! __forward_database_ledger {
              DatabaseService operation exactly once, in this order, each as \
              `forward`, `custom` or `inherit`:\n\
              \x20   get, list, create, create_many, update, delete, count, sum, query_raw,\n\
-             \x20   exec_raw, delete_where, delete_where_count, take_where, update_where,\n\
+             \x20   exec_raw, exec_raw_transaction, delete_where, delete_where_count,\n\
+             \x20   take_where, update_where,\n\
              \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
              \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_columns,\n\
@@ -640,6 +645,26 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::exec_raw($recv(self), query, args).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (exec_raw_transaction, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn exec_raw_transaction(
+                    &self,
+                    statements: &[$crate::interfaces::database::service::RawStatement],
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<i64>,
+                    $crate::interfaces::database::service::TransactionError,
+                > {
+                    <_ as $target>::exec_raw_transaction($recv(self), statements).await
                 }
             ]
         );

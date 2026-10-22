@@ -29,7 +29,7 @@ use wafer_sql_utils::aggregate::CastType;
 use super::{
     exec::windowed_counter_row,
     schema_wire,
-    service::{self, DatabaseError, DatabaseService},
+    service::{self, DatabaseError, DatabaseService, TransactionError},
 };
 use crate::interfaces::handler_util::{decode_and_authorize_all, to_output};
 
@@ -703,6 +703,52 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     }
 }
 
+/// The answer to a `database.ddl_transaction` that did not commit: the
+/// classified [`DatabaseError`]'s code (and its statement-budget detail code,
+/// as [`db_error_to_wafer`] sets it), the backend's own message, and, when the
+/// backend attributed the failure to one statement, its position under
+/// [`wire::META_FAILED_STATEMENT_INDEX`].
+///
+/// Unlike [`db_error_to_wafer`], a failure the caller's statements caused is
+/// not scrubbed. The op is reachable only with the `ddl` capability, whose
+/// holder already runs any statement it likes on this database, and the
+/// statements are its own. It needs the text: a migration runner names the
+/// statement that failed and why, and a duplicate key keeps its constraint.
+///
+/// [`DatabaseError::Unavailable`] is the exception, scrubbed exactly as
+/// [`db_error_to_wafer`] scrubs it: its text is the driver's or the
+/// connection's (it can name hosts and files), not the caller's statements.
+fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
+    let TransactionError { statement, error } = failed;
+    let code = error.code();
+    let detail = error.detail_code();
+    let message = match error {
+        DatabaseError::NotFound => "record not found".to_string(),
+        DatabaseError::AlreadyExists(msg)
+        | DatabaseError::InvalidArgument(msg)
+        | DatabaseError::StatementLimitExceeded(msg)
+        | DatabaseError::ResourceExhausted(msg)
+        | DatabaseError::Internal(msg) => msg,
+        DatabaseError::Unavailable(msg) => {
+            tracing::warn!(error = %msg, "database temporarily unavailable");
+            "database temporarily unavailable".to_string()
+        }
+        DatabaseError::Other(err) => err.to_string(),
+    };
+    let mut err = WaferError::new(code, message);
+    if let Some(detail) = detail {
+        err = err.with_detail_code(detail);
+    }
+    if let Some(index) = statement {
+        MetaSet::set(
+            &mut err.meta,
+            wire::META_FAILED_STATEMENT_INDEX.to_string(),
+            index.to_string(),
+        );
+    }
+    err
+}
+
 /// The WRAP checks `op` needs on `resource`, as
 /// [`wafer_block::wrap::DATABASE_OP_ACCESS`] classifies it. A `resource` that
 /// fails [`check_name`] is refused before any check is listed, so the name
@@ -1247,6 +1293,23 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
+        ServiceOp::DATABASE_DDL_TRANSACTION => {
+            // Authorized on `__ddl__` exactly like `DATABASE_DDL`: one
+            // statement or many, the channel is the same.
+            let req = match decode_and_authorize_op::<wire::DdlTransactionRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_DDL_TRANSACTION,
+                |_r| DDL_RESOURCE,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.exec_raw_transaction(&req.statements).await {
+                Ok(rows_affected) => to_output(&wire::DdlTransactionResponse { rows_affected }),
+                Err(e) => OutputStream::error(transaction_error_to_wafer(e)),
+            }
+        }
         ServiceOp::DATABASE_DELETE_WHERE => {
             let req = match decode_and_authorize_op::<wire::DeleteWhereRequest>(
                 ctx,
@@ -1672,6 +1735,59 @@ mod tests {
             let w = db_error_to_wafer(other);
             assert_eq!(w.detail_code(), None, "{w:?}");
         }
+    }
+
+    /// A transaction's statement failure answers with its classified code,
+    /// the backend's message unscrubbed (a transient fault's excepted), and
+    /// the statement's position; a budget refusal with its detail code and
+    /// no position.
+    #[test]
+    fn a_transaction_error_keeps_its_code_message_and_statement() {
+        use wafer_block::wire::database::{
+            failed_statement_index, STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED,
+        };
+
+        let w = transaction_error_to_wafer(TransactionError::at(
+            0,
+            DatabaseError::AlreadyExists("UNIQUE constraint failed: t.id".into()),
+        ));
+        assert_eq!(w.code, ErrorCode::AlreadyExists);
+        assert_eq!(w.message, "UNIQUE constraint failed: t.id");
+        assert_eq!(failed_statement_index(&w), Some(0));
+        assert_eq!(w.detail_code(), None);
+
+        let w = transaction_error_to_wafer(TransactionError::at(
+            3,
+            DatabaseError::Internal("no such table: missing".into()),
+        ));
+        assert_eq!(w.code, ErrorCode::Internal);
+        assert_eq!(w.message, "no such table: missing");
+        assert_eq!(failed_statement_index(&w), Some(3));
+
+        let w = transaction_error_to_wafer(TransactionError::whole(
+            DatabaseError::ResourceExhausted("spent".into()),
+        ));
+        assert_eq!(w.code, ErrorCode::ResourceExhausted);
+        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXHAUSTED));
+        assert_eq!(w.message, "spent");
+        assert_eq!(failed_statement_index(&w), None);
+
+        let w = transaction_error_to_wafer(TransactionError::whole(
+            DatabaseError::StatementLimitExceeded("over".into()),
+        ));
+        assert_eq!(w.code, ErrorCode::InvalidArgument);
+        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXCEEDS_LIMIT));
+        assert_eq!(failed_statement_index(&w), None);
+
+        // A transient fault's text is the driver's, not the caller's
+        // statements: scrubbed, as every other op scrubs it.
+        let w = transaction_error_to_wafer(TransactionError::at(
+            1,
+            DatabaseError::Unavailable("connect to db.internal:5432 refused".into()),
+        ));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.message, "database temporarily unavailable");
+        assert_eq!(failed_statement_index(&w), Some(1));
     }
 
     // `FilterOp::parse_wire` unit tests live next to the parser in
