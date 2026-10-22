@@ -90,7 +90,7 @@ ipnet = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # WASM
-wasmi = "0.44"
+wasmi = "2.0"
 
 # Crypto
 argon2 = "0.6"
