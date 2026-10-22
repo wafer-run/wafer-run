@@ -29,7 +29,7 @@ crate::service_block! {
              Init, and a change applies after a restart.",
             "52428800",
         )
-        .name("Max Response Body Bytes"),
+        .name("Max response body bytes"),
         ConfigVar::new(
             CONNECT_TIMEOUT_SECS_KEY,
             "Seconds the HTTP network service waits to connect to an \
@@ -38,7 +38,7 @@ crate::service_block! {
              applies after a restart.",
             "10",
         )
-        .name("Connect Timeout (s)"),
+        .name("Connect timeout (s)"),
         ConfigVar::new(
             READ_TIMEOUT_SECS_KEY,
             "Seconds an upstream connection may go without sending data \
@@ -48,7 +48,7 @@ crate::service_block! {
              value fails Init, and a change applies after a restart.",
             "30",
         )
-        .name("Idle Read Timeout (s)"),
+        .name("Idle read timeout (s)"),
         ConfigVar::new(
             REQUEST_TIMEOUT_SECS_KEY,
             "Total seconds allowed for a buffered request, response body \
@@ -57,7 +57,7 @@ crate::service_block! {
              value fails Init, and a change applies after a restart.",
             "30",
         )
-        .name("Buffered Request Timeout (s)"),
+        .name("Buffered request timeout (s)"),
         ConfigVar::new(
             STREAM_TIMEOUT_SECS_KEY,
             "Total seconds allowed for a streaming request, response body \
@@ -67,7 +67,7 @@ crate::service_block! {
              value fails Init, and a change applies after a restart.",
             "",
         )
-        .name("Streaming Request Timeout (s)")
+        .name("Streaming request timeout (s)")
         // Unset means "no total", a value of its own: without `optional` an
         // empty default makes the key required, and every source that
         // leaves it unset fails this block's Init.

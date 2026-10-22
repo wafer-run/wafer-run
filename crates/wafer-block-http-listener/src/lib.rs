@@ -1071,14 +1071,14 @@ impl Block for HttpListenerBlock {
                 "Socket address the listener binds to (host:port).",
                 "0.0.0.0:8080",
             )
-            .name("Listen Address"),
+            .name("Listen address"),
             ConfigVar::new(
                 "dispatch_target",
                 "Default dispatch target (flow id or block name) when no \
                  explicit router upstream resolves the request.",
                 "",
             )
-            .name("Dispatch Target"),
+            .name("Dispatch target"),
             ConfigVar::new(
                 "max_body_bytes",
                 "Maximum request-body size in bytes. The body streams to the \
@@ -1090,7 +1090,7 @@ impl Block for HttpListenerBlock {
                  Must be at least 1.",
                 &DEFAULT_MAX_BODY_BYTES.to_string(),
             )
-            .name("Max Body Bytes"),
+            .name("Max body bytes"),
             ConfigVar::new(
                 "header_read_timeout_secs",
                 "Seconds a client has to send a complete request head (request \
@@ -1099,7 +1099,7 @@ impl Block for HttpListenerBlock {
                  closed when it runs out. 1 to 86400.",
                 &DEFAULT_HEADER_READ_TIMEOUT_SECS.to_string(),
             )
-            .name("Header Read Timeout (s)"),
+            .name("Header read timeout (s)"),
             ConfigVar::new(
                 "body_read_timeout_secs",
                 "Seconds a client has to send the whole request body after its \
@@ -1111,7 +1111,7 @@ impl Block for HttpListenerBlock {
                  and the response ends as its producer ends it. 1 to 86400.",
                 &DEFAULT_BODY_READ_TIMEOUT_SECS.to_string(),
             )
-            .name("Body Read Timeout (s)"),
+            .name("Body read timeout (s)"),
             ConfigVar::new(
                 "max_connections",
                 "Maximum concurrently open client connections. At the cap the \
@@ -1121,7 +1121,7 @@ impl Block for HttpListenerBlock {
                  for as long as the stream is open. At least 1.",
                 &DEFAULT_MAX_CONNECTIONS.to_string(),
             )
-            .name("Max Connections"),
+            .name("Max connections"),
             ConfigVar::new(
                 "write_timeout_secs",
                 "Seconds a response write may make no progress (the client is \
@@ -1132,7 +1132,7 @@ impl Block for HttpListenerBlock {
                  1 to 86400.",
                 &DEFAULT_WRITE_TIMEOUT_SECS.to_string(),
             )
-            .name("Write Timeout (s)"),
+            .name("Write timeout (s)"),
             ConfigVar::new(
                 "shutdown_grace_secs",
                 "Seconds a stopping listener gives open connections to finish \
@@ -1142,7 +1142,7 @@ impl Block for HttpListenerBlock {
                  returns once they are gone. 1 to 86400.",
                 &DEFAULT_SHUTDOWN_GRACE_SECS.to_string(),
             )
-            .name("Shutdown Grace (s)"),
+            .name("Shutdown grace (s)"),
             ConfigVar::new(
                 "trusted_proxies",
                 "Comma-separated trusted reverse proxies: exact IPs (10.0.0.1, \
@@ -1156,7 +1156,7 @@ impl Block for HttpListenerBlock {
                  Invalid entries fail Init.",
                 "",
             )
-            .name("Trusted Proxies"),
+            .name("Trusted proxies"),
         ])
     }
 

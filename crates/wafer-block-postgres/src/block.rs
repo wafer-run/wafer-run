@@ -64,7 +64,7 @@ wafer_core::service_block! {
              once at Init.",
             "false",
         )
-        .name("Strict Schema")
+        .name("Strict schema")
         .input_type(InputType::Toggle),
     ]),
     handle: |service, _this, ctx, msg, body| {

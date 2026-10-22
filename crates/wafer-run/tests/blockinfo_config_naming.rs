@@ -1,22 +1,10 @@
 //! Workspace validator: every block's declared config keys obey the naming
-//! convention for the slot they live in, and no key is declared in both
-//! slots. Enforces the 2026-05-15 flow-config-api spec.
+//! convention for the slot they live in, no key is declared in both slots,
+//! and every key carries a sentence-case label. Enforces the 2026-05-15
+//! flow-config-api spec and the label rule on
+//! [`ConfigVar::name`](wafer_block::ConfigVar::name).
 
-// Reference each block crate that uses register_static_block! so the
-// linker keeps their linkme entries alive in this test binary.
-use wafer_block::STATIC_BLOCK_REGISTRATIONS;
-#[allow(unused_imports)]
-use wafer_block_cors as _;
-#[allow(unused_imports)]
-use wafer_block_ip_rate_limit as _;
-#[allow(unused_imports)]
-use wafer_block_monitoring as _;
-#[allow(unused_imports)]
-use wafer_block_postgres as _;
-#[allow(unused_imports)]
-use wafer_block_readonly_guard as _;
-#[allow(unused_imports)]
-use wafer_block_s3 as _;
+mod declared_config;
 
 /// SCREAMING_SNAKE with `{ORG}__{BLOCK}__{KEY}` form.
 /// First and last segments contain `[A-Z][A-Z0-9_]*` characters; the
@@ -50,13 +38,52 @@ fn is_snake_case(s: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// The proper nouns a label may capitalise after its first word, each
+/// spelled as its owner spells it. Only `OAuth` is here: no in-tree label
+/// names another, and one is added only with the label that needs it.
+const PROPER_NOUNS: &[&str] = &["OAuth"];
+
+/// Whether `label` capitalises its first word and only that, plus any
+/// acronym and any of [`PROPER_NOUNS`]: "URL prefix", "SPA mode", "STUN
+/// server URLs" and "Enable OAuth" are; "Max Age (seconds)", "Max age
+/// (Seconds)", "Read-Only" and "max age" are not. An empty label is not.
+///
+/// Words are split at whitespace and hyphens, so the second half of a
+/// hyphenated word is a word of its own, and are read from their first
+/// letter, so a parenthesised word is checked like any other. An acronym is
+/// a word with no lowercase letter, or one whose only lowercase letter is a
+/// plural `s` ("URLs").
+///
+/// The same rule as impresspress's `impresspress_core::test_support::case`,
+/// which checks impresspress's own labels.
+fn is_sentence_case(label: &str) -> bool {
+    let first_is_capital = label.chars().next().is_some_and(|c| !c.is_lowercase());
+    first_is_capital
+        && label
+            .split(|c: char| c.is_whitespace() || c == '-')
+            .skip(1)
+            .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()))
+            .all(|word| {
+                let starts_upper = word.chars().next().is_some_and(char::is_uppercase);
+                !starts_upper || is_acronym(word) || PROPER_NOUNS.contains(&word)
+            })
+}
+
+/// A word with no lowercase letter, or with a plural `s` as its only one.
+fn is_acronym(word: &str) -> bool {
+    let all_capitals = |w: &str| !w.chars().any(char::is_lowercase);
+    all_capitals(word)
+        || word
+            .strip_suffix('s')
+            .is_some_and(|stem| stem.chars().count() >= 2 && all_capitals(stem))
+}
+
 #[test]
 fn all_blocks_obey_config_key_naming() {
     let mut failures: Vec<String> = Vec::new();
     let mut count = 0usize;
 
-    for entry in STATIC_BLOCK_REGISTRATIONS.iter() {
-        let block = (entry.factory)();
+    for (_, block) in declared_config::every_block() {
         let info = block.info();
         count += 1;
 
@@ -74,6 +101,21 @@ fn all_blocks_obey_config_key_naming() {
                 failures.push(format!(
                     "{}: flow_config entry {:?} is not snake_case",
                     info.name, cv.key
+                ));
+            }
+        }
+        for (slot, cv) in info
+            .config_keys
+            .iter()
+            .map(|cv| ("config_keys", cv))
+            .chain(info.flow_config.iter().map(|cv| ("flow_config", cv)))
+        {
+            if !is_sentence_case(&cv.name) {
+                failures.push(format!(
+                    "{}: {slot} entry {:?} has label {:?}, which is not sentence \
+                     case (capitalise the first word only; acronyms and \
+                     {PROPER_NOUNS:?} keep their capitals)",
+                    info.name, cv.key, cv.name
                 ));
             }
         }
@@ -120,4 +162,35 @@ fn snake_case_validator_examples() {
     assert!(!is_snake_case("WAFER_RUN__S3__BUCKET")); // contains __
     assert!(!is_snake_case("")); // empty
     assert!(!is_snake_case("_underscore_first"));
+}
+
+#[test]
+fn sentence_case_validator_examples() {
+    for ok in [
+        "URL prefix",
+        "SPA mode",
+        "CSP",
+        "Read-only",
+        "Allow blob: workers",
+        "IPv6 prefix",
+        "Max age (seconds)",
+        "Connect timeout (s)",
+        "STUN server URLs",
+        "Enable OAuth",
+        "JWT secret",
+    ] {
+        assert!(is_sentence_case(ok), "{ok}");
+    }
+    for bad in [
+        "",
+        "URL Prefix",
+        "Max Age (seconds)",
+        "Max age (Seconds)",
+        "Read-Only",
+        "Strict Schema",
+        "max age",
+        "Is As",
+    ] {
+        assert!(!is_sentence_case(bad), "{bad}");
+    }
 }
