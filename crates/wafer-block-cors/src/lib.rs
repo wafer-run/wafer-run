@@ -178,28 +178,28 @@ impl Block for CorsBlock {
                  closed and denies all cross-origin requests (SEC-087).",
                 "",
             )
-            .name("Allowed Origins"),
+            .name("Allowed origins"),
             ConfigVar::new(
                 "allowed_methods",
                 "Comma-separated list of HTTP methods returned in \
                  Access-Control-Allow-Methods.",
                 DEFAULT_ALLOWED_METHODS,
             )
-            .name("Allowed Methods"),
+            .name("Allowed methods"),
             ConfigVar::new(
                 "allowed_headers",
                 "Comma-separated list of request headers returned in \
                  Access-Control-Allow-Headers.",
                 DEFAULT_ALLOWED_HEADERS,
             )
-            .name("Allowed Headers"),
+            .name("Allowed headers"),
             ConfigVar::new(
                 "max_age",
                 "Seconds a browser may cache the CORS preflight result, \
                  returned in Access-Control-Max-Age.",
                 &DEFAULT_MAX_AGE_SECONDS.to_string(),
             )
-            .name("Max Age (seconds)"),
+            .name("Max age (seconds)"),
         ])
     }
 

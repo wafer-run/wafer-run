@@ -74,7 +74,7 @@ wafer_core::service_block! {
                  once at Init: an invalid value fails Init (restart to apply).",
                 &DEFAULT_MAX_OBJECT_BYTES.to_string(),
             )
-            .name("Max Object Bytes")
+            .name("Max object bytes")
             .input_type(InputType::Number),
         ]),
     handle: |service, _this, ctx, msg, body| {

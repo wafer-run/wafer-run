@@ -10,55 +10,16 @@
 //! reads what each block actually declares, so a key added the same way fails
 //! here rather than in an embedder's boot.
 
+mod declared_config;
+
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
-use wafer_block::STATIC_BLOCK_REGISTRATIONS;
-// Link every statically registered block crate; `static_block_crates_are_all_linked`
-// fails when one is missing from this list.
-use wafer_block_cors as _;
-use wafer_block_http_listener as _;
-use wafer_block_inspector as _;
-use wafer_block_ip_rate_limit as _;
-use wafer_block_monitoring as _;
-use wafer_block_postgres as _;
-use wafer_block_readonly_guard as _;
-use wafer_block_router as _;
-use wafer_block_s3 as _;
-use wafer_block_security_headers as _;
-use wafer_block_web as _;
-use wafer_core::interfaces::network::service::{NetworkError, NetworkService, Request, Response};
+use declared_config::{NoNetwork, LINKED_STATIC_BLOCK_CRATES, SERVICE_BLOCKS_WITH_CONFIG};
 use wafer_run::{StaticConfigSource, Wafer};
-
-/// The crates whose `use` lines are above.
-const LINKED_STATIC_BLOCK_CRATES: &[&str] = &[
-    "wafer-block-cors",
-    "wafer-block-http-listener",
-    "wafer-block-inspector",
-    "wafer-block-ip-rate-limit",
-    "wafer-block-monitoring",
-    "wafer-block-postgres",
-    "wafer-block-readonly-guard",
-    "wafer-block-router",
-    "wafer-block-s3",
-    "wafer-block-security-headers",
-    "wafer-block-web",
-];
-
-/// The `wafer-core` service blocks that declare config, registered below.
-const SERVICE_BLOCKS_WITH_CONFIG: &[&str] = &["database.rs", "network.rs"];
 
 /// The keys a block cannot run without: an empty source must fail on them.
 const GENUINELY_REQUIRED: &[(&str, &str)] =
     &[("wafer-run/postgres", "WAFER_RUN__POSTGRES__DATABASE_URL")];
-
-struct NoNetwork;
-
-#[wafer_block::wafer_async_trait]
-impl NetworkService for NoNetwork {
-    async fn do_request(&self, _req: &Request) -> Result<Response, NetworkError> {
-        Err(NetworkError::Other("no network in this test".into()))
-    }
-}
 
 /// Every in-tree block that declares config, over a source holding nothing.
 fn every_block_over_an_empty_source() -> Wafer {
@@ -68,17 +29,9 @@ fn every_block_over_an_empty_source() -> Wafer {
         .config_source(Arc::new(StaticConfigSource::default()))
         .build()
         .expect("build");
-    for entry in STATIC_BLOCK_REGISTRATIONS.iter() {
-        wafer
-            .register_block(entry.name, (entry.factory)())
-            .expect("register a static block");
+    for (name, block) in declared_config::every_block() {
+        wafer.register_block(name, block).expect("register a block");
     }
-    let db: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> = Arc::new(
-        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory().expect("sqlite"),
-    );
-    wafer_core::service_blocks::database::register_with(&mut wafer, db).expect("database");
-    wafer_core::service_blocks::network::register_with(&mut wafer, Arc::new(NoNetwork))
-        .expect("network");
     wafer
 }
 
@@ -137,9 +90,11 @@ async fn the_network_block_starts_with_the_stream_timeout_unset_or_set() {
     );
 }
 
-/// The crates that register a block statically are exactly the ones linked
-/// above, and the service blocks that declare config are the ones registered;
-/// a new one fails here until it is covered.
+/// The crates that register a block statically are exactly the ones
+/// `declared_config` links, and the service blocks that declare config are
+/// exactly the ones it pairs with a constructor, each building its own file's
+/// block; a new one fails here until it is covered, so this test and
+/// `blockinfo_config_naming.rs` both walk it.
 #[test]
 fn every_block_that_declares_config_is_covered() {
     let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -147,14 +102,11 @@ fn every_block_that_declares_config_is_covered() {
     for entry in std::fs::read_dir(&crates_dir).expect("read crates/") {
         let dir = entry.expect("dir entry").path();
         let name = dir.file_name().expect("name").to_string_lossy().to_string();
-        let Ok(lib) = std::fs::read_to_string(dir.join("src/lib.rs")) else {
-            continue;
-        };
         if name.starts_with("wafer-block-")
-            && (lib.contains("register_static_block!") || lib.contains("lazy block:"))
             && name != "wafer-block-macro"
+            && calls_register_static_block(&dir.join("src"))
         {
-            static_crates.insert(name);
+            static_crates.insert(name.replace('-', "_"));
         }
     }
     let linked: BTreeSet<String> = LINKED_STATIC_BLOCK_CRATES
@@ -168,11 +120,7 @@ fn every_block_that_declares_config_is_covered() {
     for entry in std::fs::read_dir(&service_dir).expect("read service_blocks/") {
         let path = entry.expect("dir entry").path();
         let source = std::fs::read_to_string(&path).expect("read");
-        // Code, not the macro's documentation of the builder call.
-        let declares = source
-            .lines()
-            .any(|line| line.contains(".config_keys(") && !line.trim_start().starts_with("//"));
-        if declares {
+        if code_lines(&source).any(|line| line.contains(".config_keys(")) {
             with_config.insert(
                 path.file_name()
                     .expect("name")
@@ -183,7 +131,51 @@ fn every_block_that_declares_config_is_covered() {
     }
     let covered: BTreeSet<String> = SERVICE_BLOCKS_WITH_CONFIG
         .iter()
-        .map(ToString::to_string)
+        .map(|(file, _)| (*file).to_string())
         .collect();
     assert_eq!(with_config, covered);
+
+    for (file, build) in SERVICE_BLOCKS_WITH_CONFIG {
+        let (name, block) = build();
+        let expected = format!("wafer-run/{}", file.trim_end_matches(".rs"));
+        assert_eq!(name, expected, "{file} is paired with another file's block");
+        assert_eq!(
+            block.info().name,
+            expected,
+            "{file}'s block reports another name"
+        );
+    }
+}
+
+/// Whether any `.rs` file under `src`, at any depth, registers a block
+/// statically (see [`registers_statically`]).
+fn calls_register_static_block(src: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(src) else {
+        return false;
+    };
+    entries
+        .map(|entry| entry.expect("dir entry").path())
+        .any(|path| {
+            if path.is_dir() {
+                calls_register_static_block(&path)
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                registers_statically(&std::fs::read_to_string(&path).expect("read"))
+            } else {
+                false
+            }
+        })
+}
+
+/// Whether `source` calls `register_static_block!` or invokes
+/// `service_block!`'s lazy form, in code rather than in a comment.
+fn registers_statically(source: &str) -> bool {
+    code_lines(source)
+        .any(|line| line.contains("register_static_block!(") || line.contains("lazy block:"))
+}
+
+/// The lines of `source` that are not `//` comments (doc comments included).
+fn code_lines(source: &str) -> impl Iterator<Item = &str> {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
 }

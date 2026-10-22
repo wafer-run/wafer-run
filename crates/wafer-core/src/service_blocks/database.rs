@@ -26,7 +26,7 @@ crate::service_block! {
          columns their data names. Applied once at Init.",
         "false",
     )
-    .name("Strict Schema")
+    .name("Strict schema")
     .input_type(InputType::Toggle)]),
     handle: |this, ctx, msg, body| {
         handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
