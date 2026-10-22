@@ -39,8 +39,10 @@ fn is_snake_case(s: &str) -> bool {
 }
 
 /// The proper nouns a label may capitalise after its first word, each
-/// spelled as its owner spells it. Only `OAuth` is here: no in-tree label
-/// names another, and one is added only with the label that needs it.
+/// spelled as its owner spells it. No wafer-run label names one. The list is
+/// the same as impresspress's `test_support::case`, so a label is judged the
+/// same in both repos: their labels sit side by side in impresspress's
+/// Variables table. Change it in both, and only with a label that needs it.
 const PROPER_NOUNS: &[&str] = &["OAuth"];
 
 /// Whether `label` capitalises its first word and only that, plus any

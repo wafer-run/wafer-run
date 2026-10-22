@@ -92,8 +92,9 @@ async fn the_network_block_starts_with_the_stream_timeout_unset_or_set() {
 
 /// The crates that register a block statically are exactly the ones
 /// `declared_config` links, and the service blocks that declare config are
-/// the ones it builds; a new one fails here until it is covered, so this
-/// test and `blockinfo_config_naming.rs` both walk it.
+/// exactly the ones it pairs with a constructor, each building its own file's
+/// block; a new one fails here until it is covered, so this test and
+/// `blockinfo_config_naming.rs` both walk it.
 #[test]
 fn every_block_that_declares_config_is_covered() {
     let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -101,14 +102,11 @@ fn every_block_that_declares_config_is_covered() {
     for entry in std::fs::read_dir(&crates_dir).expect("read crates/") {
         let dir = entry.expect("dir entry").path();
         let name = dir.file_name().expect("name").to_string_lossy().to_string();
-        let Ok(lib) = std::fs::read_to_string(dir.join("src/lib.rs")) else {
-            continue;
-        };
         if name.starts_with("wafer-block-")
-            && (lib.contains("register_static_block!") || lib.contains("lazy block:"))
             && name != "wafer-block-macro"
+            && calls_register_static_block(&dir.join("src"))
         {
-            static_crates.insert(name);
+            static_crates.insert(name.replace('-', "_"));
         }
     }
     let linked: BTreeSet<String> = LINKED_STATIC_BLOCK_CRATES
@@ -122,11 +120,7 @@ fn every_block_that_declares_config_is_covered() {
     for entry in std::fs::read_dir(&service_dir).expect("read service_blocks/") {
         let path = entry.expect("dir entry").path();
         let source = std::fs::read_to_string(&path).expect("read");
-        // Code, not the macro's documentation of the builder call.
-        let declares = source
-            .lines()
-            .any(|line| line.contains(".config_keys(") && !line.trim_start().starts_with("//"));
-        if declares {
+        if code_lines(&source).any(|line| line.contains(".config_keys(")) {
             with_config.insert(
                 path.file_name()
                     .expect("name")
@@ -137,7 +131,51 @@ fn every_block_that_declares_config_is_covered() {
     }
     let covered: BTreeSet<String> = SERVICE_BLOCKS_WITH_CONFIG
         .iter()
-        .map(ToString::to_string)
+        .map(|(file, _)| (*file).to_string())
         .collect();
     assert_eq!(with_config, covered);
+
+    for (file, build) in SERVICE_BLOCKS_WITH_CONFIG {
+        let (name, block) = build();
+        let expected = format!("wafer-run/{}", file.trim_end_matches(".rs"));
+        assert_eq!(name, expected, "{file} is paired with another file's block");
+        assert_eq!(
+            block.info().name,
+            expected,
+            "{file}'s block reports another name"
+        );
+    }
+}
+
+/// Whether any `.rs` file under `src`, at any depth, registers a block
+/// statically (see [`registers_statically`]).
+fn calls_register_static_block(src: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(src) else {
+        return false;
+    };
+    entries
+        .map(|entry| entry.expect("dir entry").path())
+        .any(|path| {
+            if path.is_dir() {
+                calls_register_static_block(&path)
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                registers_statically(&std::fs::read_to_string(&path).expect("read"))
+            } else {
+                false
+            }
+        })
+}
+
+/// Whether `source` calls `register_static_block!` or invokes
+/// `service_block!`'s lazy form, in code rather than in a comment.
+fn registers_statically(source: &str) -> bool {
+    code_lines(source)
+        .any(|line| line.contains("register_static_block!(") || line.contains("lazy block:"))
+}
+
+/// The lines of `source` that are not `//` comments (doc comments included).
+fn code_lines(source: &str) -> impl Iterator<Item = &str> {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
 }
