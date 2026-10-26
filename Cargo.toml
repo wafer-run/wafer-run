@@ -113,7 +113,12 @@ pbkdf2 = { version = "0.13", default-features = false }
 # hyper 0.14 + rustls 0.21 + ring) alongside `default-https-client` (hyper 1 +
 # rustls 0.23 + aws-lc). Selecting features drops the entire legacy stack from
 # every s3-linking binary (PERF-06, docs/perf/2026-07-15-artifact-size-and-compile-time.md).
-aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
+# `sigv4a` (also a default) is left off: SigV4a signing is only needed for S3
+# Multi-Region Access Points, which wafer-block-s3 does not use (it addresses
+# a single bucket, optionally through a custom endpoint). Enabling it pulls
+# p256 -> elliptic-curve -> crypto-bigint 0.4/0.5 into every s3-linking
+# binary, which RUSTSEC-2026-0387 flags with no patched 0.4.x/0.5.x release.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-config = "1"
 
 # Network
