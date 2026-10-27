@@ -368,7 +368,7 @@ pub enum GuardedUpdate {
 /// `select_columns`), bounding every `CaseWhenSum` / `SumWhere` predicate tree,
 /// and parsing every output cast against the
 /// [`CastType`](wafer_sql_utils::aggregate::CastType) allowlist — so the
-/// service never sees an untrusted column name or type name. Rendering into the `!Send`
+/// service never sees an untrusted column name or type name. Rendering into the
 /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
 /// happens server-side in [`DbExec::aggregate`](super::exec::DbExec::aggregate)
 /// via [`AggregateSpec::into_grouped_config`].
@@ -401,9 +401,9 @@ pub struct AggregateSpec {
 /// [`AggregateColumnDef`](wafer_block::wire::database::AggregateColumnDef).
 ///
 /// The `CaseWhenSum` / `SumWhere` predicates are carried as already-bounds-checked
-/// [`FilterTree`] forests (not sea-query `SimpleExpr`s) so the `!Send` `CASE`
-/// expressions can be built server-side in
-/// [`AggregateSpec::into_grouped_config`].
+/// [`FilterTree`] forests (not sea-query expressions): a `CASE` predicate is
+/// rendered for one backend's dialect, so it is built server-side, for that
+/// backend, in [`AggregateSpec::into_grouped_config`].
 #[derive(Debug, Clone)]
 pub enum AggregateColumnSpec {
     /// `COUNT(*) AS alias`.
@@ -559,12 +559,11 @@ impl AggregateSpec {
     /// for `table`, to be rendered in `backend`'s dialect (the `CASE`
     /// predicates are built for it).
     ///
-    /// Builds the `!Send` sea-query expressions (the `CaseWhenSum` and
-    /// `SumWhere` `CASE` predicates via [`wafer_sql_utils::query::tree_to_simple_expr`]); the
-    /// returned config holds `Rc<dyn Iden>` and is therefore also `!Send`, so
-    /// call this server-side inside
-    /// [`DbExec::aggregate`](super::exec::DbExec::aggregate) and drop the
-    /// result before the next `.await`.
+    /// Builds the sea-query expressions for `backend` (the `CaseWhenSum` and
+    /// `SumWhere` `CASE` predicates via
+    /// [`wafer_sql_utils::query::tree_to_simple_expr`]), so it runs
+    /// server-side, inside [`DbExec::aggregate`](super::exec::DbExec::aggregate),
+    /// where the backend is known.
     #[must_use]
     pub fn into_grouped_config(
         self,
@@ -615,9 +614,8 @@ impl AggregateSpec {
                     cast_as: None,
                     inner_expr: None,
                 },
-                // The `when` predicate is `!Send` once turned into a
-                // `SimpleExpr`, so it is built here (server-side), never in the
-                // handler.
+                // The `when` predicate is rendered for `backend`, so it is
+                // built here (server-side), never in the handler.
                 AggregateColumnSpec::CaseWhenSum { when, alias } => AggregateColumn::case_when_sum(
                     alias,
                     wafer_sql_utils::query::tree_to_simple_expr(&when, backend),

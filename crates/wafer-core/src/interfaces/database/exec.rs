@@ -1114,18 +1114,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         };
         let json = self.json_columns(table).await?;
 
-        // Render both statements to `Statement` (plain `String` + `Vec<Value>`,
-        // both `Send`) before any `.await` below, inside a nested block so
-        // the intermediate `Cond` is fully dropped (its storage freed) by
-        // the closing brace — *before* the generator state machine for this
-        // async fn (via `#[wafer_async_trait]` / `async_trait`) crosses an
-        // `.await`. `Cond` — and the sea-query builder types it flows
-        // through — carries `Rc<dyn Iden>` internally (this crate doesn't
-        // enable sea-query's `thread-safe` feature), so it is **not**
-        // `Send`; a value of that type still in scope (even if logically
-        // moved-out) at an `.await` point makes the whole future non-`Send`,
-        // which the shared `DbExec` trait requires for the native
-        // (non-wasm-component) build.
+        // Render both statements before any `.await` below; the tree
+        // condition is shared by the count and the select.
         let (count_stmt, select_stmt) = {
             let unique_key: Vec<&str> = primary_key.iter().map(String::as_str).collect();
             let extra_cond = opts
@@ -1171,8 +1161,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         // them one after another, byte-identical to the prior two separate
         // awaits (and, on a transactional batch, count and select now see one
         // consistent snapshot). `skip_count` has no count statement, so it
-        // stays a single `run_fetch`. The JSON params are bound to owned
-        // (`Send`) locals so nothing `!Send` crosses the `.await`.
+        // stays a single `run_fetch`.
         let (total_count, records): (Option<i64>, Vec<Record>) = match count_stmt {
             Some(count_stmt) => {
                 let count_params = sea_values_to_json(count_stmt.values);
@@ -1648,13 +1637,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// row-returning primitive `query_raw` uses, returning one [`Record`] per
     /// group.
     ///
-    /// The spec is rendered into a `!Send`
+    /// The spec is rendered into a
     /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
-    /// inside a nested block whose closing brace drops it (and every
-    /// `Rc<dyn Iden>` it holds) *before* the `.await` below — the same pattern
-    /// [`DbExec::list`] uses so the future stays `Send` for the native build.
-    /// Every name in the spec must pass [`sql_name`] (the handler's
-    /// `to_aggregate_spec` checks the wire the same way), and every column it
+    /// for this backend's dialect, then into the statement. Every name in the
+    /// spec must pass [`sql_name`] (the handler's `to_aggregate_spec` checks
+    /// the wire the same way), and every column it
     /// reads must exist ([`require_columns`](Self::require_columns); a sort
     /// key may also name an output alias). A missing table has no groups, as
     /// [`count`](Self::count) counts `0` rows in it.
@@ -1682,10 +1669,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             )
             .collect();
         self.require_columns(table, &columns).await?;
-        let stmt = {
-            let cfg = spec.into_grouped_config(table.to_string(), Self::BACKEND);
-            wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)?
-        };
+        let cfg = spec.into_grouped_config(table.to_string(), Self::BACKEND);
+        let stmt = wafer_sql_utils::aggregate::build_grouped_query(&cfg, Self::BACKEND)?;
         // An aggregate row holds computed values and group keys, not stored
         // rows, so its text decodes as text.
         self.run_fetch(

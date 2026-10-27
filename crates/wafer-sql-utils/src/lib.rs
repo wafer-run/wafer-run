@@ -189,13 +189,22 @@ mod statement_tests {
         assert_eq!(from_str.collection, from_string.collection);
     }
 
+    /// `Statement` crosses `.await`s in `Send` database futures, and the
+    /// expression-carrying builder inputs are held across them too. Holds
+    /// only while sea-query's `thread-safe` feature is on (see Cargo.toml).
+    #[test]
+    fn builder_types_are_send_and_sync() {
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<Statement>();
+        send_sync::<SeaValue>();
+        send_sync::<sea_query::Cond>();
+        send_sync::<sea_query::Expr>();
+        send_sync::<crate::aggregate::GroupedQueryConfig>();
+    }
+
     #[test]
     fn statement_is_clone_and_debug() {
-        let s = Statement::new(
-            "X".into(),
-            vec![SeaValue::String(Some(Box::new("y".into())))],
-            "t",
-        );
+        let s = Statement::new("X".into(), vec![SeaValue::String(Some("y".into()))], "t");
         let s2 = s.clone();
         assert_eq!(s.sql, s2.sql);
         assert!(format!("{s:?}").contains("Statement"));

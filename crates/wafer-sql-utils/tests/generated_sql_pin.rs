@@ -478,14 +478,14 @@ fn render_aggregate(out: &mut Out, backend: Backend, b: &str) {
         A,
         "grouped_query",
         b,
-        aggregate::build_grouped_query(grouped_config(backend), backend),
+        aggregate::build_grouped_query(&grouped_config(backend), backend),
     );
     out.stmt_result(
         A,
         "grouped_query_minimal",
         b,
         aggregate::build_grouped_query(
-            GroupedQueryConfig {
+            &GroupedQueryConfig {
                 table: "orders".into(),
                 select_columns: vec![],
                 aggregates: vec![AggregateColumn {

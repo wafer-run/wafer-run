@@ -770,8 +770,8 @@ pub enum AggregateColumnDef {
     /// portable conditional count (no `FILTER` clause required), `0` when no
     /// row matches. `when` is a predicate forest, AND-combined at the top
     /// level; the handler bounds and validates it, and the server builds the
-    /// `CASE` predicate (the sea-query expression is `!Send`, so it can't be
-    /// built caller-side). An empty `when` is rejected as `InvalidArgument`.
+    /// `CASE` predicate for its backend's dialect. An empty `when` is rejected
+    /// as `InvalidArgument`.
     CaseWhenSum {
         /// Predicate whose matching rows are counted.
         when: Vec<FilterNode>,
