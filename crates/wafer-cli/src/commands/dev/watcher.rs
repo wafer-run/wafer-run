@@ -4,8 +4,14 @@
 use std::{path::Path, sync::mpsc as std_mpsc, time::Duration};
 
 use anyhow::{Context, Result};
-use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebouncedEvent};
+// `notify` comes from the debouncer's re-export, not a direct dependency:
+// the watcher is constructed inside the debouncer, so its `RecursiveMode` and
+// `Error` must be that notify version's types.
+use notify_debouncer_mini::{
+    new_debouncer,
+    notify::{self, RecursiveMode},
+    DebouncedEvent,
+};
 use tokio::sync::mpsc;
 
 /// Default watch patterns relative to cwd.
@@ -122,5 +128,29 @@ mod tests {
     fn no_defaults_no_user_is_empty() {
         let patterns = merge_patterns(&[], false);
         assert!(patterns.is_empty());
+    }
+
+    /// A write under a watched directory reaches the supervisor's receiver
+    /// as one debounced signal: the debouncer, the notify backend it builds
+    /// and the sync→tokio bridge all have to work for this to pass.
+    #[tokio::test]
+    async fn file_change_in_watched_dir_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        let watched = dir.path().to_str().unwrap().to_string();
+        let mut rx = spawn_watcher(&[watched], Duration::from_millis(50)).unwrap();
+
+        std::fs::write(dir.path().join("lib.rs"), b"fn main() {}").unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("no change signal within 10s")
+            .expect("watcher bridge closed");
+    }
+
+    #[test]
+    fn no_existing_pattern_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent").to_str().unwrap().to_string();
+        assert!(spawn_watcher(&[missing], Duration::from_millis(50)).is_err());
     }
 }
