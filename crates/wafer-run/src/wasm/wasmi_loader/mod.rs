@@ -76,7 +76,8 @@ pub struct WasmiBlock {
     asset_loader: parking_lot::RwLock<Arc<dyn crate::asset_loader::LoadAssetCallback>>,
     /// Per-guest-call resource limits applied at every `instantiate()` — the
     /// wasmi fuel budget and the linear-memory page cap. Selected at load time
-    /// (defaults to [`ResourceLimits::default`]: the bounded 100M fuel cap and
+    /// (defaults to [`ResourceLimits::default`]: the bounded
+    /// [`DEFAULT_FUEL`](crate::DEFAULT_FUEL) fuel cap and
     /// the 256-page / 16 MiB memory cap). The fuel mode must match the
     /// `consume_fuel` flag of the block's [`Engine`] — the constructors keep
     /// the two in sync.
@@ -144,7 +145,7 @@ impl WasmiBlock {
 
     /// Compile a WASM module from raw bytes with no embedder capability bound
     /// and the default per-call resource limits ([`ResourceLimits::default`]:
-    /// 100M fuel, 256-page / 16 MiB memory).
+    /// [`DEFAULT_FUEL`](crate::DEFAULT_FUEL) fuel, 256-page / 16 MiB memory).
     ///
     /// The guest's own `BlockInfo::capabilities` declaration is a request,
     /// never a grant. Without an embedder bound, the guest runs with

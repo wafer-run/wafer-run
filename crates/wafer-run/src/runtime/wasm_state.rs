@@ -8,17 +8,20 @@ use crate::asset_loader::{LoadAssetCallback, NoopAssetLoader};
 /// Default per-guest-call fuel budget in wasmi fuel units. A single guest
 /// invocation that consumes more than this traps with a fuel-exhaustion error.
 ///
-/// This is the value used by [`FuelLimit::default`] and matches the historical
-/// hard-coded cap.
+/// This is the value used by [`FuelLimit::default`].
 ///
 /// A fuel unit is wasmi's: since wasmi 2.0, one per executed Wasm operator
 /// (`nop`, `drop` and the structural control operators are free) plus
 /// per-byte costs for bulk memory and table operations. wasmi 0.44 charged
 /// per instruction of its own internal bytecode, which fused several Wasm
-/// operators into one, so the same budget bought roughly 2–2.5× more guest
-/// work there (measured on the echo and TinyGo fixtures). The time a tight
-/// guest loop takes to burn the budget did not change.
-pub const DEFAULT_FUEL: u64 = 100_000_000;
+/// operators into one, so the same guest work costs about 2–2.5× the fuel
+/// it did under 0.44 (measured on the echo and TinyGo fixtures). The budget
+/// was therefore raised from 0.44's 100M to 250M, keeping the headroom a
+/// legitimate guest had. The cost is the worst case: a runaway guest's
+/// tight loop burns one unit per operator, so the longest it can run per
+/// call scales with the budget — about 70 ms at 100M, about 170 ms at 250M
+/// (wasmi 2.0, native release build).
+pub const DEFAULT_FUEL: u64 = 250_000_000;
 
 /// Default per-guest-call WASM linear-memory cap, in 64 KiB wasmi pages
 /// (256 pages = 16 MiB).
@@ -58,8 +61,7 @@ pub const DEFAULT_MAX_TABLE_ELEMENTS: u32 = 100_000;
 /// Selected on the builder via
 /// [`WaferBuilder::fuel_per_call`](crate::WaferBuilder::fuel_per_call) and
 /// threaded into the wasmi loader. The default is
-/// [`Metered(DEFAULT_FUEL)`](FuelLimit::Metered) — i.e. the historical 100M
-/// cap — so omitting `fuel_per_call` leaves behaviour byte-for-byte unchanged.
+/// [`Metered(DEFAULT_FUEL)`](FuelLimit::Metered) — the bounded default cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuelLimit {
     /// Cap each guest invocation at `n` wasmi fuel units. The wasmi engine is
@@ -142,12 +144,11 @@ pub(crate) fn wasmi_config(fuel: FuelLimit) -> wasmi::Config {
 /// rather than threading two parallel arguments.
 ///
 /// Hosted, multi-tenant deployments want the bounded [`default`](Self::default)
-/// (100M metered fuel, 256-page / 16 MiB memory). Trusted single-user
+/// ([`DEFAULT_FUEL`] metered fuel, 256-page / 16 MiB memory). Trusted single-user
 /// embedders raise either bound: [`FuelLimit::Unmetered`] for heavy compute,
 /// or a larger `memory_pages` for memory-heavy tools (e.g. the `syntect`+font
-/// code-screenshot tool needs ~24 MiB ≈ 384 pages). The default is
-/// byte-for-byte the historical behaviour, so omitting `ResourceLimits` (or
-/// using [`default`](Self::default)) changes nothing.
+/// code-screenshot tool needs ~24 MiB ≈ 384 pages). Omitting
+/// `ResourceLimits` is the same as passing [`default`](Self::default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceLimits {
     /// Per-guest-call wasmi fuel budget. See [`FuelLimit`].
@@ -191,7 +192,7 @@ pub(crate) struct WasmState {
     /// Per-guest-call fuel budget applied to WASM blocks loaded through this
     /// runtime (the lazily-created shared engine + remote/lockfile blocks).
     /// Set via `WaferBuilder::fuel_per_call`; defaults to the bounded
-    /// [`FuelLimit::default`] (100M, metered). Consumers that load blocks
+    /// [`FuelLimit::default`] ([`DEFAULT_FUEL`], metered). Consumers that load blocks
     /// directly (e.g. gizza's `WasmiBlock::load_from_bytes_with_limits`) read it
     /// back via `Wafer::resource_limits()`.
     pub(crate) fuel: FuelLimit,

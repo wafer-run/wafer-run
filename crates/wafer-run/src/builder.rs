@@ -103,7 +103,7 @@ impl WaferBuilder {
     /// Set the per-guest-call wasmi fuel budget for WASM blocks run by this
     /// runtime.
     ///
-    /// Defaults to [`FuelLimit::default`] — the bounded 100M-fuel cap that
+    /// Defaults to [`FuelLimit::default`] — the bounded [`DEFAULT_FUEL`](crate::DEFAULT_FUEL) cap that
     /// protects hosted, multi-tenant deployments from runaway guests. Trusted
     /// single-user embedders can pass [`FuelLimit::Unmetered`] to run heavy
     /// tools without a per-call budget, or a larger

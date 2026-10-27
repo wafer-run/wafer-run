@@ -417,7 +417,7 @@ impl Wafer {
     /// [`WaferBuilder::fuel_per_call`](crate::WaferBuilder::fuel_per_call) and
     /// [`WaferBuilder::max_wasm_memory_pages`](crate::WaferBuilder::max_wasm_memory_pages).
     /// Defaults to the bounded [`ResourceLimits::default`](crate::ResourceLimits::default)
-    /// (100M metered fuel, 256-page / 16 MiB memory).
+    /// ([`DEFAULT_FUEL`](crate::DEFAULT_FUEL) metered fuel, 256-page / 16 MiB memory).
     ///
     /// Consumers that load WASM blocks directly — rather than through the
     /// runtime's shared engine — read this back to pass to

@@ -63,7 +63,7 @@ fn bench_guest_wasm() -> Vec<u8> {
 }
 
 /// The PERF-01 functional gate: 1 MiB must round-trip through a v2 guest
-/// under the production default limits (100M fuel / 16 MiB memory).
+/// under the production default limits (`DEFAULT_FUEL` / 16 MiB memory).
 #[tokio::test]
 async fn v2_guest_roundtrips_1mib_under_default_limits() {
     use wafer_block::Block;

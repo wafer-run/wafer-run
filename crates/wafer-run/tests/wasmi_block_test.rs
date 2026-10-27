@@ -228,11 +228,11 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Test 6b: configurable fuel budget — a heavy-but-bounded guest traps under
-    // the default 100M cap, but runs to completion under FuelLimit::Unmetered
+    // the default 250M cap, but runs to completion under FuelLimit::Unmetered
     // (and under a high Metered budget).
     //
     // The guest's `__wafer_handle` spins a counted loop sized to consume well
-    // over 100M wasmi fuel units, then returns a valid `{"action":"Respond"}`
+    // over 250M wasmi fuel units, then returns a valid `{"action":"Respond"}`
     // packed (ptr, len) pointing at a data segment. Under the metered default
     // the loop exhausts fuel and traps; with metering disabled (or a budget far
     // above the loop's cost) it finishes and Responds.
@@ -280,12 +280,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_fuel_budget_metered_vs_unmetered() {
-        // 50M iterations × 8 fuel/iter = 400M fuel — comfortably over the 100M
+        // 50M iterations × 8 fuel/iter = 400M fuel — comfortably over the 250M
         // default cap, but trivial wall-clock work when unmetered.
         let wasm_bytes = heavy_loop_module(50_000_000);
         let ctx = MockContext;
 
-        // 1. Default (metered 100M): the heavy loop exhausts fuel → trap.
+        // 1. Default (metered 250M): the heavy loop exhausts fuel → trap.
         let metered = WasmiBlock::load_from_bytes(&wasm_bytes)
             .expect("heavy-loop module should load (default fuel)");
         let metered_out = metered
@@ -392,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_path_runs_the_block_under_the_runtimes_fuel_budget() {
-        // 8 fuel per iteration: ~80k fuel, far under the 100M default and
+        // 8 fuel per iteration: ~80k fuel, far under the 250M default and
         // far over the runtime's 1000.
         let wasm = registrable_heavy_loop_module("test/spin", 10_000);
         let dir = tempfile::tempdir().expect("tempdir");
