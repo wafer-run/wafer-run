@@ -44,10 +44,8 @@ fn echo_guest() -> (Store<()>, Instance) {
         }
     }
     let instance = linker
-        .instantiate(&mut store, &module)
-        .expect("instantiate echo guest")
-        .start(&mut store)
-        .expect("start echo guest");
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiate echo guest");
     (store, instance)
 }
 

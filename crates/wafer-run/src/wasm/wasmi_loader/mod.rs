@@ -15,7 +15,7 @@ use wasmi::{Engine, Linker, Module, Store, TypedResumableCall, Val};
 use super::{capabilities::BlockCapabilities, stream::StreamRegistry};
 use crate::{
     context::Context,
-    runtime::wasm_state::{FuelLimit, ResourceLimits},
+    runtime::wasm_state::{wasmi_config, FuelLimit, ResourceLimits},
 };
 
 mod abi;
@@ -76,7 +76,8 @@ pub struct WasmiBlock {
     asset_loader: parking_lot::RwLock<Arc<dyn crate::asset_loader::LoadAssetCallback>>,
     /// Per-guest-call resource limits applied at every `instantiate()` — the
     /// wasmi fuel budget and the linear-memory page cap. Selected at load time
-    /// (defaults to [`ResourceLimits::default`]: the bounded 100M fuel cap and
+    /// (defaults to [`ResourceLimits::default`]: the bounded
+    /// [`DEFAULT_FUEL`](crate::DEFAULT_FUEL) fuel cap and
     /// the 256-page / 16 MiB memory cap). The fuel mode must match the
     /// `consume_fuel` flag of the block's [`Engine`] — the constructors keep
     /// the two in sync.
@@ -99,7 +100,7 @@ pub struct WasmiBlock {
     pool_scope: std::sync::OnceLock<PoolScope>,
 }
 
-// Safety: Engine, Module, Linker are Send+Sync in wasmi 0.44. The Mutexes
+// Safety: Engine, Module, Linker are Send+Sync in wasmi 2.0. The Mutexes
 // guard the info cache and the instance pool; `Store<WasmiHostState>` is
 // compiler-verified `Send` elsewhere (per-call stores already cross await
 // points inside `Send` handle futures), so parking pooled stores behind the
@@ -107,11 +108,24 @@ pub struct WasmiBlock {
 unsafe impl Send for WasmiBlock {}
 unsafe impl Sync for WasmiBlock {}
 
-/// A fresh engine whose `consume_fuel` flag matches `limits.fuel`.
+/// The error a guest call ends with when it exhausts its fuel budget.
+///
+/// Since wasmi 0.45 a *resumable* call that runs out of fuel does not trap:
+/// it suspends as [`TypedResumableCall::OutOfFuel`] so an embedder can top
+/// the fuel up and resume. The runtime never does — the per-call budget is
+/// the bound on a guest's work, so exhausting it ends the call. The
+/// suspended call is dropped (with its stack) and the call fails with the
+/// same `OutOfFuel` trap a non-resumable call raises, so a fuel-exhausted
+/// guest reports identically on every call path. The `Err` also keeps the
+/// instance out of the warm pool, like any other failed call.
+fn out_of_fuel_trap() -> wasmi::Error {
+    wasmi::Error::from(wasmi::TrapCode::OutOfFuel)
+}
+
+/// A fresh engine configured by [`wasmi_config`] — its `consume_fuel` flag
+/// matches `limits.fuel`.
 fn engine_for(limits: ResourceLimits) -> Engine {
-    let mut config = wasmi::Config::default();
-    config.consume_fuel(limits.fuel.consume_fuel());
-    Engine::new(&config)
+    Engine::new(&wasmi_config(limits.fuel))
 }
 
 impl WasmiBlock {
@@ -131,7 +145,7 @@ impl WasmiBlock {
 
     /// Compile a WASM module from raw bytes with no embedder capability bound
     /// and the default per-call resource limits ([`ResourceLimits::default`]:
-    /// 100M fuel, 256-page / 16 MiB memory).
+    /// [`DEFAULT_FUEL`](crate::DEFAULT_FUEL) fuel, 256-page / 16 MiB memory).
     ///
     /// The guest's own `BlockInfo::capabilities` declaration is a request,
     /// never a grant. Without an embedder bound, the guest runs with
@@ -759,7 +773,13 @@ impl WasmiBlock {
                 let (ptr, len) = unpack_ptr_len(packed)?;
                 return read_guest_bytes(scope.store(), memory, ptr, len);
             }
-            TypedResumableCall::Resumable(inv) => inv,
+            TypedResumableCall::HostTrap(inv) => inv,
+            TypedResumableCall::OutOfFuel(_) => {
+                return Err(RuntimeError::Wasm(format!(
+                    "guest call failed: {}",
+                    out_of_fuel_trap()
+                )));
+            }
         };
 
         // Resolve pending calls in a loop. Each branch resolves its pending
@@ -1019,8 +1039,14 @@ impl WasmiBlock {
                     let (ptr, len) = unpack_ptr_len(packed)?;
                     return read_guest_bytes(scope.store(), memory, ptr, len);
                 }
-                TypedResumableCall::Resumable(next) => {
+                TypedResumableCall::HostTrap(next) => {
                     resumable = next;
+                }
+                TypedResumableCall::OutOfFuel(_) => {
+                    return Err(RuntimeError::Wasm(format!(
+                        "resuming guest after {resumed_after}: {}",
+                        out_of_fuel_trap()
+                    )));
                 }
             }
         }
@@ -1457,6 +1483,46 @@ mod capabilities_update_tests {
             store.get_fuel().expect("the default limits are metered"),
             crate::runtime::wasm_state::DEFAULT_FUEL,
             "the first guest call must start from a full fuel budget"
+        );
+    }
+
+    /// A guest call's fuel use depends only on what it executes. The engine
+    /// translates eagerly at load (`wasmi_config`); under wasmi's default
+    /// lazy translation the first call to reach a function would also pay
+    /// for translating it, so a cold instance and the next one off the same
+    /// engine would be charged different amounts for identical work.
+    #[test]
+    fn fuel_use_does_not_depend_on_which_call_reached_a_function_first() {
+        // A function body large enough that translating it costs fuel well
+        // above any rounding difference.
+        let body = "(local.set $x (i32.add (local.get $x) (i32.const 1)))".repeat(500);
+        let wat = format!(
+            r#"(module
+            (memory (export "memory") 1)
+            (func (export "__wafer_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "__wafer_info") (result i64) i64.const 0)
+            (func (export "__wafer_handle") (param i32 i32) (result i64) i64.const 0)
+            (func (export "work") (result i32)
+                (local $x i32)
+                {body}
+                (local.get $x)))"#
+        );
+        let wasm = wat::parse_str(&wat).unwrap();
+        let block =
+            WasmiBlock::load_with_capabilities(&wasm, BlockCapabilities::unrestricted()).unwrap();
+        let fuel_spent = || {
+            let (mut store, inst) = block.instantiate_for_test().unwrap();
+            let work = inst
+                .get_typed_func::<(), i32>(&store, "work")
+                .expect("work export");
+            assert_eq!(work.call(&mut store, ()).expect("work runs"), 500);
+            crate::runtime::wasm_state::DEFAULT_FUEL - store.get_fuel().expect("metered")
+        };
+        let first = fuel_spent();
+        let second = fuel_spent();
+        assert_eq!(
+            first, second,
+            "the first call to reach `work` was charged differently from the next"
         );
     }
 

@@ -81,12 +81,11 @@ pub(super) fn instantiate(
     // `set_fuel` entirely (wasmi rejects it when `consume_fuel(false)`).
     apply_fuel(&mut store, limits.fuel, "setting fuel")?;
 
-    let pre = linker
-        .instantiate(&mut store, module)
+    // Instantiates and runs the module's Wasm `start` function (if any)
+    // under the fuel budget set above.
+    let instance = linker
+        .instantiate_and_start(&mut store, module)
         .map_err(|e| RuntimeError::Wasm(format!("instantiation: {e}")))?;
-    let instance = pre
-        .start(&mut store)
-        .map_err(|e| RuntimeError::Wasm(format!("running start function: {e}")))?;
 
     // Call `_start` if exported — required for TinyGo WASM modules.
     if let Ok(start_fn) = instance.get_typed_func::<(), ()>(&store, "_start") {

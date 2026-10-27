@@ -90,7 +90,13 @@ ipnet = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # WASM
-wasmi = "0.44"
+wasmi = "2.0"
+# Only for `wasmi_core::LimiterError`: wasmi 2.0's `ResourceLimiter` trait
+# returns it, but wasmi re-exports it solely through its private `core`
+# module, so an implementor can name it only from wasmi_core. Keep the two
+# on the same version — wasmi depends on wasmi_core ^2.0.0, so the
+# lockfile resolves both to one wasmi_core.
+wasmi_core = "2.0"
 
 # Crypto
 argon2 = "0.6"

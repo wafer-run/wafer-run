@@ -297,14 +297,11 @@ fn bench_abi_round_trip(c: &mut Criterion) {
     let rt = tokio_rt();
     let rust_wasm = bench_guest_wasm();
 
-    // Raised limits: the JSON ABI expands a 1 MiB body to ~3.9 MiB of
-    // integer-array text, and parsing + re-serialising it inside the
-    // interpreted guest exceeds the production defaults (100M fuel,
-    // 16 MiB memory). Fuel metering stays ON (matching the production
-    // engine configuration) with a budget high enough to never trap, and
-    // the same limits are used for every payload size so the sizes are
-    // comparable. That the defaults cannot round-trip 1 MiB is itself a
-    // PERF-01 data point — recorded here rather than hidden.
+    // Raised limits, so no payload size can trap and the sizes run under
+    // identical bounds. The production defaults (`DEFAULT_FUEL`, 16 MiB
+    // memory) do round-trip a 1 MiB echo through this guest today; the
+    // raised limits are headroom, not a requirement. Fuel metering stays ON
+    // (matching the production engine configuration).
     let block = WasmiBlock::load_from_bytes_with_limits(
         &rust_wasm,
         ResourceLimits {

@@ -110,14 +110,26 @@ pub(super) struct WasmiHostState {
     pub(super) host_codec: HostCodec,
 }
 
+/// Per-store cap on instances, tables and linear memories.
+///
+/// wasmi 2.0 made these `ResourceLimiter` methods required; up to wasmi 0.44
+/// they defaulted to 10,000 each, which is the bound every guest store has
+/// run under since. The value is kept so the upgrade changes nothing: a
+/// store holds one guest instance, and the module's declared tables and
+/// memories are what this bounds (each one's *size* is bounded separately
+/// by `max_table_elements` / `max_memory_pages`).
+const MAX_STORE_OBJECTS: usize = 10_000;
+
 impl wasmi::ResourceLimiter for WasmiHostState {
     fn memory_growing(
         &mut self,
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> Result<bool, wasmi::errors::MemoryError> {
-        // One WASM page = 64 KiB.
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        // One WASM page = 64 KiB. `Ok(false)` denies the growth: a guest
+        // `memory.grow` returns -1, and a module whose declared minimum is
+        // already past the cap fails to instantiate.
         let desired_pages = desired / 65536;
         Ok(desired_pages <= self.max_memory_pages as usize)
     }
@@ -127,10 +139,22 @@ impl wasmi::ResourceLimiter for WasmiHostState {
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> Result<bool, wasmi::errors::TableError> {
+    ) -> Result<bool, wasmi_core::LimiterError> {
         // SEC-03: bound table growth. Previously unconditionally `Ok(true)`,
         // so the linear-memory cap did not constrain WebAssembly tables.
         Ok(desired <= self.max_table_elements as usize)
+    }
+
+    fn instances(&self) -> usize {
+        MAX_STORE_OBJECTS
+    }
+
+    fn tables(&self) -> usize {
+        MAX_STORE_OBJECTS
+    }
+
+    fn memories(&self) -> usize {
+        MAX_STORE_OBJECTS
     }
 }
 
@@ -151,7 +175,7 @@ impl std::fmt::Display for StreamFinishTrap {
     }
 }
 
-impl wasmi::core::HostError for StreamFinishTrap {}
+impl wasmi::errors::HostError for StreamFinishTrap {}
 
 /// Marker trap for `__wafer_host_stream_read_chunk` — the resume loop drives
 /// `OutputStream::next()`, allocates guest memory for the bytes (if any), and
@@ -165,7 +189,7 @@ impl std::fmt::Display for StreamReadTrap {
     }
 }
 
-impl wasmi::core::HostError for StreamReadTrap {}
+impl wasmi::errors::HostError for StreamReadTrap {}
 
 /// Marker trap for `__wafer_host_stream_take_error` — the resume loop pops the
 /// stream's `last_error`, encodes it via rmp-serde, allocates guest memory, and
@@ -179,7 +203,7 @@ impl std::fmt::Display for StreamTakeErrorTrap {
     }
 }
 
-impl wasmi::core::HostError for StreamTakeErrorTrap {}
+impl wasmi::errors::HostError for StreamTakeErrorTrap {}
 
 /// Marker error returned by `__wafer_host_load_asset` to suspend execution.
 /// The resume loop catches it and drives the registered `LoadAssetCallback`
@@ -193,7 +217,7 @@ impl std::fmt::Display for LoadAssetTrap {
     }
 }
 
-impl wasmi::core::HostError for LoadAssetTrap {}
+impl wasmi::errors::HostError for LoadAssetTrap {}
 
 /// Marker trap raised by the `proc_exit(code)` WASI stub. TinyGo's `_start`
 /// terminates by calling `proc_exit`, so this is the expected end-of-`_start`
@@ -213,7 +237,7 @@ impl std::fmt::Display for ProcExitTrap {
     }
 }
 
-impl wasmi::core::HostError for ProcExitTrap {}
+impl wasmi::errors::HostError for ProcExitTrap {}
 
 // ---------------------------------------------------------------------------
 // Negative-i64 / negative-i32 ErrorCode sentinels for the streaming ABI
@@ -353,7 +377,7 @@ mod tests {
         let engine = Engine::default();
         let mut store = Store::new(&engine, ());
         let pages = bytes.div_ceil(65536);
-        let ty = MemoryType::new(pages, Some(pages)).expect("valid memory type");
+        let ty = MemoryType::new(pages, Some(pages));
         let memory = Memory::new(&mut store, ty).expect("memory allocation");
         (store, memory)
     }
