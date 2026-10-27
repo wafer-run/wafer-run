@@ -8,7 +8,7 @@ repository = "https://github.com/wafer-run/wafer-run"
 
 [features]
 default = ["wasm"]
-wasmi = ["dep:wasmi", "dep:getrandom", "dep:serde-transcode"]
+wasmi = ["dep:wasmi", "dep:wasmi_core", "dep:getrandom", "dep:serde-transcode"]
 # `wasm` bundles "needs full async runtime + seal-time download of
 # lockfile-pinned blocks": wasmi interpreter, reqwest + flate2 + tar for the
 # download, and tokio's rt + rt-multi-thread for native-side hosting.
@@ -58,6 +58,7 @@ serde-transcode = { version = "1.1", optional = true }
 
 # WASM (wasmi interpreter engine)
 wasmi = { workspace = true, optional = true }
+wasmi_core = { workspace = true, optional = true }
 getrandom = { version = "0.2", optional = true }
 
 # `web-time` polyfills `SystemTime` / `Instant` on wasm32 (via Date.now /

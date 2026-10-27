@@ -327,10 +327,8 @@ pub fn instantiate_and_start<T>(
     module: &Module,
 ) -> anyhow::Result<Instance> {
     let instance = linker
-        .instantiate(&mut *store, module)
-        .context("Failed to instantiate WASM module")?
-        .start(&mut *store)
-        .context("Failed to run WASM start function")?;
+        .instantiate_and_start(&mut *store, module)
+        .context("Failed to instantiate WASM module")?;
 
     if let Ok(start_fn) = instance.get_typed_func::<(), ()>(&mut *store, "_start") {
         if let Err(e) = start_fn.call(&mut *store, ()) {

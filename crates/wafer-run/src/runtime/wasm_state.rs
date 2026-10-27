@@ -9,7 +9,15 @@ use crate::asset_loader::{LoadAssetCallback, NoopAssetLoader};
 /// invocation that consumes more than this traps with a fuel-exhaustion error.
 ///
 /// This is the value used by [`FuelLimit::default`] and matches the historical
-/// hard-coded cap, so the default runtime behaviour is unchanged.
+/// hard-coded cap.
+///
+/// A fuel unit is wasmi's: since wasmi 2.0, one per executed Wasm operator
+/// (`nop`, `drop` and the structural control operators are free) plus
+/// per-byte costs for bulk memory and table operations. wasmi 0.44 charged
+/// per instruction of its own internal bytecode, which fused several Wasm
+/// operators into one, so the same budget bought roughly 2–2.5× more guest
+/// work there (measured on the echo and TinyGo fixtures). The time a tight
+/// guest loop takes to burn the budget did not change.
 pub const DEFAULT_FUEL: u64 = 100_000_000;
 
 /// Default per-guest-call WASM linear-memory cap, in 64 KiB wasmi pages
@@ -81,6 +89,47 @@ impl FuelLimit {
     pub(crate) fn consume_fuel(self) -> bool {
         matches!(self, FuelLimit::Metered(_))
     }
+}
+
+/// Maximum guest call depth (nested Wasm function frames) per guest call.
+///
+/// wasmi's own default moved from 1024 to 1000 in 1.0; the runtime pins the
+/// value it has always enforced instead of inheriting whatever the
+/// interpreter ships. Deeper recursion traps with a stack-overflow error, it
+/// never overflows the host's native stack.
+#[cfg(feature = "wasmi")]
+pub(crate) const MAX_WASM_RECURSION_DEPTH: usize = 1024;
+
+/// Maximum size of a guest call's value stack, in bytes (1 MiB). As
+/// [`MAX_WASM_RECURSION_DEPTH`]: wasmi's default moved from 1 MiB to
+/// 1,000,000 bytes in 1.0; the runtime pins the historical bound. Exceeding
+/// it traps with a stack-overflow error.
+#[cfg(feature = "wasmi")]
+pub(crate) const MAX_WASM_STACK_BYTES: usize = 1024 * 1024;
+
+/// The wasmi engine configuration every runtime-created engine uses.
+///
+/// Each setting that bounds a guest is stated here rather than inherited
+/// from wasmi's defaults, which have changed across releases:
+///
+/// - `consume_fuel` follows `fuel` (see [`FuelLimit::consume_fuel`]).
+/// - The call-depth and value-stack bounds are
+///   [`MAX_WASM_RECURSION_DEPTH`] and [`MAX_WASM_STACK_BYTES`].
+/// - Functions are translated eagerly, at load. wasmi's default since 0.48
+///   is lazy translation, which charges translation fuel to whichever guest
+///   call first reaches a function. Eager translation keeps a call's fuel
+///   use a function of what it executes, not of which functions earlier
+///   calls (or a pooled predecessor) happened to reach, and surfaces every
+///   compile cost at load instead of mid-request.
+#[cfg(feature = "wasmi")]
+pub(crate) fn wasmi_config(fuel: FuelLimit) -> wasmi::Config {
+    let mut config = wasmi::Config::default();
+    config
+        .consume_fuel(fuel.consume_fuel())
+        .set_max_recursion_depth(MAX_WASM_RECURSION_DEPTH)
+        .set_max_stack_height(MAX_WASM_STACK_BYTES)
+        .compilation_mode(wasmi::CompilationMode::Eager);
+    config
 }
 
 /// Per-guest-call resource limits applied to a directly-loaded [`WasmiBlock`].
@@ -194,9 +243,7 @@ impl super::Wafer {
     /// engine meter (or don't) consistently with the builder selection.
     pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, wafer_block::error::RuntimeError> {
         if self.wasm.engine.is_none() {
-            let mut config = wasmi::Config::default();
-            config.consume_fuel(self.wasm.fuel.consume_fuel());
-            let engine = wasmi::Engine::new(&config);
+            let engine = wasmi::Engine::new(&wasmi_config(self.wasm.fuel));
             self.wasm.engine = Some(Arc::new(engine));
         }
         Ok(self

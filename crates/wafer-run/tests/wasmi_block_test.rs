@@ -239,8 +239,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Build a WAT module whose `__wafer_handle` burns ~`iters` loop iterations
-    /// (≈5 fuel units each) before returning a `Respond` with empty data. The
-    /// `Respond` JSON lives in a data segment at offset 16; the function returns
+    /// (8 fuel units each — wasmi charges one per Wasm operator in the loop
+    /// body) before returning a `Respond` with empty data. The
+    /// `Respond` JSON lives in a data segment at offset 4096; the function returns
     /// the packed `(ptr << 32) | len`.
     fn heavy_loop_module(iters: u32) -> Vec<u8> {
         // The guest ABI result the host decodes into OutputStream::respond(&[]).
@@ -279,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fuel_budget_metered_vs_unmetered() {
-        // 50M iterations × ~5 fuel/iter ≈ 250M fuel — comfortably over the 100M
+        // 50M iterations × 8 fuel/iter = 400M fuel — comfortably over the 100M
         // default cap, but trivial wall-clock work when unmetered.
         let wasm_bytes = heavy_loop_module(50_000_000);
         let ctx = MockContext;
@@ -391,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_path_runs_the_block_under_the_runtimes_fuel_budget() {
-        // ~5 fuel per iteration: ~50k fuel, far under the 100M default and
+        // 8 fuel per iteration: ~80k fuel, far under the 100M default and
         // far over the runtime's 1000.
         let wasm = registrable_heavy_loop_module("test/spin", 10_000);
         let dir = tempfile::tempdir().expect("tempdir");
