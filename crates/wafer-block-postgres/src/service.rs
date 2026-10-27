@@ -7,7 +7,7 @@ use base64ct::{Base64, Encoding};
 use sqlx::{
     pool::PoolConnection,
     postgres::{PgConnectOptions, PgConnection, PgRow},
-    ConnectOptions as _, PgPool, Postgres, Row,
+    ConnectOptions as _, Connection as _, PgPool, Postgres, Row, SqlStr,
 };
 #[cfg(test)]
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
@@ -25,7 +25,29 @@ use wafer_core::{
 use wafer_sql_utils::value::sea_values_to_json;
 use wafer_sql_utils::{ddl, introspect, Backend};
 
-use crate::{errors::sqlx_error, params};
+use crate::{
+    errors::{is_stale_plan, sqlx_error},
+    params,
+};
+
+/// `$attempt`, one `*_once` run of a statement on `$conn` (a
+/// `&mut PoolConnection`) outside any transaction, as a
+/// `Result<_, DatabaseError>`. When PostgreSQL refused the connection's
+/// cached statement as stale, the connection's cache is cleared and
+/// `$attempt` runs once more, re-preparing the statement; the refused run had
+/// no effect (see [`is_stale_plan`]). A macro because the attempt borrows
+/// `$conn` afresh each time it runs.
+macro_rules! replanned {
+    ($conn:ident, $attempt:expr) => {
+        match $attempt {
+            Err(StatementError::StalePlan(_)) => {
+                clear_statements($conn).await?;
+                $attempt.map_err(StatementError::into_database_error)
+            }
+            other => other.map_err(StatementError::into_database_error),
+        }
+    };
+}
 
 /// PostgreSQL implementation of the DatabaseService.
 ///
@@ -63,6 +85,16 @@ impl PostgresDatabaseService {
     /// statement (see [`params::bind`]). Without the cache each prepare leaves
     /// a named statement on the server connection that nothing closes, so a
     /// pool configured that way is refused with `InvalidArgument`.
+    ///
+    /// A cached statement outlives a change to the columns it reads, which
+    /// PostgreSQL then refuses to run (see [`is_stale_plan`]). Two rules keep
+    /// that from reaching a caller. A schema change this service makes clears
+    /// the cache of the connection that made it before the connection is
+    /// reused ([`run_schema_execute`](DbExec::run_schema_execute),
+    /// [`run_schema_transaction`](DbExec::run_schema_transaction)). A change
+    /// made on any other connection, of this pool or of another process,
+    /// cannot reach this connection's cache, so a statement refused as stale
+    /// clears it and runs once more (a transaction runs again whole).
     pub fn from_pool(pool: PgPool) -> Result<Self, DatabaseError> {
         require_statement_cache(&pool.connect_options())?;
         Ok(Self {
@@ -84,10 +116,7 @@ impl PostgresDatabaseService {
 
     async fn schema_drop_table_async(&self, name: &str) -> Result<(), DatabaseError> {
         let stmt = ddl::build_drop_table(name, Backend::Postgres)?;
-        sqlx::query(params::statement_text(&stmt.sql))
-            .execute(&self.pool)
-            .await
-            .map_err(|e| sqlx_error(&e))?;
+        self.run_schema_execute(&stmt.sql, &[]).await?;
         Ok(())
     }
 
@@ -97,10 +126,7 @@ impl PostgresDatabaseService {
         column: &Column,
     ) -> Result<(), DatabaseError> {
         let stmt = ddl::build_add_column(table, column, Backend::Postgres)?;
-        sqlx::query(params::statement_text(&stmt.sql))
-            .execute(&self.pool)
-            .await
-            .map_err(|e| sqlx_error(&e))?;
+        self.run_schema_execute(&stmt.sql, &[]).await?;
         Ok(())
     }
 }
@@ -147,12 +173,8 @@ impl DbExec for PostgresDatabaseService {
         _json: &JsonColumns,
     ) -> Result<Record, DatabaseError> {
         let mut conn = self.connection().await?;
-        let sql = params::statement_text(sql);
-        let args = params::bind(&mut conn, &sql, params).await?;
-        let row = sqlx::query_with(sql, args)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(|e| sqlx_error(&e))?
+        let row = fetch_optional(&mut conn, sql, params)
+            .await?
             .ok_or(DatabaseError::NotFound)?;
         row_to_record(&row)
     }
@@ -164,6 +186,20 @@ impl DbExec for PostgresDatabaseService {
     ) -> Result<i64, DatabaseError> {
         let mut conn = self.connection().await?;
         execute(&mut conn, sql, params).await
+    }
+
+    /// [`run_execute`](Self::run_execute), then the connection's cached
+    /// statements are dropped whatever the outcome (see
+    /// [`PostgresDatabaseService::from_pool`]).
+    async fn run_schema_execute(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        let mut conn = self.connection().await?;
+        let outcome = execute(&mut conn, sql, params).await;
+        forget_statements(&mut conn).await;
+        outcome
     }
 
     /// Delegates to [`run_fetch`](Self::run_fetch): Postgres has one pool
@@ -202,35 +238,23 @@ impl DbExec for PostgresDatabaseService {
         fetch_scalar(&mut conn, sql, params).await
     }
 
-    /// One pooled connection for the whole transaction. Returning early on a
-    /// failed statement drops the uncommitted [`sqlx::Transaction`], which
-    /// rolls it back (sqlx issues the `ROLLBACK` when the connection returns
-    /// to the pool). PostgreSQL's DDL is transactional, so that rolls back
-    /// the `CREATE`/`ALTER`/`DROP`s before the failed statement too.
+    /// One pooled connection for the whole transaction (see [`transaction`]).
     async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| TransactionError::whole(sqlx_error(&e)))?;
-        let mut results = Vec::with_capacity(ops.len());
-        for (index, op) in ops.iter().enumerate() {
-            let (sql, params) = op.sql_params();
-            let result = match op {
-                TxOp::Execute { .. } => execute(&mut tx, sql, params).await.map(TxResult::Execute),
-                TxOp::Returning { .. } => fetch_all(&mut tx, sql, params).await.and_then(|rows| {
-                    rows.iter()
-                        .map(row_to_record)
-                        .collect::<Result<_, _>>()
-                        .map(TxResult::Returning)
-                }),
-            };
-            results.push(result.map_err(|e| TransactionError::at(index, e))?);
-        }
-        tx.commit()
-            .await
-            .map_err(|e| TransactionError::whole(sqlx_error(&e)))?;
-        Ok(results)
+        let mut conn = self.connection().await.map_err(TransactionError::whole)?;
+        transaction(&mut conn, ops).await
+    }
+
+    /// [`run_transaction`](Self::run_transaction), then the connection's
+    /// cached statements are dropped whatever the outcome (see
+    /// [`PostgresDatabaseService::from_pool`]).
+    async fn run_schema_transaction(
+        &self,
+        ops: &[TxOp<'_>],
+    ) -> Result<Vec<TxResult>, TransactionError> {
+        let mut conn = self.connection().await.map_err(TransactionError::whole)?;
+        let outcome = transaction(&mut conn, ops).await;
+        forget_statements(&mut conn).await;
+        outcome
     }
 
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
@@ -479,40 +503,106 @@ fn require_statement_cache(options: &PgConnectOptions) -> Result<(), DatabaseErr
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Running statements on a connection
+//
+// Each `*_once` function runs one statement once and reports a cached
+// statement PostgreSQL refused as stale ([`is_stale_plan`]) apart from every
+// other failure. Outside a transaction the statement then runs once more on
+// a cleared cache ([`replanned!`]); inside one the refusal aborted the
+// transaction, so [`transaction`] runs it again whole.
+// ---------------------------------------------------------------------------
+
+/// Why one attempt at a statement failed.
+enum StatementError {
+    /// The connection's cached statement no longer matches the columns it
+    /// reads, so PostgreSQL refused to run it ([`is_stale_plan`]).
+    StalePlan(sqlx::Error),
+    /// Any other failure, classified.
+    Failed(DatabaseError),
+}
+
+impl From<DatabaseError> for StatementError {
+    fn from(e: DatabaseError) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl StatementError {
+    fn from_sqlx(e: sqlx::Error) -> Self {
+        if is_stale_plan(&e) {
+            Self::StalePlan(e)
+        } else {
+            Self::Failed(sqlx_error(&e))
+        }
+    }
+
+    fn into_database_error(self) -> DatabaseError {
+        match self {
+            Self::StalePlan(e) => sqlx_error(&e),
+            Self::Failed(e) => e,
+        }
+    }
+}
+
+/// Clear `conn`'s cached statements so the next statement it runs is
+/// prepared afresh. A connection whose cache could not be cleared is closed
+/// instead of going back to the pool, since it may still hold them.
+async fn clear_statements(conn: &mut PoolConnection<Postgres>) -> Result<(), DatabaseError> {
+    conn.clear_cached_statements().await.map_err(|e| {
+        conn.close_on_drop();
+        sqlx_error(&e)
+    })
+}
+
+/// Drop `conn`'s cached statements after a statement that may have changed
+/// the schema. The statement's own outcome is what its caller reports, so a
+/// failure to clear only closes the connection ([`clear_statements`]), which
+/// drops the statements with the session that held them.
+async fn forget_statements(conn: &mut PoolConnection<Postgres>) {
+    if let Err(e) = clear_statements(conn).await {
+        tracing::warn!(
+            error = %e,
+            "could not clear a PostgreSQL connection's cached statements after a schema \
+             change; closing the connection instead"
+        );
+    }
+}
+
 /// Run `sql` with `params` on `conn`, returning its rows.
 async fn fetch_all(
-    conn: &mut PgConnection,
+    conn: &mut PoolConnection<Postgres>,
     sql: &str,
     params: &[serde_json::Value],
 ) -> Result<Vec<PgRow>, DatabaseError> {
     let sql = params::statement_text(sql);
-    let args = params::bind(conn, &sql, params).await?;
-    sqlx::query_with(sql, args)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(|e| sqlx_error(&e))
+    replanned!(conn, fetch_all_once(conn, &sql, params).await)
+}
+
+/// Run `sql` with `params` on `conn`, returning its first row if any.
+async fn fetch_optional(
+    conn: &mut PoolConnection<Postgres>,
+    sql: &str,
+    params: &[serde_json::Value],
+) -> Result<Option<PgRow>, DatabaseError> {
+    let sql = params::statement_text(sql);
+    replanned!(conn, fetch_optional_once(conn, &sql, params).await)
 }
 
 /// Run `sql` with `params` on `conn`, returning the affected-row count.
 async fn execute(
-    conn: &mut PgConnection,
+    conn: &mut PoolConnection<Postgres>,
     sql: &str,
     params: &[serde_json::Value],
 ) -> Result<i64, DatabaseError> {
     let sql = params::statement_text(sql);
-    let args = params::bind(conn, &sql, params).await?;
-    let done = sqlx::query_with(sql, args)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| sqlx_error(&e))?;
-    i64::try_from(done.rows_affected())
-        .map_err(|_| DatabaseError::Internal("affected-row count out of range".into()))
+    replanned!(conn, execute_once(conn, &sql, params).await)
 }
 
 /// Run `sql` with `params` on `conn`, returning the single scalar of its one
 /// row.
 async fn fetch_scalar<T>(
-    conn: &mut PgConnection,
+    conn: &mut PoolConnection<Postgres>,
     sql: &str,
     params: &[serde_json::Value],
 ) -> Result<T, DatabaseError>
@@ -520,11 +610,169 @@ where
     T: for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres> + Send + Unpin,
 {
     let sql = params::statement_text(sql);
-    let args = params::bind(conn, &sql, params).await?;
-    sqlx::query_scalar_with(sql, args)
+    replanned!(conn, fetch_scalar_once(conn, &sql, params).await)
+}
+
+/// One run of `sql` with `params` on `conn`, returning its rows.
+async fn fetch_all_once(
+    conn: &mut PgConnection,
+    sql: &SqlStr,
+    params: &[serde_json::Value],
+) -> Result<Vec<PgRow>, StatementError> {
+    let args = params::bind(conn, sql, params).await?;
+    sqlx::query_with(sql.clone(), args)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(StatementError::from_sqlx)
+}
+
+/// One run of `sql` with `params` on `conn`, returning its first row if any.
+async fn fetch_optional_once(
+    conn: &mut PgConnection,
+    sql: &SqlStr,
+    params: &[serde_json::Value],
+) -> Result<Option<PgRow>, StatementError> {
+    let args = params::bind(conn, sql, params).await?;
+    sqlx::query_with(sql.clone(), args)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(StatementError::from_sqlx)
+}
+
+/// One run of `sql` with `params` on `conn`, returning the affected-row count.
+async fn execute_once(
+    conn: &mut PgConnection,
+    sql: &SqlStr,
+    params: &[serde_json::Value],
+) -> Result<i64, StatementError> {
+    let args = params::bind(conn, sql, params).await?;
+    let done = sqlx::query_with(sql.clone(), args)
+        .execute(&mut *conn)
+        .await
+        .map_err(StatementError::from_sqlx)?;
+    i64::try_from(done.rows_affected()).map_err(|_| {
+        StatementError::Failed(DatabaseError::Internal(
+            "affected-row count out of range".into(),
+        ))
+    })
+}
+
+/// One run of `sql` with `params` on `conn`, returning the single scalar of
+/// its one row.
+async fn fetch_scalar_once<T>(
+    conn: &mut PgConnection,
+    sql: &SqlStr,
+    params: &[serde_json::Value],
+) -> Result<T, StatementError>
+where
+    T: for<'r> sqlx::Decode<'r, Postgres> + sqlx::Type<Postgres> + Send + Unpin,
+{
+    let args = params::bind(conn, sql, params).await?;
+    sqlx::query_scalar_with(sql.clone(), args)
         .fetch_one(&mut *conn)
         .await
-        .map_err(|e| sqlx_error(&e))
+        .map_err(StatementError::from_sqlx)
+}
+
+/// Why one attempt at a transaction failed.
+enum TransactionAttemptError {
+    /// The statement at this position was refused as stale
+    /// ([`is_stale_plan`]); the transaction was rolled back.
+    StalePlan(usize, sqlx::Error),
+    /// Any other failure, as the transaction's caller sees it.
+    Failed(TransactionError),
+}
+
+/// Run `ops` as one transaction on `conn`.
+///
+/// A statement refused as stale ([`is_stale_plan`]) aborts the transaction
+/// before it runs, so the transaction is rolled back, the connection's cache
+/// cleared, and the whole transaction run once more: everything it ran before
+/// that statement was undone, and nothing outside the database saw it.
+async fn transaction(
+    conn: &mut PoolConnection<Postgres>,
+    ops: &[TxOp<'_>],
+) -> Result<Vec<TxResult>, TransactionError> {
+    let attempt = match transaction_once(conn, ops).await {
+        Err(TransactionAttemptError::StalePlan(..)) => {
+            clear_statements(conn)
+                .await
+                .map_err(TransactionError::whole)?;
+            transaction_once(conn, ops).await
+        }
+        other => other,
+    };
+    attempt.map_err(|e| match e {
+        TransactionAttemptError::StalePlan(index, e) => TransactionError::at(index, sqlx_error(&e)),
+        TransactionAttemptError::Failed(e) => e,
+    })
+}
+
+/// One attempt at `ops` as one transaction on `conn`.
+///
+/// Returning early on a failed statement drops the uncommitted
+/// [`sqlx::Transaction`], which rolls it back (sqlx issues the `ROLLBACK`
+/// before the connection's next statement, or when it returns to the pool).
+/// PostgreSQL's DDL is transactional, so that rolls back the
+/// `CREATE`/`ALTER`/`DROP`s before the failed statement too. A stale
+/// statement's rollback is awaited here instead, so the connection is out of
+/// the aborted transaction before its cache is cleared; a connection that
+/// cannot roll back is closed.
+async fn transaction_once(
+    conn: &mut PoolConnection<Postgres>,
+    ops: &[TxOp<'_>],
+) -> Result<Vec<TxResult>, TransactionAttemptError> {
+    let mut tx = conn
+        .begin()
+        .await
+        .map_err(|e| TransactionAttemptError::Failed(TransactionError::whole(sqlx_error(&e))))?;
+    let mut results = Vec::with_capacity(ops.len());
+    for (index, op) in ops.iter().enumerate() {
+        let (sql, params) = op.sql_params();
+        let sql = params::statement_text(sql);
+        let result = match op {
+            TxOp::Execute { .. } => execute_once(&mut tx, &sql, params)
+                .await
+                .map(TxResult::Execute),
+            TxOp::Returning { .. } => {
+                fetch_all_once(&mut tx, &sql, params)
+                    .await
+                    .and_then(|rows| {
+                        rows.iter()
+                            .map(row_to_record)
+                            .collect::<Result<_, _>>()
+                            .map(TxResult::Returning)
+                            .map_err(StatementError::Failed)
+                    })
+            }
+        };
+        match result {
+            Ok(result) => results.push(result),
+            Err(StatementError::StalePlan(e)) => {
+                let rolled_back = tx.rollback().await;
+                if let Err(rollback) = rolled_back {
+                    conn.close_on_drop();
+                    return Err(TransactionAttemptError::Failed(TransactionError::at(
+                        index,
+                        DatabaseError::Internal(format!(
+                            "{}; rolling back failed: {rollback}",
+                            sqlx_error(&e)
+                        )),
+                    )));
+                }
+                return Err(TransactionAttemptError::StalePlan(index, e));
+            }
+            Err(StatementError::Failed(e)) => {
+                return Err(TransactionAttemptError::Failed(TransactionError::at(
+                    index, e,
+                )));
+            }
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|e| TransactionAttemptError::Failed(TransactionError::whole(sqlx_error(&e))))?;
+    Ok(results)
 }
 
 // ---------------------------------------------------------------------------

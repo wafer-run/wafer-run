@@ -41,6 +41,27 @@ pub(crate) fn sqlx_error(e: &sqlx::Error) -> DatabaseError {
     }
 }
 
+/// Whether PostgreSQL refused to run a connection's cached prepared statement
+/// because the statement's result columns changed since it was prepared:
+/// `cached plan must not change result type`, SQLSTATE `0A000`
+/// (feature_not_supported), raised by the server's `RevalidateCachedQuery`.
+///
+/// A prepared statement's result columns are fixed when it is prepared. Once
+/// a table it reads gains or loses a column, by DDL on any session of any
+/// process, every session still holding it gets this error the next time it
+/// runs the statement. The check fires while the statement is bound, before
+/// it runs, so the statement had no effect: re-preparing it and running it
+/// again is safe. `0A000` alone also covers features the server does not
+/// support at all, so the reporting routine (sent with every error, and not
+/// translated as the message text is) narrows it to this one case.
+pub(crate) fn is_stale_plan(e: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(db) = e else {
+        return false;
+    };
+    db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+        .is_some_and(|pg| pg.code() == "0A000" && pg.routine() == Some("RevalidateCachedQuery"))
+}
+
 fn is_transient_sqlstate(code: &str) -> bool {
     // `08P01` (protocol_violation) is in the connection class but is a bug on
     // one side of the wire, not a fault that clears.

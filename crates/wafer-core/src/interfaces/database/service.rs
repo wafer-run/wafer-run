@@ -113,7 +113,16 @@ impl DatabaseError {
 /// commit: the classified [`DatabaseError`] and, when the backend can
 /// attribute the failure to one statement, that statement's position.
 ///
-/// A failed transaction committed nothing, whichever statement failed.
+/// A failure normally means nothing committed, whichever statement failed:
+/// a statement that fails, a transaction that cannot be opened and a
+/// [`StatementBudget`] refusal all leave every statement unapplied. A failure
+/// reported after the backend accepted the commit is different, and leaves
+/// the outcome unknown: a `COMMIT` whose answer was lost (the connection
+/// broke while PostgreSQL committed), or a check on the results that runs
+/// once the backend has committed (D1's `batch()` resolves only after its
+/// commit). Such a failure is [`Self::whole`]. A caller whose next step
+/// depends on whether the statements applied must re-read its own state
+/// rather than assume they did not.
 #[derive(Debug)]
 pub struct TransactionError {
     /// The zero-based position, in the statements the caller passed, of the
@@ -870,7 +879,10 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`DatabaseError::StatementLimitExceeded`] and nothing is sent. A
     /// failure carries its classified error and, when the backend can
     /// attribute it, the failing statement's position
-    /// ([`TransactionError::statement`]; D1 cannot).
+    /// ([`TransactionError::statement`]; D1 cannot). A failure normally
+    /// means nothing committed, but one reported after the backend accepted
+    /// the commit leaves the outcome unknown, so a caller must re-read its
+    /// own state (see [`TransactionError`]).
     /// An empty `statements` runs nothing.
     ///
     /// Values are bound as given, as for [`exec_raw`](Self::exec_raw).
