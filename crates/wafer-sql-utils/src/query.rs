@@ -1,6 +1,6 @@
 use sea_query::{
-    extension::sqlite::SqliteExpr, Asterisk, BinOper, Cond, Expr, Func, InsertStatement, LikeExpr,
-    Order, Query, SelectStatement, SimpleExpr, UpdateStatement,
+    extension::sqlite::SqliteExpr, Asterisk, BinOper, Cond, Expr, ExprTrait, Func, InsertStatement,
+    LikeExpr, Order, Query, SelectStatement, UpdateStatement,
 };
 use wafer_block::db::{
     ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
@@ -19,7 +19,7 @@ use crate::{ident::DynCol, value::json_to_sea_value, Backend, SqlBuildError};
 /// `backend` is the dialect the predicate will be rendered for: most
 /// operators render the same SQL on every backend, but `StartsWith` takes a
 /// different form on each (see its arm in [`predicate_on`]).
-pub(crate) fn leaf_expr(filter: &Filter, backend: Backend) -> SimpleExpr {
+pub(crate) fn leaf_expr(filter: &Filter, backend: Backend) -> Expr {
     predicate_on(Expr::col(DynCol(filter.field.clone())), filter, backend)
 }
 
@@ -28,7 +28,7 @@ pub(crate) fn leaf_expr(filter: &Filter, backend: Backend) -> SimpleExpr {
 /// names. A grouped query's `HAVING` uses it to compare an aggregate's own
 /// expression (`COUNT(*) > 0`): Postgres does not resolve an output alias in
 /// `HAVING`, so the alias cannot stand in for it.
-pub(crate) fn predicate_on(left: Expr, filter: &Filter, backend: Backend) -> SimpleExpr {
+pub(crate) fn predicate_on(left: Expr, filter: &Filter, backend: Backend) -> Expr {
     let col = left;
     match filter.operator {
         FilterOp::IsNull => col.is_null(),
@@ -66,10 +66,10 @@ pub(crate) fn predicate_on(left: Expr, filter: &Filter, backend: Backend) -> Sim
             // renders it exactly as it renders a `LikeExpr` with an escape.
             Some(text) => {
                 let pattern = Func::lower(Expr::val(format!("%{}%", escape_like(text))));
-                let escaped = SimpleExpr::Binary(
+                let escaped = Expr::Binary(
                     Box::new(pattern.into()),
                     BinOper::Escape,
-                    Box::new(SimpleExpr::Constant('\\'.into())),
+                    Box::new(Expr::Constant('\\'.into())),
                 );
                 Expr::expr(Func::lower(col)).binary(BinOper::Like, escaped)
             }
@@ -165,7 +165,7 @@ fn escape_glob(text: &str) -> String {
 
 /// Render one [`ColumnFilter`] leaf — `field <op> column` — to a sea-query
 /// predicate. Both columns reach sea-query via [`DynCol`], which quotes them.
-fn column_compare_expr(filter: &ColumnFilter) -> SimpleExpr {
+fn column_compare_expr(filter: &ColumnFilter) -> Expr {
     let left = Expr::col(DynCol(filter.field.clone()));
     let right = Expr::col(DynCol(filter.column.clone()));
     match filter.operator {
@@ -211,14 +211,14 @@ pub fn build_condition_tree(nodes: &[FilterTree], backend: Backend) -> Option<Co
     Some(cond)
 }
 
-/// Convert a predicate **tree** into a single boolean [`SimpleExpr`] — the
+/// Convert a predicate **tree** into a single boolean [`Expr`] — the
 /// same AND/OR structure as [`build_condition_tree`], but as an expression
 /// usable outside a `WHERE` clause: most notably the predicate of a
 /// `SUM(CASE WHEN <expr> THEN 1 ELSE 0 END)` conditional count built via
 /// [`crate::aggregate::AggregateColumn::case_when_sum`].
 ///
 /// The conversion goes through [`build_condition_tree`] and sea-query's
-/// `From<Condition> for SimpleExpr`, which folds the tree with `.and()` /
+/// `From<Condition> for Expr`, which folds the tree with `.and()` /
 /// `.or()` exactly as the `WHERE`-clause path does — so a `WHERE` and a
 /// `CASE WHEN` built from the same tree render identical predicates. An empty
 /// forest folds to an always-true constant (an empty `AND`); callers that
@@ -226,8 +226,8 @@ pub fn build_condition_tree(nodes: &[FilterTree], backend: Backend) -> Option<Co
 /// upstream. Bounds are enforced before conversion, so this cannot fail. The
 /// expression is for rendering in `backend`'s dialect.
 #[must_use]
-pub fn tree_to_simple_expr(nodes: &[FilterTree], backend: Backend) -> SimpleExpr {
-    SimpleExpr::from(build_condition_tree(nodes, backend).unwrap_or_else(Cond::all))
+pub fn tree_to_simple_expr(nodes: &[FilterTree], backend: Backend) -> Expr {
+    Expr::from(build_condition_tree(nodes, backend).unwrap_or_else(Cond::all))
 }
 
 fn node_to_cond(node: &FilterTree, backend: Backend) -> Cond {
@@ -461,7 +461,7 @@ fn insert_query(table: &str, data: &[(String, serde_json::Value)]) -> InsertStat
     query.into_table(DynCol(table.into()));
 
     let cols: Vec<DynCol> = data.iter().map(|(k, _)| DynCol(k.clone())).collect();
-    let vals: Vec<SimpleExpr> = data
+    let vals: Vec<Expr> = data
         .iter()
         .map(|(_, v)| json_to_sea_value(v).into())
         .collect();
@@ -598,7 +598,7 @@ pub fn build_increment_field_where(
     query.table(DynCol(table.into()));
 
     let col_dyn = DynCol(col.into());
-    let increment_expr: SimpleExpr = Expr::col(col_dyn.clone()).add(delta);
+    let increment_expr: Expr = Expr::col(col_dyn.clone()).add(delta);
     query.value(col_dyn, increment_expr);
 
     if let Some(cond) = build_condition(filters, backend) {
@@ -1587,7 +1587,7 @@ mod tests {
     #[test]
     fn a_grouped_aggregate_orders_by_its_sort_alone() {
         let stmt = crate::aggregate::build_grouped_query(
-            crate::aggregate::GroupedQueryConfig {
+            &crate::aggregate::GroupedQueryConfig {
                 table: "t".into(),
                 select_columns: vec!["category".into()],
                 aggregates: vec![crate::aggregate::AggregateColumn {

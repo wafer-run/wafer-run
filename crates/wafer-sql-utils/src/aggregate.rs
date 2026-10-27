@@ -1,4 +1,4 @@
-use sea_query::{Alias, Asterisk, Cond, Expr, Func, Query, SimpleExpr};
+use sea_query::{Alias, Asterisk, Cond, Expr, ExprTrait, Func, Query};
 use wafer_block::db::{Filter, SortField};
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
 /// `total_count` matches the filtered row set, not the whole table).
 fn agg_select(
     table: &str,
-    expr: SimpleExpr,
+    expr: Expr,
     alias: &str,
     filters: &[Filter],
     extra_condition: Option<Cond>,
@@ -84,7 +84,7 @@ pub fn build_sum(
     let expr = Func::coalesce([
         Expr::expr(Func::sum(Expr::col(DynCol(field.into()))))
             .cast_as(Alias::new(CastType::Double.as_sql())),
-        Expr::val(0.0_f64).into(),
+        Expr::val(0.0_f64),
     ]);
     agg_select(table, expr.into(), "total", filters, None, backend)
 }
@@ -99,13 +99,13 @@ pub fn build_sum(
 /// for both dialects), so this validates it with [`validate_ident`] and
 /// returns [`SqlBuildError::InvalidIdentifier`] rather than splice a value
 /// that could break out of the surrounding expression.
-fn date_bucket_expr(field: &str, backend: Backend) -> Result<SimpleExpr, SqlBuildError> {
+fn date_bucket_expr(field: &str, backend: Backend) -> Result<Expr, SqlBuildError> {
     let field = validate_ident(field)?;
     let sql = match backend {
         Backend::Sqlite => format!("date(\"{field}\")"),
         Backend::Postgres => format!("to_char(CAST(\"{field}\" AS DATE), 'YYYY-MM-DD')"),
     };
-    Ok(Expr::cust(&sql))
+    Ok(Expr::cust(sql))
 }
 
 /// Build a per-day count over a date window.
@@ -276,7 +276,7 @@ pub struct AggregateColumn {
     /// Default-constructed via [`AggregateColumn::case_when_sum`] for
     /// the common "count rows matching predicate" pattern; see that
     /// constructor for an example.
-    pub inner_expr: Option<SimpleExpr>,
+    pub inner_expr: Option<Expr>,
 }
 
 impl AggregateColumn {
@@ -311,7 +311,7 @@ impl AggregateColumn {
     ///     Expr::col(DynCol("status_code".into())).gte(400),
     /// );
     /// ```
-    pub fn case_when_sum(alias: impl Into<String>, when: SimpleExpr) -> Self {
+    pub fn case_when_sum(alias: impl Into<String>, when: Expr) -> Self {
         // The THEN/ELSE operands are emitted as INLINE integer literals (`1` /
         // `0`), not bound parameters. A `CASE` whose branches are all bound
         // parameters gives Postgres nothing to infer their type from, so it
@@ -319,7 +319,7 @@ impl AggregateColumn {
         // `INT4` literal, so the SUM is `INT8`, which decodes cleanly as the
         // integer this conditional row-count is. SQLite is unaffected (it sums
         // to an integer either way).
-        let case: SimpleExpr = sea_query::CaseStatement::new()
+        let case: Expr = sea_query::CaseStatement::new()
             .case(when, Expr::cust("1"))
             .finally(Expr::cust("0"))
             .into();
@@ -348,8 +348,8 @@ impl AggregateColumn {
     /// [`cast_as`](Self::cast_as).
     ///
     /// [`case_when_sum`]: Self::case_when_sum
-    pub fn sum_where(alias: impl Into<String>, field: impl Into<String>, when: SimpleExpr) -> Self {
-        let case: SimpleExpr = sea_query::CaseStatement::new()
+    pub fn sum_where(alias: impl Into<String>, field: impl Into<String>, when: Expr) -> Self {
+        let case: Expr = sea_query::CaseStatement::new()
             .case(when, Expr::col(DynCol(field.into())))
             .finally(Expr::cust("0"))
             .into();
@@ -423,24 +423,13 @@ pub struct GroupedQueryConfig {
 /// FROM request_logs WHERE ... GROUP BY method, path ORDER BY cnt DESC LIMIT 50
 /// ```
 ///
-/// Takes `cfg` **by value** on purpose: [`GroupedQueryConfig`] is `!Send`
-/// (its [`AggregateColumn`] expressions hold `Rc<dyn sea_query::Iden>`), so an
-/// async caller that built the config inline must be able to *move and drop* it
-/// before the next `.await`. A by-reference signature would keep the config
-/// alive across the await point and make the caller's future `!Send`. The
-/// `needless_pass_by_value` lint can't see that ownership transfer is the point.
-///
 /// Returns [`SqlBuildError::InvalidIdentifier`] if a
 /// [`DateBucketGroup::field`] is not a plain identifier ([`validate_ident`]),
 /// [`SqlBuildError::InvalidHaving`] if a `HAVING` filter names no aggregate,
 /// and the [`check_pagination`](crate::query::check_pagination) errors for a
 /// limit/offset pair no backend can render.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "by-value lets async callers drop the !Send GroupedQueryConfig (Rc<dyn Iden>) before awaiting; a &ref signature would poison their futures' Send-ness"
-)]
 pub fn build_grouped_query(
-    cfg: GroupedQueryConfig,
+    cfg: &GroupedQueryConfig,
     backend: Backend,
 ) -> Result<crate::Statement, SqlBuildError> {
     let limit = cfg
@@ -454,7 +443,7 @@ pub fn build_grouped_query(
     // Each aggregate's expression by alias, for `HAVING` (which cannot name
     // the alias on Postgres). The `CountGroups` window is left out: it is
     // computed after `HAVING`.
-    let mut having_exprs: Vec<(&str, SimpleExpr)> = Vec::new();
+    let mut having_exprs: Vec<(&str, Expr)> = Vec::new();
 
     // Plain columns
     for col in &cfg.select_columns {
@@ -465,28 +454,26 @@ pub fn build_grouped_query(
     for agg in &cfg.aggregates {
         // `inner_expr`, when set, wins over the `field`/`Asterisk` shape so
         // callers can express SUM(CASE WHEN ...), COUNT(DISTINCT ...), etc.
-        let inner: SimpleExpr = match (&agg.inner_expr, &agg.field) {
+        let inner: Expr = match (&agg.inner_expr, &agg.field) {
             (Some(expr), _) => expr.clone(),
-            (None, Some(f)) => Expr::col(DynCol(f.clone())).into(),
-            (None, None) => Expr::col(Asterisk).into(),
+            (None, Some(f)) => Expr::col(DynCol(f.clone())),
+            (None, None) => Expr::col(Asterisk),
         };
 
-        let agg_expr: SimpleExpr = match &agg.func {
+        let agg_expr: Expr = match &agg.func {
             AggFunc::Count => Func::count(inner).into(),
             AggFunc::Sum => Func::sum(inner).into(),
             AggFunc::SumOrZero => Func::coalesce([Func::sum(inner).into(), Expr::cust("0")]).into(),
             AggFunc::Avg => Func::avg(inner).into(),
             AggFunc::Max => Func::max(inner).into(),
             AggFunc::Min => Func::min(inner).into(),
-            AggFunc::Coalesce(default) => Func::coalesce([
-                inner,
-                Expr::val(crate::value::json_to_sea_value(default)).into(),
-            ])
-            .into(),
+            AggFunc::Coalesce(default) => {
+                Func::coalesce([inner, Expr::val(crate::value::json_to_sea_value(default))]).into()
+            }
             AggFunc::CountGroups => Expr::cust("COUNT(*) OVER ()"),
         };
 
-        let final_expr: sea_query::SimpleExpr = if let Some(cast_type) = agg.cast_as {
+        let final_expr: Expr = if let Some(cast_type) = agg.cast_as {
             Expr::expr(agg_expr).cast_as(Alias::new(cast_type.as_sql()))
         } else {
             agg_expr
@@ -657,7 +644,7 @@ mod tests {
 
     #[test]
     fn a_paged_grouped_query_renders_having_window_count_and_offset() {
-        let sqlite = build_grouped_query(paged_config(), Backend::Sqlite).unwrap();
+        let sqlite = build_grouped_query(&paged_config(), Backend::Sqlite).unwrap();
         assert!(
             sqlite.sql.contains(r#"COUNT(*) OVER () AS "total""#),
             "{}",
@@ -665,7 +652,7 @@ mod tests {
         );
         assert!(sqlite.sql.contains("HAVING COUNT(*) > ?"), "{}", sqlite.sql);
         assert!(sqlite.sql.ends_with("LIMIT ? OFFSET ?"), "{}", sqlite.sql);
-        let postgres = build_grouped_query(paged_config(), Backend::Postgres).unwrap();
+        let postgres = build_grouped_query(&paged_config(), Backend::Postgres).unwrap();
         assert!(
             postgres.sql.contains("HAVING COUNT(*) > $1"),
             "{}",
@@ -684,7 +671,7 @@ mod tests {
             let mut cfg = paged_config();
             cfg.having[0].field = field.into();
             assert_eq!(
-                build_grouped_query(cfg, Backend::Sqlite).unwrap_err(),
+                build_grouped_query(&cfg, Backend::Sqlite).unwrap_err(),
                 SqlBuildError::InvalidHaving {
                     alias: field.into()
                 },
@@ -698,7 +685,7 @@ mod tests {
         let mut cfg = paged_config();
         cfg.limit = None;
         assert_eq!(
-            build_grouped_query(cfg, Backend::Sqlite).unwrap_err(),
+            build_grouped_query(&cfg, Backend::Sqlite).unwrap_err(),
             SqlBuildError::OffsetWithoutLimit { offset: 40 }
         );
     }
@@ -735,7 +722,7 @@ mod tests {
             having: vec![],
             offset: 0,
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
+        let stmt = build_grouped_query(&cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("GROUP BY"));
@@ -764,7 +751,7 @@ mod tests {
             having: vec![],
             offset: 0,
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
+        let stmt = build_grouped_query(&cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         eprintln!("SQL: {sql}");
         assert!(
@@ -810,7 +797,7 @@ mod tests {
             having: vec![],
             offset: 0,
         };
-        let stmt = build_grouped_query(cfg, Backend::Sqlite).expect("renders");
+        let stmt = build_grouped_query(&cfg, Backend::Sqlite).expect("renders");
         let sql = stmt.sql;
         // Both plain aggregate and CASE-WHEN aggregate render.
         assert!(sql.contains("COUNT(*)"), "missing COUNT in: {sql}");
@@ -829,7 +816,7 @@ mod tests {
         // alias and add the `date(field)` expression to GROUP BY — sharing the
         // exact per-dialect expression `build_daily_count` uses.
         let sqlite = build_grouped_query(
-            GroupedQueryConfig {
+            &GroupedQueryConfig {
                 table: "events".into(),
                 select_columns: vec![],
                 aggregates: vec![AggregateColumn {
@@ -868,7 +855,7 @@ mod tests {
 
         // Postgres renders the `to_char(CAST(... AS DATE), ...)` form.
         let pg = build_grouped_query(
-            GroupedQueryConfig {
+            &GroupedQueryConfig {
                 table: "events".into(),
                 select_columns: vec![],
                 aggregates: vec![AggregateColumn {
@@ -903,7 +890,7 @@ mod tests {
         // text, so a quote in it would close the identifier and inject SQL.
         for backend in [Backend::Sqlite, Backend::Postgres] {
             let err = build_grouped_query(
-                GroupedQueryConfig {
+                &GroupedQueryConfig {
                     table: "events".into(),
                     select_columns: vec![],
                     aggregates: vec![],
@@ -933,7 +920,7 @@ mod tests {
 
     fn single_aggregate(agg: AggregateColumn, backend: Backend) -> String {
         build_grouped_query(
-            GroupedQueryConfig {
+            &GroupedQueryConfig {
                 table: "orders".into(),
                 select_columns: vec![],
                 aggregates: vec![agg],
@@ -1042,7 +1029,7 @@ mod tests {
                 Expr::col(DynCol("status".into())).eq("paid"),
             );
             let stmt = build_grouped_query(
-                GroupedQueryConfig {
+                &GroupedQueryConfig {
                     table: "orders".into(),
                     select_columns: vec![],
                     aggregates: vec![summed, counted],

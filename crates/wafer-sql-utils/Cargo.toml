@@ -13,10 +13,15 @@ wafer-schema = { workspace = true }
 # renderer (`backend-mysql`) and the `#[derive(Iden)]` proc-macro stack
 # (`sea-query-derive` → darling), which `wafer-sql-utils` does not use — it
 # implements `Iden` by hand in `ident.rs`. Keeps the wasm graph lean.
-sea-query = { version = "0.32", default-features = false, features = [
+# `thread-safe` makes sea-query's shared pointers `Arc` rather than `Rc`:
+# `Value::Enum` holds one, and `Statement` carries `Value`s across `.await`s
+# in every `Send` database future, so without it `Statement` is not `Send`.
+# `statement_tests::builder_types_are_send_and_sync` pins this.
+sea-query = { version = "1.0", default-features = false, features = [
     "backend-sqlite",
     "backend-postgres",
     "with-json",
+    "thread-safe",
 ] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

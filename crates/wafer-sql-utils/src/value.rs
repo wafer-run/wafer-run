@@ -19,7 +19,7 @@ pub fn sea_value_to_json(v: Value) -> serde_json::Value {
         Value::BigUnsigned(Some(i)) => serde_json::json!(i),
         Value::Float(Some(f)) => serde_json::json!(f),
         Value::Double(Some(f)) => serde_json::json!(f),
-        Value::String(Some(s)) => serde_json::Value::String(*s),
+        Value::String(Some(s)) => serde_json::Value::String(s),
         Value::Json(Some(j)) => *j,
         _ => serde_json::Value::Null,
     }
@@ -36,10 +36,10 @@ pub fn json_to_sea_value(v: &serde_json::Value) -> Value {
             } else if let Some(f) = n.as_f64() {
                 Value::Double(Some(f))
             } else {
-                Value::String(Some(Box::new(n.to_string())))
+                Value::String(Some(n.to_string()))
             }
         }
-        serde_json::Value::String(s) => Value::String(Some(Box::new(s.clone()))),
+        serde_json::Value::String(s) => Value::String(Some(s.clone())),
         // Arrays and objects are carried as JSON values so each backend keeps
         // its own bind policy (SQLite serialises to JSON text, Postgres binds
         // JSONB) — `sea_value_to_json` returns the original value unchanged.
@@ -89,7 +89,7 @@ mod tests {
     fn test_string() {
         assert_eq!(
             json_to_sea_value(&serde_json::json!("hello")),
-            Value::String(Some(Box::new("hello".to_string())))
+            Value::String(Some("hello".to_string()))
         );
     }
 
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_sea_value_to_json_string() {
-        let v = Value::String(Some(Box::new("hello".to_string())));
+        let v = Value::String(Some("hello".to_string()));
         assert_eq!(sea_value_to_json(v), serde_json::json!("hello"));
     }
 

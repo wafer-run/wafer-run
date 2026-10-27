@@ -1,4 +1,4 @@
-use sea_query::{Asterisk, Cond, Expr, ExprTrait, Func, Query, SimpleExpr};
+use sea_query::{Asterisk, Cond, Expr, ExprTrait, Func, Query};
 use wafer_block::db::Filter;
 
 use crate::{
@@ -40,18 +40,13 @@ pub enum CapGuard {
 }
 
 /// `(SELECT {aggregate} FROM {table} WHERE {filters})` as an expression.
-fn aggregate_subquery(
-    table: &str,
-    aggregate: SimpleExpr,
-    filters: &[Filter],
-    backend: Backend,
-) -> SimpleExpr {
+fn aggregate_subquery(table: &str, aggregate: Expr, filters: &[Filter], backend: Backend) -> Expr {
     let mut sub = Query::select();
     sub.expr(aggregate).from(DynCol(table.into()));
     if let Some(cond) = build_condition(filters, backend) {
         sub.cond_where(cond);
     }
-    SimpleExpr::SubQuery(None, Box::new(sub.into_sub_query_statement()))
+    Expr::SubQuery(None, Box::new(sub.into()))
 }
 
 /// The predicate "`guard` holds".
@@ -59,11 +54,7 @@ fn aggregate_subquery(
 /// The subqueries name `table` in their own `FROM`, so an unqualified column
 /// in a guard's filters resolves to the counted rows, never to the row an
 /// enclosing `UPDATE` is writing.
-fn guard_holds(
-    table: &str,
-    guard: &CapGuard,
-    backend: Backend,
-) -> Result<SimpleExpr, SqlBuildError> {
+fn guard_holds(table: &str, guard: &CapGuard, backend: Backend) -> Result<Expr, SqlBuildError> {
     Ok(match guard {
         CapGuard::CountBelow { filters, cap } => Expr::expr(aggregate_subquery(
             table,
@@ -80,8 +71,8 @@ fn guard_holds(
         } => {
             let field = validate_ident(field)?;
             let sum = Func::coalesce([
-                Func::sum(Expr::col(DynCol(field.into()))).into(),
-                Expr::val(0_i64).into(),
+                Expr::from(Func::sum(Expr::col(DynCol(field.into())))),
+                Expr::val(0_i64),
             ]);
             Expr::expr(aggregate_subquery(table, sum.into(), filters, backend))
                 .add(*add)
@@ -159,7 +150,7 @@ pub fn build_insert_guarded(
 ) -> Result<crate::Statement, SqlBuildError> {
     let mut select = Query::select();
     for (_, value) in data {
-        select.expr(SimpleExpr::from(json_to_sea_value(value)));
+        select.expr(Expr::from(json_to_sea_value(value)));
     }
     if let Some(cond) = guard_condition(table, guards, backend)? {
         select.cond_where(cond);
