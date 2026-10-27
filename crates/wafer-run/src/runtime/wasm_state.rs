@@ -162,8 +162,9 @@ pub enum WasmCompilation {
 }
 
 /// Refuse a compilation mode that would make metered fuel use depend on
-/// call order (see [`WasmCompilation`]). The one check every constructor
-/// that takes a fuel limit and a compilation mode runs.
+/// call order (see [`WasmCompilation`]). Every constructor that takes a fuel
+/// limit and a compilation mode runs this one check: `WaferBuilder::build`,
+/// [`wasmi_config`], and `WasmiBlock::load_with_engine_and_limits`.
 pub(crate) fn check_compilation_mode(
     fuel: FuelLimit,
     compilation: WasmCompilation,

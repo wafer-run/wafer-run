@@ -494,9 +494,9 @@ impl Wafer {
     /// or downloaded by `seal()`.
     ///
     /// Honours the builder's `fuel_per_call` / `max_wasm_memory_pages` /
-    /// `wasm_compilation` selection. The entry's `capabilities` is the operator's bound; without
-    /// one the block is bounded at `seal()` by its `capabilities` block
-    /// config, `none()` when absent.
+    /// `wasm_compilation` selection. The entry's `capabilities` is the
+    /// operator's bound; without one the block is bounded at `seal()` by its
+    /// `capabilities` block config, `none()` when absent.
     #[cfg(feature = "wasmi")]
     pub(crate) fn register_locked_wasm(
         &mut self,
