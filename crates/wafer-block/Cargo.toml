@@ -19,11 +19,15 @@ getrandom = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_bytes = { workspace = true }
+indexmap = { workspace = true }
 async-trait = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+# `#/$defs/` pointer-segment encoding (`types::schema_ref`). Already in the
+# tree through `url`.
+percent-encoding = { workspace = true }
 wafer-block-macro = { workspace = true }
 schemars = { version = "1", optional = true }
 futures = { workspace = true }
@@ -54,6 +58,12 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-futures = "0.4"
+
+# `tests/spawn_wrapper.rs`: the spawn wrapper exists only here, and its tests
+# need a JS microtask queue, so they run under `wasm-bindgen-test-runner` on
+# Node (`scripts/check.sh wasm`).
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [lints]
 workspace = true

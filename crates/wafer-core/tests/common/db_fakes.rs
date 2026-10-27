@@ -23,7 +23,8 @@ use wafer_block::{
     ErrorCode, Message, WaferError,
 };
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, StatementBudget, UpsertSpec,
+    AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
+    StatementBudget, TransactionError, UpsertSpec,
 };
 use wafer_schema::{Column, Table};
 
@@ -83,7 +84,7 @@ impl DatabaseService for RecordingDb {
         self.record("create");
         Ok(Record {
             id: "new".into(),
-            data,
+            data: data.into_iter().collect(),
         })
     }
     async fn create_many(
@@ -118,7 +119,7 @@ impl DatabaseService for RecordingDb {
         Ok(
             wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
                 id: collection.to_string(),
-                data,
+                data: data.into_iter().collect(),
             }),
         )
     }
@@ -141,7 +142,7 @@ impl DatabaseService for RecordingDb {
         self.record("update");
         Ok(Record {
             id: id.to_string(),
-            data,
+            data: data.into_iter().collect(),
         })
     }
     async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
@@ -176,6 +177,13 @@ impl DatabaseService for RecordingDb {
     ) -> Result<i64, DatabaseError> {
         self.record("exec_raw");
         Ok(0)
+    }
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        self.record("exec_raw_transaction");
+        Ok(vec![0; statements.len()])
     }
     async fn delete_where(
         &self,

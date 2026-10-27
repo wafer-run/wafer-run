@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "S3-compatible storage block for WAFER"
 
+[features]
+# The statically registered `wafer-run/s3` block. Off by default: linking the
+# crate for `S3StorageService` alone must not add a block whose `Init` reads
+# (and can refuse) its own `WAFER_RUN__S3__*` config.
+block = []
+
 [dependencies]
 wafer-block = { path = "../wafer-block" }
 wafer-core = { path = "../wafer-core", default-features = false }
@@ -29,3 +35,5 @@ path = "src/lib.rs"
 aws-sdk-s3 = { workspace = true, features = ["test-util"] }
 aws-smithy-mocks = "0.3.0"
 futures = { workspace = true }
+# The block's own tests (`src/block.rs`) need it compiled.
+wafer-block-s3 = { path = ".", features = ["block"] }

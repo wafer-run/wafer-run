@@ -9,10 +9,7 @@
 //! that authorizes through the real `wafer_block::wrap::check_access`, as a
 //! caller holding the llm block's read-write grant on its models.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use futures::{stream::BoxStream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -103,9 +100,10 @@ struct ScriptedLlm {
     backend_id: String,
     chunks: Vec<ChatChunk>,
     models: Vec<ModelInfo>,
-    cancel_observed: Arc<AtomicBool>,
-    /// If set, `chat_stream` awaits the cancel token before yielding — used
-    /// to deterministically test cancellation.
+    /// Where `chat_stream` hands over the cancellation token it was given.
+    handed: Arc<std::sync::Mutex<Option<futures::channel::oneshot::Sender<CancellationToken>>>>,
+    /// If set, `chat_stream` returns a stream that never yields — used to
+    /// deterministically test cancellation.
     wait_for_cancel: bool,
 }
 
@@ -115,7 +113,7 @@ impl ScriptedLlm {
             backend_id: backend_id.into(),
             chunks: vec![],
             models: vec![],
-            cancel_observed: Arc::new(AtomicBool::new(false)),
+            handed: Arc::new(std::sync::Mutex::new(None)),
             wait_for_cancel: false,
         }
     }
@@ -135,8 +133,11 @@ impl ScriptedLlm {
         self
     }
 
-    fn cancel_flag(&self) -> Arc<AtomicBool> {
-        self.cancel_observed.clone()
+    /// The cancellation token the service is handed by its next chat.
+    fn handed_token(&self) -> futures::channel::oneshot::Receiver<CancellationToken> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        *self.handed.lock().unwrap() = Some(tx);
+        rx
     }
 }
 
@@ -148,13 +149,13 @@ impl LlmService for ScriptedLlm {
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<ChatChunk, LlmError>> {
         let chunks = self.chunks.clone();
-        let cancel_flag = self.cancel_observed.clone();
+        if let Some(handed) = self.handed.lock().unwrap().take() {
+            let _ = handed.send(cancel);
+        }
         if self.wait_for_cancel {
-            Box::pin(async_stream::stream! {
-                cancel.cancelled().await;
-                cancel_flag.store(true, Ordering::SeqCst);
-                yield Err(LlmError::Cancelled);
-            })
+            // Never yields: a relay whose output is dropped stops reading and
+            // drops this stream unread (see `LlmService::chat_stream`).
+            Box::pin(futures::stream::pending())
         } else {
             Box::pin(futures::stream::iter(chunks.into_iter().map(Ok)))
         }
@@ -335,21 +336,25 @@ async fn unload_model_returns_empty_complete() {
 #[tokio::test]
 async fn dropping_chat_stream_cancels_service() {
     let scripted = ScriptedLlm::new("test").blocking_until_cancel();
-    let cancel_flag = scripted.cancel_flag();
+    let handed = scripted.handed_token();
     let service = build_router(scripted);
 
     let body = wire_chat_request_bytes();
     let stream =
         handler::handle_message(&service, &granted(), LLM, &msg(ServiceOp::LLM_CHAT), &body).await;
+    // The bounds only turn a hang into a failure. Wait for the chat to reach
+    // the service first: a drop before that cancels the relay before it
+    // calls the service at all.
+    let token = tokio::time::timeout(std::time::Duration::from_secs(5), handed)
+        .await
+        .expect("the chat reaches the service")
+        .expect("the service hands over its token");
+    assert!(!token.is_cancelled(), "nothing has cancelled the chat yet");
+
     // Consumer drop should cancel the service through the OutputStream cancel token.
     drop(stream);
 
-    // Give the spawned producer a moment to observe cancellation.
-    for _ in 0..50 {
-        if cancel_flag.load(Ordering::SeqCst) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("service never observed cancellation after stream drop");
+    tokio::time::timeout(std::time::Duration::from_secs(5), token.cancelled())
+        .await
+        .expect("the token the service was handed fires once the output is dropped");
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build wasm test fixtures consumed by wafer-run integration tests.
+# Build wasm test fixtures consumed by wafer-run and wafer-cli integration tests.
 # Idempotent — cargo's own fingerprinting decides whether a fixture is
 # actually recompiled, so repeat runs are fast no-ops when nothing changed.
 #
@@ -117,6 +117,15 @@ build_fixture \
     crates/wafer-run/tests/json_host_guest/target/wasm32-wasip1/release/json_host_guest.wasm \
     crates/wafer-run/tests/json_host_guest/Cargo.toml \
     crates/wafer-run/tests/json_host_guest/target/wasm32-wasip1/release/json_host_guest.wasm
+
+# macro_block.wasm — consumed by crates/wafer-cli/tests/core_abi.rs at
+# runtime via Path. A block written only with the `#[wafer_block]` macro, so
+# `wafer package` and `wafer test` are tested against the core ABI the macro
+# emits today. Built in place.
+build_fixture \
+    crates/wafer-cli/tests/fixtures/macro_block/target/wasm32-wasip1/release/macro_block.wasm \
+    crates/wafer-cli/tests/fixtures/macro_block/Cargo.toml \
+    crates/wafer-cli/tests/fixtures/macro_block/target/wasm32-wasip1/release/macro_block.wasm
 
 # pool_guest_{singleton,percall,perflow}.wasm — consumed by
 # wasm_instance_pooling.rs at runtime via Path. Three variant builds of one

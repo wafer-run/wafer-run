@@ -93,15 +93,28 @@
 
 use std::collections::HashMap;
 
-use wafer_block::db::{
-    ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField,
+use wafer_block::{
+    codec,
+    common::ServiceOp,
+    context::Context,
+    db::{ColumnCompareOp, ColumnFilter, Filter, FilterOp, FilterTree, ListOptions, SortField},
+    streams::{
+        input::InputStream,
+        output::{OutputStream, TerminalNotResponse},
+    },
+    types::{ResourceAccess, ResourceType},
+    wire::database as wire,
+    ErrorCode, Message, WaferError,
 };
 use wafer_sql_utils::aggregate::CastType;
 
-use super::service::{
-    pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
-    DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, Record, StatementBudget, Table,
-    UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+use super::{
+    handler::handle_message,
+    service::{
+        pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
+        DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, RawStatement, Record,
+        StatementBudget, Table, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -209,7 +222,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// `set_strict_schema`); `create`/`get` (a taken id refused, the row
 /// untouched) and `schema_columns`; a table that numbers its own rows
 /// ([`pk_int`]) filling the id of every create path; `count`/`sum` across the full
-/// [`FilterOp`] surface; `list` (filter, sort, limit, offset, projection,
+/// [`FilterOp`] surface; `ContainsIgnoreCase` text search (`%`, `_` and `\`
+/// literal, ASCII letter case ignored, a non-string value matching nothing);
+/// `list` (filter, sort, limit, offset, projection,
 /// OR-group `filter_tree`, `total_count`, and pages over a tied sort key
 /// ordered by the primary key — single-column, composite, or none);
 /// `update`/`update_where`/
@@ -248,6 +263,8 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_create_get(svc).await;
     check_generated_ids(svc).await;
     check_count_and_sum(svc).await;
+    check_contains_ignore_case(svc).await;
+    check_starts_with(svc).await;
     check_list(svc).await;
     check_list_tiebreak(svc).await;
     check_update_family(svc).await;
@@ -263,8 +280,12 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_upsert_windowed_counter(svc).await;
     check_upsert_windowed_counter_honours_its_columns(svc).await;
     check_aggregate(svc).await;
+    check_aggregate_paging(svc).await;
     check_aggregate_money(svc).await;
     check_raw_sql(svc).await;
+    check_raw_transaction(svc).await;
+    check_raw_transaction_through_the_host_op(svc).await;
+    check_rows_keep_their_column_order(svc).await;
     check_json_value_round_trip(svc).await;
     check_typed_values_round_trip(svc).await;
     check_names_are_verbatim_and_reads_never_reshape(svc).await;
@@ -1108,6 +1129,8 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
                 group_by: vec![GroupBySpec::Column("category".into())],
                 sort: vec![],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             },
         )
         .await
@@ -1115,6 +1138,270 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
     assert!(
         groups.is_empty(),
         "aggregate on a non-existent table has no groups: {groups:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ContainsIgnoreCase — literal, case-insensitive substring search
+// ---------------------------------------------------------------------------
+
+/// [`FilterOp::ContainsIgnoreCase`] is the text search a person types, so it
+/// must mean the same thing on every backend: the characters of `value` are
+/// literal (`%`, `_` and `\` are not wildcards or escapes) and ASCII letter
+/// case is ignored. Plain `LIKE` gives neither: its `%`/`_` are wildcards,
+/// and it folds ASCII case on SQLite and D1 but not on PostgreSQL.
+async fn check_contains_ignore_case(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_search".to_string(),
+        columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+    let rows = [
+        ("s1", Some("a_b")),
+        ("s2", Some("axb")),
+        ("s3", Some("100% off")),
+        ("s4", Some("1000 off")),
+        ("s5", Some(r"back\slash")),
+        ("s6", Some("Alice@Example.COM")),
+        ("s7", Some("Café")),
+        ("s8", None),
+    ];
+    for (id, name) in rows {
+        let mut data = row([("id", serde_json::json!(id))]);
+        if let Some(name) = name {
+            data.insert("name".to_string(), serde_json::json!(name));
+        }
+        svc.create("conf_search", data)
+            .await
+            .expect("create must succeed");
+    }
+
+    let matching = |value: serde_json::Value| async move {
+        let opts = ListOptions {
+            filters: vec![filt("name", FilterOp::ContainsIgnoreCase, value)],
+            sort: vec![SortField {
+                field: "id".to_string(),
+                desc: false,
+            }],
+            ..Default::default()
+        };
+        svc.list("conf_search", &opts)
+            .await
+            .expect("list with ContainsIgnoreCase")
+            .records
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        matching(serde_json::json!("a_b")).await,
+        ["s1"],
+        "`_` is literal, not a one-character wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("0% o")).await,
+        ["s3"],
+        "`%` is literal, not a wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!(r"k\s")).await,
+        ["s5"],
+        "`\\` is literal, not an escape"
+    );
+    assert_eq!(
+        matching(serde_json::json!("alice@example.com")).await,
+        ["s6"],
+        "ASCII case is ignored in the value's direction"
+    );
+    assert_eq!(
+        matching(serde_json::json!("EXAMPLE.cOm")).await,
+        ["s6"],
+        "ASCII case is ignored in either direction"
+    );
+    assert_eq!(
+        matching(serde_json::json!("café")).await,
+        ["s7"],
+        "a non-ASCII letter matches itself"
+    );
+    assert_eq!(
+        matching(serde_json::json!("CAFé")).await,
+        ["s7"],
+        "ASCII letters next to a non-ASCII one still ignore case"
+    );
+    assert_eq!(
+        matching(serde_json::json!("")).await,
+        ["s1", "s2", "s3", "s4", "s5", "s6", "s7"],
+        "an empty value matches every non-NULL field"
+    );
+    assert_eq!(
+        matching(serde_json::json!(1000)).await,
+        Vec::<String>::new(),
+        "a value that is not a string matches nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// StartsWith — literal, case-sensitive prefix
+// ---------------------------------------------------------------------------
+
+/// [`FilterOp::StartsWith`] is the prefix of a key or path, so it must mean
+/// the same thing on every backend: the characters of `value` are literal
+/// (no LIKE or GLOB wildcard, class or escape) and letter case is
+/// significant. Plain `LIKE 'prefix%'` gives neither: its `%`/`_` are
+/// wildcards, and it ignores ASCII case on SQLite and D1.
+async fn check_starts_with(svc: &dyn DatabaseService) {
+    let table = Table {
+        name: "conf_prefix".to_string(),
+        columns: vec![pk("id"), Column::new("key", DataType::Text).null()],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    reset(svc, &table).await;
+    let rows = [
+        ("p01", Some("a/b.txt")),
+        ("p02", Some("a/B.txt")),
+        ("p03", Some("a/b/c.txt")),
+        ("p04", Some("a_b")),
+        ("p05", Some("axb")),
+        ("p06", Some("100%/x")),
+        ("p07", Some("1000/x")),
+        ("p08", Some(r"back\slash")),
+        ("p09", Some("star*/x")),
+        ("p10", Some("starry/x")),
+        ("p11", Some("q?/x")),
+        ("p12", Some("qq/x")),
+        ("p13", Some("[ab]/x")),
+        ("p14", Some("a]/x")),
+        ("p15", Some("Café/x")),
+        ("p16", Some("CAFÉ/x")),
+        ("p17", Some("-n")),
+        ("p18", None),
+    ];
+    for (id, key) in rows {
+        let mut data = row([("id", serde_json::json!(id))]);
+        if let Some(key) = key {
+            data.insert("key".to_string(), serde_json::json!(key));
+        }
+        svc.create("conf_prefix", data)
+            .await
+            .expect("create must succeed");
+    }
+
+    let matching = |value: serde_json::Value| async move {
+        let opts = ListOptions {
+            filters: vec![filt("key", FilterOp::StartsWith, value)],
+            sort: vec![SortField {
+                field: "id".to_string(),
+                desc: false,
+            }],
+            ..Default::default()
+        };
+        svc.list("conf_prefix", &opts)
+            .await
+            .expect("list with StartsWith")
+            .records
+            .into_iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        matching(serde_json::json!("a/b")).await,
+        ["p01", "p03"],
+        "ASCII case is significant"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a/B")).await,
+        ["p02"],
+        "ASCII case is significant in the other direction"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a/b.txt")).await,
+        ["p01"],
+        "a value that is the whole field matches it"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a/b.txtx")).await,
+        Vec::<String>::new(),
+        "a value longer than the field does not match"
+    );
+    assert_eq!(
+        matching(serde_json::json!("b.txt")).await,
+        Vec::<String>::new(),
+        "the value is anchored at the start of the field"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a_")).await,
+        ["p04"],
+        "`_` is literal, not a one-character wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("100%")).await,
+        ["p06"],
+        "`%` is literal, not a wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!(r"back\s")).await,
+        ["p08"],
+        "`\\` is literal, not an escape"
+    );
+    assert_eq!(
+        matching(serde_json::json!("star*")).await,
+        ["p09"],
+        "`*` is literal, not a GLOB wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("q?")).await,
+        ["p11"],
+        "`?` is literal, not a GLOB wildcard"
+    );
+    assert_eq!(
+        matching(serde_json::json!("[ab]")).await,
+        ["p13"],
+        "`[` opens no character class"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a]")).await,
+        ["p14"],
+        "`]` is literal"
+    );
+    assert_eq!(
+        matching(serde_json::json!("Café")).await,
+        ["p15"],
+        "a non-ASCII letter matches itself"
+    );
+    assert_eq!(
+        matching(serde_json::json!("CAFé")).await,
+        Vec::<String>::new(),
+        "case is significant for every letter, ASCII or not"
+    );
+    assert_eq!(
+        matching(serde_json::json!("-")).await,
+        ["p17"],
+        "a leading `-` is an ordinary character"
+    );
+    assert_eq!(
+        matching(serde_json::json!("")).await,
+        [
+            "p01", "p02", "p03", "p04", "p05", "p06", "p07", "p08", "p09", "p10", "p11", "p12",
+            "p13", "p14", "p15", "p16", "p17"
+        ],
+        "an empty value matches every non-NULL field"
+    );
+    assert_eq!(
+        matching(serde_json::json!("a\u{0}")).await,
+        Vec::<String>::new(),
+        "a value containing NUL matches nothing"
+    );
+    assert_eq!(
+        matching(serde_json::json!(100)).await,
+        Vec::<String>::new(),
+        "a value that is not a string matches nothing"
     );
 }
 
@@ -3047,6 +3334,8 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let groups = svc
         .aggregate("conf_read", spec)
@@ -3096,6 +3385,8 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let cw = svc
         .aggregate("conf_read", spec)
@@ -3123,6 +3414,8 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let buckets = svc
         .aggregate("conf_read", spec)
@@ -3142,6 +3435,92 @@ async fn check_aggregate(svc: &dyn DatabaseService) {
 // ---------------------------------------------------------------------------
 // aggregate over BIGINT money — cast_as, SumWhere, column-to-column filters
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// aggregate paging — HAVING on an aggregate, CountGroups, LIMIT/OFFSET
+// ---------------------------------------------------------------------------
+
+async fn check_aggregate_paging(svc: &dyn DatabaseService) {
+    // The conf_read fixture again: x has 2 rows (sum 30), y 2 (sum 10), z 1
+    // (sum 100).
+    let page = |having: Vec<Filter>, limit: i64, offset: i64| AggregateSpec {
+        select_columns: vec!["category".into()],
+        aggregates: vec![
+            AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            },
+            AggregateColumnSpec::Sum {
+                field: "amount".into(),
+                alias: "total".into(),
+                cast_as: None,
+            },
+            AggregateColumnSpec::CountGroups {
+                alias: "groups".into(),
+            },
+        ],
+        filters: vec![],
+        group_by: vec![GroupBySpec::Column("category".into())],
+        sort: vec![SortField {
+            field: "category".into(),
+            desc: false,
+        }],
+        limit,
+        having,
+        offset,
+    };
+    let categories = |rows: &[Record]| -> Vec<String> {
+        rows.iter()
+            .map(|r| r.data["category"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    // One group a page; the second page is `y`, and every row carries the
+    // total number of groups, not the number on the page.
+    let second = svc
+        .aggregate("conf_read", page(vec![], 1, 1))
+        .await
+        .expect("a paged aggregate");
+    assert_eq!(categories(&second), ["y"], "offset 1, limit 1");
+    assert_eq!(
+        field_i64(&second[0], "groups"),
+        3,
+        "CountGroups counts every group"
+    );
+
+    // HAVING on an aggregate (COUNT >= 2) keeps x and y, and the group count
+    // is of what HAVING kept.
+    let at_least_two = Filter {
+        field: "cnt".into(),
+        operator: FilterOp::GreaterEqual,
+        value: serde_json::json!(2),
+    };
+    let kept = svc
+        .aggregate("conf_read", page(vec![at_least_two.clone()], 10, 0))
+        .await
+        .expect("an aggregate with HAVING");
+    assert_eq!(categories(&kept), ["x", "y"], "HAVING COUNT(*) >= 2");
+    assert!(kept.iter().all(|r| field_i64(r, "groups") == 2), "{kept:?}");
+
+    // A second HAVING leaf is AND-ed: also SUM(amount) > 20 → only x.
+    let over_twenty = Filter {
+        field: "total".into(),
+        operator: FilterOp::GreaterThan,
+        value: serde_json::json!(20),
+    };
+    let both = svc
+        .aggregate("conf_read", page(vec![at_least_two, over_twenty], 10, 0))
+        .await
+        .expect("an aggregate with two HAVING leaves");
+    assert_eq!(categories(&both), ["x"]);
+    assert_eq!(field_i64(&both[0], "groups"), 1);
+
+    // An offset past the last group is an empty page, not an error.
+    assert!(svc
+        .aggregate("conf_read", page(vec![], 1, 3))
+        .await
+        .expect("an offset past the end")
+        .is_empty());
+}
 
 async fn check_aggregate_money(svc: &dyn DatabaseService) {
     // Money in minor units, in `BIGINT` columns — the shape on which Postgres
@@ -3238,6 +3617,8 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
             desc: false,
         }],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     let groups = svc
         .aggregate("conf_money", spec)
@@ -3301,6 +3682,8 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
                 group_by: vec![],
                 sort: vec![],
                 limit: 0,
+                having: vec![],
+                offset: 0,
             },
         )
         .await
@@ -3410,6 +3793,429 @@ async fn check_raw_sql(svc: &dyn DatabaseService) {
         .expect("exec_raw delete");
     assert_eq!(deleted, 1, "exec_raw delete affected-row count");
     assert_eq!(svc.count("conf_exec", &[]).await.unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// exec_raw_transaction
+// ---------------------------------------------------------------------------
+
+/// A [`RawStatement`] with no bind arguments: the suite writes its values as
+/// literals (see the module docs).
+fn raw(query: &str) -> RawStatement {
+    RawStatement {
+        query: query.to_string(),
+        args: Vec::new(),
+    }
+}
+
+/// A table of a text primary key `id` and the nullable text `columns`.
+fn keyed_table(name: &str, columns: &[&str]) -> Table {
+    let mut all = vec![pk("id")];
+    all.extend(
+        columns
+            .iter()
+            .map(|column| Column::new(*column, DataType::Text).null()),
+    );
+    Table {
+        name: name.to_string(),
+        columns: all,
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    }
+}
+
+async fn assert_absent(svc: &dyn DatabaseService, table: &str, why: &str) {
+    assert!(
+        !svc.schema_table_exists(table)
+            .await
+            .expect("schema_table_exists"),
+        "{table} must not exist: {why}"
+    );
+}
+
+/// Drop each of `tables` if present, so a persistent database starts clean.
+async fn drop_all(svc: &dyn DatabaseService, tables: &[&str]) {
+    for table in tables {
+        svc.schema_drop_table(table)
+            .await
+            .expect("schema_drop_table (idempotent) must succeed");
+    }
+}
+
+/// `exec_raw_transaction` is all or nothing, DDL included, and a failure
+/// names the statement that failed, classified as every other op classifies
+/// it, with the backend's own message.
+///
+/// The index assertions hold for a backend that can attribute a failure to
+/// one statement (native SQLite, PostgreSQL, sql.js). D1's `batch()` cannot
+/// (its failures carry no index, see [`TransactionError::statement`]), so a
+/// live D1 run of this check would need the backend to declare that.
+///
+/// [`TransactionError::statement`]: super::service::TransactionError::statement
+///
+/// The cases:
+/// - DML, an `ALTER TABLE` and two `CREATE TABLE`s before a refused fifth
+///   statement leave nothing behind, and the error is that statement's;
+/// - a duplicate key at index 0 (another writer's claim) is `AlreadyExists`
+///   at 0, and the DDL after it never lands;
+/// - a unique index the existing rows violate is `AlreadyExists` at its own
+///   index, so a caller can tell it from a claim at 0;
+/// - a transaction that commits returns each statement's count, and a typed
+///   read afterwards sees the column its DDL added, decoded by the column's
+///   declared type: the executor's schema cache was cleared;
+/// - a table the cache knows is present, dropped by a transaction, reads as
+///   empty afterwards rather than failing on a stale "present": the cache was
+///   cleared on every backend, Postgres included (which decodes JSON by its
+///   column type and so does not need the cache for the read above).
+async fn check_raw_transaction(svc: &dyn DatabaseService) {
+    drop_all(
+        svc,
+        &[
+            "conf_tx_base",
+            "conf_tx_a",
+            "conf_tx_b",
+            "conf_tx_claims",
+            "conf_tx_after",
+            "conf_tx_dups",
+            "conf_tx_side",
+            "conf_tx_cache",
+            "conf_tx_gone",
+        ],
+    )
+    .await;
+
+    // Nothing at all.
+    assert_eq!(
+        svc.exec_raw_transaction(&[])
+            .await
+            .expect("an empty transaction runs nothing"),
+        Vec::<i64>::new()
+    );
+
+    // DML and DDL, then a refused statement: all of it rolls back.
+    svc.ensure_schema_table(&keyed_table("conf_tx_base", &["name"]))
+        .await
+        .expect("create conf_tx_base");
+    let err = svc
+        .exec_raw_transaction(&[
+            raw("INSERT INTO conf_tx_base (id, name) VALUES ('b1', 'kept?')"),
+            raw("ALTER TABLE conf_tx_base ADD COLUMN extra TEXT"),
+            raw("CREATE TABLE conf_tx_a (id TEXT PRIMARY KEY)"),
+            raw("CREATE TABLE conf_tx_b (id TEXT PRIMARY KEY)"),
+            raw("CREATE TABLE conf_tx_a (id TEXT PRIMARY KEY)"),
+        ])
+        .await
+        .expect_err("creating conf_tx_a twice is refused");
+    assert_eq!(
+        err.statement,
+        Some(4),
+        "the fifth statement failed: {err:?}"
+    );
+    assert!(
+        matches!(&err.error, DatabaseError::Internal(msg)
+            if msg.contains("conf_tx_a") && msg.contains("already exists")),
+        "a duplicate table is a fault, with the backend's message: {err:?}"
+    );
+    assert_absent(svc, "conf_tx_a", "its CREATE rolled back").await;
+    assert_absent(svc, "conf_tx_b", "its CREATE rolled back").await;
+    assert_eq!(
+        svc.schema_columns("conf_tx_base")
+            .await
+            .expect("schema_columns"),
+        vec!["id".to_string(), "name".to_string()],
+        "the ALTER rolled back"
+    );
+    assert_eq!(
+        svc.count("conf_tx_base", &[]).await.expect("count"),
+        0,
+        "the INSERT rolled back"
+    );
+
+    // A duplicate key at index 0: the claim is taken, nothing after it lands.
+    svc.ensure_schema_table(&keyed_table("conf_tx_claims", &[]))
+        .await
+        .expect("create conf_tx_claims");
+    svc.create("conf_tx_claims", row([("id", serde_json::json!("f1"))]))
+        .await
+        .expect("seed the claim");
+    let err = svc
+        .exec_raw_transaction(&[
+            raw("INSERT INTO conf_tx_claims (id) VALUES ('f1')"),
+            raw("CREATE TABLE conf_tx_after (id TEXT PRIMARY KEY)"),
+        ])
+        .await
+        .expect_err("the claim is taken");
+    assert_eq!(err.statement, Some(0), "{err:?}");
+    assert!(
+        matches!(&err.error, DatabaseError::AlreadyExists(msg) if msg.contains("conf_tx_claims")),
+        "a taken key is AlreadyExists with the backend's message: {err:?}"
+    );
+    assert_absent(svc, "conf_tx_after", "the transaction stopped at its claim").await;
+    assert_eq!(
+        svc.count("conf_tx_claims", &[]).await.expect("count"),
+        1,
+        "the claim is the seeded row alone"
+    );
+
+    // A unique index the data refuses, after DDL: AlreadyExists at its index.
+    svc.ensure_schema_table(&keyed_table("conf_tx_dups", &["k"]))
+        .await
+        .expect("create conf_tx_dups");
+    for id in ["d1", "d2"] {
+        svc.create(
+            "conf_tx_dups",
+            row([
+                ("id", serde_json::json!(id)),
+                ("k", serde_json::json!("same")),
+            ]),
+        )
+        .await
+        .expect("seed conf_tx_dups");
+    }
+    let err = svc
+        .exec_raw_transaction(&[
+            raw("CREATE TABLE conf_tx_side (id TEXT PRIMARY KEY)"),
+            raw("CREATE UNIQUE INDEX conf_tx_dups_k ON conf_tx_dups (k)"),
+        ])
+        .await
+        .expect_err("the rows violate the index");
+    assert_eq!(err.statement, Some(1), "{err:?}");
+    assert!(
+        matches!(&err.error, DatabaseError::AlreadyExists(msg) if msg.contains("conf_tx_dups")),
+        "an index the data violates is AlreadyExists at its own index: {err:?}"
+    );
+    assert_absent(svc, "conf_tx_side", "its CREATE rolled back").await;
+
+    // A transaction that commits, and the column it added read back typed.
+    svc.ensure_schema_table(&keyed_table("conf_tx_cache", &["name"]))
+        .await
+        .expect("create conf_tx_cache");
+    svc.create(
+        "conf_tx_cache",
+        row([
+            ("id", serde_json::json!("c1")),
+            ("name", serde_json::json!("before")),
+        ]),
+    )
+    .await
+    .expect("seed conf_tx_cache");
+    // Read once, so a backend that caches the table's columns has them.
+    let before = svc.get("conf_tx_cache", "c1").await.expect("get before");
+    assert!(!before.data.contains_key("meta"));
+    let counts = svc
+        .exec_raw_transaction(&[
+            raw("ALTER TABLE conf_tx_cache ADD COLUMN meta JSON"),
+            raw("UPDATE conf_tx_cache SET meta = '{\"a\":1}' WHERE id = 'c1'"),
+            raw("INSERT INTO conf_tx_cache (id, name) VALUES ('c2', 'added')"),
+        ])
+        .await
+        .expect("the transaction commits");
+    // A DDL statement's count is the backend's own (SQLite repeats the last
+    // DML's), so only the DML counts are compared.
+    assert_eq!(counts.len(), 3, "one count per statement: {counts:?}");
+    assert_eq!(counts[1..], [1, 1], "each DML statement's affected rows");
+    let after = svc.get("conf_tx_cache", "c1").await.expect("get after");
+    assert_eq!(
+        after.data.get("meta"),
+        Some(&serde_json::json!({ "a": 1 })),
+        "the added JSON column reads back as JSON: {after:?}"
+    );
+    assert_eq!(svc.count("conf_tx_cache", &[]).await.expect("count"), 2);
+
+    // A table the cache knows is present, dropped by a transaction.
+    svc.ensure_schema_table(&keyed_table("conf_tx_gone", &[]))
+        .await
+        .expect("create conf_tx_gone");
+    assert_eq!(
+        svc.count("conf_tx_gone", &[]).await.expect("count before"),
+        0
+    );
+    svc.exec_raw_transaction(&[raw("DROP TABLE conf_tx_gone")])
+        .await
+        .expect("the DROP commits");
+    assert_eq!(
+        svc.count("conf_tx_gone", &[])
+            .await
+            .expect("a dropped table reads as empty, not as a stale present one"),
+        0
+    );
+}
+
+/// A `Context` that grants every resource, so [`check_raw_transaction_through_the_host_op`]
+/// reaches the service through the database handler.
+struct GrantAllContext;
+
+#[wafer_block::wafer_async_trait]
+impl Context for GrantAllContext {
+    async fn call_block(
+        &self,
+        _block_name: &str,
+        _msg: Message,
+        _input: InputStream,
+    ) -> OutputStream {
+        unimplemented!("the database handler makes no block calls")
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
+        unimplemented!("the database handler does not clone its context")
+    }
+    fn check_resource_access(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> Result<(), WaferError> {
+        Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: ResourceType,
+        _access: ResourceAccess,
+    ) -> bool {
+        true
+    }
+}
+
+/// Send `statements` as a `database.ddl_transaction` through the database
+/// handler, as a block's `db::ddl_transaction` does.
+async fn ddl_transaction_via_handler(
+    svc: &dyn DatabaseService,
+    statements: Vec<RawStatement>,
+) -> Result<Vec<i64>, WaferError> {
+    let body =
+        codec::encode(&wire::DdlTransactionRequest { statements }).expect("encode the request");
+    let msg = Message::new(ServiceOp::DATABASE_DDL_TRANSACTION);
+    match handle_message(svc, &GrantAllContext, &msg, &body)
+        .await
+        .collect_buffered()
+        .await
+    {
+        Ok(resp) => Ok(codec::decode::<wire::DdlTransactionResponse>(&resp.body)
+            .expect("decode the response")
+            .rows_affected),
+        Err(TerminalNotResponse::Error(e)) => Err(e),
+        Err(_) => panic!("the handler ended without a response or an error"),
+    }
+}
+
+/// Through the host op a block calls, a failed statement keeps what a
+/// migration runner needs: the classified code (a taken key is
+/// `AlreadyExists`), the statement's position, and the backend's message.
+/// The other ops scrub a duplicate key's message to a fixed string; this one
+/// must not.
+async fn check_raw_transaction_through_the_host_op(svc: &dyn DatabaseService) {
+    drop_all(svc, &["conf_tx_wire", "conf_tx_wire_after"]).await;
+    svc.ensure_schema_table(&keyed_table("conf_tx_wire", &[]))
+        .await
+        .expect("create conf_tx_wire");
+
+    let counts = ddl_transaction_via_handler(
+        svc,
+        vec![
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w1')"),
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w2')"),
+        ],
+    )
+    .await
+    .expect("the transaction commits");
+    assert_eq!(counts, vec![1, 1]);
+
+    let err = ddl_transaction_via_handler(
+        svc,
+        vec![
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w1')"),
+            raw("CREATE TABLE conf_tx_wire_after (id TEXT PRIMARY KEY)"),
+        ],
+    )
+    .await
+    .expect_err("w1 is taken");
+    assert_eq!(err.code, ErrorCode::AlreadyExists, "{err:?}");
+    assert_eq!(
+        wire::failed_statement_index(&err),
+        Some(0),
+        "the error names the statement: {err:?}"
+    );
+    assert!(
+        err.message.contains("conf_tx_wire"),
+        "the backend's message, not a fixed string: {err:?}"
+    );
+    assert_absent(
+        svc,
+        "conf_tx_wire_after",
+        "the transaction stopped at its claim",
+    )
+    .await;
+
+    let err = ddl_transaction_via_handler(
+        svc,
+        vec![
+            raw("INSERT INTO conf_tx_wire (id) VALUES ('w3')"),
+            raw("INSERT INTO conf_tx_wire_missing (id) VALUES ('w4')"),
+        ],
+    )
+    .await
+    .expect_err("no such table");
+    assert_eq!(err.code, ErrorCode::Internal, "{err:?}");
+    assert_eq!(wire::failed_statement_index(&err), Some(1), "{err:?}");
+    assert!(
+        err.message.contains("conf_tx_wire_missing"),
+        "the backend's message, not a scrubbed one: {err:?}"
+    );
+    assert_eq!(
+        svc.count("conf_tx_wire", &[]).await.expect("count"),
+        2,
+        "w3 rolled back"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// column order
+// ---------------------------------------------------------------------------
+
+fn column_names(record: &Record) -> Vec<&str> {
+    record.data.keys().map(String::as_str).collect()
+}
+
+/// A record lists its columns in the order the statement returned them: a
+/// `query_raw` row in its `SELECT` order (an alias in place, `id` where the
+/// statement put it), and a `get` — `SELECT *` — in the table's declaration
+/// order. Neither name order nor a hash order.
+async fn check_rows_keep_their_column_order(svc: &dyn DatabaseService) {
+    seed_read_fixture(svc).await;
+
+    let rows = svc
+        .query_raw(
+            "SELECT score, name, id, category AS c_alias, amount FROM conf_read WHERE id = 'r1'",
+            &[],
+        )
+        .await
+        .expect("query_raw");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        column_names(&rows[0]),
+        ["score", "name", "id", "c_alias", "amount"],
+        "query_raw must keep the SELECT's column order"
+    );
+    assert_eq!(rows[0].id, "r1", "an `id` anywhere in the SELECT is the id");
+
+    let got = svc.get("conf_read", "r1").await.expect("get");
+    let declared: Vec<String> = crud_table("conf_read")
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(
+        column_names(&got),
+        declared,
+        "a whole-row read lists the table's columns in declaration order"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3666,6 +4472,8 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
             group_by,
             sort: Vec::new(),
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
     assert_invalid_argument(
         svc.aggregate(

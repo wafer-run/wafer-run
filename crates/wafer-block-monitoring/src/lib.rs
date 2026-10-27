@@ -234,14 +234,14 @@ impl Block for MonitoringBlock {
                  (uptime / per-route counts). Access per `stats_access`.",
                 DEFAULT_STATS_PATH,
             )
-            .name("Stats Path"),
+            .name("Stats path"),
             ConfigVar::new(
                 "monitoring_path",
                 "Alias path for the stats endpoint. Same access \
                  rules, same response shape.",
                 DEFAULT_MONITORING_PATH,
             )
-            .name("Monitoring Path"),
+            .name("Monitoring path"),
             ConfigVar::new(
                 "stats_access",
                 "Who may read the stats: `roles` (the caller's \
@@ -250,7 +250,7 @@ impl Block for MonitoringBlock {
                  behind a same-host reverse proxy).",
                 DEFAULT_STATS_ACCESS,
             )
-            .name("Stats Access")
+            .name("Stats access")
             .input_type(InputType::Select)
             .options(&[("roles", "Roles"), ("loopback", "Loopback")]),
             ConfigVar::new(
@@ -259,7 +259,7 @@ impl Block for MonitoringBlock {
                  `stats_access` is `roles`.",
                 DEFAULT_STATS_ROLES,
             )
-            .name("Stats Roles"),
+            .name("Stats roles"),
         ])
     }
 

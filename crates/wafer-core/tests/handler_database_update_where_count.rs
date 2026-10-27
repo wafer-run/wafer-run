@@ -126,8 +126,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, FilterOp, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, StatementBudget,
-        UpsertSpec,
+        AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
+        StatementBudget, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -189,7 +189,7 @@ mod db_fakes {
         ) -> Result<Record, DatabaseError> {
             Ok(Record {
                 id: "new".into(),
-                data,
+                data: data.into_iter().collect(),
             })
         }
         async fn create_many(
@@ -239,11 +239,22 @@ mod db_fakes {
         ) -> Result<Record, DatabaseError> {
             Ok(Record {
                 id: id.to_string(),
-                data,
+                data: data.into_iter().collect(),
             })
         }
         async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
             Ok(())
+        }
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "fixture: increment_field_where not needed".into(),
+            ))
         }
         async fn count(
             &self,
@@ -273,6 +284,12 @@ mod db_fakes {
             _args: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
             Ok(0)
+        }
+        async fn exec_raw_transaction(
+            &self,
+            statements: &[RawStatement],
+        ) -> Result<Vec<i64>, TransactionError> {
+            Ok(vec![0; statements.len()])
         }
         async fn upsert(
             &self,

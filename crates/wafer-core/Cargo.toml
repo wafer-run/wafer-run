@@ -34,9 +34,6 @@ wafer-block-macro = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
-# Decoding schemars' percent-encoded `#/$defs/` reference names back to the
-# unencoded `$defs` keys they point at (see `discovery::decode_ref_name`).
-percent-encoding = { workspace = true }
 # Content-hashing definition bodies that share a `$defs` name but differ, so
 # the OpenAPI `components/schemas` hoist can disambiguate them (see
 # `discovery::short_sha256`).
@@ -44,6 +41,10 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
+# Deriving endpoint schemas in the discovery tests, so the projections are
+# tested on what `BlockEndpoint::input::<T>()` really emits.
+wafer-block = { path = "../wafer-block", features = ["json-schema"] }
+schemars = "1"
 async-stream = "0.3"
 
 [lints]

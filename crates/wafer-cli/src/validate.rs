@@ -15,7 +15,13 @@ const REQUIRED_EXPORTS: &[&str] = &[
 ];
 
 /// Load a `.wasm` file, verify its exports, call `__wafer_info()`, and return
-/// the deserialized [`wafer_block::BlockInfo`].
+/// the decoded [`wafer_block::BlockInfo`].
+///
+/// The info frame is decoded with the core-ABI codec the module negotiates
+/// ([`wasm_stubs::negotiate`], the runtime's rule): MessagePack for a guest
+/// built with the current `#[wafer_block]` macro (v2), JSON for a legacy
+/// guest without `__wafer_abi_version` (v1). A guest declaring a version the
+/// runtime does not speak is refused with the runtime's message.
 ///
 /// Instantiation runs against the shared stub linker
 /// ([`crate::wasm_stubs`]), which registers exactly the host-import set the
@@ -57,7 +63,12 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
     }
 
     // -----------------------------------------------------------------------
-    // 4. Call __wafer_info() and read the result.
+    // 4. Negotiate the core-ABI codec (after `_start`, as the runtime does).
+    // -----------------------------------------------------------------------
+    let codec = wasm_stubs::negotiate(&module, &instance, &mut store)?;
+
+    // -----------------------------------------------------------------------
+    // 5. Call __wafer_info() and read the result.
     // -----------------------------------------------------------------------
     let info_fn = instance
         .get_typed_func::<(), i64>(&store, "__wafer_info")
@@ -74,10 +85,11 @@ pub fn validate_wasm(wasm_path: &Path) -> anyhow::Result<wafer_block::BlockInfo>
     let info_bytes = wasm_stubs::read_packed_region(&memory, &store, packed, "__wafer_info")?;
 
     // -----------------------------------------------------------------------
-    // 5. Deserialize BlockInfo.
+    // 6. Decode BlockInfo with the negotiated codec.
     // -----------------------------------------------------------------------
-    let info: wafer_block::BlockInfo = serde_json::from_slice(&info_bytes)
-        .context("Failed to deserialize BlockInfo from __wafer_info() output")?;
+    let info: wafer_block::BlockInfo = codec.decode(&info_bytes).map_err(|e| {
+        anyhow::anyhow!("Failed to decode BlockInfo from __wafer_info() output ({codec:?}): {e}")
+    })?;
 
     Ok(info)
 }

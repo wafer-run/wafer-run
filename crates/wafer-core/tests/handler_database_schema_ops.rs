@@ -392,26 +392,53 @@ async fn ddl_capability_alone_does_not_grant_ensure_table() {
 }
 
 /// The converse: `schema: true, ddl: false` (the `OwnTablesCtx` shape) can
-/// create its own tables but cannot execute a raw `database.ddl` statement.
+/// create its own tables but cannot execute raw DDL — neither one
+/// `database.ddl` statement nor a `database.ddl_transaction`.
 #[tokio::test]
 async fn schema_capability_alone_cannot_call_raw_ddl() {
-    let calls = new_calls();
-    let svc = db_fakes::RecordingDb::new(calls.clone());
-    let body = codec::encode(&wire::ExecRawRequest {
-        query: "DROP TABLE my_org__other__secrets".into(),
-        args: vec![],
-    })
-    .unwrap();
-    let msg = msg_without_wrap_meta(ServiceOp::DATABASE_DDL);
-    let out =
-        wafer_core::interfaces::database::handler::handle_message(&svc, &OwnTablesCtx, &msg, &body)
-            .await;
-    expect_permission_denied(out).await;
-    assert!(
-        calls.lock().unwrap().is_empty(),
-        "raw ddl must not reach the service under a schema-only grant; calls = {:?}",
-        calls.lock().unwrap()
-    );
+    let statement = "DROP TABLE my_org__other__secrets";
+    for (op, body) in [
+        (
+            ServiceOp::DATABASE_DDL,
+            codec::encode(&wire::ExecRawRequest {
+                query: statement.into(),
+                args: vec![],
+            })
+            .unwrap(),
+        ),
+        (
+            ServiceOp::DATABASE_DDL_TRANSACTION,
+            codec::encode(&wire::DdlTransactionRequest {
+                statements: vec![wire::RawStatement {
+                    query: statement.into(),
+                    args: vec![],
+                }],
+            })
+            .unwrap(),
+        ),
+    ] {
+        let calls = new_calls();
+        let svc = db_fakes::RecordingDb::new(calls.clone());
+        let msg = msg_without_wrap_meta(op);
+        let out = wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &OwnTablesCtx,
+            &msg,
+            &body,
+        )
+        .await;
+        let err = expect_permission_denied(out).await;
+        assert!(
+            err.message.contains(wafer_block::wrap::DDL_RESOURCE),
+            "{op}: the denial must name the ddl sentinel, got: {}",
+            err.message
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "{op} must not reach the service under a schema-only grant; calls = {:?}",
+            calls.lock().unwrap()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

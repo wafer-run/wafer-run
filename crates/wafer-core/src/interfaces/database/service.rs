@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
+pub use wafer_block::wire::database::{RawStatement, RecordData};
 use wafer_block::wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
@@ -103,6 +104,69 @@ impl DatabaseError {
             | Self::Unavailable(_)
             | Self::Internal(_)
             | Self::Other(_) => None,
+        }
+    }
+}
+
+/// Why a transaction ([`DatabaseService::exec_raw_transaction`],
+/// [`DbExec::run_transaction`](super::exec::DbExec::run_transaction)) did not
+/// commit: the classified [`DatabaseError`] and, when the backend can
+/// attribute the failure to one statement, that statement's position.
+///
+/// A failed transaction committed nothing, whichever statement failed.
+#[derive(Debug)]
+pub struct TransactionError {
+    /// The zero-based position, in the statements the caller passed, of the
+    /// statement that failed, when the backend can attribute the failure to
+    /// one statement. Native SQLite and PostgreSQL always can. A backend
+    /// whose atomic API reports one error for the whole sequence cannot:
+    /// Cloudflare D1's `batch()` names no statement, so every D1 failure is
+    /// `None`.
+    ///
+    /// `None` is therefore not "no statement failed". It is also the answer
+    /// when the [`StatementBudget`] refused the transaction before anything
+    /// was sent, or when opening or committing it failed; [`Self::error`]
+    /// says which.
+    pub statement: Option<usize>,
+    /// The failure, classified as every other operation classifies it: a
+    /// statement that would duplicate a primary or unique key is
+    /// [`DatabaseError::AlreadyExists`] on every backend, a transient fault
+    /// [`DatabaseError::Unavailable`], and so on. Its text is the backend's
+    /// own message.
+    pub error: DatabaseError,
+}
+
+impl std::fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.statement {
+            Some(index) => write!(f, "statement {index}: {}", self.error),
+            None => write!(f, "{}", self.error),
+        }
+    }
+}
+
+impl std::error::Error for TransactionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl TransactionError {
+    /// A failure that is not one statement's (see [`Self::statement`]).
+    #[must_use]
+    pub const fn whole(error: DatabaseError) -> Self {
+        Self {
+            statement: None,
+            error,
+        }
+    }
+
+    /// The statement at `index` failed with `error`.
+    #[must_use]
+    pub const fn at(index: usize, error: DatabaseError) -> Self {
+        Self {
+            statement: Some(index),
+            error,
         }
     }
 }
@@ -322,6 +386,14 @@ pub struct AggregateSpec {
     pub sort: Vec<SortField>,
     /// Optional `LIMIT N`; a value `<= 0` means no limit.
     pub limit: i64,
+    /// `HAVING` predicates, AND-combined leaves whose `field` is the alias of
+    /// one of [`aggregates`](Self::aggregates) other than a
+    /// [`CountGroups`](AggregateColumnSpec::CountGroups) (checked upstream).
+    pub having: Vec<Filter>,
+    /// Groups to skip before the first returned; `<= 0` skips none. A
+    /// positive offset comes with a positive [`limit`](Self::limit) (checked
+    /// upstream).
+    pub offset: i64,
 }
 
 /// One aggregate output column in an [`AggregateSpec`] — the validated,
@@ -389,6 +461,28 @@ pub enum AggregateColumnSpec {
         /// Optional output cast.
         cast_as: Option<CastType>,
     },
+    /// `COUNT(*) OVER () AS alias` — the number of groups matched, on every
+    /// row.
+    CountGroups {
+        /// Output alias.
+        alias: String,
+    },
+}
+
+impl AggregateColumnSpec {
+    /// The column's output alias.
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        match self {
+            Self::Count { alias }
+            | Self::Sum { alias, .. }
+            | Self::Avg { alias, .. }
+            | Self::Max { alias, .. }
+            | Self::CaseWhenSum { alias, .. }
+            | Self::SumWhere { alias, .. }
+            | Self::CountGroups { alias } => alias,
+        }
+    }
 }
 
 /// One `GROUP BY` term in an [`AggregateSpec`]: a plain column or a date
@@ -412,14 +506,7 @@ impl AggregateSpec {
     pub fn aliases(&self) -> Vec<&str> {
         self.aggregates
             .iter()
-            .map(|a| match a {
-                AggregateColumnSpec::Count { alias }
-                | AggregateColumnSpec::Sum { alias, .. }
-                | AggregateColumnSpec::Avg { alias, .. }
-                | AggregateColumnSpec::Max { alias, .. }
-                | AggregateColumnSpec::CaseWhenSum { alias, .. }
-                | AggregateColumnSpec::SumWhere { alias, .. } => alias.as_str(),
-            })
+            .map(AggregateColumnSpec::alias)
             .collect()
     }
 
@@ -446,7 +533,7 @@ impl AggregateSpec {
         let mut out: Vec<&str> = self.select_columns.iter().map(String::as_str).collect();
         for aggregate in &self.aggregates {
             match aggregate {
-                AggregateColumnSpec::Count { .. } => {}
+                AggregateColumnSpec::Count { .. } | AggregateColumnSpec::CountGroups { .. } => {}
                 AggregateColumnSpec::Sum { field, .. }
                 | AggregateColumnSpec::Avg { field, .. }
                 | AggregateColumnSpec::Max { field, .. } => out.push(field),
@@ -469,7 +556,8 @@ impl AggregateSpec {
 
     /// Render this validated spec into a
     /// [`GroupedQueryConfig`](wafer_sql_utils::aggregate::GroupedQueryConfig)
-    /// for `table`.
+    /// for `table`, to be rendered in `backend`'s dialect (the `CASE`
+    /// predicates are built for it).
     ///
     /// Builds the `!Send` sea-query expressions (the `CaseWhenSum` and
     /// `SumWhere` `CASE` predicates via [`wafer_sql_utils::query::tree_to_simple_expr`]); the
@@ -481,6 +569,7 @@ impl AggregateSpec {
     pub fn into_grouped_config(
         self,
         table: String,
+        backend: wafer_sql_utils::Backend,
     ) -> wafer_sql_utils::aggregate::GroupedQueryConfig {
         use wafer_sql_utils::aggregate::{
             AggFunc, AggregateColumn, DateBucketGroup, GroupedQueryConfig,
@@ -531,7 +620,7 @@ impl AggregateSpec {
                 // handler.
                 AggregateColumnSpec::CaseWhenSum { when, alias } => AggregateColumn::case_when_sum(
                     alias,
-                    wafer_sql_utils::query::tree_to_simple_expr(&when),
+                    wafer_sql_utils::query::tree_to_simple_expr(&when, backend),
                 ),
                 AggregateColumnSpec::SumWhere {
                     field,
@@ -543,9 +632,10 @@ impl AggregateSpec {
                     ..AggregateColumn::sum_where(
                         alias,
                         field,
-                        wafer_sql_utils::query::tree_to_simple_expr(&when),
+                        wafer_sql_utils::query::tree_to_simple_expr(&when, backend),
                     )
                 },
+                AggregateColumnSpec::CountGroups { alias } => AggregateColumn::count_groups(alias),
             })
             .collect();
 
@@ -571,12 +661,14 @@ impl AggregateSpec {
             filters: self.filters,
             group_by,
             date_buckets,
+            having: self.having,
             order_by: self.sort,
             limit: if self.limit > 0 {
                 Some(self.limit)
             } else {
                 None
             },
+            offset: self.offset,
         }
     }
 }
@@ -736,6 +828,11 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// QueryRaw executes a raw SELECT query.
     ///
+    /// Each record's [`data`](Record::data) holds the row's columns in the
+    /// order the statement returned them — `SELECT b, a, c` iterates `b`,
+    /// `a`, `c` — on every backend. (Two result columns with the same name
+    /// collapse into one entry, the last one's value; alias them apart.)
+    ///
     /// Raw SQL names no single source table, so JSON columns are not decoded
     /// the way the typed reads decode them, and the result differs by backend:
     /// on the SQLite family (native, D1, sql.js) a JSON column comes back as
@@ -757,6 +854,35 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// JSON text.
     async fn exec_raw(&self, query: &str, args: &[serde_json::Value])
         -> Result<i64, DatabaseError>;
+
+    /// Run `statements`, in order, as ONE transaction and return each one's
+    /// affected-row count, in the same order (a DDL statement's count is
+    /// whatever the backend reports for it; SQLite repeats the previous
+    /// statement's). Every statement commits or none
+    /// does — DDL included, on every backend: native SQLite and the SQLite
+    /// family run DDL inside a transaction, and so does PostgreSQL. So a
+    /// statement that cannot run inside a transaction (`PRAGMA`, `VACUUM`,
+    /// PostgreSQL's `CREATE INDEX CONCURRENTLY`, a `BEGIN` or `COMMIT` of the
+    /// caller's own) has no place here.
+    ///
+    /// The whole call is admitted against the
+    /// [`statement_budget`](Self::statement_budget), one statement each,
+    /// before the first is sent: a call the backend could not finish in this
+    /// invocation is refused with [`DatabaseError::ResourceExhausted`] or
+    /// [`DatabaseError::StatementLimitExceeded`] and nothing is sent. A
+    /// failure carries its classified error and, when the backend can
+    /// attribute it, the failing statement's position
+    /// ([`TransactionError::statement`]; D1 cannot).
+    /// An empty `statements` runs nothing.
+    ///
+    /// Values are bound as given, as for [`exec_raw`](Self::exec_raw).
+    ///
+    /// No default: a decorator that inherited a statement-by-statement loop
+    /// would leave the statements before a failing one applied.
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError>;
 
     /// Bulk-delete all records matching filters in a single query.
     ///
@@ -866,19 +992,17 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Implementations must perform this as a single
     /// `UPDATE … SET col = col + delta WHERE …` round-trip — the whole point
-    /// of this op is the absence of a read-modify-write race. The default
-    /// here returns an `Internal` error so backends are forced to override.
+    /// of this op is the absence of a read-modify-write race. No default: a
+    /// backend that forgot it would compile and fail every call at runtime.
+    /// SQL backends forward to
+    /// [`DbExec::increment_field_where`](super::exec::DbExec::increment_field_where).
     async fn increment_field_where(
         &self,
-        _collection: &str,
-        _col: &str,
-        _delta: i64,
-        _filters: &[Filter],
-    ) -> Result<i64, DatabaseError> {
-        Err(DatabaseError::Internal(
-            "increment_field_where is not implemented by this database backend".into(),
-        ))
-    }
+        collection: &str,
+        col: &str,
+        delta: i64,
+        filters: &[Filter],
+    ) -> Result<i64, DatabaseError>;
 
     /// Upsert `spec` into `collection` in one statement, answering the row
     /// as the statement left it (inserted, or updated on conflict), or `None`
@@ -961,8 +1085,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 pub struct Record {
     /// Primary-key identifier as text.
     pub id: String,
-    /// Remaining columns rendered as a JSON-valued map.
-    pub data: HashMap<String, serde_json::Value>,
+    /// Every column of the row (`id` included), JSON-valued, in the order the
+    /// statement returned them (see [`RecordData`]).
+    pub data: RecordData,
 }
 
 /// RecordList represents a paginated list of records.

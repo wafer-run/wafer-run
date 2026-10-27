@@ -3,7 +3,10 @@
 use std::borrow::Cow;
 
 use serde_json::{json, Value};
-use wafer_block::types::{AgentTool, AuthLevel, BlockEndpoint, BlockInfo, HttpMethod};
+use wafer_block::types::{
+    decode_ref_name, encode_ref_name, keyword_value, AgentTool, AuthLevel, BlockEndpoint,
+    BlockInfo, HttpMethod, KeywordValue,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,53 +55,33 @@ fn path_to_slug(path: &str) -> String {
         .replace('/', "_")
 }
 
-/// JSON Schema keywords whose value is *instance data*, not a subschema.
-///
-/// `default`, `const`, and each entry of `examples` and `enum` are literal
-/// JSON values that a validator compares against the instance; they are
-/// never interpreted as schemas. So the `$ref` rewriting below must not walk
-/// into them, in either direction:
-///
-/// * A literal `{"$ref": "https://example.com/x"}` sitting in a `default` is
-///   perfectly legal user data — an object with one key that happens to be
-///   spelled `$ref`. Treating it as a reference reports the whole endpoint
-///   as carrying an unresolvable `$ref` and deletes a working tool.
-/// * Worse, and silent: `{"$ref": "#/$defs/D", "note": "..."}` in a
-///   `default` would be *rewritten* through the sibling-merge path, so the
-///   published schema hands the agent a default value the endpoint never
-///   declared.
-///
-/// `$defs` stripping is suspended inside them for the same reason: a literal
-/// value may legitimately have a `$defs` key, and deleting it would corrupt
-/// the data.
-///
-/// These names are keywords only in a position where the surrounding
-/// object's keys are *read* as keywords. Inside one of the
-/// [`SCHEMA_MAP_KEYWORDS`] maps the keys are names the author chose, and the
-/// rule must not apply — see that constant.
-const LITERAL_VALUE_KEYWORDS: &[&str] = &["default", "const", "examples", "enum"];
-
-/// JSON Schema keywords whose value is a *map from author-chosen names to
-/// schemas*, rather than a schema object.
-///
-/// Which of the two a member sits in decides whether its key is a keyword at
-/// all. In a schema object, `default` is the default-value keyword. In a
-/// `properties` map, `default` is a field literally named `default` —
-/// `struct S { default: Status }` emits
-/// `{"properties": {"default": {"$ref": "#/$defs/Status"}}}` — and its value
-/// is a schema that must be resolved like any other.
-///
-/// Deciding by key name alone copied that `$ref` through verbatim, stripped
-/// `$defs` out from under it, and set no flag, so the tool shipped an
-/// argument pointing at a definition no longer in the document. That is the
-/// silent lie about a tool's own arguments the rest of this module exists to
-/// refuse, so the walk tracks position instead of guessing from the name.
-///
-/// `$defs` is deliberately absent: it never reaches the member walk, because
-/// a schema object drops it outright as the reference table. A *property*
-/// named `$defs` is a member of a `properties` map and is never read as that
-/// table.
-const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "dependentSchemas"];
+// ---------------------------------------------------------------------------
+// How the schema walks read a keyword
+// ---------------------------------------------------------------------------
+//
+// Every walk below — `RefWalk` (WebMCP inlining), `collect_local_refs`
+// (both projections) and `rewrite_local_refs` (OpenAPI hoisting) — reads a
+// member of a schema object by `wafer_block::types::keyword_value`, the one
+// classification `wafer-block`'s endpoint schema derivation reads too:
+//
+// * `Literal` (`default`, `const`, `examples`, `enum`) is instance data and is
+//   copied verbatim, never searched for references. A literal
+//   `{"$ref": "https://example.com/x"}` there is legal user data; treating it
+//   as a reference reports a working endpoint as carrying an unresolvable
+//   `$ref` and deletes its tool, and rewriting
+//   `{"$ref": "#/$defs/D", "note": "..."}` through the sibling merge would
+//   publish a default value the endpoint never declared. `$defs` stripping is
+//   suspended inside one for the same reason.
+// * `SubschemaMap` (`properties`, ...) maps author-chosen names to schemas.
+//   Its keys are not keywords — a field really can be named `default` or
+//   `$ref` — so only its values are walked, as schemas. Deciding by key name
+//   alone once copied a `properties.default` `$ref` through verbatim and
+//   stripped `$defs` out from under it, shipping a tool argument that pointed
+//   at nothing.
+// * Everything else, `Other` included, is walked as a schema. That is the
+//   safe direction for these walks: a `$ref` under a keyword nobody here
+//   knows (draft-07's `definitions`, say) that went unwalked would dangle,
+//   while walking a non-schema value (`type`, `required`) finds nothing.
 
 /// The most JSON nodes — objects, arrays, and scalars counted individually —
 /// one schema source may expand into while its `$ref`s are inlined.
@@ -124,80 +107,24 @@ const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "depen
 /// # What the budget bounds, exactly
 ///
 /// It bounds the nodes the *walk emits*, which is not quite the size of the
-/// returned document. [`inline_refs`] keeps a cyclic definition by cloning
-/// the body its frame already produced, so a kept definition's nodes are
-/// charged once (when they were walked) and appear twice (in the output tree
-/// and in the `$defs` table). With `d` definitions kept — `d` is the number
-/// of *distinct* definitions some back-edge names, one for almost every real
-/// recursive type — the returned document holds at most `(d + 1) ×
-/// MAX_INLINED_NODES` nodes.
+/// returned document. A kept (cyclic) definition's body is walked once, into
+/// the `$defs` table, and charged then; its use sites carry only a `$ref`.
+/// The one copy that is not charged is the recursive *root*: [`inline_refs`]
+/// keeps it by cloning the finished document into the table, so its nodes
+/// are charged once and appear twice, and the returned document holds at
+/// most `2 × MAX_INLINED_NODES` nodes.
 ///
 /// The clone is deliberately not charged. Charging it would push a
 /// legitimately-sized recursive schema over a budget that exists for runaway
-/// *expansion*, and there is no runaway here: `d` is bounded by the number of
-/// definitions the source declares, and each kept body is a subtree of output
-/// the walk already paid for. A factor of `d + 1` on a bound chosen to be
+/// *expansion*, and there is no runaway here: the clone is a subtree of
+/// output the walk already paid for. A factor of two on a bound chosen to be
 /// orders of magnitude larger than any real schema is not the failure this
 /// constant guards against.
 const MAX_INLINED_NODES: usize = 100_000;
 
-/// Decode a `#/$defs/` pointer segment back into the key it names in the
-/// `$defs` table.
-///
-/// schemars writes reference *names* through its `encode_ref_name`: `~`
-/// becomes `~0` and `/` becomes `~1` (RFC 6901 JSON-Pointer escaping), and
-/// every other byte outside the URI-fragment safe set is percent-encoded
-/// (space, `"`, `#`, `%`, `<`, `>`, `[`, `\`, `]`, `^`, `` ` ``, `{`, `|`,
-/// `}`, and anything non-ASCII). The `$defs` *keys* are left unencoded, so
-/// `#[schemars(rename = "Product Status")]` emits a reference to
-/// `#/$defs/Product%20Status` against a table keyed `Product Status`.
-/// Looking the raw segment up would miss and silently degrade the property
-/// to `{}`.
-///
-/// Unescaping order is load-bearing, and is the order RFC 6901 §4 requires:
-/// `~1` first, then `~0`. Doing `~0` first would turn the encoding of the
-/// literal name `~1` (which is `~01`) into `~1` and then into `/`.
-///
-/// Returns `None` when percent-decoding does not yield valid UTF-8 — a
-/// segment that cannot name any key, and so must be reported as unresolvable
-/// rather than guessed at.
-fn decode_ref_name(encoded: &str) -> Option<String> {
-    let decoded = percent_encoding::percent_decode_str(encoded)
-        .decode_utf8()
-        .ok()?;
-    Some(decoded.replace("~1", "/").replace("~0", "~"))
-}
-
-/// The bytes a `#/$defs/` pointer segment may carry unencoded: the RFC 3986
-/// unreserved set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`). Everything else
-/// is percent-encoded, including every non-ASCII byte —
-/// `percent_encoding` escapes those regardless of the set.
-const REF_NAME_ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
-
-/// Encode a `$defs` key into the pointer segment that names it — the exact
-/// inverse of [`decode_ref_name`], and the encoding schemars itself writes.
-///
-/// Used for the back-edges [`inline_refs`] emits for a cycle. The `$defs`
-/// keys it writes are the *unencoded* names, exactly as schemars leaves them,
-/// so a definition named `Product Status` is keyed `Product Status` and
-/// referred to as `#/$defs/Product%20Status`.
-///
-/// Order is load-bearing and mirrors the decoder's. JSON-Pointer escaping
-/// comes first (`~` → `~0`, then `/` → `~1`, in that order, so the `~` that
-/// `~1` introduces is not escaped a second time), then percent-encoding —
-/// which leaves the escapes alone, since `~`, `0` and `1` are all unreserved.
-fn encode_ref_name(name: &str) -> String {
-    let escaped = name.replace('~', "~0").replace('/', "~1");
-    percent_encoding::utf8_percent_encode(&escaped, REF_NAME_ESCAPE).to_string()
-}
-
 /// Count the JSON nodes in a value.
 ///
-/// Used to charge a verbatim-copied literal ([`LITERAL_VALUE_KEYWORDS`]) to
+/// Used to charge a verbatim-copied literal ([`KeywordValue::Literal`]) to
 /// the same [`MAX_INLINED_NODES`] budget the resolved nodes pay into. A
 /// literal is small on its own, but it is copied again at every place its
 /// enclosing definition is inlined, so leaving it uncharged would leave a
@@ -228,11 +155,19 @@ fn count_nodes(value: &Value) -> usize {
 /// self-contained in the only sense that matters here — a client needs
 /// nothing but the document it was handed to resolve it.
 ///
-/// So the cycle is not cut; it is rebased. The first reference to a
-/// definition is still inlined in full, and only the reference that closes
-/// the cycle becomes a `$ref` back to that definition, which the output then
-/// carries under its own `$defs`. Exactly the definitions some back-edge
-/// names are kept — every other one is inlined and named by nothing.
+/// So the cycle is not cut; it is rebased. A definition that lies on a
+/// cycle of references ([`definitions_on_a_cycle`]) is never inlined: every
+/// reference to it stays a `$ref`, and the output carries its body exactly
+/// once, under its own `$defs`. Inlining it at its first use site and
+/// referencing it only where the cycle closes — what this function used to
+/// do — ships the body once per use site *plus* once in the table: a
+/// condition tree used by three fields reached the agent four times.
+/// Exactly the definitions some emitted `$ref` names are kept; every
+/// definition on no cycle is inlined wherever it is used and named by
+/// nothing. The one exception is a document whose root *is* a reference to
+/// a cyclic definition: the root has to be the schema itself (the merge
+/// flattens its `properties`), so that one reference is inlined, and its
+/// back-edges still resolve against the kept body.
 /// schemars' root-recursion marker `{"$ref": "#"}` is rebased the same way,
 /// onto a definition named after the document's `title` (see
 /// [`root_definition_name`]), because a bare `#` would point at whatever
@@ -251,15 +186,15 @@ fn inline_refs(schema: &Value) -> (Value, RefIssues) {
     let root_name = root_definition_name(schema, &defs);
     let mut walk = RefWalk {
         defs: &defs,
-        active: Vec::new(),
+        cyclic: definitions_on_a_cycle(&defs),
         issues: RefIssues::default(),
         emitted: 0,
         kept: std::collections::BTreeMap::new(),
-        cyclic: std::collections::BTreeSet::new(),
+        started: std::collections::BTreeSet::new(),
         root_name: root_name.clone(),
         root_recursive: false,
     };
-    let mut resolved = walk.resolve(schema);
+    let mut resolved = walk.resolve_document(schema);
     let mut issues = walk.issues;
     let mut kept = walk.kept;
 
@@ -309,16 +244,24 @@ fn inline_refs(schema: &Value) -> (Value, RefIssues) {
 /// until the name is free. That only ever fires for a hand-written schema:
 /// schemars never puts the root type it is inlining into its own `$defs`.
 fn root_definition_name(schema: &Value, defs: &Value) -> String {
-    let mut name = schema
-        .get("title")
-        .and_then(Value::as_str)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Root")
-        .to_string();
+    let mut name = root_title(schema).to_string();
     while defs.get(name.as_str()).is_some() {
         name.push('_');
     }
     name
+}
+
+/// The name a self-referencing root is known by, before any collision rule:
+/// its `title` (on a derived schema, the source Rust type's name, which is
+/// precisely what the root is), or `Root` when it has none. Shared by the
+/// WebMCP projection ([`root_definition_name`]) and the OpenAPI hoist
+/// ([`hoist_defs_into_components`]), so one type is named alike in both.
+fn root_title(schema: &Value) -> &str {
+    schema
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Root")
 }
 
 /// The two distinct ways [`inline_refs`] can fail to produce a
@@ -346,33 +289,147 @@ struct RefIssues {
     oversized: bool,
 }
 
-/// One pass of [`inline_refs`]: the reference table it resolves against, the
-/// chain of definitions currently open, what went wrong, and how much output
+/// The `$defs` entries that can reach themselves through `#/$defs/*`
+/// references — the definitions with no finite inlining, which
+/// [`inline_refs`] keeps and references instead of expanding.
+///
+/// A definition referenced from two branches of a finite tree (a diamond) is
+/// not on a cycle and is not in this set: it inlines at both sites. Every
+/// definition on a cycle is, not only the one some traversal happens to
+/// close it on, so `A -> B -> A` keeps both `A` and `B` — each referenced
+/// wherever it is used, each carried once. References are collected from
+/// schema positions only, by the same keyword rules the walk itself follows
+/// ([`collect_local_refs`]); a reference to a missing entry is no edge (the
+/// walk reports it).
+fn definitions_on_a_cycle(defs: &Value) -> std::collections::BTreeSet<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let Some(table) = defs.as_object() else {
+        return BTreeSet::new();
+    };
+    let edges: BTreeMap<&str, BTreeSet<String>> = table
+        .iter()
+        .map(|(name, body)| {
+            let mut refs = BTreeSet::new();
+            collect_local_refs(body, &mut refs);
+            let targets: BTreeSet<String> = refs
+                .into_iter()
+                .filter_map(|target| match target {
+                    LocalRef::Def(name) if table.contains_key(&name) => Some(name),
+                    _ => None,
+                })
+                .collect();
+            (name.as_str(), targets)
+        })
+        .collect();
+
+    table
+        .keys()
+        .filter(|start| {
+            let mut seen = BTreeSet::new();
+            let mut frontier: Vec<&str> =
+                edges[start.as_str()].iter().map(String::as_str).collect();
+            while let Some(name) = frontier.pop() {
+                if name == start.as_str() {
+                    return true;
+                }
+                if seen.insert(name) {
+                    frontier.extend(edges[name].iter().map(String::as_str));
+                }
+            }
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// A local reference inside one schema: schemars' root-recursion marker
+/// `#`, or `#/$defs/<name>` with its segment decoded to the `$defs` key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalRef {
+    /// `#` — the schema's own root.
+    Root,
+    /// `#/$defs/<name>` — the `$defs` entry keyed `name`.
+    Def(String),
+}
+
+impl LocalRef {
+    /// The reference string that names this target inside its schema.
+    fn pointer(&self) -> String {
+        match self {
+            LocalRef::Root => "#".to_string(),
+            LocalRef::Def(name) => format!("#/$defs/{}", encode_ref_name(name)),
+        }
+    }
+}
+
+/// Collect the local references in `node`, read as a schema — walking
+/// exactly the positions [`RefWalk::resolve`] walks: literal-value keywords
+/// are data, [`KeywordValue::SubschemaMap`] members are schemas under
+/// author-chosen names, and a nested `$defs` is not followed.
+fn collect_local_refs(node: &Value, out: &mut std::collections::BTreeSet<LocalRef>) {
+    match node {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref") {
+                if reference == "#" {
+                    out.insert(LocalRef::Root);
+                } else if let Some(name) =
+                    reference.strip_prefix("#/$defs/").and_then(decode_ref_name)
+                {
+                    out.insert(LocalRef::Def(name));
+                }
+            }
+            for (key, value) in map {
+                let key = key.as_str();
+                if key == "$ref" || key == "$defs" {
+                    continue;
+                }
+                let kind = keyword_value(key);
+                if kind == KeywordValue::Literal {
+                    continue;
+                }
+                if kind == KeywordValue::SubschemaMap {
+                    if let Value::Object(members) = value {
+                        for member in members.values() {
+                            collect_local_refs(member, out);
+                        }
+                        continue;
+                    }
+                }
+                collect_local_refs(value, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_local_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One pass of [`inline_refs`]: the reference table it resolves against,
+/// which of its definitions are cyclic, what went wrong, and how much output
 /// has been produced so far.
 struct RefWalk<'a> {
     /// The document's `$defs` table — the only thing a `#/$defs/*` pointer
     /// can name.
     defs: &'a Value,
-    /// The definitions currently being expanded, innermost last.
-    ///
-    /// A stack, not a set of everything ever seen: a definition referenced
-    /// twice from *different* branches of a finite type tree is not a cycle,
-    /// and must inline both times.
-    active: Vec<String>,
+    /// The definitions that lie on a cycle — see [`definitions_on_a_cycle`].
+    /// Every reference to one stays a `$ref`; every other reference is
+    /// inlined.
+    cyclic: std::collections::BTreeSet<String>,
     issues: RefIssues,
     /// JSON nodes emitted so far, charged against [`MAX_INLINED_NODES`].
     emitted: usize,
-    /// Definitions that closed a cycle and are therefore kept under the
-    /// output's `$defs` instead of inlined. Filled when a frame that is
-    /// `active` is referenced again; the body is stored when that frame
-    /// finishes resolving.
+    /// The resolved bodies of the cyclic definitions some emitted `$ref`
+    /// names, carried under the output's `$defs`.
     kept: std::collections::BTreeMap<String, Value>,
-    /// Names whose bodies must be captured when their frame completes.
-    ///
-    /// Separate from `kept` because the two are known at different moments:
-    /// a cycle is discovered at the back-edge, deep inside the frame, and
-    /// the body only exists once that frame unwinds.
-    cyclic: std::collections::BTreeSet<String>,
+    /// Cyclic definitions whose body has been (or is being) resolved into
+    /// `kept`. Separate from `kept` because a body is only stored once it is
+    /// finished, and the references *inside* it to its own definition must
+    /// not start it a second time.
+    started: std::collections::BTreeSet<String>,
     /// The name the document root is known by when it references itself —
     /// see [`root_definition_name`].
     root_name: String,
@@ -397,10 +454,25 @@ impl RefWalk<'_> {
         true
     }
 
-    /// Resolve one `$ref` target, tracking the chain of definitions currently
-    /// being expanded so a cycle is rebased where it closes rather than after
-    /// an arbitrary number of hops.
-    fn resolve_ref_target(&mut self, reference: &str) -> Value {
+    /// Resolve the document root. A root that is itself a `$ref` is
+    /// inlined even when it names a cyclic definition: the root has to *be*
+    /// the schema, not point at one.
+    fn resolve_document(&mut self, schema: &Value) -> Value {
+        match schema {
+            Value::Object(map) if map.get("$ref").is_some_and(Value::is_string) => {
+                if !self.spend(1) {
+                    return json!({});
+                }
+                self.resolve_ref_node(map, true)
+            }
+            _ => self.resolve(schema),
+        }
+    }
+
+    /// Resolve one `$ref` target: a reference to a cyclic definition stays a
+    /// reference (unless `inline_cyclic`, for the document root) and its
+    /// body is kept; any other is replaced by its resolved target.
+    fn resolve_ref_target(&mut self, reference: &str, inline_cyclic: bool) -> Value {
         // schemars' root-recursion marker: the document root contains
         // itself. There is no finite inlining of that, but there is a finite
         // self-contained document — the root under a name of its own, with
@@ -420,51 +492,58 @@ impl RefWalk<'_> {
             self.issues.unresolved = true;
             return json!({});
         };
-        if self.active.contains(&name) {
-            // The cycle closes here. Point back at the definition instead of
-            // expanding it a second time, and mark it so the frame that owns
-            // it leaves a body behind for this reference to resolve against.
-            let back_edge = json!({ "$ref": format!("#/$defs/{}", encode_ref_name(&name)) });
-            self.cyclic.insert(name);
-            return back_edge;
-        }
-
         let target = target.clone();
-        self.active.push(name.clone());
-        let resolved = self.resolve(&target);
-        self.active.pop();
-        // Only a definition something referred *back* to is kept. A
-        // definition that merely appears twice in a finite tree is inlined at
-        // both sites and named by nothing, so putting it in the table would
-        // ship a definition no reference resolves against.
-        if self.cyclic.contains(&name) {
-            self.kept.entry(name).or_insert_with(|| resolved.clone());
+        if self.cyclic.contains(&name) && !inline_cyclic {
+            let reference = json!({ "$ref": format!("#/$defs/{}", encode_ref_name(&name)) });
+            self.keep(name, &target);
+            return reference;
         }
-        resolved
+        // Not on a cycle (or the document root): inline it. Expansion
+        // terminates, because every path back to a definition already being
+        // expanded passes through a cyclic one, which is referenced above
+        // rather than expanded.
+        self.resolve(&target)
+    }
+
+    /// Resolve a cyclic definition's body into the output's `$defs`, once.
+    ///
+    /// Only a definition some emitted `$ref` names is kept; one that is on a
+    /// cycle but never reached is not, so the table never ships a body no
+    /// reference resolves against. The name is marked *before* the body is
+    /// resolved, so the references inside it — to itself, or round a longer
+    /// cycle back to it — stay references instead of starting it again.
+    fn keep(&mut self, name: String, body: &Value) {
+        if !self.started.insert(name.clone()) {
+            return;
+        }
+        let resolved = self.resolve(body);
+        self.kept.insert(name, resolved);
     }
 
     /// Walk one member of a *schema object*, whose keys are JSON Schema
     /// keywords.
     ///
     /// Only here is a key read as a keyword: a literal-value keyword's data
-    /// is copied verbatim ([`LITERAL_VALUE_KEYWORDS`]), and a schema-map
+    /// is copied verbatim ([`KeywordValue::Literal`]), and a schema-map
     /// keyword's members are walked as author-named schemas
-    /// ([`SCHEMA_MAP_KEYWORDS`]). Everything else is a subschema.
+    /// ([`KeywordValue::SubschemaMap`]). Everything else is a subschema.
     fn resolve_member(&mut self, key: &str, value: &Value) -> Value {
-        if LITERAL_VALUE_KEYWORDS.contains(&key) {
-            if !self.spend(count_nodes(value)) {
-                return json!({});
+        match keyword_value(key) {
+            KeywordValue::Literal => {
+                if !self.spend(count_nodes(value)) {
+                    return json!({});
+                }
+                value.clone()
             }
-            value.clone()
-        } else if SCHEMA_MAP_KEYWORDS.contains(&key) {
-            self.resolve_schema_map(value)
-        } else {
-            self.resolve(value)
+            KeywordValue::SubschemaMap => self.resolve_schema_map(value),
+            KeywordValue::Subschema | KeywordValue::SubschemaList | KeywordValue::Other => {
+                self.resolve(value)
+            }
         }
     }
 
     /// Walk a map whose keys are names the author chose and whose values are
-    /// schemas — the value of a [`SCHEMA_MAP_KEYWORDS`] keyword.
+    /// schemas — the value of a [`KeywordValue::SubschemaMap`] keyword.
     ///
     /// No key here is a keyword. A body field really can be named `default`,
     /// `const`, `enum`, `examples`, or `$defs`, and every one of those names
@@ -494,33 +573,8 @@ impl RefWalk<'_> {
         }
         match node {
             Value::Object(map) => {
-                if let Some(Value::String(reference)) = map.get("$ref") {
-                    let mut resolved = self.resolve_ref_target(reference);
-
-                    // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`,
-                    // and schemars uses exactly that: a doc-commented field
-                    // of a named type emits
-                    // `{"description": "...", "$ref": "#/$defs/Status"}`.
-                    // Returning only the resolved target would silently
-                    // delete every such field description. Siblings win over
-                    // the target's own keys, since they are the more specific
-                    // annotation. `$defs` is excluded here too — it is the
-                    // reference table itself, not a schema keyword, and must
-                    // never survive into the output (it can appear as a
-                    // literal sibling of `$ref` when the ref sits at the
-                    // schema root). The siblings are members of a schema
-                    // object, so they go through exactly the keyword-position
-                    // rules the plain-object walk below uses.
-                    if let Some(out) = resolved.as_object_mut() {
-                        for (key, value) in map {
-                            if key == "$ref" || key == "$defs" {
-                                continue;
-                            }
-                            let member = self.resolve_member(key, value);
-                            out.insert(key.clone(), member);
-                        }
-                    }
-                    return resolved;
+                if map.get("$ref").is_some_and(Value::is_string) {
+                    return self.resolve_ref_node(map, false);
                 }
 
                 let mut out = serde_json::Map::new();
@@ -546,6 +600,42 @@ impl RefWalk<'_> {
             }
             other => other.clone(),
         }
+    }
+
+    /// Resolve a schema object that carries a string `$ref`, together with
+    /// the keywords beside it. The node itself has already been charged.
+    fn resolve_ref_node(
+        &mut self,
+        map: &serde_json::Map<String, Value>,
+        inline_cyclic: bool,
+    ) -> Value {
+        let Some(Value::String(reference)) = map.get("$ref") else {
+            unreachable!("callers check for a string `$ref`");
+        };
+        let mut resolved = self.resolve_ref_target(reference, inline_cyclic);
+
+        // JSON Schema 2020-12 allows keywords ALONGSIDE `$ref`, and schemars
+        // uses exactly that: a doc-commented field of a named type emits
+        // `{"description": "...", "$ref": "#/$defs/Status"}`. Returning only
+        // the resolved target would silently delete every such field
+        // description. Siblings win over the target's own keys, since they
+        // are the more specific annotation — and when the target stays a
+        // reference (a cyclic definition), they stay beside it. `$defs` is
+        // excluded here too — it is the reference table itself, not a schema
+        // keyword, and must never survive into the output (it can appear as
+        // a literal sibling of `$ref` when the ref sits at the schema root).
+        // The siblings are members of a schema object, so they go through
+        // exactly the keyword-position rules the plain-object walk uses.
+        if let Some(out) = resolved.as_object_mut() {
+            for (key, value) in map {
+                if key == "$ref" || key == "$defs" {
+                    continue;
+                }
+                let member = self.resolve_member(key, value);
+                out.insert(key.clone(), member);
+            }
+        }
+        resolved
     }
 }
 
@@ -592,9 +682,9 @@ struct MergedSource {
 /// [`source_is_flattenable`], and `$defs`, which is neither structure nor
 /// annotation:
 ///
-/// * `$defs` — the definitions [`inline_refs`] kept because a cycle closes
-///   on them. Dropping it would strand every back-edge in `properties` on a
-///   pointer with no referent, which is exactly the unconstrained-`{}` lie
+/// * `$defs` — the definitions [`inline_refs`] kept because they lie on a
+///   cycle. Dropping it would strand every reference to them in
+///   `properties` on a pointer with no referent, which is exactly the unconstrained-`{}` lie
 ///   the rest of this wall exists to prevent. So it is neither dropped nor
 ///   carried in place: [`merge_schema_source`] *hoists* it into the one
 ///   `$defs` table the merged schema has, since the three sources are being
@@ -785,7 +875,7 @@ fn source_is_flattenable(inlined: &Value) -> bool {
 /// A source that kept a cyclic definition (see [`inline_refs`]) arrives with
 /// a `$defs` table of its own, and the merged schema is one document with
 /// one such table. Its entries are therefore folded into the shared `defs`
-/// accumulator rather than left on the source, so that the back-edges in the
+/// accumulator rather than left on the source, so that the references in the
 /// properties this source contributes still resolve inside the merged
 /// document. Two sources naming the same definition *identically* is not a
 /// conflict — they are the same type, and one entry describes both. Two
@@ -1059,7 +1149,7 @@ fn agent_input_schema(ep: &BlockEndpoint) -> AgentInputSchema {
     let mut required: Vec<String> = Vec::new();
 
     // One table for all three sources: the merged schema is a single
-    // document, so the definitions its back-edges name have exactly one
+    // document, so the definitions its references name have exactly one
     // place to live — see `merge_schema_source`.
     let mut defs = serde_json::Map::new();
 
@@ -1222,8 +1312,8 @@ struct AgentOutputSchema {
 
 /// Project an endpoint's declared response schema into the tool's
 /// `outputSchema`: the same self-containment treatment `inputSchema` gets —
-/// every `#/$defs/*` reference inlined except the ones a cycle closes on,
-/// whose definitions travel in the schema's own `$defs`, and the root
+/// every `#/$defs/*` reference inlined except those to a definition on a
+/// cycle, whose definitions travel in the schema's own `$defs`, and the root
 /// `title` dropped — under the same [`MAX_INLINED_NODES`] budget.
 ///
 /// Unlike the input side there is nothing to hoist: an output schema is one
@@ -1544,61 +1634,282 @@ fn published_path_template(path: &str) -> Cow<'_, str> {
 // generate_openapi
 // ---------------------------------------------------------------------------
 
+/// One endpoint schema after [`hoist_defs_into_components`]: what to embed
+/// in the document in its place.
+struct Hoisted {
+    /// The schema itself, `$defs` removed and every local reference rewritten
+    /// to `components.schemas`. Embeddable anywhere, and the form a
+    /// parameter list is taken apart from (it reads `properties`).
+    schema: Value,
+    /// The component the root was published under, when the root references
+    /// itself — see [`hoist_defs_into_components`].
+    root: Option<String>,
+}
+
+impl Hoisted {
+    /// The schema to embed as a request or response body: a reference to the
+    /// root's component when there is one, so the body is published once,
+    /// and the schema itself otherwise.
+    fn into_body(self) -> Value {
+        match self.root {
+            Some(name) => json!({ "$ref": component_ref(&name) }),
+            None => self.schema,
+        }
+    }
+}
+
+/// The pointer to the published component `key`.
+///
+/// Every key [`hoist_defs_into_components`] publishes comes out of
+/// [`component_key`], whose alphabet is all RFC 3986 unreserved bytes, so
+/// [`encode_ref_name`] returns such a key unchanged and the pointer spells it
+/// verbatim. The encoding only changes anything for a reference to a
+/// `$defs` name the schema never defined, which dangles either way; encoding
+/// it keeps that dangling pointer a well-formed URI fragment.
+fn component_ref(key: &str) -> String {
+    format!("#/components/schemas/{}", encode_ref_name(key))
+}
+
+/// Whether `b` may appear in a `components.schemas` key. OpenAPI 3.1
+/// (Components Object) requires every key there to match
+/// `^[a-zA-Z0-9\.\-_]+$`.
+fn is_component_key_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')
+}
+
+/// The `components.schemas` key a `$defs` key or root title is published
+/// under, before collisions are considered.
+///
+/// A name that is already a valid key is its own key, so a derived schema
+/// whose types are named by ASCII Rust identifiers keeps the names it always
+/// had. Any other name (`#[schemars(rename = "Product Status")]`, a
+/// hand-written `a/b`, an empty `$defs` key) has each character outside the
+/// key alphabet replaced by `_` and is then *always* suffixed with the hash
+/// of the original name: `Product_Status_<16 hex>`. The suffix is what keeps
+/// this collision-safe and order-independent. Two names that sanitise alike
+/// (`a b`, `a/b`) still get different keys, and a sanitised name never takes
+/// the bare key a valid name of the same spelling (`Product_Status`) is
+/// published under, whichever of the two the document meets first.
+fn component_key(name: &str) -> Cow<'_, str> {
+    if !name.is_empty() && name.bytes().all(is_component_key_byte) {
+        return Cow::Borrowed(name);
+    }
+    let sanitised: String = name
+        .chars()
+        .map(|c| match u8::try_from(c) {
+            Ok(b) if is_component_key_byte(b) => c,
+            _ => '_',
+        })
+        .collect();
+    Cow::Owned(format!("{sanitised}_{}", short_sha256(name)))
+}
+
+/// What a definition (or a self-referencing root) *is*, for deciding whether
+/// two of them may share one component: its unrewritten body together with
+/// the unrewritten body of every local target it reaches, transitively, keyed
+/// by the reference that names that target in the schema.
+///
+/// The body alone is not enough. A `$ref` names its target by a key that is
+/// local to its schema, so two byte-identical bodies that both reference
+/// `#/$defs/Cond` are different schemas when the two `Cond`s differ — and
+/// sharing one component between them would publish the second as a
+/// reference to the first one's `Cond`. Since every reference in the closure
+/// is spelled by its local name and every target's body is in it, two equal
+/// identities describe the same schema graph from the same start. The walk
+/// visits each target once, so a cycle terminates. A reference to a key the
+/// table lacks is recorded as `null`: it dangles alike in both.
+fn component_identity(
+    start: &Value,
+    table: &std::collections::BTreeMap<String, Value>,
+    root_body: &Value,
+) -> Value {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut reached: BTreeMap<LocalRef, Value> = BTreeMap::new();
+    let mut frontier: BTreeSet<LocalRef> = BTreeSet::new();
+    collect_local_refs(start, &mut frontier);
+    while let Some(target) = frontier.pop_first() {
+        if reached.contains_key(&target) {
+            continue;
+        }
+        let body = match &target {
+            LocalRef::Root => Some(root_body),
+            LocalRef::Def(name) => table.get(name),
+        };
+        if let Some(body) = body {
+            collect_local_refs(body, &mut frontier);
+        }
+        reached.insert(target, body.cloned().unwrap_or(Value::Null));
+    }
+    let reached: serde_json::Map<String, Value> = reached
+        .into_iter()
+        .map(|(target, body)| (target.pointer(), body))
+        .collect();
+    json!({ "body": start, "reaches": reached })
+}
+
+/// The text a disambiguating suffix hashes: `value` serialised with every
+/// object's keys in sorted order, at every depth.
+///
+/// Whether two identities are the same is decided by `Value` equality, which
+/// ignores key order; the suffix must agree with it, or one definition met
+/// twice gets two keys. `Value::to_string` alone does not: with serde_json's
+/// `preserve_order` feature on it writes keys in insertion order, and that
+/// feature is on whenever something else in the build enables it (a
+/// full-workspace build does, through `aws-smithy-http-client`). Sorting
+/// here makes the suffix the same with the feature on or off.
+fn canonical_json(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+                entries.sort_by_key(|(key, _)| *key);
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), sorted(v)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    sorted(value).to_string()
+}
+
 /// Move a schema's `$defs` into `components` and rewrite `#/$defs/X` to
-/// `#/components/schemas/X`. Same-named definitions with identical bodies
-/// share one entry; different bodies get a content-hash suffix.
+/// `#/components/schemas/X`.
 ///
 /// Unlike [`inline_refs`], nothing is inlined: OpenAPI clients resolve
 /// `$ref` fine, so each definition is published once under
 /// `components.schemas` and every reference to it is rewritten in place —
-/// including a cyclic one, which stays a `$ref` rather than needing the
-/// back-edge dance `inline_refs` does for the ref-free WebMCP projection.
+/// acyclic ones included, which `inline_refs` expands for the WebMCP
+/// projection (keeping only the cyclic definitions, once each, in that
+/// projection's own `$defs`).
 ///
-/// Two passes: decide every name first (bodies are compared *unrewritten*,
-/// so the decision does not depend on rewrite order), then rewrite the root
-/// and every hoisted body with the final rename map.
+/// # Naming
+///
+/// A definition is published under [`component_key`] of its `$defs` key.
+/// Every schema of the document shares the one flat `components.schemas`
+/// namespace, so that key may already hold something: when it holds the
+/// same [`component_identity`] — the same body *and* the same referents,
+/// transitively — the definition shares it; when it holds a different one,
+/// the definition is published under the key suffixed with a hash of its
+/// identity instead. Two definitions with byte-identical text whose
+/// references reach different targets therefore never share a component.
+///
+/// # A root that references itself
+///
+/// A type whose recursion closes on the *root* reaches here as schemars'
+/// marker `{"$ref": "#"}`, with no `$defs` entry. Embedded in the OpenAPI
+/// document, a bare `#` names that document, not the schema. So when the
+/// schema (or one of its definitions) references `#`, the root itself is
+/// published as a component too — under its `title`, the Rust type name on
+/// a derived schema, or `Root` without one — named by exactly the rule the
+/// definitions follow, and every `#` is rewritten to it. The body is then
+/// embedded as a reference to that component ([`Hoisted::into_body`]); a
+/// parameter list, which is taken apart property by property, embeds
+/// [`Hoisted::schema`], whose back-edges point at the component.
+///
+/// Two passes: decide every name first (identities are built from
+/// *unrewritten* bodies, so the decision does not depend on rewrite order),
+/// then rewrite the root and every hoisted body with the final rename map.
 fn hoist_defs_into_components(
     schema: &Value,
-    raw: &mut std::collections::BTreeMap<String, Value>, // unrewritten bodies, for comparison
-    components: &mut serde_json::Map<String, Value>,     // rewritten bodies, published
-) -> Value {
-    let table: Vec<(String, Value)> = schema
+    published: &mut std::collections::BTreeMap<String, Value>, // key -> identity
+    components: &mut serde_json::Map<String, Value>,           // key -> rewritten body
+) -> Hoisted {
+    let table: std::collections::BTreeMap<String, Value> = schema
         .get("$defs")
         .and_then(Value::as_object)
         .map(|t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
 
-    // Pass 1: names. `pending` remembers the unrewritten body we compared
-    // against so a later duplicate in the same schema compares equal.
-    let mut renames: std::collections::BTreeMap<String, String> = Default::default();
-    let mut pending: Vec<(String, Value)> = Vec::new();
-    for (name, body) in &table {
-        let target = match raw
-            .get(name)
-            .or_else(|| pending.iter().find(|(n, _)| n == name).map(|(_, b)| b))
-        {
-            None => name.clone(),
-            Some(existing) if existing == body => name.clone(),
-            Some(_) => format!("{name}_{}", short_sha256(&body.to_string())),
+    // The root, as a body of its own: the schema without its table. It is a
+    // candidate for publishing only when something references it.
+    let root_body = {
+        let mut body = schema.clone();
+        if let Some(map) = body.as_object_mut() {
+            map.remove("$defs");
+        }
+        body
+    };
+    let references_root = |body: &Value| {
+        let mut refs = std::collections::BTreeSet::new();
+        collect_local_refs(body, &mut refs);
+        refs.contains(&LocalRef::Root)
+    };
+    let root_referenced = references_root(&root_body) || table.values().any(references_root);
+    let root_name = root_referenced.then(|| root_title(schema).to_string());
+
+    // Pass 1: names. `pending` remembers each identity decided here, so a
+    // later definition of the same schema that lands on the same key
+    // compares against it. The root goes through the same rule after the
+    // definitions, so it can neither take a key a definition of the same
+    // schema already holds nor share one with a different schema.
+    let mut pending: Vec<(String, Value, Value)> = Vec::new(); // key, identity, body
+    let mut name_for = |name: &str, body: &Value| -> String {
+        let identity = component_identity(body, &table, &root_body);
+        let holder = |key: &str| {
+            published.get(key).cloned().or_else(|| {
+                pending
+                    .iter()
+                    .find(|(k, _, _)| k == key)
+                    .map(|(_, held, _)| held.clone())
+            })
         };
-        renames.insert(name.clone(), target.clone());
-        pending.push((target, body.clone()));
+        let base = component_key(name).into_owned();
+        let mut key = base.clone();
+        // The suffixed key is checked too: a different identity holding it
+        // (a hash collision, or a valid name an author happened to spell
+        // that way) moves on to the next salted hash rather than being
+        // silently shadowed by it.
+        let mut salt = 0u32;
+        while holder(&key).is_some_and(|held| held != identity) {
+            let text = canonical_json(&identity);
+            let digest = if salt == 0 {
+                short_sha256(&text)
+            } else {
+                short_sha256(&format!("{salt}:{text}"))
+            };
+            key = format!("{base}_{digest}");
+            salt += 1;
+        }
+        pending.push((key.clone(), identity, body.clone()));
+        key
+    };
+    let mut defs: std::collections::BTreeMap<String, String> = Default::default();
+    for (name, body) in &table {
+        let key = name_for(name, body);
+        defs.insert(name.clone(), key);
     }
+    let root = root_name.map(|name| name_for(&name, &root_body));
+    let renames = Renames { defs, root };
 
     // Pass 2: rewrite with the complete map, then publish. `entry` (rather
     // than a `contains_key` check followed by a separate `insert`) does the
     // vacancy check and the reservation in one lookup.
-    for (target, body) in pending {
-        if let std::collections::btree_map::Entry::Vacant(entry) = raw.entry(target.clone()) {
-            components.insert(target, rewrite_local_refs(&body, &renames));
-            entry.insert(body);
+    for (key, identity, body) in pending {
+        if let std::collections::btree_map::Entry::Vacant(entry) = published.entry(key.clone()) {
+            components.insert(key, rewrite_local_refs(&body, &renames));
+            entry.insert(identity);
         }
     }
-    let mut out = rewrite_local_refs(schema, &renames);
-    if let Some(map) = out.as_object_mut() {
-        map.remove("$defs");
+    Hoisted {
+        schema: rewrite_local_refs(&root_body, &renames),
+        root: renames.root,
     }
-    out
+}
+
+/// The published names [`rewrite_local_refs`] rewrites local references to.
+struct Renames {
+    /// Each `$defs` key to the `components.schemas` key it was published
+    /// under.
+    defs: std::collections::BTreeMap<String, String>,
+    /// The `components.schemas` key the root was published under, when it
+    /// references itself.
+    root: Option<String>,
 }
 
 /// The first 8 bytes (16 hex chars) of the SHA-256 digest of `text`. Used to
@@ -1616,24 +1927,24 @@ fn short_sha256(text: &str) -> String {
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-/// Rewrite every `#/$defs/X` reference under `node` — read as a *schema
-/// object*, whose keys are JSON Schema keywords — to
-/// `#/components/schemas/Y`, where `Y` is `X`'s entry in `renames` (or `X`
-/// itself when the name was not renamed).
+/// Rewrite every local reference under `node` — read as a *schema object*,
+/// whose keys are JSON Schema keywords — to `components.schemas`:
+/// `#/$defs/X` to the key `X` was published under (`X` itself when it was
+/// not renamed), and the root-recursion marker `#` to the root's component.
 ///
-/// Mirrors [`RefWalk::resolve`]/[`RefWalk::resolve_member`]'s position
-/// tracking exactly, and for the same reason ([`LITERAL_VALUE_KEYWORDS`]'s
-/// doc comment): a plain object-recursion that rewrites any `$ref`-named key
-/// it meets cannot tell a real reference from a `$ref`-shaped *literal*
-/// sitting in a `default`/`const`/`examples`/`enum` value, or from a
-/// `properties` entry that is itself named `$ref`. Both would be corrupted —
-/// the first silently, the second by pointing a field's own name-lookup at
-/// `components/schemas` instead of leaving it alone. So a member's key is
-/// only ever read as a keyword here, in the schema-object walk; a
-/// `SCHEMA_MAP_KEYWORDS` value hands its members to [`rewrite_schema_map`],
-/// which walks the *values* as schemas and leaves the author-chosen *keys*
-/// untouched, and a `LITERAL_VALUE_KEYWORDS` value is copied verbatim.
-fn rewrite_local_refs(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
+/// Walks the positions every other walk here walks, and for the same reasons
+/// (see "How the schema walks read a keyword"): a plain object-recursion
+/// that rewrites any `$ref`-named key it meets cannot tell a real reference
+/// from a `$ref`-shaped *literal* sitting in a `default`/`const`/`examples`/
+/// `enum` value, or from a `properties` entry that is itself named `$ref`.
+/// Both would be corrupted — the first silently, the second by pointing a
+/// field's own name-lookup at `components/schemas` instead of leaving it
+/// alone. So a member's key is only ever read as a keyword here, in the
+/// schema-object walk; a [`KeywordValue::SubschemaMap`] value hands its
+/// members to [`rewrite_schema_map`], which walks the *values* as schemas
+/// and leaves the author-chosen *keys* untouched, and a
+/// [`KeywordValue::Literal`] value is copied verbatim.
+fn rewrite_local_refs(node: &Value, renames: &Renames) -> Value {
     match node {
         Value::Object(map) => Value::Object(
             map.iter()
@@ -1652,35 +1963,35 @@ fn rewrite_local_refs(node: &Value, renames: &std::collections::BTreeMap<String,
 
 /// Rewrite one member of a *schema object*, whose key is read as a keyword —
 /// see [`rewrite_local_refs`].
-fn rewrite_schema_member(
-    key: &str,
-    value: &Value,
-    renames: &std::collections::BTreeMap<String, String>,
-) -> Value {
-    if LITERAL_VALUE_KEYWORDS.contains(&key) {
-        return value.clone();
-    }
-    if SCHEMA_MAP_KEYWORDS.contains(&key) {
-        return rewrite_schema_map(value, renames);
-    }
+fn rewrite_schema_member(key: &str, value: &Value, renames: &Renames) -> Value {
     if key == "$ref" {
-        if let Some(name) = value
-            .as_str()
-            .and_then(|r| r.strip_prefix("#/$defs/"))
-            .and_then(decode_ref_name)
-        {
-            let target = renames.get(&name).cloned().unwrap_or(name);
-            return json!(format!("#/components/schemas/{target}"));
+        if let Some(reference) = value.as_str() {
+            if reference == "#" {
+                if let Some(root) = &renames.root {
+                    return json!(component_ref(root));
+                }
+            }
+            if let Some(name) = reference.strip_prefix("#/$defs/").and_then(decode_ref_name) {
+                let target = renames.defs.get(&name).cloned().unwrap_or(name);
+                return json!(component_ref(&target));
+            }
         }
     }
-    rewrite_local_refs(value, renames)
+    match keyword_value(key) {
+        KeywordValue::Literal => value.clone(),
+        KeywordValue::SubschemaMap => rewrite_schema_map(value, renames),
+        KeywordValue::Subschema | KeywordValue::SubschemaList | KeywordValue::Other => {
+            rewrite_local_refs(value, renames)
+        }
+    }
 }
 
 /// Rewrite a map whose keys are author-chosen names and whose values are
-/// schemas — the value of a [`SCHEMA_MAP_KEYWORDS`] keyword. No key here is
-/// read as a keyword, so a property literally named `$ref` or `default`
-/// passes its key through unexamined; only its value is walked as a schema.
-fn rewrite_schema_map(node: &Value, renames: &std::collections::BTreeMap<String, String>) -> Value {
+/// schemas — the value of a [`KeywordValue::SubschemaMap`] keyword. No key
+/// here is read as a keyword, so a property literally named `$ref` or
+/// `default` passes its key through unexamined; only its value is walked as
+/// a schema.
+fn rewrite_schema_map(node: &Value, renames: &Renames) -> Value {
     let Value::Object(map) = node else {
         // Not a map at all. Only a hand-written schema can produce this;
         // walking it as a schema object is the one interpretation that does
@@ -1720,13 +2031,15 @@ pub fn generate_openapi(
 ) -> Value {
     let mut paths: serde_json::Map<String, Value> = serde_json::Map::new();
 
-    // `hoist_defs_into_components` runs once per document build: `raw` holds
-    // every hoisted definition's unrewritten body, keyed by its published
-    // name, so a same-named definition met later in the walk compares
-    // against what was actually published rather than re-deciding from
-    // scratch; `components` holds the rewritten bodies that go out under
-    // `components.schemas`.
-    let mut raw: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    // `hoist_defs_into_components` runs once per schema, against state that
+    // spans the whole document build. `published` holds the identity
+    // (`component_identity`) of every hoisted definition and self-referencing
+    // root, keyed by its published key, so a definition met later in the
+    // walk that lands on the same key compares against what was actually
+    // published rather than re-deciding from scratch. `components` holds the
+    // rewritten bodies that go out under `components.schemas`.
+    let mut published: std::collections::BTreeMap<String, Value> =
+        std::collections::BTreeMap::new();
     let mut components: serde_json::Map<String, Value> = serde_json::Map::new();
 
     for block in blocks {
@@ -1761,7 +2074,8 @@ pub fn generate_openapi(
 
             // requestBody from input_schema
             if let Some(input) = &ep.input_schema {
-                let input = hoist_defs_into_components(input, &mut raw, &mut components);
+                let input =
+                    hoist_defs_into_components(input, &mut published, &mut components).into_body();
                 operation.insert(
                     "requestBody".into(),
                     json!({
@@ -1778,11 +2092,11 @@ pub fn generate_openapi(
             // parameters from path_params and query_params
             let mut parameters: Vec<Value> = Vec::new();
             if let Some(pp) = &ep.path_params {
-                let pp = hoist_defs_into_components(pp, &mut raw, &mut components);
+                let pp = hoist_defs_into_components(pp, &mut published, &mut components).schema;
                 parameters.extend(extract_params(&pp, "path"));
             }
             if let Some(qp) = &ep.query_params {
-                let qp = hoist_defs_into_components(qp, &mut raw, &mut components);
+                let qp = hoist_defs_into_components(qp, &mut published, &mut components).schema;
                 parameters.extend(extract_params(&qp, "query"));
             }
             if !parameters.is_empty() {
@@ -1793,7 +2107,9 @@ pub fn generate_openapi(
             let response_200 = ep.output_schema.as_ref().map_or_else(
                 || json!({ "description": "Successful response" }),
                 |output| {
-                    let output = hoist_defs_into_components(output, &mut raw, &mut components);
+                    let output =
+                        hoist_defs_into_components(output, &mut published, &mut components)
+                            .into_body();
                     json!({
                         "description": "Successful response",
                         "content": {
@@ -1827,9 +2143,10 @@ pub fn generate_openapi(
         }
     }
 
-    // A document with no `$defs` anywhere hoists nothing, and must come out
-    // byte-identical to before this hoist existed — so `schemas` is only
-    // added when there is something to publish under it.
+    // A document with no `$defs` and no root-recursion marker (`#`) anywhere
+    // hoists nothing, and must come out byte-identical to before this hoist
+    // existed — so `schemas` is only added when there is something to
+    // publish under it.
     let mut components_obj: serde_json::Map<String, Value> = serde_json::Map::new();
     if !components.is_empty() {
         components_obj.insert("schemas".into(), Value::Object(components));
@@ -3150,6 +3467,277 @@ mod tests {
         assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
     }
 
+    /// The same recursive type used in two fields of a *derived* schema
+    /// reaches `/openapi.json` as one component: `input::<T>()` already
+    /// references it from every use site, and the hoist rewrites those
+    /// references — and the field doc beside one — without unrolling
+    /// anything.
+    #[test]
+    fn openapi_carries_a_derived_recursive_type_once() {
+        #[derive(schemars::JsonSchema)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum Condition {
+            /// Every child condition holds.
+            All { all: Vec<Condition> },
+            /// BODY-MARKER: the input equals a literal.
+            Equals { equals: String },
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            /// When the rule applies.
+            when: Condition,
+            unless: Vec<Condition>,
+        }
+
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/rules")
+                    .auth(AuthLevel::Public)
+                    .input::<Rule>(),
+            ]),
+        ];
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
+        let text = doc.to_string();
+        assert_eq!(text.matches("BODY-MARKER").count(), 1, "{text}");
+        let schema = &doc["paths"]["/b/test/rules"]["post"]["requestBody"]["content"]
+            ["application/json"]["schema"];
+        assert_eq!(
+            schema["properties"]["when"],
+            json!({
+                "$ref": "#/components/schemas/Condition",
+                "description": "When the rule applies."
+            }),
+            "{text}"
+        );
+        assert_eq!(
+            schema["properties"]["unless"]["items"],
+            json!({ "$ref": "#/components/schemas/Condition" }),
+            "{text}"
+        );
+        assert!(!text.contains("#/$defs/"), "no dangling local refs: {text}");
+    }
+
+    /// Every `$ref` in `doc` — read as a JSON Pointer fragment, segments
+    /// decoded as `decode_ref_name` decodes them — names a node of `doc`.
+    /// Collects the references that do not, with their location.
+    fn dangling_refs(doc: &Value) -> Vec<String> {
+        fn resolves(doc: &Value, reference: &str) -> bool {
+            let Some(pointer) = reference.strip_prefix('#') else {
+                return false;
+            };
+            let mut node = doc;
+            for segment in pointer.split('/').skip(1) {
+                let Some(key) = decode_ref_name(segment) else {
+                    return false;
+                };
+                let next = match node {
+                    Value::Object(map) => map.get(&key),
+                    Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+                    _ => None,
+                };
+                let Some(next) = next else {
+                    return false;
+                };
+                node = next;
+            }
+            // `#` alone names the whole document — never an embedded schema.
+            !pointer.is_empty()
+        }
+        fn walk(doc: &Value, node: &Value, at: &str, out: &mut Vec<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        if key == "$ref" {
+                            if let Some(reference) = value.as_str() {
+                                if !resolves(doc, reference) {
+                                    out.push(format!("{at}: {reference}"));
+                                }
+                            }
+                        }
+                        walk(doc, value, &format!("{at}/{key}"), out);
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        walk(doc, item, &format!("{at}/{i}"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(doc, doc, "", &mut out);
+        out
+    }
+
+    /// A type that recurses on its own *root* reaches schemars' output as
+    /// `{"$ref": "#"}` with no `$defs` entry. Embedded in `/openapi.json`, a
+    /// bare `#` names the OpenAPI document — so the root is hoisted into
+    /// `components.schemas` under its title and every `#` is rewritten to
+    /// that component, as an input body, an output body, and a query
+    /// parameter.
+    #[test]
+    fn openapi_hoists_a_root_recursive_schema_into_components() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Node {
+            name: String,
+            children: Vec<Node>,
+            parent: Option<Box<Node>>,
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Filter {
+            label: String,
+            and: Vec<Filter>,
+        }
+
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/nodes")
+                    .auth(AuthLevel::Public)
+                    .input::<Node>()
+                    .output::<Node>(),
+                BlockEndpoint::get("/b/test/nodes")
+                    .auth(AuthLevel::Public)
+                    .query_params::<Filter>(),
+            ]),
+        ];
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
+        let text = doc.to_string();
+        assert_eq!(dangling_refs(&doc), Vec::<String>::new(), "{text}");
+
+        let post = &doc["paths"]["/b/test/nodes"]["post"];
+        assert_eq!(
+            post["requestBody"]["content"]["application/json"]["schema"],
+            json!({ "$ref": "#/components/schemas/Node" }),
+            "{text}"
+        );
+        let node = &doc["components"]["schemas"]["Node"];
+        assert_eq!(
+            node["properties"]["children"]["items"],
+            json!({ "$ref": "#/components/schemas/Node" }),
+            "{text}"
+        );
+        assert_eq!(node["title"], "Node", "{text}");
+        assert!(node.get("$defs").is_none(), "{text}");
+
+        // A query parameter is taken apart property by property, so the
+        // root stays inline there; its back-edges point at the component.
+        let parameters = doc["paths"]["/b/test/nodes"]["get"]["parameters"]
+            .as_array()
+            .expect("query parameters");
+        let and = parameters
+            .iter()
+            .find(|p| p["name"] == "and")
+            .expect("`and` parameter");
+        assert_eq!(
+            and["schema"]["items"],
+            json!({ "$ref": "#/components/schemas/Filter" }),
+            "{text}"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Filter"]["properties"]["label"]["type"], "string",
+            "{text}"
+        );
+    }
+
+    /// Two different root-recursive schemas with the same title — and a
+    /// root title that collides with a `$defs` entry of a different body —
+    /// each get their own component, exactly as same-named `$defs` entries
+    /// do, and every reference still resolves to the right one.
+    #[test]
+    fn openapi_root_recursive_schemas_never_share_a_component_by_name_alone() {
+        let first = json!({
+            "title": "Tree",
+            "type": "object",
+            "properties": { "kids": { "type": "array", "items": { "$ref": "#" } } }
+        });
+        let second = json!({
+            "title": "Tree",
+            "type": "object",
+            "properties": {
+                "next": { "$ref": "#" },
+                "leaf": { "$ref": "#/$defs/Tree" }
+            },
+            "$defs": { "Tree": { "type": "string" } }
+        });
+        let blocks = vec![
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/test/a")
+                    .auth(AuthLevel::Public)
+                    .input_schema(first.clone()),
+                BlockEndpoint::post("/b/test/b")
+                    .auth(AuthLevel::Public)
+                    .input_schema(second),
+                BlockEndpoint::post("/b/test/c")
+                    .auth(AuthLevel::Public)
+                    .input_schema(first),
+            ]),
+        ];
+        let doc = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        );
+        let text = doc.to_string();
+        assert_eq!(dangling_refs(&doc), Vec::<String>::new(), "{text}");
+
+        let body = |path: &str| {
+            doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["$ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{path} body is a $ref: {text}"))
+                .to_string()
+        };
+        let resolve = |reference: &str| {
+            let name = reference
+                .strip_prefix("#/components/schemas/")
+                .and_then(decode_ref_name)
+                .unwrap_or_else(|| panic!("component ref: {reference}"));
+            doc["components"]["schemas"][name.as_str()].clone()
+        };
+        // Identical bodies share one component; a different one does not.
+        assert_eq!(body("/b/test/a"), body("/b/test/c"), "{text}");
+        assert_ne!(body("/b/test/a"), body("/b/test/b"), "{text}");
+
+        let second = resolve(&body("/b/test/b"));
+        assert_eq!(
+            second["properties"]["next"]["$ref"],
+            body("/b/test/b"),
+            "{text}"
+        );
+        let leaf = resolve(second["properties"]["leaf"]["$ref"].as_str().unwrap());
+        assert_eq!(leaf, json!({ "type": "string" }), "{text}");
+        let first = resolve(&body("/b/test/a"));
+        assert_eq!(
+            first["properties"]["kids"]["items"]["$ref"],
+            body("/b/test/a"),
+            "{text}"
+        );
+    }
+
     // 7c. openapi_without_defs_is_byte_identical_to_before_the_hoist
     #[test]
     fn openapi_without_defs_is_byte_identical_to_before_the_hoist() {
@@ -3317,6 +3905,355 @@ mod tests {
         );
 
         assert_eq!(doc["components"]["schemas"].as_object().unwrap().len(), 2);
+    }
+
+    /// The document for `blocks`, generated as the other hoist tests do.
+    fn openapi_for(blocks: &[BlockInfo]) -> Value {
+        generate_openapi(
+            blocks,
+            AuthLevel::Admin,
+            |_, ep| ep.auth,
+            "t",
+            "t",
+            "https://x.test",
+        )
+    }
+
+    /// The component a `#/components/schemas/` reference names.
+    fn component<'a>(doc: &'a Value, reference: &Value) -> &'a Value {
+        let name = reference
+            .as_str()
+            .and_then(|r| r.strip_prefix("#/components/schemas/"))
+            .and_then(decode_ref_name)
+            .unwrap_or_else(|| panic!("a component reference: {reference}"));
+        doc["components"]["schemas"]
+            .get(name.as_str())
+            .unwrap_or_else(|| panic!("component {name} exists: {doc}"))
+    }
+
+    /// Every `components.schemas` key that no `$ref` in `doc` names.
+    fn unreferenced_components(doc: &Value) -> Vec<String> {
+        fn refs(node: &Value, out: &mut std::collections::BTreeSet<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        if key == "$ref" {
+                            if let Some(name) = value
+                                .as_str()
+                                .and_then(|r| r.strip_prefix("#/components/schemas/"))
+                                .and_then(decode_ref_name)
+                            {
+                                out.insert(name);
+                            }
+                        }
+                        refs(value, out);
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
+                _ => {}
+            }
+        }
+        let mut named = std::collections::BTreeSet::new();
+        refs(doc, &mut named);
+        doc["components"]["schemas"]
+            .as_object()
+            .map(|schemas| {
+                schemas
+                    .keys()
+                    .filter(|key| !named.contains(*key))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A block whose one endpoint takes `input` at `path`.
+    fn block_taking(name: &str, path: &str, input: Value) -> BlockInfo {
+        BlockInfo::new(name, "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+            BlockEndpoint::post(path)
+                .auth(AuthLevel::Public)
+                .input_schema(input),
+        ])
+    }
+
+    /// Two blocks each define a recursive `Expr` whose text is byte-for-byte
+    /// the same, but whose `#/$defs/Cond` names a *different* `Cond` in each.
+    /// The `Expr`s are different schemas and must not share a component:
+    /// sharing one would publish the second block's `Expr` as a reference to
+    /// the first block's `Cond`, and leave the second `Cond` published with
+    /// nothing pointing at it.
+    #[test]
+    fn openapi_never_shares_a_component_whose_references_differ() {
+        let schema = |cond: Value| {
+            json!({
+                "type": "object",
+                "properties": { "expr": { "$ref": "#/$defs/Expr" } },
+                "$defs": {
+                    "Expr": { "type": "object", "properties": {
+                        "not": { "$ref": "#/$defs/Expr" },
+                        "when": { "$ref": "#/$defs/Cond" } } },
+                    "Cond": cond
+                }
+            })
+        };
+        let doc = openapi_for(&[
+            block_taking("a/one", "/b/one/eval", schema(json!({ "type": "string" }))),
+            block_taking("b/two", "/b/two/eval", schema(json!({ "type": "integer" }))),
+        ]);
+        let text = doc.to_string();
+        assert_eq!(dangling_refs(&doc), Vec::<String>::new(), "{text}");
+        assert_eq!(
+            unreferenced_components(&doc),
+            Vec::<String>::new(),
+            "{text}"
+        );
+
+        let expr_ref = |path: &str| {
+            doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["properties"]["expr"]["$ref"]
+                .clone()
+        };
+        for (path, cond) in [
+            ("/b/one/eval", json!({ "type": "string" })),
+            ("/b/two/eval", json!({ "type": "integer" })),
+        ] {
+            let expr = component(&doc, &expr_ref(path));
+            assert_eq!(
+                expr["properties"]["not"]["$ref"],
+                expr_ref(path),
+                "{path}: {text}"
+            );
+            assert_eq!(
+                component(&doc, &expr["properties"]["when"]["$ref"]),
+                &cond,
+                "{path}'s Expr references its own Cond: {text}"
+            );
+        }
+        // The first-met definitions keep their bare names.
+        assert_eq!(
+            expr_ref("/b/one/eval"),
+            "#/components/schemas/Expr",
+            "{text}"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["Cond"],
+            json!({ "type": "string" }),
+            "{text}"
+        );
+    }
+
+    /// Identity is transitive: `Expr` and `Cond` are textually identical in
+    /// both schemas and only the `Leaf` that `Cond` references differs, so
+    /// neither may be shared — while a third schema identical to the first,
+    /// referents and all, still shares every component with it.
+    #[test]
+    fn openapi_component_identity_follows_references_transitively() {
+        let schema = |leaf: Value| {
+            json!({
+                "type": "object",
+                "properties": { "expr": { "$ref": "#/$defs/Expr" } },
+                "$defs": {
+                    "Expr": { "type": "object", "properties": {
+                        "any": { "type": "array", "items": { "$ref": "#/$defs/Expr" } },
+                        "when": { "$ref": "#/$defs/Cond" } } },
+                    "Cond": { "type": "object", "properties": {
+                        "leaf": { "$ref": "#/$defs/Leaf" } } },
+                    "Leaf": leaf
+                }
+            })
+        };
+        let doc = openapi_for(&[
+            block_taking("a/one", "/b/one/eval", schema(json!({ "type": "string" }))),
+            block_taking("b/two", "/b/two/eval", schema(json!({ "type": "integer" }))),
+            block_taking(
+                "c/three",
+                "/b/three/eval",
+                schema(json!({ "type": "string" })),
+            ),
+        ]);
+        let text = doc.to_string();
+        assert_eq!(dangling_refs(&doc), Vec::<String>::new(), "{text}");
+        assert_eq!(
+            unreferenced_components(&doc),
+            Vec::<String>::new(),
+            "{text}"
+        );
+
+        let expr_ref = |path: &str| {
+            doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["properties"]["expr"]["$ref"]
+                .clone()
+        };
+        for (path, leaf) in [
+            ("/b/one/eval", json!({ "type": "string" })),
+            ("/b/two/eval", json!({ "type": "integer" })),
+            ("/b/three/eval", json!({ "type": "string" })),
+        ] {
+            let expr = component(&doc, &expr_ref(path));
+            let cond = component(&doc, &expr["properties"]["when"]["$ref"]);
+            assert_eq!(
+                component(&doc, &cond["properties"]["leaf"]["$ref"]),
+                &leaf,
+                "{path}: {text}"
+            );
+        }
+        assert_ne!(expr_ref("/b/one/eval"), expr_ref("/b/two/eval"), "{text}");
+        assert_eq!(expr_ref("/b/one/eval"), expr_ref("/b/three/eval"), "{text}");
+        assert_eq!(
+            doc["components"]["schemas"].as_object().map(|s| s.len()),
+            Some(6),
+            "Expr, Cond and Leaf once for each distinct family: {text}"
+        );
+    }
+
+    /// Two definitions that are equal as JSON but whose objects list their
+    /// keys in a different order are one definition, and get one suffixed
+    /// key. With serde_json's `preserve_order` on — which a full-workspace
+    /// build turns on, through `aws-smithy-http-client` — `Value` equality
+    /// ignores key order but `to_string` does not, so hashing the plain
+    /// serialisation published the second as a duplicate component.
+    #[test]
+    fn openapi_suffix_does_not_depend_on_object_key_order() {
+        let mut integer_first = serde_json::Map::new();
+        integer_first.insert("type".into(), json!("integer"));
+        integer_first.insert("minimum".into(), json!(0));
+        let mut minimum_first = serde_json::Map::new();
+        minimum_first.insert("minimum".into(), json!(0));
+        minimum_first.insert("type".into(), json!("integer"));
+        let schema = |cond: serde_json::Map<String, Value>| {
+            json!({
+                "type": "object",
+                "properties": { "c": { "$ref": "#/$defs/Cond" } },
+                "$defs": { "Cond": Value::Object(cond) }
+            })
+        };
+        let doc = openapi_for(&[
+            block_taking(
+                "a/one",
+                "/b/one/x",
+                schema(
+                    [("type".to_string(), json!("string"))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+            block_taking("b/two", "/b/two/x", schema(integer_first)),
+            block_taking("c/three", "/b/three/x", schema(minimum_first)),
+        ]);
+        let text = doc.to_string();
+        let cond_ref = |path: &str| {
+            doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["properties"]["c"]["$ref"]
+                .clone()
+        };
+        assert_eq!(cond_ref("/b/two/x"), cond_ref("/b/three/x"), "{text}");
+        assert_eq!(
+            doc["components"]["schemas"].as_object().map(|s| s.len()),
+            Some(2),
+            "{text}"
+        );
+    }
+
+    /// Whether `key` is a valid `components.schemas` key: OpenAPI 3.1
+    /// (Components Object) requires every key there to match `^[a-zA-Z0-9\.\-_]+$`.
+    fn is_valid_component_key(key: &str) -> bool {
+        !key.is_empty()
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    }
+
+    /// A `$defs` key or root title outside OpenAPI's component-key alphabet
+    /// (`#[schemars(rename = "Product Status")]`, a hand-written `a/b`) is
+    /// published under a valid key, so every reference names its key
+    /// verbatim. A name that was already valid keeps its exact key, whatever
+    /// order the two are met in — even when it is what the other sanitises
+    /// towards.
+    #[test]
+    fn openapi_component_keys_are_valid_and_stable() {
+        let odd = json!({
+            "title": "My Tree",
+            "type": "object",
+            "properties": {
+                "status": { "$ref": "#/$defs/Product%20Status" },
+                "path": { "$ref": "#/$defs/a~1b" },
+                "kids": { "type": "array", "items": { "$ref": "#" } }
+            },
+            "$defs": {
+                "Product Status": { "enum": ["draft", "live"] },
+                "a/b": { "type": "integer" }
+            }
+        });
+        let plain = json!({
+            "type": "object",
+            "properties": { "flag": { "$ref": "#/$defs/Product_Status" } },
+            "$defs": { "Product_Status": { "type": "boolean" } }
+        });
+        for blocks in [
+            vec![
+                block_taking("a/odd", "/b/odd/x", odd.clone()),
+                block_taking("b/plain", "/b/plain/x", plain.clone()),
+            ],
+            vec![
+                block_taking("b/plain", "/b/plain/x", plain),
+                block_taking("a/odd", "/b/odd/x", odd),
+            ],
+        ] {
+            let doc = openapi_for(&blocks);
+            let text = doc.to_string();
+            assert_eq!(dangling_refs(&doc), Vec::<String>::new(), "{text}");
+            let schemas = doc["components"]["schemas"]
+                .as_object()
+                .expect("components");
+            for key in schemas.keys() {
+                assert!(is_valid_component_key(key), "invalid key {key:?}: {text}");
+            }
+            assert_eq!(
+                schemas.get("Product_Status"),
+                Some(&json!({ "type": "boolean" })),
+                "a valid unique name keeps its key: {text}"
+            );
+
+            let body = |path: &str| {
+                doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                    .clone()
+            };
+            // Every reference spells its key verbatim: no segment needs
+            // decoding, so a reader that strips the prefix finds the key.
+            let tree_ref = body("/b/odd/x")["$ref"].clone();
+            for reference in [
+                &tree_ref,
+                &component(&doc, &tree_ref)["properties"]["status"]["$ref"],
+                &component(&doc, &tree_ref)["properties"]["path"]["$ref"],
+            ] {
+                let key = reference
+                    .as_str()
+                    .and_then(|r| r.strip_prefix("#/components/schemas/"))
+                    .unwrap_or_else(|| panic!("component reference {reference}: {text}"));
+                assert!(schemas.contains_key(key), "{key:?} named verbatim: {text}");
+            }
+            let tree = component(&doc, &tree_ref);
+            assert_eq!(tree["title"], "My Tree", "{text}");
+            assert_eq!(
+                tree["properties"]["kids"]["items"]["$ref"], tree_ref,
+                "{text}"
+            );
+            assert_eq!(
+                component(&doc, &tree["properties"]["status"]["$ref"]),
+                &json!({ "enum": ["draft", "live"] }),
+                "{text}"
+            );
+            assert_eq!(
+                component(&doc, &tree["properties"]["path"]["$ref"]),
+                &json!({ "type": "integer" }),
+                "{text}"
+            );
+            assert_eq!(
+                body("/b/plain/x")["properties"]["flag"]["$ref"],
+                "#/components/schemas/Product_Status",
+                "{text}"
+            );
+        }
     }
 
     // 7e. openapi_hoists_defs_from_path_query_and_output_schemas_too
@@ -3754,13 +4691,9 @@ mod tests {
         });
         let (out, issues) = inline_refs(&schema);
         assert_eq!(issues, RefIssues::default());
-        // The first reference is inlined; the cycle inside it is a `$ref`
-        // back to the kept definition.
-        assert_eq!(out["properties"]["root"]["type"], "object");
-        assert_eq!(
-            out["properties"]["root"]["properties"]["children"]["items"],
-            json!({ "$ref": "#/$defs/Node" })
-        );
+        // A cyclic definition is referenced at its use site too, not inlined
+        // there: the body travels once, in the kept table.
+        assert_eq!(out["properties"]["root"], json!({ "$ref": "#/$defs/Node" }));
         assert_eq!(
             out["$defs"]["Node"]["properties"]["children"]["items"],
             json!({ "$ref": "#/$defs/Node" })
@@ -3847,9 +4780,10 @@ mod tests {
     }
 
     /// A definition referenced twice from *different* branches is a diamond,
-    /// not a cycle: the visited stack must unwind, or the second branch is
-    /// falsely read as closing a cycle — inlined once and then left as a
-    /// back-edge to a definition that is in no way recursive.
+    /// not a cycle: it is on no cycle ([`definitions_on_a_cycle`]), so it is
+    /// inlined at both sites rather than kept and referenced — a reference to
+    /// a definition that is in no way recursive would be an indirection an
+    /// MCP client may not follow, for nothing.
     #[test]
     fn inline_refs_resolves_a_definition_referenced_from_two_branches() {
         let schema = json!({
@@ -3880,13 +4814,14 @@ mod tests {
         );
     }
 
-    /// A cycle that closes through an intermediate definition keeps exactly
-    /// the definition the back-edge names — `A`, whose body carries `B`
-    /// inlined — and nothing else. `B` is not part of any cycle on its own,
-    /// so keeping it too would put a definition in the table that nothing
-    /// refers to.
+    /// A cycle that closes through an intermediate definition puts *both*
+    /// definitions on it: `A -> B -> A` is as much a cycle through `B` as
+    /// through `A`. Each is referenced wherever it is used and carried once.
+    /// The document root is the one reference that is inlined — it has to be
+    /// the schema itself — so its `b` is a reference to the kept `B`, whose
+    /// own `a` refers back to the kept `A`.
     #[test]
-    fn inline_refs_keeps_the_definition_an_indirect_cycle_closes_on() {
+    fn inline_refs_keeps_every_definition_on_an_indirect_cycle() {
         let indirect = json!({
             "$ref": "#/$defs/A",
             "$defs": {
@@ -3896,20 +4831,19 @@ mod tests {
         });
         let (out, issues) = inline_refs(&indirect);
         assert_eq!(issues, RefIssues::default());
+        assert_eq!(out["type"], json!("object"), "the root is inlined: {out}");
         assert_eq!(
-            out["properties"]["b"]["properties"]["a"],
-            json!({ "$ref": "#/$defs/A" }),
-            "A -> B -> A closes on A: {out}"
+            out["properties"]["b"],
+            json!({ "$ref": "#/$defs/B" }),
+            "{out}"
         );
         assert_eq!(
-            out["$defs"]["A"]["properties"]["b"]["properties"]["a"],
-            json!({ "$ref": "#/$defs/A" }),
-            "and the kept body is the one the back-edge names: {out}"
-        );
-        assert_eq!(
-            out["$defs"].as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["A"],
-            "B is inlined inside A and is referred to by nothing: {out}"
+            out["$defs"],
+            json!({
+                "A": { "type": "object", "properties": { "b": { "$ref": "#/$defs/B" } } },
+                "B": { "type": "object", "properties": { "a": { "$ref": "#/$defs/A" } } }
+            }),
+            "each definition on the cycle is carried once: {out}"
         );
     }
 
@@ -3936,13 +4870,14 @@ mod tests {
         );
     }
 
-    /// The back-edge is a JSON pointer, so it carries the *encoded* name
+    /// A reference to a kept definition — at the use site and at the
+    /// back-edge alike — is a JSON pointer, so it carries the *encoded* name
     /// while the `$defs` key stays raw — the same split `decode_ref_name`
     /// exists for, now written in the other direction. Getting this wrong is
     /// invisible until a client tries to resolve the pointer and finds
     /// nothing, or finds a fragment that is not a legal URI at all.
     #[test]
-    fn inline_refs_encodes_the_back_edge_of_an_awkwardly_named_definition() {
+    fn inline_refs_encodes_the_reference_to_an_awkwardly_named_definition() {
         let schema = json!({
             "type": "object",
             "properties": { "status": { "$ref": "#/$defs/Product%20Status" } },
@@ -3956,9 +4891,14 @@ mod tests {
         let (out, issues) = inline_refs(&schema);
         assert_eq!(issues, RefIssues::default());
         assert_eq!(
-            out["properties"]["status"]["properties"]["next"],
+            out["properties"]["status"],
             json!({ "$ref": "#/$defs/Product%20Status" }),
             "the pointer is encoded: {out}"
+        );
+        assert_eq!(
+            out["$defs"]["Product Status"]["properties"]["next"],
+            json!({ "$ref": "#/$defs/Product%20Status" }),
+            "{out}"
         );
         assert!(
             out["$defs"].get("Product Status").is_some(),
@@ -5330,8 +6270,8 @@ mod tests {
 
     /// The recursion a real block declares: a `Condition` that nests
     /// `Condition`s inside an otherwise ordinary object body. The tool is
-    /// published, the first reference is inlined, and the back-edge points
-    /// at the definition the schema now carries.
+    /// published, the field references the definition the schema now
+    /// carries, and so does the back-edge inside that definition.
     #[test]
     fn webmcp_publishes_an_endpoint_with_a_recursive_body_and_keeps_defs() {
         let blocks = vec![
@@ -5352,8 +6292,8 @@ mod tests {
         let tool = &doc["tools"][0];
         assert_eq!(tool["name"], "create_offer");
         assert_eq!(
-            tool["inputSchema"]["properties"]["condition"]["type"],
-            "object"
+            tool["inputSchema"]["properties"]["condition"],
+            json!({ "$ref": "#/$defs/Condition" })
         );
         assert_eq!(
             tool["inputSchema"]["$defs"]["Condition"]["properties"]["all"]["items"],
@@ -5406,9 +6346,9 @@ mod tests {
         );
         for (source, field) in [("query", "q"), ("body", "b")] {
             assert_eq!(
-                result.schema["properties"][field]["properties"]["n"],
+                result.schema["properties"][field],
                 json!({ "$ref": "#/$defs/T" }),
-                "the {source} source's back-edge resolves against the merged table: {:?}",
+                "the {source} source's reference resolves against the merged table: {:?}",
                 result.schema
             );
         }
@@ -6799,6 +7739,72 @@ mod tests {
         assert_eq!(
             doc["tools"][0]["inputSchema"]["properties"]["status"],
             json!({ "type": "string", "enum": ["draft", "active"] })
+        );
+    }
+
+    /// A recursive type used in several fields reaches an agent with its
+    /// body exactly once. `BlockEndpoint::input` already emits it that way —
+    /// one `$defs` body, a `$ref` at every use site — and the WebMCP
+    /// projection must not undo that by unrolling a full copy into each
+    /// field: a definition that lies on a cycle is kept under `$defs` and
+    /// referenced from every use site, not just from the back-edge.
+    ///
+    /// Derived through the real `input::<T>()` path, so the shape under test
+    /// is the shape a block ships.
+    #[test]
+    fn webmcp_carries_a_recursive_type_used_in_several_fields_once() {
+        #[derive(schemars::JsonSchema)]
+        #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum Condition {
+            /// Every child condition holds.
+            All { all: Vec<Condition> },
+            /// The child condition does not hold.
+            Not { not: Box<Condition> },
+            /// BODY-MARKER: the input equals a literal.
+            Equals { equals: String },
+        }
+
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Rule {
+            /// When the rule applies.
+            when: Condition,
+            /// Conditions that suspend the rule.
+            unless: Vec<Condition>,
+        }
+
+        let block =
+            BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![
+                BlockEndpoint::post("/b/x/rules")
+                    .auth(AuthLevel::Public)
+                    .input::<Rule>()
+                    .agent_tool("create_rule", "Create a rule."),
+            ]);
+
+        let doc = generate_webmcp_declared_auth(&[block], AuthLevel::Admin);
+        assert_eq!(tool_names(&doc), vec!["create_rule".to_string()]);
+        let input = &doc["tools"][0]["inputSchema"];
+        let rendered = input.to_string();
+        assert_eq!(
+            rendered.matches("BODY-MARKER").count(),
+            1,
+            "the `Condition` body must reach the agent exactly once: {rendered}"
+        );
+        assert_eq!(
+            input["properties"]["when"],
+            json!({ "$ref": "#/$defs/Condition", "description": "When the rule applies." }),
+            "{rendered}"
+        );
+        assert_eq!(
+            input["properties"]["unless"]["items"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "{rendered}"
+        );
+        assert_eq!(
+            input["$defs"]["Condition"]["oneOf"][1]["properties"]["not"],
+            json!({ "$ref": "#/$defs/Condition" }),
+            "the kept body closes its own cycle: {rendered}"
         );
     }
 

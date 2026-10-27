@@ -11,7 +11,8 @@
 //! tests reconstruct that exact shape (WRAP metas absent on the message)
 //! and assert the *ctx*, not the meta, is what gates the call: a denying
 //! `Context` must produce `PermissionDenied` for every one of `query_raw`,
-//! `exec_raw`, the new `database.ddl` op, and a foreign-collection
+//! `exec_raw`, the `database.ddl` and `database.ddl_transaction` ops, and a
+//! foreign-collection
 //! `list`/`create` — and, via a recording fake `DatabaseService`, that the
 //! underlying service method never actually ran. A granting `Context` must
 //! let the same requests through and reach the service.
@@ -210,6 +211,39 @@ async fn ddl_denied_never_reaches_service() {
     assert!(
         calls.lock().unwrap().is_empty(),
         "database.ddl must not run on a denied request; calls = {:?}",
+        calls.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn ddl_transaction_denied_never_reaches_service() {
+    let calls = new_calls();
+    let svc = db_fakes::RecordingDb::new(calls.clone());
+    // `database.ddl_transaction` is the same `__ddl__` channel as
+    // `database.ddl`, many statements at once: no grant, no statement.
+    let req = wire::database::DdlTransactionRequest {
+        statements: vec![
+            wire::database::RawStatement {
+                query: "CREATE TABLE my_org__auth__evil (id TEXT)".into(),
+                args: vec![],
+            },
+            wire::database::RawStatement {
+                query: "DROP TABLE my_org__other__secrets".into(),
+                args: vec![],
+            },
+        ],
+    };
+    let body = codec::encode(&req).unwrap();
+    let msg = msg_without_wrap_meta(ServiceOp::DATABASE_DDL_TRANSACTION);
+
+    let out =
+        wafer_core::interfaces::database::handler::handle_message(&svc, &DenyCtx, &msg, &body)
+            .await;
+    expect_permission_denied(out).await;
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "database.ddl_transaction must not run on a denied request; calls = {:?}",
         calls.lock().unwrap()
     );
 }
@@ -609,7 +643,7 @@ async fn upsert_windowed_counter_parts_it_would_not_write_are_invalid_argument()
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
+async fn granted_ctx_allows_query_raw_exec_raw_ddl_ddl_transaction_and_typed_ops() {
     let calls = new_calls();
     let svc = db_fakes::RecordingDb::new(calls.clone());
 
@@ -661,6 +695,24 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
     )
     .await;
 
+    let ddl_transaction_body = codec::encode(&wire::database::DdlTransactionRequest {
+        statements: vec![wire::database::RawStatement {
+            query: "CREATE TABLE my_org__auth__gadgets (id TEXT)".into(),
+            args: vec![],
+        }],
+    })
+    .unwrap();
+    expect_success(
+        wafer_core::interfaces::database::handler::handle_message(
+            &svc,
+            &AllowCtx,
+            &msg_without_wrap_meta(ServiceOp::DATABASE_DDL_TRANSACTION),
+            &ddl_transaction_body,
+        )
+        .await,
+    )
+    .await;
+
     let list_body = codec::encode(&wire::database::ListRequest {
         collection: "my_org__auth__users".into(),
         filters: vec![],
@@ -700,7 +752,14 @@ async fn granted_ctx_allows_query_raw_exec_raw_ddl_and_typed_ops() {
 
     assert_eq!(
         *calls.lock().unwrap(),
-        vec!["query_raw", "exec_raw", "exec_raw", "list", "create"],
+        vec![
+            "query_raw",
+            "exec_raw",
+            "exec_raw",
+            "exec_raw_transaction",
+            "list",
+            "create"
+        ],
         "every op should have reached the service exactly once, in order"
     );
 }

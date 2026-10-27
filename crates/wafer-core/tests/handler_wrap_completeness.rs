@@ -81,8 +81,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, Record, RecordList, StatementBudget,
-        UpsertSpec,
+        AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
+        StatementBudget, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -136,7 +136,7 @@ mod db_fakes {
             self.record("create");
             Ok(Record {
                 id: "new".into(),
-                data,
+                data: data.into_iter().collect(),
             })
         }
         async fn create_many(
@@ -173,7 +173,7 @@ mod db_fakes {
             Ok(
                 wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
                     id: collection.to_string(),
-                    data,
+                    data: data.into_iter().collect(),
                 }),
             )
         }
@@ -201,7 +201,7 @@ mod db_fakes {
             self.record("update");
             Ok(Record {
                 id: id.to_string(),
-                data,
+                data: data.into_iter().collect(),
             })
         }
         async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
@@ -240,6 +240,13 @@ mod db_fakes {
         ) -> Result<i64, DatabaseError> {
             self.record("exec_raw");
             Ok(0)
+        }
+        async fn exec_raw_transaction(
+            &self,
+            statements: &[RawStatement],
+        ) -> Result<Vec<i64>, TransactionError> {
+            self.record("exec_raw_transaction");
+            Ok(vec![0; statements.len()])
         }
         async fn delete_where(
             &self,
@@ -550,23 +557,37 @@ mod auth_fakes {
 
     #[async_trait::async_trait]
     impl AuthService for RecordingAuth {
-        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+        async fn require_user(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: &Message,
+        ) -> Result<UserId, AuthError> {
             self.record("require_user");
             Ok(UserId("u".into()))
         }
         async fn require_token(
             &self,
+            _ctx: &dyn wafer_block::context::Context,
             _msg: &Message,
             _scope: TokenScope,
         ) -> Result<UserId, AuthError> {
             self.record("require_token");
             Ok(UserId("u".into()))
         }
-        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+        async fn require_role(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            _msg: &Message,
+            _role: Role,
+        ) -> Result<UserId, AuthError> {
             self.record("require_role");
             Ok(UserId("u".into()))
         }
-        async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError> {
+        async fn user_profile(
+            &self,
+            _ctx: &dyn wafer_block::context::Context,
+            user: UserId,
+        ) -> Result<UserProfile, AuthError> {
             self.record("user_profile");
             Ok(UserProfile {
                 id: user,
@@ -1007,6 +1028,12 @@ fn database_op_body(op: &str) -> Vec<u8> {
             query: "CREATE TABLE my_org__auth__widgets (id TEXT)".into(),
             args: vec![],
         }),
+        ServiceOp::DATABASE_DDL_TRANSACTION => codec::encode(&wire::DdlTransactionRequest {
+            statements: vec![wire::RawStatement {
+                query: "CREATE TABLE my_org__auth__widgets (id TEXT)".into(),
+                args: vec![],
+            }],
+        }),
         ServiceOp::DATABASE_UPSERT => codec::encode(&wire::UpsertRequest {
             collection: "my_org__auth__users".into(),
             data: vec![("id".into(), serde_json::json!("1"))],
@@ -1023,6 +1050,8 @@ fn database_op_body(op: &str) -> Vec<u8> {
             group_by: vec![],
             sort: vec![],
             limit: 0,
+            having: vec![],
+            offset: 0,
         }),
         ServiceOp::DATABASE_ENSURE_TABLE => codec::encode(&wire::EnsureTableRequest {
             table: wire::TableDef {

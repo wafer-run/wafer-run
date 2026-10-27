@@ -130,7 +130,7 @@ fn filter_schema() -> serde_json::Value {
         "type": "object",
         "properties": {
             "field": { "type": "string" },
-            "operator": { "type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "like", "in", "is_null", "is_not_null"], "default": "eq" },
+            "operator": { "type": "string", "enum": ["eq", "neq", "gt", "gte", "lt", "lte", "like", "contains_ignore_case", "starts_with", "in", "is_null", "is_not_null"], "default": "eq" },
             "value": {},
             "column": { "type": "string", "description": "Compare `field` to this column of the same row instead of to `value` (eq/neq/gt/gte/lt/lte only; not accepted by ops that take flat filters)." }
         },
@@ -609,6 +609,32 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 "type": "object",
                 "properties": {
                     "rows_affected": { "type": "integer" }
+                }
+            })),
+        },
+        ServiceOp::DATABASE_DDL_TRANSACTION => ActionSpec {
+            description: "Execute raw statements, DDL included, as one transaction: every statement commits or none does (cap-gated exactly like database.ddl). A failure carries the backend's classification as its code and the backend's message (a transient Unavailable scrubbed) and, when the backend can attribute it to one statement, that statement's position under the database.failed_statement_index meta key; D1 cannot, so a missing position does not mean the failure was not a statement's.".into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "statements": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" },
+                                "args": { "type": "array" }
+                            },
+                            "required": ["query"]
+                        }
+                    }
+                },
+                "required": ["statements"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "rows_affected": { "type": "array", "items": { "type": "integer" } }
                 }
             })),
         },

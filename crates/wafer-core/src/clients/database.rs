@@ -7,21 +7,21 @@ use wafer_block::context::Context;
 use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
-pub use wafer_block::wire::database::{Record, RecordList};
+pub use wafer_block::wire::database::{RawStatement, Record, RecordData, RecordList};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
         AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, BatchWrite,
         BatchWriteResult, ColumnDef, CountRequest, CountResponse, CreateManyRequest,
-        CreateManyResponse, CreateRequest, DeleteRequest, DeleteWhereCountRequest,
-        DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest, EnsureTableRequest,
-        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
-        IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse, ListRequest,
-        OnConflict, QueryRawRequest, SchemaOpResponse, SortFieldDef as WireSortFieldDef,
-        SumRequest, SumResponse, TableDef, TableExistsRequest, TableExistsResponse,
-        TakeWhereRequest, TakeWhereResponse, UpdateGuardedRequest, UpdateGuardedResponse,
-        UpdateRequest, UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest,
-        UpsertRequest, UpsertResponse,
+        CreateManyResponse, CreateRequest, DdlTransactionRequest, DdlTransactionResponse,
+        DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest,
+        DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse,
+        FilterDef as WireFilterDef, FilterNode, GetRequest, IncrementFieldWhereRequest,
+        InsertGuardedRequest, InsertGuardedResponse, ListRequest, OnConflict, QueryRawRequest,
+        SchemaOpResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TableDef,
+        TableExistsRequest, TableExistsResponse, TakeWhereRequest, TakeWhereResponse,
+        UpdateGuardedRequest, UpdateGuardedResponse, UpdateRequest, UpdateWhereCountRequest,
+        UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -47,21 +47,6 @@ pub const LIST_ALL_MAX_ROWS: u32 = 10_000;
 
 // --- Helpers ---
 
-fn filter_op_str(op: &FilterOp) -> &'static str {
-    match op {
-        FilterOp::Equal => "eq",
-        FilterOp::NotEqual => "neq",
-        FilterOp::GreaterThan => "gt",
-        FilterOp::GreaterEqual => "gte",
-        FilterOp::LessThan => "lt",
-        FilterOp::LessEqual => "lte",
-        FilterOp::Like => "like",
-        FilterOp::In => "in",
-        FilterOp::IsNull => "is_null",
-        FilterOp::IsNotNull => "is_not_null",
-    }
-}
-
 /// Encode flat client-side [`Filter`]s as all-leaf wire [`FilterNode`]s. The
 /// client never builds AND/OR groups; the tree shape exists so the wire is
 /// uniform and group-capable callers (a later task) reuse the same field.
@@ -71,7 +56,7 @@ fn to_wire_filters(filters: &[Filter]) -> Vec<FilterNode> {
         .map(|f| {
             FilterNode::Leaf(WireFilterDef {
                 field: f.field.clone(),
-                operator: filter_op_str(&f.operator).to_string(),
+                operator: f.operator.as_wire().to_string(),
                 value: f.value.clone(),
                 column: None,
             })
@@ -89,13 +74,13 @@ pub(crate) fn filter_tree_to_wire_node(tree: &FilterTree) -> FilterNode {
     match tree {
         FilterTree::Leaf(f) => FilterNode::Leaf(WireFilterDef {
             field: f.field.clone(),
-            operator: filter_op_str(&f.operator).to_string(),
+            operator: f.operator.as_wire().to_string(),
             value: f.value.clone(),
             column: None,
         }),
         FilterTree::ColumnCompare(f) => FilterNode::Leaf(WireFilterDef {
             field: f.field.clone(),
-            operator: filter_op_str(&f.operator.as_filter_op()).to_string(),
+            operator: f.operator.as_filter_op().as_wire().to_string(),
             value: serde_json::Value::Null,
             column: Some(f.column.clone()),
         }),
@@ -430,6 +415,39 @@ dual_api! {
             Some("db")
         )?;
         let resp: ExecRawResponse = decode(&data)?;
+        Ok(resp.rows_affected)
+    }
+
+    /// Execute `statements` — DDL, and the DML that goes with it — in order,
+    /// as ONE transaction on the [`ddl`] channel (the `__ddl__` resource and
+    /// the `ddl` capability), returning each statement's affected-row count
+    /// in the same order. Every statement commits or none does.
+    ///
+    /// The whole call is admitted against the database's statement budget
+    /// before anything is sent. A refusal is `ResourceExhausted` or
+    /// `InvalidArgument` with the statement-budget detail code
+    /// (`wire::database::STATEMENT_BUDGET_EXHAUSTED` /
+    /// `STATEMENT_BUDGET_EXCEEDS_LIMIT`), and nothing ran.
+    ///
+    /// When the transaction fails, the error's `code` is the backend's
+    /// classification of the failure (a duplicate key is `AlreadyExists` on
+    /// every backend) and its `message` is the backend's own text, except a
+    /// transient `Unavailable`, whose driver text is scrubbed.
+    /// [`failed_statement_index`](wafer_block::wire::database::failed_statement_index)
+    /// reads the failing statement's position when the backend could
+    /// attribute it; D1 cannot, so a missing position does not mean the
+    /// failure was not a statement's.
+    pub fn ddl_transaction(ctx, statements: &[RawStatement]) -> Result<Vec<i64>, WaferError> {
+        let req = DdlTransactionRequest { statements: statements.to_vec() };
+        let data = svc!(
+            ctx, BLOCK,
+            ServiceOp::DATABASE_DDL_TRANSACTION,
+            &req,
+            Some(DDL_RESOURCE),
+            true,
+            Some("db")
+        )?;
+        let resp: DdlTransactionResponse = decode(&data)?;
         Ok(resp.rows_affected)
     }
 

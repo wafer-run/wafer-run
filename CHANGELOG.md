@@ -4,6 +4,257 @@
 
 ### Breaking changes
 
+- `DatabaseService` has a new required method,
+  `exec_raw_transaction(&self, &[RawStatement]) -> Result<Vec<i64>,
+  TransactionError>`: run raw statements, DDL included, in order as ONE
+  transaction, admitted whole against the statement budget before the first
+  is sent. It has no default, so every implementation adds it:
+  - a SQL backend adds `exec_raw_transaction: forward` after `exec_raw` in
+    its `forward_database_service!` ledger, which now names the operation,
+    and takes `DbExec`'s shared implementation;
+  - a decorator forwards it to the service it wraps;
+  - a test fake writes it out.
+
+  `DbExec::run_transaction` now fails with a `TransactionError` instead of a
+  `DatabaseError`: the classified error plus, when the backend can attribute
+  the failure, the zero-based position of the op that failed
+  (`TransactionError::at(index, error)`). A backend that runs the statements
+  one at a time on a connection (native SQLite, PostgreSQL, sql.js) reports
+  the index of the statement it was running. One whose atomic API reports a
+  single error for the whole sequence (D1's `batch()`) returns
+  `TransactionError::whole(error)` and must not guess a position; so does
+  every backend for a failure to open or commit the transaction.
+  Callers inside `DbExec` that do not expose positions (`create_many`,
+  `batch`, the guarded writes) answer with the classified error alone, as
+  before.
+
+- Every `AuthService` method that does work takes the `ctx` of the call it
+  serves, after `&self`: `require_user(ctx, msg)`,
+  `require_token(ctx, msg, scope)`, `require_role(ctx, msg, role)`,
+  `verify_org_admin(ctx, user, provider, org_ref)` and
+  `user_profile(ctx, user)`. The auth handler passes the auth block's own
+  frame for the message, with `wafer-run/auth` as the caller of whatever the
+  service dispatches. `init` and `grants` are unchanged, and so are the
+  `wafer_core::clients::auth` functions. An implementation updates each
+  signature, reaches the database or another block through the `ctx` it is
+  given, and drops any context it stored.
+
+  Before, a service that had to dispatch kept `ctx.clone_arc()` from
+  `init`. That handle owns every registered block, the `AuthBlock` that owns
+  the service among them, so the runtime was a reference cycle and no
+  runtime built with such a service was ever freed (in impresspress's
+  Cloudflare build, about 13 MB per runtime against a 128 MB isolate).
+  `Context::clone_arc` now documents the rule: the handle is for work that
+  ends with the call that received it, never for block or service state.
+
+  This is a behaviour change, not only a signature change. The per-call
+  frame differs from the stored `Init` frame in four ways an implementation
+  can observe:
+  - its dispatches are bound by the request's deadline and cancellation; a
+    cancelled or late request's database call is refused with `Cancelled`
+    or `DeadlineExceeded`, where before it had neither;
+  - they no longer register a wait of auth's finished `Init` in the init
+    wait graph;
+  - `ctx.config_get` sees the caller's per-call config overrides (a flow
+    step's `config`) layered over the runtime's config, where the `Init`
+    frame had none; a secret the service reads through `config_get` can
+    therefore be set by that layer;
+  - call depth counts from the caller: the service's database call sits at
+    the caller's depth + 2 instead of 1, against the default maximum of 16.
+
+- `VectorError`, `LlmError` and `ImageError` have a new variant,
+  `EngineUnavailable(String)`: the engine that runs the model cannot take
+  the request now, for a reason the caller can act on (a browser runtime
+  with no open page running the engine, or none holding the model). The
+  handlers map it to `ErrorCode::Unavailable` (503 at the HTTP edge) and
+  return its message as it is, so a backend writes that message for the
+  caller — no paths, hosts or driver text. `VectorError::Unavailable` keeps
+  meaning a store fault and keeps its scrubbed message. `LlmError` and
+  `ImageError` are `#[non_exhaustive]`; a `match` over `VectorError` needs
+  the new arm.
+
+- A flow forwards its terminal step's streamed response instead of
+  collecting it. The terminal step is the top-level step that ends the flow
+  — the last one, or one a `next` jumped to — with no `next` of its own and
+  no `each` or `parallel`; a transfer target's terminal step is terminal for
+  the chain. When its block's leading meta `declares_streaming`
+  (`wafer_block::http_codec`: the `resp.stream` marker, or a
+  `text/event-stream` / `application/octet-stream` content type) and a body
+  chunk follows, `Wafer::run` returns as soon as that head is read: the
+  output leads with the flow message's `resp.*` entries as `Meta` events —
+  the step's leading meta laid over the middleware's with the same rules as
+  a collected response's, so CORS and security headers are on it, and the
+  marker and `resp.content_length` survive — followed by the step's own
+  stream. Backpressure reaches the producer and dropping the output cancels
+  it. Before, the flow collected every step, so a streaming response — SSE
+  through `site-main`, on every platform — reached the caller only once it
+  had ended, as one chunk with trailing meta. Consequences for a caller of
+  a flow:
+  - after the first chunk the head is final, by one rule for every
+    consumer — a streaming transport, or a caller that collects the
+    response: the flow drops `Meta` events and the `Complete`'s meta (a
+    producer cannot loosen a security header or add one after its head);
+    an `Error` terminal is an `Error` event after the chunks already sent
+    (not a flow error, and not subject to `on_error`) carrying the
+    middleware's response headers as a flow error does — one whose own meta
+    cannot be sent becomes the flow's `Internal` error naming the step —
+    and a `Halt`, `Drop` or `Continue`, which cannot follow a body, becomes
+    such an `Internal` error;
+  - the step's `block_end` span and every chain flow's `flow_end` hook fire
+    when the head is read, so their durations are time-to-headers for a
+    streamed response. The flow's timeout is checked before each step, as
+    before: it does not bound a running step, its head or its body;
+  - leading meta no transport can send fails the flow closed at head time
+    (`Internal`, with the middleware's headers carried, the producer
+    cancelled) — as for a collected step, but without waiting for a body
+    that may never end.
+  Every other step output — a non-terminal step, a fan-out, a parallel
+  step and its branches, a step with `next`, an output with no streaming
+  declaration or with no body before its terminal — is collected exactly as
+  before. A caller that collects the flow's output (`collect_buffered`,
+  `collect_http_response`, the embed/Node/FFI JSON boundary) gets the body
+  and the head the flow decided at the first chunk; meta the producer sent
+  after it, which used to be laid over the head, is dropped.
+  A responding step's meta now also removes the `resp.stream` marker and
+  `resp.content_length` an earlier responding step left on the flow
+  message: they describe that step's body, so a later (streamed) response
+  never leads with another body's declared length.
+  `wafer-run-node`'s `run` holds the runtime's read lock until the result
+  is encoded, as `wafer-ffi` does, so `stop()` waits for a flow whose
+  response is still streaming from a block instead of stopping the block
+  under it.
+
+- The native HTTP listener (`wafer-run/http-listener`, and
+  `wafer_block_http_listener::wafer_output_to_response` for embedders)
+  streams a response whose leading meta declares streaming
+  (`http_codec::declares_streaming`: `text/event-stream`,
+  `application/octet-stream`, or the `resp.stream` marker) instead of
+  collecting it first. It goes through `http_codec::open_response`: the
+  status and headers go out with the producer's first chunk, and each chunk
+  after it as the producer sends it. Every other response is collected and
+  sent whole, byte for byte as before. Together with the flow change above
+  (a flow forwards its terminal step's streamed response), a stream served
+  through a flow — SSE through impresspress's `site-main` — reaches a native
+  client as it is produced (without that change the flow collected the
+  stream before the listener saw it). What changes for a streamed response:
+  - Framing is `Content-Length` when the producer declared
+    `resp.content_length`; otherwise chunked on an HTTP/1.1 request and
+    close-delimited on an HTTP/1.0 one (no chunked encoding there: the
+    body ends when the connection closes). It used to be the collected
+    body's `Content-Length`.
+  - Backpressure reaches the producer: a client that reads slowly blocks
+    the producer's `send_chunk` instead of the body being held in memory,
+    and `write_timeout_secs` still drops a client that stops reading. A
+    client that disconnects, a `HEAD` request (answered with the head
+    alone), and a listener that stops all drop the body, which cancels the
+    producer.
+  - The status is committed with the head. A producer that ends without a
+    clean `Complete` (an `Error`, no terminal, a body that contradicts its
+    declared length) no longer turns into a `500`: the listener **resets**
+    the connection (TCP RST), without the chunked terminator or short of
+    the `Content-Length`. So does every other connection the listener cuts
+    mid-response: a write stalled past `write_timeout_secs`, and a response
+    still open when `shutdown_grace_secs` runs out (hyper's own `400` for a
+    malformed request head is not reset, so it is delivered). The reset is
+    what makes the cut visible on a
+    close-delimited HTTP/1.0 body, where a clean close would be the body's
+    whole end — nginx speaks HTTP/1.0 upstream by default — so the client
+    or proxy sees an error, never a whole response. An embedder calling
+    `wafer_output_to_response` from its own server gets the abort as
+    hyper's connection error and must reset an HTTP/1.0 connection itself.
+    A request-body failure (`max_body_bytes`,
+    `body_read_timeout_secs`, an unreadable body) after the head can no
+    longer turn the response into a `413`/`408`/`400`; the block still
+    reads it as an `Err` from its input.
+  - A streamed response with leading meta no transport can send, or a body
+    byte under a declared `resp.content_length` of `0`, is the uniform
+    `500` before any header goes out, and its producer is cancelled — also
+    for an open-ended SSE stream that a collecting listener would never
+    have answered.
+  - A long-lived stream holds its connection for as long as it is open: an
+    SSE client takes one of the `max_connections` slots (default 1024) for
+    its whole subscription, and a stopping listener cuts it off when
+    `shutdown_grace_secs` runs out. `write_timeout_secs` does not cut an
+    idle stream, only a blocked write.
+  - A block dispatched directly (not through a flow) that streams before
+    reading its request body learns that its client disconnected only when
+    its next chunk cannot be written; hyper watches for the disconnect once
+    the request body has been read to its end, which a flow always does.
+
+- `FilterOp` has a new operator, `StartsWith` (wire `starts_with`): the
+  prefix of a key or path. Its `value` is plain text — no character is a
+  wildcard or an escape — and letter case is significant on every backend;
+  plain `LIKE 'prefix%'` ignored ASCII case on SQLite and D1. A value
+  containing NUL, or that is not a string, matches no row. `wafer-sql-utils`
+  renders it per dialect, in a form the planner can serve from an index on
+  the (text) column: SQLite/D1 `col GLOB ?` (GLOB metacharacters wrapped as
+  `[*]`, `[?]`, `[[]`, index with the default BINARY collation), PostgreSQL
+  `col LIKE ? ESCAPE '\'` (LIKE-escaped, index with `text_pattern_ops` or
+  the `C` collation on a custom plan; a generic plan gets no range on the
+  column). An empty prefix gets no index range. A `match` over `FilterOp`
+  needs the new arm.
+  Because a predicate's SQL can now depend on the dialect, the filter
+  builders take the `Backend` they render for: `query::build_condition`,
+  `query::build_condition_tree` and `query::tree_to_simple_expr` gain a
+  `backend` argument, and so does `AggregateSpec::into_grouped_config` in
+  `wafer-core` (it builds `CASE` predicates).
+
+- `FilterOp` has a new operator, `ContainsIgnoreCase` (wire
+  `contains_ignore_case`): the text search a person types. Its `value` is
+  plain text — `%`, `_` and `\` match only themselves — and ASCII letters
+  match in either case on every backend. `wafer-sql-utils` renders it as
+  `LOWER(col) LIKE LOWER(?) ESCAPE '\'` with the text LIKE-escaped, so a
+  caller no longer escapes by hand; plain `Like` folded ASCII case on SQLite
+  and D1 but not on PostgreSQL. A `match` over `FilterOp` needs the new arm.
+  `FilterOp::as_wire` is the canonical wire spelling (the inverse of
+  `parse_wire`), so a client that encodes filters no longer keeps its own
+  operator table.
+  `FilterOp::as_sql` is removed: nothing called it, and SQL is rendered
+  by `wafer-sql-utils`, where an operator is not one keyword
+  (`ContainsIgnoreCase` renders `LOWER(col) LIKE LOWER(?) ESCAPE '\'`).
+
+- `wafer-block-s3` registers its `wafer-run/s3` block only with the new
+  `block` feature, as `wafer-block-postgres` does since #427: linking the
+  crate for `S3StorageService` alone no longer adds a block whose `Init`
+  reads (and can refuse) its own `WAFER_RUN__S3__*` config. A consumer that
+  wants the block enables `wafer-block-s3 = { …, features = ["block"] }`.
+
+- `wafer-block-postgres` registers its `wafer-run/postgres` block only with
+  the new `block` feature. Linking the crate for `PostgresDatabaseService`
+  alone used to add a statically registered block that requires its own
+  `WAFER_RUN__POSTGRES__DATABASE_URL`, so an embedder that wraps the service
+  in a database block of its own got a block that failed `Init` on every
+  boot. A consumer that wants the block enables
+  `wafer-block-postgres = { …, features = ["block"] }`.
+
+- A database row keeps its columns in the order the statement returned
+  them (#424). `Record::data`, on the wire type
+  (`wafer_block::wire::database::Record`, re-exported from
+  `wafer_core::clients::database`) and on the service type
+  (`interfaces::database::service::Record`), is now `RecordData`
+  (`IndexMap<String, serde_json::Value>`) instead of
+  `HashMap<String, serde_json::Value>`: `SELECT b, a, c` iterates `b`, `a`,
+  `c`, and a whole-row read iterates the table's columns in declaration
+  order. Code that builds a `Record` builds a `RecordData` (or `.collect()`s
+  into one); code that takes `&HashMap` for a row's columns takes
+  `&RecordData`; `remove` is deprecated on it — use `shift_remove`, which
+  keeps the order. `codec::record_from_json_row(serde_json::Value, …)` is
+  replaced by `codec::record_from_columns(pairs, …)`, because a
+  `serde_json` object sorts its keys; a backend whose driver answers
+  positional rows pairs them with `codec::rows_from_positional`. The wire
+  encoding is unchanged (a map keyed by column name, now written in column
+  order), so a guest built against an older `wafer-block` decodes it as
+  before. The JSON host codec transcodes without materializing a
+  `serde_json::Value`, so JSON-codec guests see the order too.
+
+- `VectorService::list_indexes`, `VectorService::describe_index`,
+  `VectorService::list_ids` and `DatabaseService::increment_field_where`
+  have no default any more (#423). Their defaults returned an `Internal`
+  "not implemented by this backend" error, so a backend that forgot one
+  compiled and failed at runtime; every implementor now states its answer.
+  `forward_database_service!` no longer accepts `increment_field_where:
+  inherit`.
+
 - `DatabaseService::upsert` returns `Result<Option<Record>, DatabaseError>`
   — the row as the statement left it (inserted, or updated on conflict), or
   `None` when `DO NOTHING` kept the existing row — instead of an affected
@@ -1611,6 +1862,18 @@
 
 ### Security
 
+- The llm and image handlers no longer return a provider's transport error
+  text to the caller. `LlmError::Network` and `ImageError::Network` still map
+  to `ErrorCode::Unavailable` (503 at the HTTP edge), but their message is
+  now the fixed `llm::handler::PROVIDER_UNREACHABLE` ("the model provider
+  could not be reached") or `image::handler::PROVIDER_UNREACHABLE` ("the
+  image provider could not be reached"), both new public constants, instead
+  of `network: <provider text>`. That text can name hosts, addresses and
+  URLs; the handlers log it with `tracing::warn!`, as the vector handler
+  does for a store `Unavailable`. `EngineUnavailable` keeps its message, so
+  an `Unavailable` from these handlers carries either an engine's reason
+  written for the caller or the fixed text, and an edge can pass it through.
+  A consumer that matched on `network:` must match on the constant instead.
 - A string column default reaches PostgreSQL DDL as an `E'…'` escape string
   with every backslash and quote doubled. It was a plain `'…'` literal with
   only quotes doubled, which reads the value correctly only while the
@@ -1628,6 +1891,106 @@
   returns as `InvalidArgument`.
 
 ### Added
+
+- `database.ddl_transaction` (`ServiceOp::DATABASE_DDL_TRANSACTION`), the
+  client `wafer_core::clients::database::ddl_transaction(ctx, &[RawStatement])`
+  and the SDK's `ddl_transaction`: raw statements, DDL and DML, as one
+  transaction, gated exactly like `database.ddl` (the `__ddl__` resource, the
+  `ddl` capability). Every statement commits or none does, on native SQLite
+  (`BEGIN IMMEDIATE`) and PostgreSQL (transactional DDL). The schema cache is
+  cleared once the transaction was sent, whether it committed or not.
+
+  A failure carries the backend's classification as the code (a duplicate
+  key is `AlreadyExists` on every backend) and the backend's own message,
+  unscrubbed (the other database ops replace a duplicate key's message with a
+  fixed string); a transient `Unavailable`, whose text is the driver's, is
+  scrubbed as everywhere else. When the backend can attribute the failure to
+  one statement, the error also carries that statement's position under the
+  meta key `database.failed_statement_index`, which
+  `wafer_block::wire::database::failed_statement_index` reads. D1's `batch()`
+  cannot attribute a failure, so a missing position does not mean the
+  failure was not a statement's. A budget refusal is `ResourceExhausted` or
+  `InvalidArgument` with its statement-budget detail code and no position,
+  and sends nothing.
+
+- `wafer_block::spawn::set_spawn_wrapper` (wasm32-unknown-unknown only):
+  install a `fn(SpawnedTask) -> SpawnedTask` that `spawn_producer` — and so
+  every `OutputStream::from_producer` — passes each task through, on the
+  spawning call's stack, before `spawn_local`. A wasm32 adapter that scopes
+  state to the request being polled (Cloudflare's request-current service
+  bundle) uses it to give a producer the scope it was spawned in: a
+  `spawn_local` task is polled from the JS microtask queue, never inside
+  the request's poll, so without it a producer reaches none of that state,
+  before or after its first chunk. Any other caller of `spawn_producer`
+  (a deferred-task runner spawning through it, for one) is wrapped too.
+  Returns the wrapper it replaces; `None`
+  removes it. Native and wasm32-wasip1 have no wrapper. A producer must
+  finish its work before its terminal: nothing keeps a request alive for
+  it afterwards unless the host extends the request for it, as an
+  adapter's after-response machinery may (the `spawn` module docs say when
+  that is for). The tests run under `wasm-bindgen-test-runner` on node in
+  `scripts/check.sh wasm`, which now needs `wasm-bindgen-cli` at the lock's
+  `wasm-bindgen` version.
+
+- `wafer_block::http_codec` decides whether an HTTP response streams, and
+  opens it. `open_response(output)` reads the stream's leading meta and
+  answers `OpenedResponse::Streamed(StreamedHttpResponse { status, headers,
+  content_length, body })` when that meta `declares_streaming` and a body
+  chunk follows, or `OpenedResponse::Buffered(output)` — the stream as it
+  was — for everything else, which `collect_http_response` renders as
+  before. A streaming declaration whose leading meta cannot be sent is
+  answered as `unsendable_response` before any header goes out, and its
+  producer is cancelled. `StreamedBody` reads straight from the producer's
+  stream, so backpressure reaches the producer and dropping the body
+  cancels it; an `Error`, `Halt`, `Drop` or `Continue` terminal after the
+  body started, or a stream with no terminal, ends it in a final `Err`,
+  which a transport answers by aborting the body. The decision moves here
+  from impresspress: `META_RESP_STREAM` (`"resp.stream"`, value
+  `STREAM_MARKER_VALUE`), `has_stream_marker`, `is_streaming_content_type`
+  (`text/event-stream`, `application/octet-stream`) and `declares_streaming`.
+  One change from impresspress's `wants_streaming`: the content type read is
+  the last one in the leading meta (the one the response carries), whatever
+  the other entries hold. impresspress read the first, and none at all when
+  any entry could not be sent — so an SSE response with an unsendable header
+  was collected whole, which for an open-ended stream is never, instead of
+  being answered with the 500 at once.
+  New `META_RESP_CONTENT_LENGTH` (`"resp.content_length"`): a streaming
+  producer that knows its body's length declares it in the leading meta, and
+  it becomes `StreamedHttpResponse::content_length`, so a transport can send
+  `Content-Length` instead of chunked framing; like the marker it is never a
+  header. `open_response` and `StreamedBody` enforce it, so a transport that
+  sends the `Ok` items and aborts on an `Err` counts no bytes itself — even
+  one that stops polling the body once the length is met, as hyper does: a
+  body byte under a declared `0`, or a first chunk already longer than the
+  length, is the 500 at head time; a chunk that would overrun it is an `Err`
+  in its place; the chunk that meets it is held until the terminal, and
+  replaced by an `Err` if more bytes follow; a body that ends short of it
+  ends in an `Err`. A streamed response without a content type is
+  `application/octet-stream` (`DEFAULT_STREAMED_CONTENT_TYPE`).
+  `terminal_to_http_response` renders a terminal the caller collected
+  itself (under a byte cap, say) exactly as `collect_http_response` does.
+  The native HTTP listener serves every response through `open_response`
+  (see Breaking changes).
+
+- `OutputStream::rewrite_produced(f)` rewrites every event read from the
+  producer from then on — `f` returns the event to yield in its place, or
+  `None` to skip it — in place, as `prepend` does: no task and no channel,
+  an event is read (and rewritten) only when the consumer asks, so
+  backpressure and drop-to-cancel are kept. Events already read ahead are
+  not rewritten; a second rewrite applies to what the first yields. The
+  flow executor uses it to decide what a forwarded stream's events mean
+  after its head.
+
+- `OutputStream::prepend(events)` puts events back at the front of a stream
+  in place, and `OutputStream::peek` / `OutputStream::take_leading_meta` read
+  ahead through it, leaving the stream on the first event they did not
+  consume. The stream keeps its producer, channel and cancellation token:
+  reading ahead neither cancels the producer nor adds a buffer beyond the
+  events read ahead, and dropping the stream still cancels it.
+  `take_leading_meta` is cancel-safe: dropped while it waits, it leaves the
+  events it read on the stream. This replaces
+  re-pumping a stream through a new `from_producer` task to look at its
+  head.
 
 - `wafer-flow` has a `json-schema` feature: the flow document types derive
   `schemars::JsonSchema`, and `wafer_flow::json_schema()` returns the JSON
@@ -2131,6 +2494,71 @@
   read-only.
 
 ### Fixed
+
+- `wafer build`, `wafer package` and `wafer test` speak the runtime's core
+  ABI. They decoded every guest's `__wafer_info` and `__wafer_handle` output
+  as JSON, but a block built with the current `#[wafer_block]` macro speaks
+  v2 MessagePack, so packaging it failed with "expected value at line 1
+  column 1" and `wafer test` sent it a frame it could not decode. The codec
+  negotiation now lives in `wafer_block::abi::CoreCodec`, and the runtime's
+  wasmi loader and the CLI both call it: a v2 guest is decoded as
+  MessagePack, a legacy guest without `__wafer_abi_version` as JSON (v1 stays
+  supported), and a guest declaring any other version is refused with the
+  runtime's message.
+  - `wafer test` sends the runtime's `CallFrameRef` and decodes a typed
+    `GuestResult`. A fixture without an `.expected.json` fails when the
+    result's action is `Error`. An `.expected.json` is compared with the
+    result written as JSON, so it has the `GuestResult` shape: `action` is
+    `"Respond"`, `"Error"`, `"Drop"` or `"Continue"`, and `response`,
+    `error` and `message` are all present (`null` when unset). Existing
+    `.expected.json` files written for the old untyped comparison may need
+    updating.
+
+- The `llm.chat`, `llm.load_model` and `image.load_model` handlers stop
+  reading the service once their output is cancelled (dropped, or cancelled
+  through `OutputStream::cancel_token`), instead of waiting on its next item.
+  For `llm.chat` this covers the `chat_stream` setup await too. The service
+  is still handed the cancellation token, but a service that ignores it, or
+  is silent when it fires (a model thinking, a load between milestones), no
+  longer keeps the relay task and its stream alive until it next yields.
+  - A cancelled relay ends its stream with an `ErrorCode::Cancelled` error
+    (`"llm.chat: cancelled"`, `"llm.load_model: cancelled"`,
+    `"image.load_model: cancelled"`), whether the service honours the token
+    or not. Before, that code reached the caller only when the service ended
+    its own stream with `LlmError::Cancelled`. A cancel never reads as a
+    successful empty `Complete`, nor as the `Internal` "no terminal" fault a
+    dropped sink reports.
+  - For `LlmService` and `ImageService` implementers: once `cancel` fires,
+    the relay drops the service's stream (and `chat_stream`'s future) unread.
+    Cleanup on cancel belongs in a task that watches the token, or in
+    `Drop`, not after `cancelled().await` inside the stream body.
+
+- `wafer_core::mime` declares `charset=utf-8` on every textual type. `svg`
+  is now `image/svg+xml; charset=utf-8` and `map` is
+  `application/json; charset=utf-8`; `rs` and `toml` are now
+  `text/plain; charset=utf-8` instead of `application/octet-stream`, so a
+  browser shows them instead of downloading them. The table's fallback is
+  the new public constant `wafer_core::mime::UNKNOWN`
+  (`application/octet-stream`). `wafer-run/local-storage`, which derives
+  every object's type from its key, and `wafer-run/web`, which falls back to
+  the table when stored metadata names no type (or `UNKNOWN`), pick up the
+  new types. `wafer-run/web` and `wafer-run/s3` (an object with no stored
+  type) name that fallback as `mime::UNKNOWN`.
+- `/openapi.json` no longer merges two same-named `$defs` entries whose text
+  is identical but whose references reach different definitions (two blocks
+  each with a recursive `Expr` over a different `Cond`). The merge published
+  the second `Expr` as a reference to the first block's `Cond` and left the
+  second `Cond` referenced by nothing. Whether two definitions share a
+  component is now decided by the body together with the bodies of
+  everything it reaches, transitively; a definition that differs anywhere in
+  that closure gets the hash-suffixed key, and the suffix hashes that closure
+  rather than the body alone.
+- `/openapi.json` publishes only valid `components.schemas` keys
+  (`^[a-zA-Z0-9.\-_]+$`). A `$defs` key or root title outside that alphabet
+  (`#[schemars(rename = "Product Status")]`, a hand-written `a/b`) is published
+  as the name with each invalid character replaced by `_` and a hash of the
+  original name appended (`Product_Status_<16 hex>`), so every `$ref` spells
+  its key verbatim. A name that was already valid keeps its key, as before.
 
 - A table's `id` source is cached from the first create into it, so the
   second create into an insert-only table is its `INSERT` alone. The id-policy

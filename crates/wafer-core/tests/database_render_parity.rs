@@ -193,7 +193,7 @@ fn list_projection_parity(backend: Backend) {
         filter_tree: Some(tree_direct.clone()),
         columns: Some(columns.clone()),
     };
-    let extra_direct = query::build_condition_tree(&tree_direct);
+    let extra_direct = query::build_condition_tree(&tree_direct, backend);
     let direct = query::build_select_columns(
         "things",
         &col_refs,
@@ -249,7 +249,7 @@ fn list_projection_parity(backend: Backend) {
     let extra_wire = opts_wire
         .filter_tree
         .as_deref()
-        .and_then(query::build_condition_tree);
+        .and_then(|tree| query::build_condition_tree(tree, backend));
     let via_cols_owned = decoded.columns.expect("columns present");
     let via_cols: Vec<&str> = via_cols_owned.iter().map(String::as_str).collect();
     let via = query::build_select_columns(
@@ -453,7 +453,10 @@ fn aggregate_parity(backend: Backend) {
                 cast_as: None,
                 inner_expr: None,
             },
-            AggregateColumn::case_when_sum("errors", query::tree_to_simple_expr(&when_direct)),
+            AggregateColumn::case_when_sum(
+                "errors",
+                query::tree_to_simple_expr(&when_direct, backend),
+            ),
             AggregateColumn {
                 func: AggFunc::Max,
                 field: Some("value".to_string()),
@@ -477,6 +480,8 @@ fn aggregate_parity(backend: Backend) {
             desc: true,
         }],
         limit: Some(50),
+        having: vec![],
+        offset: 0,
     };
     let direct = wafer_sql_utils::aggregate::build_grouped_query(cfg_direct, backend)
         .expect("render the direct config");
@@ -520,13 +525,15 @@ fn aggregate_parity(backend: Backend) {
             desc: true,
         }],
         limit: 50,
+        having: vec![],
+        offset: 0,
     };
     let bytes = codec::encode(&req).expect("encode AggregateRequest");
     let decoded: wire::AggregateRequest = codec::decode(&bytes).expect("decode AggregateRequest");
     let (collection, spec) = to_aggregate_spec(decoded).expect("to_aggregate_spec");
     // Server-side render (the `!Send` `GroupedQueryConfig` is built + consumed
     // in one expression, exactly as `DbExec::aggregate` does).
-    let cfg_wire = spec.into_grouped_config(collection);
+    let cfg_wire = spec.into_grouped_config(collection, backend);
     let via = wafer_sql_utils::aggregate::build_grouped_query(cfg_wire, backend)
         .expect("render the wire config");
 

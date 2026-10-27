@@ -134,9 +134,15 @@ pub(super) fn instantiate(
 /// [`Context::clone_arc`], so host imports may hold it across await points
 /// with no lifetime hazard (this replaced the old `ContextGuard`, which
 /// `transmute`d a borrowed `&dyn Context` to `'static` and policed the lie
-/// with a strong-count assertion at drop). Clearing the slot on drop is now
-/// hygiene — a stale context must not leak into the next invocation — not a
-/// use-after-free guard.
+/// with a strong-count assertion at drop).
+///
+/// Clearing the slot on drop is what keeps a Wasm block from leaking its
+/// runtime. The store outlives the invocation: it goes back to the block's
+/// warm `InstancePool`, which the registered block owns, and the context owns
+/// every registered block. A store that kept its context would be a
+/// reference cycle, and the runtime would never be freed (the rule on
+/// [`Context::clone_arc`]). The clear also keeps a stale context out of the
+/// next invocation.
 pub(super) struct ContextScope<'s> {
     store: &'s mut Store<WasmiHostState>,
 }

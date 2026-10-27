@@ -4,6 +4,19 @@
 //! configured flow or block, and converts the resulting [`OutputStream`] back
 //! into an HTTP response.
 //!
+//! Both directions stream. The request body reaches the flow or block chunk
+//! by chunk as it arrives. A response whose leading meta declares streaming
+//! ([`http_codec::declares_streaming`]: Server-Sent Events, a generic byte
+//! stream, or the `resp.stream` marker) is sent as the producer emits it —
+//! status and headers with its first chunk, then each chunk as it comes —
+//! not collected first. Backpressure from the
+//! client's socket reaches the producer, and a client that goes away
+//! cancels it. Every other response is collected and sent whole. See
+//! [`wafer_output_to_response`] for both paths. A long-lived stream (an SSE
+//! client) holds one of the `max_connections` slots for as long as it is
+//! open, and a stopping listener aborts it once `shutdown_grace_secs` runs
+//! out (see those config keys).
+//!
 //! Registered as the `wafer-run/http-listener` block via
 //! [`wafer_block::register_static_block!`]. The only public entry point most
 //! consumers need is the block name itself; the [`http_to_message`] and
@@ -12,10 +25,14 @@
 //! router).
 
 use std::{
+    collections::HashMap,
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+    },
     task::Poll,
     time::Duration,
 };
@@ -37,8 +54,10 @@ use tokio::{
 };
 use tower::ServiceExt;
 use wafer_block::{
-    http_codec, types::ConfigVar, Block, BlockConfig, BlockInfo, ErrorCode, InputStream,
-    LifecycleEvent, LifecycleType, Message, OutputStream, WaferError,
+    http_codec::{self, OpenedResponse, StreamedHttpResponse},
+    types::ConfigVar,
+    Block, BlockConfig, BlockInfo, ErrorCode, InputStream, LifecycleEvent, LifecycleType, Message,
+    OutputStream, WaferError,
 };
 use wafer_block_macro::wafer_async_trait;
 
@@ -72,27 +91,147 @@ pub fn http_to_message(
     )
 }
 
-/// Collect a WAFER [`OutputStream`] and turn the terminal event into an
-/// HTTP response.
+/// Turn a WAFER [`OutputStream`] into an HTTP response: streamed when its
+/// leading meta declares streaming, buffered otherwise.
 ///
-/// Axum adaptation of [`wafer_block::http_codec::collect_http_response`],
-/// which owns the canonical terminal-event mapping (`Complete`/`Halt` →
-/// body+meta, `Error` → status from [`wafer_block::ErrorCode`] + JSON body,
-/// `Drop` → `204`, `Continue` → empty `200`, `Malformed` → `500`). This
-/// wrapper only rebuilds the transport-neutral parts as an
-/// `axum::http::Response`; the codec emits only header names and values
-/// hyper accepts, having dropped the rest.
+/// The decision and both renderings are
+/// [`wafer_block::http_codec::open_response`]'s; this function only rebuilds
+/// them as an `axum::http::Response` (the codec emits only header names and
+/// values hyper accepts, having dropped the rest).
+///
+/// - [`OpenedResponse::Buffered`]: the stream is collected and its terminal
+///   event rendered by [`wafer_block::http_codec::collect_http_response`]
+///   (`Complete`/`Halt` → body+meta, `Error` → status from
+///   [`wafer_block::ErrorCode`] + JSON body, `Drop` → `204`, `Continue` →
+///   empty `200`, `Malformed` → `500`), and the response is sent whole with
+///   its `Content-Length`.
+/// - [`OpenedResponse::Streamed`]: this returns as soon as the producer's
+///   first chunk is ready, with the status and headers from its leading meta
+///   and the body passed straight through to hyper. hyper polls the body only
+///   when the client's socket can take more, so a slow reader blocks the
+///   producer's `send_chunk` (the output channel is bounded) instead of
+///   buffering. Framing is `Content-Length` when the producer declared
+///   [`wafer_block::http_codec::META_RESP_CONTENT_LENGTH`] (the codec's
+///   [`StreamedBody`](wafer_block::http_codec::StreamedBody) enforces it, so
+///   hyper never sends more or fewer bytes as if the body were whole).
+///   Otherwise it is chunked on an HTTP/1.1 request, and close-delimited on
+///   an HTTP/1.0 one (HTTP/1.0 has no chunked encoding: the body ends when
+///   the connection closes).
+///
+/// Once a streamed head is sent nothing can change its status. A body that
+/// does not end cleanly — an `Error` terminal, a producer that stops without
+/// one, a length that does not match — aborts the response: hyper ends the
+/// connection without the chunked terminator, or short of the
+/// `Content-Length`. A close-delimited body has no terminator, so there an
+/// ordinary close would read as the clean end of the whole body; the
+/// `wafer-run/http-listener` block therefore **resets** (TCP RST) every
+/// connection it cuts mid-response — a streamed body that aborted, a write
+/// that stalled past `write_timeout_secs`, a response still open when
+/// `shutdown_grace_secs` runs out — so the client, or a proxy in front such
+/// as nginx (which speaks HTTP/1.0 upstream by default), sees an error on
+/// every framing, never a whole response. A response hyper itself refuses
+/// (a `400` for a malformed request head) is not reset, so it is delivered. An embedder serving this
+/// response from its own server gets the abort as hyper's connection error
+/// and must reset an HTTP/1.0 connection itself to keep that guarantee.
+/// A client that goes away drops the body, which cancels the producer.
 pub async fn wafer_output_to_response(output: OutputStream) -> axum::http::Response<Body> {
-    let parts = http_codec::collect_http_response(output).await;
-    let mut builder = axum::http::Response::builder()
-        .status(StatusCode::from_u16(parts.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-    for (name, value) in &parts.headers {
-        builder = builder.header(name, value);
+    render_response(output, None).await
+}
+
+/// [`wafer_output_to_response`], marking `abort` when a streamed body
+/// aborts so the listener resets the connection.
+async fn render_response(
+    output: OutputStream,
+    abort: Option<ConnectionAbort>,
+) -> axum::http::Response<Body> {
+    match http_codec::open_response(output).await {
+        OpenedResponse::Buffered(output) => {
+            buffered_response(http_codec::collect_http_response(output).await)
+        }
+        OpenedResponse::Streamed(response) => streamed_response(response, abort),
     }
-    builder
+}
+
+/// Set when the listener cuts the connection mid-response: its streamed
+/// response body aborted, a write stalled past `write_timeout_secs`, or the
+/// response was still open when `shutdown_grace_secs` ran out. The
+/// connection's socket ([`WriteStallTimeout`]) then closes with a reset
+/// instead of a FIN: on a close-delimited (HTTP/1.0) body a FIN is the
+/// body's clean end, so only a reset tells the client the body is
+/// truncated. Shared by the connection's socket and, through a request
+/// extension, every request it serves.
+#[derive(Clone, Default)]
+struct ConnectionAbort(Arc<AtomicBool>);
+
+impl ConnectionAbort {
+    fn mark(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_marked(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// The collected response, sent whole.
+fn buffered_response(parts: http_codec::HttpResponseParts) -> axum::http::Response<Body> {
+    response_head(parts.status, &parts.headers)
         .body(Body::from(parts.body))
         .unwrap_or_else(|_| internal_error_response())
 }
+
+/// The streamed response: its head now, its body as the producer sends it.
+/// A body `Err` marks `abort` before hyper sees it, so the connection is
+/// reset once hyper drops it.
+fn streamed_response(
+    response: StreamedHttpResponse,
+    abort: Option<ConnectionAbort>,
+) -> axum::http::Response<Body> {
+    use futures::StreamExt;
+
+    let mut builder = response_head(response.status, &response.headers);
+    if let Some(length) = response.content_length {
+        builder = builder.header(axum::http::header::CONTENT_LENGTH, length);
+    }
+    let body = response.body.map(move |item| {
+        item.map(axum::body::Bytes::from).map_err(|error| {
+            tracing::warn!(
+                error = %error,
+                "wafer-run/http-listener streamed response ended without a clean end; aborting it"
+            );
+            if let Some(abort) = &abort {
+                abort.mark();
+            }
+            StreamAbort(error)
+        })
+    });
+    builder
+        .body(Body::from_stream(body))
+        .unwrap_or_else(|_| internal_error_response())
+}
+
+fn response_head(status: u16, headers: &[(String, String)]) -> axum::http::response::Builder {
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    builder
+}
+
+/// The body error that makes hyper abort a streamed response after its head:
+/// the producer's [`WaferError`] (an `Error` terminal, a missing terminal, a
+/// body that contradicts its declared length).
+#[derive(Debug)]
+struct StreamAbort(WaferError);
+
+impl std::fmt::Display for StreamAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "streamed response body aborted: {}", self.0)
+    }
+}
+
+impl std::error::Error for StreamAbort {}
 
 fn internal_error_response() -> axum::http::Response<Body> {
     // `.body()` only errors on header-builder misuse; this hand-rolled
@@ -243,15 +382,20 @@ const DEFAULT_HEADER_READ_TIMEOUT_SECS: u64 = 30;
 /// this time too.
 const DEFAULT_BODY_READ_TIMEOUT_SECS: u64 = 120;
 
-/// Default cap on concurrently open client connections.
+/// Default cap on concurrently open client connections. A connection holds
+/// its slot for as long as it is open, so each client of a long-lived
+/// streamed response (an SSE subscription, a chat) takes one for the whole
+/// stream.
 const DEFAULT_MAX_CONNECTIONS: u64 = 1024;
 
 /// Default time a response write may make no progress — 60 s. A client that
-/// stops reading its response is dropped after this, freeing its slot.
+/// stops reading its response is dropped after this, freeing its slot; the
+/// connection is reset, so the cut body never reads as whole.
 const DEFAULT_WRITE_TIMEOUT_SECS: u64 = 60;
 
 /// Default time a stopping listener gives open connections to finish their
-/// in-flight request — 10 s. Connections still open after it are aborted.
+/// in-flight request — 10 s. Connections still open after it are reset,
+/// which is how an open-ended streamed response (SSE) ends at shutdown.
 const DEFAULT_SHUTDOWN_GRACE_SECS: u64 = 10;
 
 /// Upper bound for every timeout knob — one day. Larger values are refused
@@ -520,6 +664,21 @@ fn repeated_singleton_header_response(name: &'static str) -> axum::http::Respons
 
 /// Turn one HTTP request into a WAFER dispatch and its output into the
 /// response.
+///
+/// A request-body failure (too large, too slow, unreadable) replaces the
+/// response with 413 / 408 / 400 only while the response's head is still
+/// unsent: for a buffered response that is once the output is collected, for
+/// a streamed one it is when [`wafer_output_to_response`] returns its head.
+/// After a streamed head the status is committed; the block still reads the
+/// failure as an `Err` from its input, and the response ends however its
+/// producer ends it (an `Error` aborts the body).
+///
+/// A client that disconnects in the middle of a streamed response cancels its
+/// producer: hyper notices the EOF and drops the body. hyper watches for that
+/// EOF only once the request body has been read to its end, which a flow
+/// always does before its steps run. A block dispatched directly that streams
+/// before reading its request body learns of the disconnect only when its
+/// next chunk cannot be written.
 async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::Response<Body> {
     let (parts, body) = req.into_parts();
     if let Some(name) =
@@ -545,6 +704,7 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
         body_failure.clone(),
     );
 
+    let abort = parts.extensions.get::<ConnectionAbort>().cloned();
     let uri = &parts.uri;
     // SEC-07: the peer address is the `ConnectInfo` extension `serve_connection`
     // inserts on every request of the connection. Default to it; trust
@@ -574,7 +734,9 @@ async fn dispatch_request(cx: Arc<RequestContext>, req: Request) -> axum::http::
         DispatchTarget::Block(name) => cx.runtime.run_block(name, msg, input).await,
     };
     // Built first: the output may still be reading the body while it runs.
-    let response = wafer_output_to_response(output).await;
+    // For a streamed response this is its head; a body failure after it can
+    // no longer change the status (see the fn doc).
+    let response = render_response(output, abort).await;
     match body_failure.get() {
         Some(failure) => failure.response(&limits),
         None => response,
@@ -595,21 +757,29 @@ async fn serve(
     // the signal to finish its in-flight request and close.
     let (closing_tx, closing_rx) = watch::channel(());
     let mut connections = JoinSet::new();
+    // Each open connection's abort flag, so the grace expiry can mark the
+    // connections it cuts.
+    let mut aborts: HashMap<tokio::task::Id, ConnectionAbort> = HashMap::new();
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
             // Reap finished connection tasks so the set holds only live ones.
-            Some(_) = connections.join_next() => {}
+            Some(finished) = connections.join_next_with_id() => {
+                aborts.remove(&finished_task_id(&finished));
+            }
             accepted = accept_within_cap(&listener, &slots) => match accepted {
                 Ok((stream, peer, slot)) => {
-                    connections.spawn(serve_connection(
+                    let abort = ConnectionAbort::default();
+                    let task = connections.spawn(serve_connection(
                         stream,
                         peer,
                         app.clone(),
                         limits,
                         closing_rx.clone(),
                         slot,
+                        abort.clone(),
                     ));
+                    aborts.insert(task.id(), abort);
                 }
                 Err(e) => handle_accept_error(&e).await,
             },
@@ -618,16 +788,34 @@ async fn serve(
     drop(listener);
     drop(closing_tx);
     let drained = tokio::time::timeout(limits.shutdown_grace, async {
-        while connections.join_next().await.is_some() {}
+        while let Some(finished) = connections.join_next_with_id().await {
+            aborts.remove(&finished_task_id(&finished));
+        }
     })
     .await;
     if drained.is_err() {
         tracing::warn!(
             open = connections.len(),
             grace_secs = limits.shutdown_grace.as_secs(),
-            "wafer-run/http-listener connections still open after shutdown_grace_secs; aborting them"
+            "wafer-run/http-listener connections still open after shutdown_grace_secs; resetting them"
         );
+        // Graceful h1 shutdown has already closed every idle connection, so
+        // each one left is cut mid-response: reset it, or a close-delimited
+        // (HTTP/1.0) body cut here would read as whole.
+        for abort in aborts.values() {
+            abort.mark();
+        }
         connections.shutdown().await;
+    }
+}
+
+/// The task id of a finished connection task, however it finished.
+fn finished_task_id(
+    finished: &Result<(tokio::task::Id, ()), tokio::task::JoinError>,
+) -> tokio::task::Id {
+    match finished {
+        Ok((id, ())) => *id,
+        Err(e) => e.id(),
     }
 }
 
@@ -667,18 +855,25 @@ async fn handle_accept_error(e: &std::io::Error) {
 /// cannot hold the connection (and its slot) open. The clock runs only while
 /// a write, flush or shutdown is blocked on a full socket buffer; any
 /// progress resets it, so a slow but reading client is never cut off.
+///
+/// It also owns the connection's close: dropped after the listener cut the
+/// connection mid-response ([`ConnectionAbort`] — a stall it timed out
+/// itself among them), it resets the connection instead of closing it
+/// cleanly.
 struct WriteStallTimeout {
     stream: TcpStream,
     timeout: Duration,
     stalled: Option<Pin<Box<tokio::time::Sleep>>>,
+    abort: ConnectionAbort,
 }
 
 impl WriteStallTimeout {
-    fn new(stream: TcpStream, timeout: Duration) -> Self {
+    fn new(stream: TcpStream, timeout: Duration, abort: ConnectionAbort) -> Self {
         Self {
             stream,
             timeout,
             stalled: None,
+            abort,
         }
     }
 
@@ -698,11 +893,28 @@ impl WriteStallTimeout {
             .stalled
             .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
         match stalled.as_mut().poll(cx) {
-            Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "response write made no progress within write_timeout_secs",
-            ))),
+            // The listener cuts this connection mid-response: reset it, or a
+            // close-delimited (HTTP/1.0) body cut here would read as whole.
+            Poll::Ready(()) => Poll::Ready(Err({
+                self.abort.mark();
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "response write made no progress within write_timeout_secs",
+                )
+            })),
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for WriteStallTimeout {
+    fn drop(&mut self) {
+        // hyper sends no FIN on the error path (it drops the IO without a
+        // shutdown), so with a zero linger the close below is the RST.
+        if self.abort.is_marked() {
+            if let Err(e) = self.stream.set_zero_linger() {
+                tracing::debug!(error = %e, "wafer-run/http-listener could not reset an aborted connection");
+            }
         }
     }
 }
@@ -774,17 +986,20 @@ async fn serve_connection(
     limits: RequestLimits,
     mut closing: watch::Receiver<()>,
     _slot: OwnedSemaphorePermit,
+    abort: ConnectionAbort,
 ) {
+    let request_abort = abort.clone();
     let service = hyper::service::service_fn(move |mut req: hyper::Request<Incoming>| {
         req.extensions_mut()
             .insert(axum::extract::ConnectInfo(peer));
+        req.extensions_mut().insert(request_abort.clone());
         app.clone().oneshot(req.map(Body::new))
     });
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_read_timeout);
-    let io = WriteStallTimeout::new(stream, limits.write_timeout);
+    let io = WriteStallTimeout::new(stream, limits.write_timeout, abort);
     let conn = builder.serve_connection(TokioIo::new(io), service);
     tokio::pin!(conn);
     let result = tokio::select! {
@@ -856,23 +1071,26 @@ impl Block for HttpListenerBlock {
                 "Socket address the listener binds to (host:port).",
                 "0.0.0.0:8080",
             )
-            .name("Listen Address"),
+            .name("Listen address"),
             ConfigVar::new(
                 "dispatch_target",
                 "Default dispatch target (flow id or block name) when no \
                  explicit router upstream resolves the request.",
                 "",
             )
-            .name("Dispatch Target"),
+            .name("Dispatch target"),
             ConfigVar::new(
                 "max_body_bytes",
                 "Maximum request-body size in bytes. The body streams to the \
                  flow or block; a larger one (announced or received) fails \
-                 that stream and is answered with 413 Payload Too Large. \
+                 that stream and is answered with 413 Payload Too Large — \
+                 unless the response has already started streaming, whose \
+                 status is then committed: the flow or block still reads the \
+                 failure, and the response ends as its producer ends it. \
                  Must be at least 1.",
                 &DEFAULT_MAX_BODY_BYTES.to_string(),
             )
-            .name("Max Body Bytes"),
+            .name("Max body bytes"),
             ConfigVar::new(
                 "header_read_timeout_secs",
                 "Seconds a client has to send a complete request head (request \
@@ -881,40 +1099,50 @@ impl Block for HttpListenerBlock {
                  closed when it runs out. 1 to 86400.",
                 &DEFAULT_HEADER_READ_TIMEOUT_SECS.to_string(),
             )
-            .name("Header Read Timeout (s)"),
+            .name("Header read timeout (s)"),
             ConfigVar::new(
                 "body_read_timeout_secs",
                 "Seconds a client has to send the whole request body after its \
                  headers, counting time the flow or block spends between \
                  reads. A slower body fails the body stream, is answered with \
-                 408 Request Timeout, and the connection is closed. 1 to 86400.",
+                 408 Request Timeout, and the connection is closed — unless \
+                 the response has already started streaming, whose status is \
+                 then committed: the flow or block still reads the failure, \
+                 and the response ends as its producer ends it. 1 to 86400.",
                 &DEFAULT_BODY_READ_TIMEOUT_SECS.to_string(),
             )
-            .name("Body Read Timeout (s)"),
+            .name("Body read timeout (s)"),
             ConfigVar::new(
                 "max_connections",
                 "Maximum concurrently open client connections. At the cap the \
                  listener stops accepting; further clients wait in the \
-                 kernel's accept backlog until a connection closes. At least 1.",
+                 kernel's accept backlog until a connection closes. A client \
+                 of a streamed response (an SSE subscription) holds its slot \
+                 for as long as the stream is open. At least 1.",
                 &DEFAULT_MAX_CONNECTIONS.to_string(),
             )
-            .name("Max Connections"),
+            .name("Max connections"),
             ConfigVar::new(
                 "write_timeout_secs",
                 "Seconds a response write may make no progress (the client is \
-                 not reading) before the connection is dropped. A slow client \
-                 that keeps reading is not affected. 1 to 86400.",
+                 not reading) before the connection is reset (never closed \
+                 cleanly, so the cut body cannot read as whole). A slow client \
+                 that keeps reading is not affected, and neither is an idle \
+                 stream (an SSE connection waiting for its next event). \
+                 1 to 86400.",
                 &DEFAULT_WRITE_TIMEOUT_SECS.to_string(),
             )
-            .name("Write Timeout (s)"),
+            .name("Write timeout (s)"),
             ConfigVar::new(
                 "shutdown_grace_secs",
                 "Seconds a stopping listener gives open connections to finish \
                  their in-flight request; connections still open after it are \
-                 aborted. Stop returns once they are gone. 1 to 86400.",
+                 reset, and a streamed response still open (an SSE \
+                 subscription) is cut off then, cancelling its producer. Stop \
+                 returns once they are gone. 1 to 86400.",
                 &DEFAULT_SHUTDOWN_GRACE_SECS.to_string(),
             )
-            .name("Shutdown Grace (s)"),
+            .name("Shutdown grace (s)"),
             ConfigVar::new(
                 "trusted_proxies",
                 "Comma-separated trusted reverse proxies: exact IPs (10.0.0.1, \
@@ -928,7 +1156,7 @@ impl Block for HttpListenerBlock {
                  Invalid entries fail Init.",
                 "",
             )
-            .name("Trusted Proxies"),
+            .name("Trusted proxies"),
         ])
     }
 

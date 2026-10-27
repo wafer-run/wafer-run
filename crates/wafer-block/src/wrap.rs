@@ -738,6 +738,7 @@ pub const DATABASE_OP_ACCESS: &[(&str, DatabaseOpAccess)] = {
         (ServiceOp::DATABASE_QUERY_RAW, On(&[Read])),
         (ServiceOp::DATABASE_EXEC_RAW, On(&[Write])),
         (ServiceOp::DATABASE_DDL, On(&[Write])),
+        (ServiceOp::DATABASE_DDL_TRANSACTION, On(&[Write])),
         (ServiceOp::DATABASE_ENSURE_TABLE, On(&[Write])),
         (ServiceOp::DATABASE_ADD_COLUMN, On(&[Write])),
         (ServiceOp::DATABASE_DROP_TABLE, On(&[Write])),
