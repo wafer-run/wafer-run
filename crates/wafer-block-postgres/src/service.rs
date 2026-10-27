@@ -31,11 +31,12 @@ use crate::{
 };
 
 /// `$attempt`, one `*_once` run of a statement on `$conn` (a
-/// `&mut PoolConnection`) outside any transaction, as a `Result<_, DatabaseError>`. When
-/// PostgreSQL refused the connection's cached statement as stale, the
-/// connection's cache is cleared and `$attempt` runs once more, re-preparing
-/// the statement; the refused run had no effect (see [`is_stale_plan`]). A
-/// macro because the attempt borrows `$conn` afresh each time it runs.
+/// `&mut PoolConnection`) outside any transaction, as a
+/// `Result<_, DatabaseError>`. When PostgreSQL refused the connection's
+/// cached statement as stale, the connection's cache is cleared and
+/// `$attempt` runs once more, re-preparing the statement; the refused run had
+/// no effect (see [`is_stale_plan`]). A macro because the attempt borrows
+/// `$conn` afresh each time it runs.
 macro_rules! replanned {
     ($conn:ident, $attempt:expr) => {
         match $attempt {
