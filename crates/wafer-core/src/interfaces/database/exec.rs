@@ -638,6 +638,47 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         params: &[serde_json::Value],
     ) -> Result<f64, DatabaseError>;
 
+    /// Run a statement that may change the schema, as
+    /// [`run_execute`](Self::run_execute) runs any non-row statement.
+    ///
+    /// Every schema change the shared orchestration makes goes through here:
+    /// [`exec_raw`](Self::exec_raw) (whose statement may be DDL),
+    /// [`ensure_schema_table`](Self::ensure_schema_table)'s `CREATE`s and the
+    /// column adds of [`add_column_checked`](Self::add_column_checked). Each
+    /// of those callers drops its [`schema_cache`](Self::schema_cache) entries
+    /// afterwards; this primitive is where the backend drops what *it* keeps
+    /// about the schema on the connection that ran the statement.
+    ///
+    /// A backend that caches prepared statements per connection (PostgreSQL)
+    /// overrides it to clear the cache of that connection, on success and on
+    /// failure alike, before the connection serves anything else: a statement
+    /// prepared before a column was added or dropped no longer describes the
+    /// table's rows. The default runs [`run_execute`](Self::run_execute),
+    /// which is right for a backend whose prepared statements re-prepare
+    /// themselves on a schema change (SQLite) or that keeps none.
+    async fn run_schema_execute(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        self.run_execute(sql, params).await
+    }
+
+    /// Run `ops`, which may change the schema, as
+    /// [`run_transaction`](Self::run_transaction) runs them.
+    ///
+    /// [`exec_raw_transaction`](Self::exec_raw_transaction) runs its
+    /// statements here. It is to `run_transaction` what
+    /// [`run_schema_execute`](Self::run_schema_execute) is to
+    /// [`run_execute`](Self::run_execute), with the same default and the same
+    /// reason to override it.
+    async fn run_schema_transaction(
+        &self,
+        ops: &[TxOp<'_>],
+    ) -> Result<Vec<TxResult>, TransactionError> {
+        self.run_transaction(ops).await
+    }
+
     /// Whether `table` exists (already-sanitized or raw name, per call site).
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError>;
 
@@ -656,7 +697,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// does. A backend whose atomic API reports one error for the whole
     /// sequence (D1's `batch()`) returns [`TransactionError::whole`]; it must
     /// not guess a position. A failure to open or commit the transaction is
-    /// [`TransactionError::whole`] everywhere.
+    /// [`TransactionError::whole`] everywhere. A failed commit, or a failure
+    /// a backend reports after its commit was accepted, leaves the outcome
+    /// unknown rather than rolled back (see [`TransactionError`]).
     ///
     /// No default. Running the statements one by one, as
     /// [`run_batch`](Self::run_batch)'s default does, would leave the earlier
@@ -934,7 +977,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         column: &str,
         stmt: &wafer_sql_utils::Statement,
     ) -> Result<(), DatabaseError> {
-        let outcome = self.run_execute(&stmt.sql, &[]).await;
+        let outcome = self.run_schema_execute(&stmt.sql, &[]).await;
         if let Some(cache) = self.schema_cache() {
             cache.invalidate(table);
         }
@@ -1701,19 +1744,22 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.run_fetch(query, args, JsonColumns::NONE).await
     }
 
-    /// Shared `exec_raw`: pass-through to `run_execute`.
+    /// Shared `exec_raw`: pass-through to
+    /// [`run_schema_execute`](Self::run_schema_execute).
     ///
     /// This is the runtime DDL escape hatch — a raw statement may be DDL
     /// (`CREATE`/`ALTER`/`DROP TABLE`) whose target table can't be recovered
-    /// from the SQL text here. On success the whole [`schema_cache`](Self::schema_cache)
-    /// is conservatively cleared so no stale entry outlives a schema change; a
-    /// failed statement changed nothing, so the cache is left intact.
+    /// from the SQL text here. So it runs as a schema change, which drops the
+    /// backend's per-connection statement cache, and on success the whole
+    /// [`schema_cache`](Self::schema_cache) is conservatively cleared so no
+    /// stale entry outlives a schema change; a failed statement changed
+    /// nothing, so the cache is left intact.
     async fn exec_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        let affected = self.run_execute(query, args).await?;
+        let affected = self.run_schema_execute(query, args).await?;
         if let Some(cache) = self.schema_cache() {
             cache.clear();
         }
@@ -1722,15 +1768,21 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `exec_raw_transaction`: admit every statement against the
     /// [`statement_budget`](Self::statement_budget) at once, then run them as
-    /// ONE [`run_transaction`](Self::run_transaction) of
+    /// ONE [`run_schema_transaction`](Self::run_schema_transaction) of
     /// [`TxOp::Execute`]s.
     ///
     /// A budget refusal sends nothing and names no statement. Once the
     /// transaction was sent, the whole [`schema_cache`](Self::schema_cache)
     /// is cleared, as [`exec_raw`](Self::exec_raw) clears it, on success and
-    /// on failure alike: the statements' targets cannot be recovered from
-    /// their text, and a failed commit (a connection lost during `COMMIT`)
-    /// does not say whether the schema changed.
+    /// on failure alike (and `run_schema_transaction` drops the backend's
+    /// statement cache on the transaction's connection on both outcomes): the
+    /// statements' targets cannot be recovered from their text, and a failed
+    /// commit (a connection lost during `COMMIT`) does not say whether the
+    /// schema changed.
+    ///
+    /// The checks on the result's shape below run after the commit. A
+    /// failure they report, like a failed `COMMIT`, leaves the outcome
+    /// unknown (see [`TransactionError`]).
     async fn exec_raw_transaction(
         &self,
         statements: &[RawStatement],
@@ -1748,7 +1800,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 params: &statement.args,
             })
             .collect();
-        let outcome = self.run_transaction(&ops).await;
+        let outcome = self.run_schema_transaction(&ops).await;
         if let Some(cache) = self.schema_cache() {
             cache.clear();
         }
@@ -1828,7 +1880,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             sql_name(&column.name)?;
         }
         let create = ddl::build_create_table(table, Self::BACKEND)?;
-        self.run_execute(&create.sql, &[])
+        self.run_schema_execute(&create.sql, &[])
             .await
             .map_err(|e| schema_step_error(&format!("create table {}", table.name), e))?;
 
@@ -1850,14 +1902,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
         for index in &table.indexes {
             let stmt = ddl::build_create_index(&table.name, index, Self::BACKEND)?;
-            self.run_execute(&stmt.sql, &[])
+            self.run_schema_execute(&stmt.sql, &[])
                 .await
                 .map_err(|e| schema_step_error("create index", e))?;
         }
 
         let fk_indexes = ddl::build_fk_indexes(table, Self::BACKEND)?;
         for stmt in fk_indexes {
-            self.run_execute(&stmt.sql, &[])
+            self.run_schema_execute(&stmt.sql, &[])
                 .await
                 .map_err(|e| schema_step_error("create FK index", e))?;
         }

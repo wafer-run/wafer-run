@@ -1000,3 +1000,325 @@ async fn a_string_default_round_trips_with_standard_conforming_strings_off() {
     }
     svc.schema_drop_table(&table.name).await.expect("drop");
 }
+
+// ---------------------------------------------------------------------------
+// Cached statements across schema changes
+//
+// Every statement this backend runs is prepared once per connection and kept
+// in that connection's statement cache (see `params::bind`). A prepared
+// statement's result type is fixed when it is prepared: once a table it reads
+// gains or loses a column, PostgreSQL refuses to run it again ("cached plan
+// must not change result type", SQLSTATE 0A000) on every session that still
+// holds it, not just the one that changed the table.
+// ---------------------------------------------------------------------------
+
+/// A service whose pool has exactly one connection, so every call runs on the
+/// same server session, plus that pool for inspecting the session.
+async fn single_connection_service(url: &str) -> (sqlx::PgPool, PostgresDatabaseService) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(url)
+        .await
+        .expect("connect a single-connection pool");
+    let svc = PostgresDatabaseService::from_pool(pool.clone()).expect("service");
+    (pool, svc)
+}
+
+/// The column names of `records`' first row, in result order.
+fn columns_of(records: &[wafer_core::interfaces::database::service::Record]) -> Vec<String> {
+    records
+        .first()
+        .expect("at least one row")
+        .data
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// The statement texts the pool's one session holds prepared, read over the
+/// simple-query protocol so the read itself prepares nothing.
+async fn prepared_statements(pool: &sqlx::PgPool) -> Vec<String> {
+    use sqlx::Row as _;
+
+    let mut conn = pool.acquire().await.expect("acquire the session");
+    sqlx::raw_sql("SELECT statement FROM pg_prepared_statements")
+        .fetch_all(&mut *conn)
+        .await
+        .expect("list prepared statements")
+        .iter()
+        .map(|row| row.get::<String, _>(0))
+        .collect()
+}
+
+/// impresspress's boot sequence on one session: read a table, change its
+/// columns with a raw statement, read it again with the same statement. The
+/// second read must see the new columns, not fail on the plan cached by the
+/// first. Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_read_after_a_raw_column_change_on_its_session_sees_the_new_columns() {
+    use wafer_core::interfaces::database::service::DatabaseService;
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres same-session stale-plan check: set {URL_ENV} to run");
+        return;
+    };
+    let (_pool, svc) = single_connection_service(&url).await;
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_stale_same",
+        "CREATE TABLE conf_stale_same (id TEXT PRIMARY KEY, a TEXT, b TEXT)",
+        "INSERT INTO conf_stale_same (id, a, b) VALUES ('r1', 'x', 'y')",
+    ] {
+        svc.exec_raw(stmt, &[])
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let read = "SELECT * FROM conf_stale_same";
+    let rows = svc.query_raw(read, &[]).await.expect("first read");
+    assert_eq!(columns_of(&rows), ["id", "a", "b"]);
+
+    svc.exec_raw("ALTER TABLE conf_stale_same DROP COLUMN b", &[])
+        .await
+        .expect("drop a column");
+    let rows = svc
+        .query_raw(read, &[])
+        .await
+        .expect("read after dropping a column");
+    assert_eq!(columns_of(&rows), ["id", "a"]);
+
+    svc.exec_raw_transaction(&[wafer_core::interfaces::database::service::RawStatement {
+        query: "ALTER TABLE conf_stale_same ADD COLUMN c TEXT".to_string(),
+        args: Vec::new(),
+    }])
+    .await
+    .expect("add a column in a raw transaction");
+    let rows = svc
+        .query_raw(read, &[])
+        .await
+        .expect("read after adding a column");
+    assert_eq!(columns_of(&rows), ["id", "a", "c"]);
+
+    svc.exec_raw("DROP TABLE conf_stale_same", &[])
+        .await
+        .expect("drop");
+}
+
+/// Every way this service changes a table's columns drops the statements its
+/// session cached, before the session serves anything else: `exec_raw`,
+/// `exec_raw_transaction`, `schema_add_column`, `schema_drop_table`,
+/// `ensure_schema_table` adding a declared column, and a write adding a
+/// column for a new key. Each runs on the pool's one session right after a
+/// read of the table, and the read's statement must be gone from the session.
+/// Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn every_schema_change_drops_its_sessions_cached_statements() {
+    use std::collections::HashMap;
+
+    use wafer_core::interfaces::database::service::{
+        pk, Column, DataType, DatabaseService, RawStatement, Table,
+    };
+
+    const TABLE: &str = "conf_stale_paths";
+    const READ: &str = "SELECT * FROM conf_stale_paths";
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres statement-cache invalidation check: set {URL_ENV} to run");
+        return;
+    };
+    let (pool, svc) = single_connection_service(&url).await;
+    let table = |columns: &[&str]| Table {
+        name: TABLE.to_string(),
+        columns: std::iter::once(pk("id"))
+            .chain(columns.iter().map(|c| Column::new(*c, DataType::Text)))
+            .collect(),
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    svc.schema_drop_table(TABLE).await.expect("drop");
+    svc.ensure_schema_table(&table(&["a"]))
+        .await
+        .expect("create");
+
+    // Caches READ on the session, then confirms `change` dropped it.
+    async fn check(pool: &sqlx::PgPool, svc: &PostgresDatabaseService, what: &str) {
+        let held = prepared_statements(pool).await;
+        assert!(
+            !held.iter().any(|s| s == READ),
+            "{what} left the session's cached read prepared: {held:?}"
+        );
+        svc.query_raw(READ, &[])
+            .await
+            .unwrap_or_else(|e| panic!("read after {what}: {e}"));
+        assert!(
+            prepared_statements(pool).await.iter().any(|s| s == READ),
+            "the read is cached on the session again"
+        );
+    }
+
+    svc.query_raw(READ, &[]).await.expect("cache the read");
+    svc.exec_raw("ALTER TABLE conf_stale_paths ADD COLUMN b TEXT", &[])
+        .await
+        .expect("exec_raw");
+    check(&pool, &svc, "exec_raw").await;
+
+    svc.exec_raw_transaction(&[RawStatement {
+        query: "ALTER TABLE conf_stale_paths DROP COLUMN b".to_string(),
+        args: Vec::new(),
+    }])
+    .await
+    .expect("exec_raw_transaction");
+    check(&pool, &svc, "exec_raw_transaction").await;
+
+    // A failed raw transaction still drops them: whether it changed the
+    // schema before failing is not the caller's to know.
+    svc.exec_raw_transaction(&[RawStatement {
+        query: "ALTER TABLE conf_stale_paths DROP COLUMN no_such_column".to_string(),
+        args: Vec::new(),
+    }])
+    .await
+    .expect_err("a raw transaction that fails");
+    check(&pool, &svc, "a failed exec_raw_transaction").await;
+
+    svc.schema_add_column(TABLE, &Column::new("c", DataType::Text))
+        .await
+        .expect("schema_add_column");
+    check(&pool, &svc, "schema_add_column").await;
+
+    svc.ensure_schema_table(&table(&["a", "c", "d"]))
+        .await
+        .expect("ensure_schema_table adding d");
+    check(&pool, &svc, "ensure_schema_table").await;
+
+    // The declared columns are NOT NULL; `e` is the key the table lacks.
+    let row: HashMap<String, serde_json::Value> = ["id", "a", "c", "d", "e"]
+        .into_iter()
+        .map(|column| (column.to_string(), serde_json::json!(column)))
+        .collect();
+    svc.create(TABLE, row).await.expect("create adding e");
+    check(&pool, &svc, "a write adding a column").await;
+
+    svc.schema_drop_table(TABLE)
+        .await
+        .expect("schema_drop_table");
+    let held = prepared_statements(&pool).await;
+    assert!(
+        !held.iter().any(|s| s == READ),
+        "schema_drop_table left the session's cached read prepared: {held:?}"
+    );
+}
+
+/// Two services on one database, one session each. A changes nothing; B
+/// changes a table's columns. A's next read of that table, with the statement
+/// its session cached before the change, must see the new columns: B's
+/// service cannot reach A's session, so A's own execution has to recover.
+/// The same holds for another process changing the schema. Skipped unless
+/// `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_column_change_on_another_session_does_not_break_a_cached_read() {
+    use wafer_core::interfaces::database::service::DatabaseService;
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres cross-session stale-plan check: set {URL_ENV} to run");
+        return;
+    };
+    let (_a_pool, a) = single_connection_service(&url).await;
+    let (_b_pool, b) = single_connection_service(&url).await;
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_stale_cross",
+        "CREATE TABLE conf_stale_cross (id TEXT PRIMARY KEY, a TEXT, b TEXT)",
+        "INSERT INTO conf_stale_cross (id, a, b) VALUES ('r1', 'x', 'y')",
+    ] {
+        b.exec_raw(stmt, &[])
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let read = "SELECT * FROM conf_stale_cross";
+    let rows = a.query_raw(read, &[]).await.expect("A's first read");
+    assert_eq!(columns_of(&rows), ["id", "a", "b"]);
+    let counted = "SELECT * FROM conf_stale_cross WHERE id = $1";
+    let row = a
+        .query_raw(counted, &[serde_json::json!("r1")])
+        .await
+        .expect("A's first parameterized read");
+    assert_eq!(columns_of(&row), ["id", "a", "b"]);
+
+    b.exec_raw("ALTER TABLE conf_stale_cross DROP COLUMN b", &[])
+        .await
+        .expect("B drops a column");
+    let rows = a
+        .query_raw(read, &[])
+        .await
+        .expect("A's read after B dropped a column");
+    assert_eq!(columns_of(&rows), ["id", "a"]);
+    let row = a
+        .query_raw(counted, &[serde_json::json!("r1")])
+        .await
+        .expect("A's parameterized read after B dropped a column");
+    assert_eq!(columns_of(&row), ["id", "a"]);
+
+    b.exec_raw("DROP TABLE conf_stale_cross", &[])
+        .await
+        .expect("drop");
+}
+
+/// The cross-session case inside a transaction. A `batch` insert runs as one
+/// transaction whose `INSERT … RETURNING *` A's session cached; after B adds
+/// a column, that statement fails mid-transaction and aborts it. The whole
+/// transaction must then run again, once, and land its row exactly once.
+/// Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn a_column_change_on_another_session_does_not_break_a_cached_transaction() {
+    use std::collections::HashMap;
+
+    use wafer_core::interfaces::database::service::{DatabaseService, WriteOp, WriteOutcome};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!(
+            "skipping postgres cross-session stale-plan transaction check: set {URL_ENV} to run"
+        );
+        return;
+    };
+    let (_a_pool, a) = single_connection_service(&url).await;
+    let (_b_pool, b) = single_connection_service(&url).await;
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_stale_tx",
+        "CREATE TABLE conf_stale_tx (id TEXT PRIMARY KEY, a TEXT, \
+         created_at TEXT, updated_at TEXT)",
+    ] {
+        b.exec_raw(stmt, &[])
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let insert = |id: &str| WriteOp::Create {
+        collection: "conf_stale_tx".to_string(),
+        data: [
+            ("id".to_string(), serde_json::json!(id)),
+            ("a".to_string(), serde_json::json!("x")),
+        ]
+        .into_iter()
+        .collect::<HashMap<_, _>>(),
+    };
+    let created = |outcomes: Vec<WriteOutcome>| match outcomes.as_slice() {
+        [WriteOutcome::Created(record)] => record.data.keys().cloned().collect::<Vec<_>>(),
+        other => panic!("one created row expected, got {other:?}"),
+    };
+    let first = a.batch(vec![insert("r1")]).await.expect("A's first batch");
+    assert!(!created(first).contains(&"d".to_string()));
+
+    b.exec_raw(
+        "ALTER TABLE conf_stale_tx ADD COLUMN d TEXT DEFAULT 'dv'",
+        &[],
+    )
+    .await
+    .expect("B adds a column");
+    let second = a
+        .batch(vec![insert("r2")])
+        .await
+        .expect("A's batch after B added a column");
+    assert!(created(second).contains(&"d".to_string()));
+
+    let count = a.count("conf_stale_tx", &[]).await.expect("count the rows");
+    assert_eq!(count, 2, "each batch landed its row exactly once");
+    b.exec_raw("DROP TABLE conf_stale_tx", &[])
+        .await
+        .expect("drop");
+}
