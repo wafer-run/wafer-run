@@ -493,8 +493,8 @@ impl Wafer {
     /// caller has verified against `pkg.wasm_sha256` — from the cache here,
     /// or downloaded by `seal()`.
     ///
-    /// Honours the builder's `fuel_per_call` / `max_wasm_memory_pages`
-    /// selection. The entry's `capabilities` is the operator's bound; without
+    /// Honours the builder's `fuel_per_call` / `max_wasm_memory_pages` /
+    /// `wasm_compilation` selection. The entry's `capabilities` is the operator's bound; without
     /// one the block is bounded at `seal()` by its `capabilities` block
     /// config, `none()` when absent.
     #[cfg(feature = "wasmi")]

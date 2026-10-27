@@ -15,7 +15,7 @@ use wasmi::{Engine, Linker, Module, Store, TypedResumableCall, Val};
 use super::{capabilities::BlockCapabilities, stream::StreamRegistry};
 use crate::{
     context::Context,
-    runtime::wasm_state::{wasmi_config, FuelLimit, ResourceLimits},
+    runtime::wasm_state::{check_compilation_mode, wasmi_config, FuelLimit, ResourceLimits},
 };
 
 mod abi;
@@ -123,9 +123,10 @@ fn out_of_fuel_trap() -> wasmi::Error {
 }
 
 /// A fresh engine configured by [`wasmi_config`] — its `consume_fuel` flag
-/// matches `limits.fuel`.
-fn engine_for(limits: ResourceLimits) -> Engine {
-    Engine::new(&wasmi_config(limits.fuel))
+/// matches `limits.fuel` and its compilation mode is `limits.compilation`.
+/// Fails when the two are incompatible (`Metered` + lazy translation).
+fn engine_for(limits: ResourceLimits) -> Result<Engine, RuntimeError> {
+    Ok(Engine::new(&wasmi_config(limits.fuel, limits.compilation)?))
 }
 
 impl WasmiBlock {
@@ -191,14 +192,17 @@ impl WasmiBlock {
     /// [`Wafer::resource_limits`](crate::Wafer::resource_limits). Pass
     /// [`FuelLimit::Unmetered`] for heavy compute and/or a larger
     /// `memory_pages` for memory-heavy tools (e.g. the `syntect`+font
-    /// code-screenshot tool needs ~24 MiB ≈ 384 pages). The freshly-created
-    /// engine's `consume_fuel` flag is matched to the requested fuel mode.
+    /// code-screenshot tool needs ~24 MiB ≈ 384 pages), and, with
+    /// `Unmetered` fuel, [`WasmCompilation::LazyTranslation`](crate::WasmCompilation::LazyTranslation)
+    /// to cut load cost. The freshly-created engine's `consume_fuel` flag and
+    /// compilation mode follow `limits`; `Metered` fuel with lazy translation
+    /// is refused with [`RuntimeError::Config`].
     pub fn load_from_bytes_with_limits(
         wasm_bytes: &[u8],
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
         Self::compile(
-            &engine_for(limits),
+            &engine_for(limits)?,
             wasm_bytes,
             BlockCapabilities::none(),
             None,
@@ -224,13 +228,13 @@ impl WasmiBlock {
     /// Compile a WASM module under the capability bound `caps` (see
     /// [`load_with_capabilities`](Self::load_with_capabilities)) and explicit
     /// per-call [`ResourceLimits`]. Creates a fresh engine whose
-    /// `consume_fuel` flag matches the requested fuel mode.
+    /// `consume_fuel` flag and compilation mode follow `limits`.
     pub fn load_with_capabilities_and_limits(
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
-        Self::load_with_engine_and_limits(&engine_for(limits), wasm_bytes, caps, limits)
+        Self::load_with_engine_and_limits(&engine_for(limits)?, wasm_bytes, caps, limits)
     }
 
     /// Compile a WASM module under the capability bound `caps` (see
@@ -254,16 +258,22 @@ impl WasmiBlock {
     ///
     /// The caller is responsible for ensuring the engine's `consume_fuel` flag
     /// matches `limits.fuel` (`true` for [`FuelLimit::Metered`], `false` for
-    /// [`FuelLimit::Unmetered`]). `Wafer::wasm_engine` derives the engine's
-    /// flag from the runtime's configured limit and passes matching `limits`
-    /// here, so blocks loaded through the runtime stay consistent. (The memory
-    /// cap is enforced per-store, so it needs no engine coordination.)
+    /// [`FuelLimit::Unmetered`]) and that its compilation mode is
+    /// `limits.compilation` — the engine is the caller's, so this constructor
+    /// cannot reconfigure it. `Wafer::wasm_engine` derives both from the
+    /// runtime's configured limits, which
+    /// [`Wafer::resource_limits`](crate::Wafer::resource_limits) returns, so
+    /// passing those here keeps blocks loaded through the runtime consistent.
+    /// (The memory cap is enforced per-store, so it needs no engine
+    /// coordination.) `limits` pairing `Metered` fuel with lazy translation
+    /// is refused, as on every other constructor.
     pub fn load_with_engine_and_limits(
         engine: &Engine,
         wasm_bytes: &[u8],
         caps: BlockCapabilities,
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
+        check_compilation_mode(limits.fuel, limits.compilation)?;
         Self::compile(engine, wasm_bytes, caps.clone(), Some(caps), limits)
     }
 
@@ -280,7 +290,7 @@ impl WasmiBlock {
         limits: ResourceLimits,
     ) -> Result<Self, RuntimeError> {
         let mut block = Self::compile(
-            &engine_for(limits),
+            &engine_for(limits)?,
             wasm_bytes,
             BlockCapabilities::none(),
             None,
@@ -1486,11 +1496,13 @@ mod capabilities_update_tests {
         );
     }
 
-    /// A guest call's fuel use depends only on what it executes. The engine
-    /// translates eagerly at load (`wasmi_config`); under wasmi's default
-    /// lazy translation the first call to reach a function would also pay
-    /// for translating it, so a cold instance and the next one off the same
-    /// engine would be charged different amounts for identical work.
+    /// A metered guest call's fuel use depends only on what it executes. A
+    /// metered engine translates eagerly at load (the default
+    /// `WasmCompilation::Eager`, and `wasmi_config` refuses anything else
+    /// with metered fuel); under lazy translation the first call to reach a
+    /// function would also pay for translating it, so a cold instance and
+    /// the next one off the same engine would be charged different amounts
+    /// for identical work.
     #[test]
     fn fuel_use_does_not_depend_on_which_call_reached_a_function_first() {
         // A function body large enough that translating it costs fuel well
@@ -1524,6 +1536,162 @@ mod capabilities_update_tests {
             first, second,
             "the first call to reach `work` was charged differently from the next"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Compilation mode (`WasmCompilation`)
+    // -----------------------------------------------------------------------
+
+    use crate::runtime::wasm_state::WasmCompilation;
+
+    /// A module whose exported `work` runs a 500-operator body: large enough
+    /// that translating it costs fuel well above any rounding difference.
+    fn translation_probe_module() -> Vec<u8> {
+        let body = "(local.set $x (i32.add (local.get $x) (i32.const 1)))".repeat(500);
+        wat::parse_str(format!(
+            r#"(module
+            (func (export "work") (result i32)
+                (local $x i32)
+                {body}
+                (local.get $x)))"#
+        ))
+        .unwrap()
+    }
+
+    /// Fuel charged to the first and the second call of `work`, each on a
+    /// fresh instance of one module compiled under `wasmi_config(Unmetered,
+    /// compilation)` with fuel consumption turned on afterwards — fuel is the
+    /// only observable of *when* wasmi translated a function.
+    fn first_and_second_call_fuel(compilation: WasmCompilation) -> (u64, u64) {
+        let mut config = wasmi_config(FuelLimit::Unmetered, compilation).expect("unmetered");
+        config.consume_fuel(true);
+        let engine = Engine::new(&config);
+        let module = Module::new(&engine, translation_probe_module()).unwrap();
+        let spent = || {
+            let mut store = Store::new(&engine, ());
+            store.set_fuel(u64::MAX).unwrap();
+            let instance = Linker::<()>::new(&engine)
+                .instantiate_and_start(&mut store, &module)
+                .unwrap();
+            let work = instance
+                .get_typed_func::<(), i32>(&store, "work")
+                .expect("work export");
+            assert_eq!(work.call(&mut store, ()).expect("work runs"), 500);
+            u64::MAX - store.get_fuel().unwrap()
+        };
+        let first = spent();
+        (first, spent())
+    }
+
+    /// `WasmCompilation::Eager` and `LazyTranslation` reach wasmi as the
+    /// modes they name: under eager translation the first call to `work`
+    /// costs what the second does, under lazy translation it also pays for
+    /// translating `work`.
+    #[test]
+    fn compilation_mode_reaches_the_wasmi_engine() {
+        let (first, second) = first_and_second_call_fuel(WasmCompilation::Eager);
+        assert_eq!(
+            first, second,
+            "Eager must translate at load, not on first use"
+        );
+        let (first, second) = first_and_second_call_fuel(WasmCompilation::LazyTranslation);
+        assert!(
+            first > second,
+            "LazyTranslation must translate on first use: first call {first}, second {second}"
+        );
+    }
+
+    /// Eager translation stays the default everywhere a mode can come from.
+    #[test]
+    fn eager_is_the_default_compilation_mode() {
+        assert_eq!(WasmCompilation::default(), WasmCompilation::Eager);
+        assert_eq!(
+            ResourceLimits::default().compilation,
+            WasmCompilation::Eager
+        );
+        let wafer = crate::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .unwrap();
+        assert_eq!(wafer.resource_limits().compilation, WasmCompilation::Eager);
+    }
+
+    fn metered_lazy() -> ResourceLimits {
+        ResourceLimits {
+            fuel: FuelLimit::Metered(crate::runtime::wasm_state::DEFAULT_FUEL),
+            compilation: WasmCompilation::LazyTranslation,
+            ..ResourceLimits::default()
+        }
+    }
+
+    fn assert_refused<T>(what: &str, result: Result<T, RuntimeError>) {
+        match result {
+            Err(RuntimeError::Config(msg)) => assert!(
+                msg.contains("LazyTranslation requires FuelLimit::Unmetered"),
+                "{what}: unexpected refusal message: {msg}"
+            ),
+            Err(other) => panic!("{what}: refused with the wrong error: {other}"),
+            Ok(_) => panic!("{what}: metered fuel with lazy translation was accepted"),
+        }
+    }
+
+    /// Metered fuel with lazy translation is refused by every constructor
+    /// that takes the pair — never silently translated eagerly.
+    #[test]
+    fn metered_fuel_refuses_lazy_translation() {
+        let wasm = translation_probe_module();
+        let caps = BlockCapabilities::none;
+        assert_refused(
+            "load_from_bytes_with_limits",
+            WasmiBlock::load_from_bytes_with_limits(&wasm, metered_lazy()),
+        );
+        assert_refused(
+            "load_with_capabilities_and_limits",
+            WasmiBlock::load_with_capabilities_and_limits(&wasm, caps(), metered_lazy()),
+        );
+        assert_refused(
+            "load_approving_declaration",
+            WasmiBlock::load_approving_declaration(&wasm, metered_lazy()),
+        );
+        let engine = engine_for(ResourceLimits::default()).unwrap();
+        assert_refused(
+            "load_with_engine_and_limits",
+            WasmiBlock::load_with_engine_and_limits(&engine, &wasm, caps(), metered_lazy()),
+        );
+        assert_refused(
+            "WaferBuilder::build",
+            crate::Wafer::builder()
+                .disable_inventory()
+                .disable_lockfile()
+                .fuel_per_call(FuelLimit::Metered(1))
+                .wasm_compilation(WasmCompilation::LazyTranslation)
+                .build(),
+        );
+    }
+
+    /// Lazy translation still validates the whole module at load: a
+    /// function body that does not type-check fails the load, not the first
+    /// call that reaches it.
+    #[test]
+    fn lazy_translation_rejects_an_invalid_module_at_load() {
+        // `i32.add` with no operands: well-formed binary (the text parser
+        // does not type-check), invalid Wasm.
+        let wasm = wat::parse_str(r#"(module (func (export "bad") (result i32) i32.add))"#)
+            .expect("the text parser does not validate operand types");
+        let limits = ResourceLimits {
+            fuel: FuelLimit::Unmetered,
+            compilation: WasmCompilation::LazyTranslation,
+            ..ResourceLimits::default()
+        };
+        match WasmiBlock::load_from_bytes_with_limits(&wasm, limits) {
+            Err(RuntimeError::Wasm(msg)) => assert!(
+                msg.starts_with("compiling WASM module"),
+                "unexpected load error: {msg}"
+            ),
+            Err(other) => panic!("rejected with the wrong error: {other}"),
+            Ok(_) => panic!("an invalid module loaded under LazyTranslation"),
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -39,7 +39,9 @@ pub use runtime::{
         resolve_declared, ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource,
     },
     slot::{BlockSlot, InitError, InitializedState},
-    wasm_state::{FuelLimit, ResourceLimits, DEFAULT_FUEL, DEFAULT_MAX_WASM_MEMORY_PAGES},
+    wasm_state::{
+        FuelLimit, ResourceLimits, WasmCompilation, DEFAULT_FUEL, DEFAULT_MAX_WASM_MEMORY_PAGES,
+    },
     BrokenBlock, SealState, ValidationReport, Wafer,
 };
 #[cfg(not(target_arch = "wasm32"))]

@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use wafer_block::error::RuntimeError;
+
 use crate::asset_loader::{LoadAssetCallback, NoopAssetLoader};
 
 /// Default per-guest-call fuel budget in wasmi fuel units. A single guest
@@ -109,6 +111,77 @@ pub(crate) const MAX_WASM_RECURSION_DEPTH: usize = 1024;
 #[cfg(feature = "wasmi")]
 pub(crate) const MAX_WASM_STACK_BYTES: usize = 1024 * 1024;
 
+/// How a runtime-created wasmi engine compiles a guest module's functions
+/// into the bytecode it executes.
+///
+/// Selected per load through [`ResourceLimits::compilation`], or for a whole
+/// runtime with
+/// [`WaferBuilder::wasm_compilation`](crate::WaferBuilder::wasm_compilation).
+/// Both modes validate the whole module when it is loaded, so a malformed
+/// guest is rejected at load (at boot, for a runtime that loads its blocks
+/// at startup) in either mode. They differ in when each function is
+/// *translated*:
+///
+/// | mode | translation | load cost | per-call fuel |
+/// |---|---|---|---|
+/// | [`Eager`](Self::Eager) | every function, at load | highest | depends only on what the call executes |
+/// | [`LazyTranslation`](Self::LazyTranslation) | each function on the first call that reaches it | about 3.5× (release) to 6× (debug) lower | not deterministic, so refused with metered fuel |
+///
+/// (Load-cost ratios measured on wasmi 2.0 over 1440 real tool modules.)
+///
+/// Because lazy translation bills a function's translation to the call that
+/// first reaches it, a metered call's fuel use would depend on which
+/// functions earlier calls — or a pooled predecessor instance — happened to
+/// reach. [`LazyTranslation`](Self::LazyTranslation) is therefore only
+/// accepted together with [`FuelLimit::Unmetered`]; every constructor that
+/// takes the pair refuses `Metered` + `LazyTranslation` with
+/// [`RuntimeError::Config`] instead of silently translating eagerly.
+///
+/// wasmi also offers a fully lazy mode that skips validation until a
+/// function's first use. The runtime does not expose it: a malformed guest
+/// would then load cleanly and fail mid-request, and the remaining load cost
+/// under [`LazyTranslation`](Self::LazyTranslation) is validation, which is
+/// what keeps that failure at load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum WasmCompilation {
+    /// Translate every function when the module is loaded. Every compile
+    /// cost is paid up front, and a metered call's fuel use is a function of
+    /// what it executes alone. The default, and the only mode a
+    /// [`FuelLimit::Metered`] runtime accepts — hosted, multi-tenant
+    /// deployments keep deterministic fuel.
+    #[default]
+    Eager,
+    /// Validate the whole module at load, but translate each function only
+    /// when a call first reaches it. Loading is several times cheaper, which
+    /// matters to a trusted single-user host that loads many modules per
+    /// start and runs few of their functions (e.g. a CLI hosting hundreds of
+    /// tools). The first call to reach a function pays for translating it.
+    /// Requires [`FuelLimit::Unmetered`].
+    LazyTranslation,
+}
+
+/// Refuse a compilation mode that would make metered fuel use depend on
+/// call order (see [`WasmCompilation`]). The one check every constructor
+/// that takes a fuel limit and a compilation mode runs.
+pub(crate) fn check_compilation_mode(
+    fuel: FuelLimit,
+    compilation: WasmCompilation,
+) -> Result<(), RuntimeError> {
+    match (fuel, compilation) {
+        (FuelLimit::Metered(_), WasmCompilation::LazyTranslation) => Err(RuntimeError::Config(
+            "WasmCompilation::LazyTranslation requires FuelLimit::Unmetered: lazy translation \
+             bills a function's translation to the first metered call that reaches it, so a \
+             call's fuel use would depend on which calls ran before it. Use \
+             WasmCompilation::Eager with a metered fuel limit."
+                .to_string(),
+        )),
+        (FuelLimit::Metered(_), WasmCompilation::Eager)
+        | (FuelLimit::Unmetered, WasmCompilation::Eager)
+        | (FuelLimit::Unmetered, WasmCompilation::LazyTranslation) => Ok(()),
+    }
+}
+
 /// The wasmi engine configuration every runtime-created engine uses.
 ///
 /// Each setting that bounds a guest is stated here rather than inherited
@@ -117,21 +190,30 @@ pub(crate) const MAX_WASM_STACK_BYTES: usize = 1024 * 1024;
 /// - `consume_fuel` follows `fuel` (see [`FuelLimit::consume_fuel`]).
 /// - The call-depth and value-stack bounds are
 ///   [`MAX_WASM_RECURSION_DEPTH`] and [`MAX_WASM_STACK_BYTES`].
-/// - Functions are translated eagerly, at load. wasmi's default since 0.48
-///   is lazy translation, which charges translation fuel to whichever guest
-///   call first reaches a function. Eager translation keeps a call's fuel
-///   use a function of what it executes, not of which functions earlier
-///   calls (or a pooled predecessor) happened to reach, and surfaces every
-///   compile cost at load instead of mid-request.
+/// - The compilation mode is `compilation`, stated explicitly: wasmi's own
+///   default has changed (Eager until 0.48, lazy translation since). A
+///   metered engine always translates eagerly — `Metered` +
+///   [`WasmCompilation::LazyTranslation`] is refused here (see
+///   [`check_compilation_mode`]) — so a metered call's fuel use is a
+///   function of what it executes, not of which functions earlier calls (or
+///   a pooled predecessor) happened to reach.
 #[cfg(feature = "wasmi")]
-pub(crate) fn wasmi_config(fuel: FuelLimit) -> wasmi::Config {
+pub(crate) fn wasmi_config(
+    fuel: FuelLimit,
+    compilation: WasmCompilation,
+) -> Result<wasmi::Config, RuntimeError> {
+    check_compilation_mode(fuel, compilation)?;
+    let mode = match compilation {
+        WasmCompilation::Eager => wasmi::CompilationMode::Eager,
+        WasmCompilation::LazyTranslation => wasmi::CompilationMode::LazyTranslation,
+    };
     let mut config = wasmi::Config::default();
     config
         .consume_fuel(fuel.consume_fuel())
         .set_max_recursion_depth(MAX_WASM_RECURSION_DEPTH)
         .set_max_stack_height(MAX_WASM_STACK_BYTES)
-        .compilation_mode(wasmi::CompilationMode::Eager);
-    config
+        .compilation_mode(mode);
+    Ok(config)
 }
 
 /// Per-guest-call resource limits applied to a directly-loaded [`WasmiBlock`].
@@ -168,6 +250,11 @@ pub struct ResourceLimits {
     /// SEC-03: cap on WebAssembly table elements. Defaults to
     /// [`DEFAULT_MAX_TABLE_ELEMENTS`] (100_000).
     pub max_table_elements: u32,
+    /// How the block's engine compiles the module. Defaults to
+    /// [`WasmCompilation::Eager`]; [`WasmCompilation::LazyTranslation`] is
+    /// accepted only with [`FuelLimit::Unmetered`], and a load that pairs it
+    /// with `Metered` fuel fails.
+    pub compilation: WasmCompilation,
 }
 
 impl Default for ResourceLimits {
@@ -178,6 +265,7 @@ impl Default for ResourceLimits {
             max_host_bytes: DEFAULT_MAX_HOST_BYTES,
             max_live_streams: DEFAULT_MAX_LIVE_STREAMS,
             max_table_elements: DEFAULT_MAX_TABLE_ELEMENTS,
+            compilation: WasmCompilation::default(),
         }
     }
 }
@@ -202,6 +290,12 @@ pub(crate) struct WasmState {
     /// [`DEFAULT_MAX_WASM_MEMORY_PAGES`] (256 pages = 16 MiB). Consumers that
     /// load blocks directly read it back via `Wafer::resource_limits()`.
     pub(crate) max_wasm_memory_pages: u32,
+    /// How engines this runtime creates compile modules — the shared engine
+    /// and `wafer.lock` blocks — and the mode direct loaders read back via
+    /// `Wafer::resource_limits()`. Set via `WaferBuilder::wasm_compilation`,
+    /// which refuses a non-eager mode with metered fuel; defaults to
+    /// [`WasmCompilation::Eager`].
+    pub(crate) compilation: WasmCompilation,
     /// Shared fuel-metered WASM engine, created lazily by
     /// `Wafer::wasm_engine()` for embedders that compile blocks against one
     /// engine. The runtime's own `wafer.lock` loading does not use it.
@@ -217,17 +311,20 @@ impl WasmState {
             asset_loader: Arc::new(NoopAssetLoader),
             fuel: FuelLimit::default(),
             max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
+            compilation: WasmCompilation::default(),
             #[cfg(feature = "wasmi")]
             engine: None,
         }
     }
 
     /// The runtime's configured per-call resource limits, bundled for direct
-    /// loaders. Mirrors the individual `fuel` / `max_wasm_memory_pages` fields.
+    /// loaders. Mirrors the individual `fuel` / `max_wasm_memory_pages` /
+    /// `compilation` fields.
     pub(crate) fn resource_limits(&self) -> ResourceLimits {
         ResourceLimits {
             fuel: self.fuel,
             memory_pages: self.max_wasm_memory_pages,
+            compilation: self.compilation,
             // SEC-03 host-side caps are not builder-configurable yet; use the
             // bounded defaults for runtime-loaded blocks.
             ..ResourceLimits::default()
@@ -239,12 +336,13 @@ impl WasmState {
 impl super::Wafer {
     /// Get or create the shared WASM engine.
     ///
-    /// The engine's `consume_fuel` flag is derived from the runtime's
-    /// configured [`FuelLimit`] so blocks an embedder loads against this
-    /// engine meter (or don't) consistently with the builder selection.
+    /// The engine's `consume_fuel` flag and compilation mode are derived
+    /// from the runtime's configured [`FuelLimit`] and [`WasmCompilation`],
+    /// so blocks an embedder loads against this engine meter (or don't) and
+    /// compile consistently with the builder selection.
     pub fn wasm_engine(&mut self) -> Result<&wasmi::Engine, wafer_block::error::RuntimeError> {
         if self.wasm.engine.is_none() {
-            let engine = wasmi::Engine::new(&wasmi_config(self.wasm.fuel));
+            let engine = wasmi::Engine::new(&wasmi_config(self.wasm.fuel, self.wasm.compilation)?);
             self.wasm.engine = Some(Arc::new(engine));
         }
         Ok(self
