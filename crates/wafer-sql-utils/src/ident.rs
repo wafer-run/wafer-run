@@ -9,8 +9,8 @@ use crate::SqlBuildError;
 pub struct DynCol(pub String);
 
 impl Iden for DynCol {
-    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
-        write!(s, "{}", self.0).unwrap();
+    fn unquoted(&self) -> &str {
+        &self.0
     }
 }
 
@@ -112,8 +112,6 @@ mod tests {
     #[test]
     fn test_dyncol_iden() {
         let col = DynCol("my_col".into());
-        let mut out = String::new();
-        col.unquoted(&mut out);
-        assert_eq!(out, "my_col");
+        assert_eq!(col.unquoted(), "my_col");
     }
 }

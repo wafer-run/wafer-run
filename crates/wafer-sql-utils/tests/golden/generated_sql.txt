@@ -1,0 +1,784 @@
+### query / select_every_filter_sorted_paged [sqlite]
+sql: SELECT * FROM "users" WHERE "status" = ? AND "kind" <> ? AND "score" > ? AND "score" >= ? AND "ratio" < ? AND "ratio" <= ? AND "name" LIKE ? ESCAPE '\' AND LOWER("email") LIKE LOWER(?) ESCAPE '\' AND ("path" GLOB ?) AND "tier" IN (?, ?, ?) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = ? AND "note" = ? ORDER BY "created_at" DESC, "name" ASC, "id" ASC LIMIT ? OFFSET ?
+params: ["active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a_b%*","free","pro",3,true,"it's \"quoted\"",25,50]
+kinds: [String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String, BigUnsigned, BigUnsigned]
+collection: users
+
+### query / select_unsorted_unique_key [sqlite]
+sql: SELECT * FROM "users" ORDER BY "org_id" ASC, "id" ASC LIMIT ?
+params: [10]
+kinds: [BigUnsigned]
+collection: users
+
+### query / select_all [sqlite]
+sql: SELECT * FROM "users"
+params: []
+kinds: []
+collection: users
+
+### query / select_quoted_identifier [sqlite]
+sql: SELECT * FROM "users" WHERE "we""ird" = ? ORDER BY "or""der" ASC
+params: [1]
+kinds: [BigInt]
+collection: users
+
+### query / select_filter_tree [sqlite]
+sql: SELECT * FROM "users" ORDER BY "created_at" DESC, "name" ASC, "id" ASC
+params: []
+kinds: []
+collection: users
+
+### query / select_with_condition [sqlite]
+sql: SELECT * FROM "users" WHERE "org_id" = ? AND "org_id" = ? AND ("status" IN (?, ?) OR ("score" > ? AND "used" < "quota") OR "deleted_at" IS NULL)
+params: ["o1","o1","a","b",5]
+kinds: [String, String, String, String, BigInt]
+collection: users
+
+### query / select_columns [sqlite]
+sql: SELECT "id", "email" FROM "users" WHERE "email" LIKE ? ESCAPE '\' ORDER BY "id" ASC LIMIT ?
+params: ["%@x.io",5]
+kinds: [String, BigUnsigned]
+collection: users
+
+### query / select_zero_limit [sqlite]
+error: ZeroLimit
+
+### query / insert [sqlite]
+sql: INSERT INTO "users" ("id", "name", "count", "ratio", "enabled", "meta", "tags", "cleared") VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+params: ["r1","Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null]
+kinds: [String, String, BigInt, Double, Bool, Json, Json, String]
+collection: users
+
+### query / insert_returning [sqlite]
+sql: INSERT INTO "users" ("id", "name", "count", "ratio", "enabled", "meta", "tags", "cleared") VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *
+params: ["r1","Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null]
+kinds: [String, String, BigInt, Double, Bool, Json, Json, String]
+collection: users
+
+### query / select_by_id [sqlite]
+sql: SELECT * FROM "users" WHERE "id" = ?
+params: ["r1"]
+kinds: [String]
+collection: users
+
+### query / update_by_id [sqlite]
+sql: UPDATE "users" SET "name" = ?, "count" = ?, "ratio" = ?, "enabled" = ?, "meta" = ?, "tags" = ?, "cleared" = ? WHERE "id" = ?
+params: ["Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null,"r1"]
+kinds: [String, BigInt, Double, Bool, Json, Json, String, String]
+collection: users
+
+### query / update_by_id_returning [sqlite]
+sql: UPDATE "users" SET "name" = ?, "count" = ? WHERE "id" = ? RETURNING *
+params: ["Ann",42,"r1"]
+kinds: [String, BigInt, String]
+collection: users
+
+### query / update_where [sqlite]
+sql: UPDATE "users" SET "name" = ?, "count" = ? WHERE "status" = ? AND "kind" <> ? AND "score" > ? AND "score" >= ? AND "ratio" < ? AND "ratio" <= ? AND "name" LIKE ? ESCAPE '\' AND LOWER("email") LIKE LOWER(?) ESCAPE '\' AND ("path" GLOB ?) AND "tier" IN (?, ?, ?) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = ? AND "note" = ?
+params: ["Ann",42,"active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a_b%*","free","pro",3,true,"it's \"quoted\""]
+kinds: [String, BigInt, String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String]
+collection: users
+
+### query / increment_field_where [sqlite]
+sql: UPDATE "users" SET "count" = "count" + ? WHERE "status" = ? AND "kind" <> ? AND "score" > ?
+params: [-2,"active","bot",10]
+kinds: [BigInt, String, String, BigInt]
+collection: users
+
+### query / delete_by_id [sqlite]
+sql: DELETE FROM "users" WHERE "id" = ?
+params: ["r1"]
+kinds: [String]
+collection: users
+
+### query / delete_where [sqlite]
+sql: DELETE FROM "users" WHERE "status" = ? AND "kind" <> ? AND "score" > ? AND "score" >= ? AND "ratio" < ? AND "ratio" <= ? AND "name" LIKE ? ESCAPE '\' AND LOWER("email") LIKE LOWER(?) ESCAPE '\' AND ("path" GLOB ?) AND "tier" IN (?, ?, ?) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = ? AND "note" = ?
+params: ["active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a_b%*","free","pro",3,true,"it's \"quoted\""]
+kinds: [String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String]
+collection: users
+
+### query / delete_where_no_filters [sqlite]
+sql: DELETE FROM "users"
+params: []
+kinds: []
+collection: users
+
+### query / delete_where_returning [sqlite]
+sql: DELETE FROM "users" WHERE "status" = ? AND "kind" <> ? RETURNING *
+params: ["active","bot"]
+kinds: [String, String]
+collection: users
+
+### aggregate / count [sqlite]
+sql: SELECT COUNT(*) AS "cnt" FROM "events" WHERE "status" = ? AND "kind" <> ? AND "score" > ? AND "score" >= ? AND "ratio" < ? AND "ratio" <= ? AND "name" LIKE ? ESCAPE '\' AND LOWER("email") LIKE LOWER(?) ESCAPE '\' AND ("path" GLOB ?) AND "tier" IN (?, ?, ?) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = ? AND "note" = ?
+params: ["active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a_b%*","free","pro",3,true,"it's \"quoted\""]
+kinds: [String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String]
+collection: events
+
+### aggregate / count_unfiltered [sqlite]
+sql: SELECT COUNT(*) AS "cnt" FROM "events"
+params: []
+kinds: []
+collection: events
+
+### aggregate / count_with_condition [sqlite]
+sql: SELECT COUNT(*) AS "cnt" FROM "events" WHERE "status" = ? AND "org_id" = ? AND ("status" IN (?, ?) OR ("score" > ? AND "used" < "quota") OR "deleted_at" IS NULL)
+params: ["active","o1","a","b",5]
+kinds: [String, String, String, String, BigInt]
+collection: events
+
+### aggregate / sum [sqlite]
+sql: SELECT COALESCE(CAST(SUM("amount") AS DOUBLE PRECISION), ?) AS "total" FROM "events" WHERE "status" = ? AND "kind" <> ?
+params: [0.0,"active","bot"]
+kinds: [Double, String, String]
+collection: events
+
+### aggregate / daily_count [sqlite]
+sql: SELECT date("created_at") AS "day", COUNT(*) AS "cnt" FROM "events" WHERE "status" = ? GROUP BY date("created_at") ORDER BY "day" ASC
+params: ["active"]
+kinds: [String]
+collection: events
+
+### aggregate / avg [sqlite]
+sql: SELECT AVG("amount") AS "avg_val" FROM "events" WHERE "status" = ? AND "kind" <> ?
+params: ["active","bot"]
+kinds: [String, String]
+collection: events
+
+### aggregate / grouped_query [sqlite]
+sql: SELECT "region", COUNT(*) AS "n", CAST(SUM("amount") AS BIGINT) AS "total", COALESCE(SUM("fee"), 0) AS "fees", CAST(AVG("amount") AS DOUBLE PRECISION) AS "mean", MAX("amount") AS "hi", MIN("amount") AS "lo", COALESCE("bonus", ?) AS "bonus_or", COALESCE(SUM((CASE WHEN ("status" = ?) THEN 1 ELSE 0 END)), 0) AS "paid_count", COALESCE(SUM((CASE WHEN ("status" = ?) THEN "amount" ELSE 0 END)), 0) AS "paid_amount", COUNT(*) OVER () AS "groups", date("created_at") AS "day" FROM "orders" WHERE "org_id" = ? AND "amount" > ? GROUP BY "region", date("created_at") HAVING COUNT(*) >= ? ORDER BY "total" DESC LIMIT ? OFFSET ?
+params: [7,"paid","paid","o1",0,2,20,40]
+kinds: [BigInt, String, String, String, BigInt, BigInt, BigUnsigned, BigUnsigned]
+collection: orders
+
+### aggregate / grouped_query_minimal [sqlite]
+sql: SELECT COUNT(*) AS "n" FROM "orders"
+params: []
+kinds: []
+collection: orders
+
+### upsert / upsert [sqlite]
+sql: INSERT INTO "kv" ("id", "name", "count", "ratio", "enabled", "meta", "tags", "cleared") VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name", "count" = "excluded"."count", "meta" = "excluded"."meta"
+params: ["r1","Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null]
+kinds: [String, String, BigInt, Double, Bool, Json, Json, String]
+collection: kv
+
+### upsert / upsert_do_nothing [sqlite]
+sql: INSERT INTO "kv" ("id", "name") VALUES (?, ?) ON CONFLICT ("id") DO NOTHING
+params: ["r1","Ann"]
+kinds: [String, String]
+collection: kv
+
+### upsert / upsert_returning [sqlite]
+sql: INSERT INTO "kv" ("id", "name", "count") VALUES (?, ?, ?) ON CONFLICT ("id", "name") DO UPDATE SET "count" = "excluded"."count" RETURNING *
+params: ["r1","Ann",42]
+kinds: [String, String, BigInt]
+collection: kv
+
+### upsert / windowed_counter [sqlite]
+sql: INSERT INTO "rate_limits" ("id", "key", "count", "window_start", "created_at", "updated_at") VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT ("key") DO UPDATE SET "count" = (CASE WHEN ("rate_limits"."window_start" < ?) THEN ? ELSE "rate_limits"."count" + ? END), "window_start" = (CASE WHEN ("rate_limits"."window_start" < ?) THEN ? ELSE "rate_limits"."window_start" END), "updated_at" = ?
+params: ["rl1","ip:1.2.3.4",1,1000,"2026-10-27T00:00:00Z","2026-10-27T00:00:00Z",940,1,1,940,1000,"2026-10-27T00:00:00Z"]
+kinds: [String, String, BigInt, BigInt, String, String, BigInt, BigInt, Int, BigInt, BigInt, String]
+collection: rate_limits
+
+### upsert / windowed_counter_returning [sqlite]
+sql: INSERT INTO "rate_limits" ("id", "key", "count", "window_start", "updated_at") VALUES (?, ?, ?, ?, ?) ON CONFLICT ("key") DO UPDATE SET "count" = (CASE WHEN ("rate_limits"."window_start" < ?) THEN ? ELSE "rate_limits"."count" + ? END), "window_start" = (CASE WHEN ("rate_limits"."window_start" < ?) THEN ? ELSE "rate_limits"."window_start" END), "updated_at" = ? RETURNING *
+params: ["rl1","ip:1.2.3.4",1,1000,"2026-10-27T00:00:00Z",940,1,1,940,1000,"2026-10-27T00:00:00Z"]
+kinds: [String, String, BigInt, BigInt, String, BigInt, BigInt, Int, BigInt, BigInt, String]
+collection: rate_limits
+
+### guard / probe [sqlite]
+sql: SELECT (CASE WHEN ((SELECT COUNT(*) FROM "files" WHERE "org_id" = ?) < ?) THEN 1 ELSE 0 END) AS "g0", (CASE WHEN ((SELECT COALESCE(SUM("bytes"), ?) FROM "files" WHERE "org_id" = ? AND "deleted_at" IS NULL) + ? <= ?) THEN 1 ELSE 0 END) AS "g1"
+params: ["o1",10,0,"o1",500,4096]
+kinds: [String, BigInt, BigInt, String, BigInt, BigInt]
+collection: files
+
+### guard / insert_guarded [sqlite]
+sql: INSERT INTO "files" ("id", "name", "count") SELECT ?, ?, ? WHERE (SELECT COUNT(*) FROM "files" WHERE "org_id" = ?) < ? AND (SELECT COALESCE(SUM("bytes"), ?) FROM "files" WHERE "org_id" = ? AND "deleted_at" IS NULL) + ? <= ? RETURNING *
+params: ["r1","Ann",42,"o1",10,0,"o1",500,4096]
+kinds: [String, String, BigInt, String, BigInt, BigInt, String, BigInt, BigInt]
+collection: files
+
+### guard / update_guarded [sqlite]
+sql: UPDATE "files" SET "name" = ?, "count" = ? WHERE "id" = ? AND (SELECT COUNT(*) FROM "files" WHERE "org_id" = ?) < ? AND (SELECT COALESCE(SUM("bytes"), ?) FROM "files" WHERE "org_id" = ? AND "deleted_at" IS NULL) + ? <= ?
+params: ["Ann",42,"r1","o1",10,0,"o1",500,4096]
+kinds: [String, BigInt, String, String, BigInt, BigInt, String, BigInt, BigInt]
+collection: files
+
+### ddl / create_table [sqlite]
+sql: CREATE TABLE IF NOT EXISTS "posts" (
+    "id" TEXT PRIMARY KEY,
+    "owner_id" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "views" INTEGER NOT NULL DEFAULT 0,
+    "draft" INTEGER NOT NULL,
+    "meta" JSON TEXT NOT NULL,
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY ("owner_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE SET NULL
+)
+params: []
+kinds: []
+collection: posts
+
+### ddl / create_index [sqlite]
+sql: CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_owner_id_title ON "posts"("owner_id", "title")
+params: []
+kinds: []
+collection: posts
+
+### ddl / fk_index_0 [sqlite]
+sql: CREATE INDEX IF NOT EXISTS idx_posts_owner_id ON "posts"("owner_id")
+params: []
+kinds: []
+collection: posts
+
+### ddl / add_column [sqlite]
+sql: ALTER TABLE "posts" ADD COLUMN "likes" INTEGER NOT NULL DEFAULT 0
+params: []
+kinds: []
+collection: posts
+
+### ddl / add_column_for_value [sqlite]
+sql: ALTER TABLE "posts" ADD COLUMN "score" TEXT
+params: []
+kinds: []
+collection: posts
+
+### ddl / drop_table [sqlite]
+sql: DROP TABLE IF EXISTS "posts"
+params: []
+kinds: []
+collection: posts
+
+### introspect / list_tables [sqlite]
+sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name
+params: []
+
+### introspect / list_tables_like [sqlite]
+sql: SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ORDER BY name
+params: ["app__%"]
+
+### introspect / table_exists [sqlite]
+sql: SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present
+params: ["users"]
+
+### introspect / list_columns [sqlite]
+sql: SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY cid
+params: ["users"]
+
+### introspect / list_primary_key [sqlite]
+sql: SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk
+params: ["users"]
+
+### introspect / id_policy [sqlite]
+sql: SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) THEN 3 WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk = 1 AND name = 'id' COLLATE NOCASE) AND NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk > 1) AND NOT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE origin = 'pk') THEN 1 WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = 'id' COLLATE NOCASE AND upper(type) LIKE '%INT%') THEN 2 ELSE 0 END AS id_policy
+params: ["users"]
+
+### introspect / table_info [sqlite]
+sql: PRAGMA table_info("users")
+params: []
+
+### introspect / table_row_count [sqlite]
+sql: SELECT COUNT(*) AS cnt FROM "users"
+params: []
+
+### query / select_every_filter_sorted_paged [postgres]
+sql: SELECT * FROM "users" WHERE "status" = $1 AND "kind" <> $2 AND "score" > $3 AND "score" >= $4 AND "ratio" < $5 AND "ratio" <= $6 AND "name" LIKE $7 ESCAPE E'\\' AND LOWER("email") LIKE LOWER($8) ESCAPE E'\\' AND "path" LIKE $9 ESCAPE E'\\' AND "tier" IN ($10, $11, $12) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = $13 AND "note" = $14 ORDER BY "created_at" DESC, "name" ASC, "id" ASC LIMIT $15 OFFSET $16
+params: ["active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a\\_b\\%%","free","pro",3,true,"it's \"quoted\"",25,50]
+kinds: [String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String, BigUnsigned, BigUnsigned]
+collection: users
+
+### query / select_unsorted_unique_key [postgres]
+sql: SELECT * FROM "users" ORDER BY "org_id" ASC, "id" ASC LIMIT $1
+params: [10]
+kinds: [BigUnsigned]
+collection: users
+
+### query / select_all [postgres]
+sql: SELECT * FROM "users"
+params: []
+kinds: []
+collection: users
+
+### query / select_quoted_identifier [postgres]
+sql: SELECT * FROM "users" WHERE "we""ird" = $1 ORDER BY "or""der" ASC
+params: [1]
+kinds: [BigInt]
+collection: users
+
+### query / select_filter_tree [postgres]
+sql: SELECT * FROM "users" ORDER BY "created_at" DESC, "name" ASC, "id" ASC
+params: []
+kinds: []
+collection: users
+
+### query / select_with_condition [postgres]
+sql: SELECT * FROM "users" WHERE "org_id" = $1 AND "org_id" = $2 AND ("status" IN ($3, $4) OR ("score" > $5 AND "used" < "quota") OR "deleted_at" IS NULL)
+params: ["o1","o1","a","b",5]
+kinds: [String, String, String, String, BigInt]
+collection: users
+
+### query / select_columns [postgres]
+sql: SELECT "id", "email" FROM "users" WHERE "email" LIKE $1 ESCAPE E'\\' ORDER BY "id" ASC LIMIT $2
+params: ["%@x.io",5]
+kinds: [String, BigUnsigned]
+collection: users
+
+### query / select_zero_limit [postgres]
+error: ZeroLimit
+
+### query / insert [postgres]
+sql: INSERT INTO "users" ("id", "name", "count", "ratio", "enabled", "meta", "tags", "cleared") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+params: ["r1","Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null]
+kinds: [String, String, BigInt, Double, Bool, Json, Json, String]
+collection: users
+
+### query / insert_returning [postgres]
+sql: INSERT INTO "users" ("id", "name", "count", "ratio", "enabled", "meta", "tags", "cleared") VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *
+params: ["r1","Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null]
+kinds: [String, String, BigInt, Double, Bool, Json, Json, String]
+collection: users
+
+### query / select_by_id [postgres]
+sql: SELECT * FROM "users" WHERE "id" = $1
+params: ["r1"]
+kinds: [String]
+collection: users
+
+### query / update_by_id [postgres]
+sql: UPDATE "users" SET "name" = $1, "count" = $2, "ratio" = $3, "enabled" = $4, "meta" = $5, "tags" = $6, "cleared" = $7 WHERE "id" = $8
+params: ["Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null,"r1"]
+kinds: [String, BigInt, Double, Bool, Json, Json, String, String]
+collection: users
+
+### query / update_by_id_returning [postgres]
+sql: UPDATE "users" SET "name" = $1, "count" = $2 WHERE "id" = $3 RETURNING *
+params: ["Ann",42,"r1"]
+kinds: [String, BigInt, String]
+collection: users
+
+### query / update_where [postgres]
+sql: UPDATE "users" SET "name" = $1, "count" = $2 WHERE "status" = $3 AND "kind" <> $4 AND "score" > $5 AND "score" >= $6 AND "ratio" < $7 AND "ratio" <= $8 AND "name" LIKE $9 ESCAPE E'\\' AND LOWER("email") LIKE LOWER($10) ESCAPE E'\\' AND "path" LIKE $11 ESCAPE E'\\' AND "tier" IN ($12, $13, $14) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = $15 AND "note" = $16
+params: ["Ann",42,"active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a\\_b\\%%","free","pro",3,true,"it's \"quoted\""]
+kinds: [String, BigInt, String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String]
+collection: users
+
+### query / increment_field_where [postgres]
+sql: UPDATE "users" SET "count" = "count" + $1 WHERE "status" = $2 AND "kind" <> $3 AND "score" > $4
+params: [-2,"active","bot",10]
+kinds: [BigInt, String, String, BigInt]
+collection: users
+
+### query / delete_by_id [postgres]
+sql: DELETE FROM "users" WHERE "id" = $1
+params: ["r1"]
+kinds: [String]
+collection: users
+
+### query / delete_where [postgres]
+sql: DELETE FROM "users" WHERE "status" = $1 AND "kind" <> $2 AND "score" > $3 AND "score" >= $4 AND "ratio" < $5 AND "ratio" <= $6 AND "name" LIKE $7 ESCAPE E'\\' AND LOWER("email") LIKE LOWER($8) ESCAPE E'\\' AND "path" LIKE $9 ESCAPE E'\\' AND "tier" IN ($10, $11, $12) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = $13 AND "note" = $14
+params: ["active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a\\_b\\%%","free","pro",3,true,"it's \"quoted\""]
+kinds: [String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String]
+collection: users
+
+### query / delete_where_no_filters [postgres]
+sql: DELETE FROM "users"
+params: []
+kinds: []
+collection: users
+
+### query / delete_where_returning [postgres]
+sql: DELETE FROM "users" WHERE "status" = $1 AND "kind" <> $2 RETURNING *
+params: ["active","bot"]
+kinds: [String, String]
+collection: users
+
+### aggregate / count [postgres]
+sql: SELECT COUNT(*) AS "cnt" FROM "events" WHERE "status" = $1 AND "kind" <> $2 AND "score" > $3 AND "score" >= $4 AND "ratio" < $5 AND "ratio" <= $6 AND "name" LIKE $7 ESCAPE E'\\' AND LOWER("email") LIKE LOWER($8) ESCAPE E'\\' AND "path" LIKE $9 ESCAPE E'\\' AND "tier" IN ($10, $11, $12) AND "deleted_at" IS NULL AND "verified_at" IS NOT NULL AND "enabled" = $13 AND "note" = $14
+params: ["active","bot",10,-3,0.75,1,"a%_b","%Ex\\_ample\\%%","/a\\_b\\%%","free","pro",3,true,"it's \"quoted\""]
+kinds: [String, String, BigInt, BigInt, Double, BigInt, String, String, String, String, String, BigInt, Bool, String]
+collection: events
+
+### aggregate / count_unfiltered [postgres]
+sql: SELECT COUNT(*) AS "cnt" FROM "events"
+params: []
+kinds: []
+collection: events
+
+### aggregate / count_with_condition [postgres]
+sql: SELECT COUNT(*) AS "cnt" FROM "events" WHERE "status" = $1 AND "org_id" = $2 AND ("status" IN ($3, $4) OR ("score" > $5 AND "used" < "quota") OR "deleted_at" IS NULL)
+params: ["active","o1","a","b",5]
+kinds: [String, String, String, String, BigInt]
+collection: events
+
+### aggregate / sum [postgres]
+sql: SELECT COALESCE(CAST(SUM("amount") AS DOUBLE PRECISION), $1) AS "total" FROM "events" WHERE "status" = $2 AND "kind" <> $3
+params: [0.0,"active","bot"]
+kinds: [Double, String, String]
+collection: events
+
+### aggregate / daily_count [postgres]
+sql: SELECT to_char(CAST("created_at" AS DATE), 'YYYY-MM-DD') AS "day", COUNT(*) AS "cnt" FROM "events" WHERE "status" = $1 GROUP BY to_char(CAST("created_at" AS DATE), 'YYYY-MM-DD') ORDER BY "day" ASC
+params: ["active"]
+kinds: [String]
+collection: events
+
+### aggregate / avg [postgres]
+sql: SELECT AVG("amount") AS "avg_val" FROM "events" WHERE "status" = $1 AND "kind" <> $2
+params: ["active","bot"]
+kinds: [String, String]
+collection: events
+
+### aggregate / grouped_query [postgres]
+sql: SELECT "region", COUNT(*) AS "n", CAST(SUM("amount") AS BIGINT) AS "total", COALESCE(SUM("fee"), 0) AS "fees", CAST(AVG("amount") AS DOUBLE PRECISION) AS "mean", MAX("amount") AS "hi", MIN("amount") AS "lo", COALESCE("bonus", $1) AS "bonus_or", COALESCE(SUM((CASE WHEN ("status" = $2) THEN 1 ELSE 0 END)), 0) AS "paid_count", COALESCE(SUM((CASE WHEN ("status" = $3) THEN "amount" ELSE 0 END)), 0) AS "paid_amount", COUNT(*) OVER () AS "groups", to_char(CAST("created_at" AS DATE), 'YYYY-MM-DD') AS "day" FROM "orders" WHERE "org_id" = $4 AND "amount" > $5 GROUP BY "region", to_char(CAST("created_at" AS DATE), 'YYYY-MM-DD') HAVING COUNT(*) >= $6 ORDER BY "total" DESC LIMIT $7 OFFSET $8
+params: [7,"paid","paid","o1",0,2,20,40]
+kinds: [BigInt, String, String, String, BigInt, BigInt, BigUnsigned, BigUnsigned]
+collection: orders
+
+### aggregate / grouped_query_minimal [postgres]
+sql: SELECT COUNT(*) AS "n" FROM "orders"
+params: []
+kinds: []
+collection: orders
+
+### upsert / upsert [postgres]
+sql: INSERT INTO "kv" ("id", "name", "count", "ratio", "enabled", "meta", "tags", "cleared") VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT ("id") DO UPDATE SET "name" = "excluded"."name", "count" = "excluded"."count", "meta" = "excluded"."meta"
+params: ["r1","Ann",42,0.5,false,{"k":[1,"v"]},["x","y"],null]
+kinds: [String, String, BigInt, Double, Bool, Json, Json, String]
+collection: kv
+
+### upsert / upsert_do_nothing [postgres]
+sql: INSERT INTO "kv" ("id", "name") VALUES ($1, $2) ON CONFLICT ("id") DO NOTHING
+params: ["r1","Ann"]
+kinds: [String, String]
+collection: kv
+
+### upsert / upsert_returning [postgres]
+sql: INSERT INTO "kv" ("id", "name", "count") VALUES ($1, $2, $3) ON CONFLICT ("id", "name") DO UPDATE SET "count" = "excluded"."count" RETURNING *
+params: ["r1","Ann",42]
+kinds: [String, String, BigInt]
+collection: kv
+
+### upsert / windowed_counter [postgres]
+sql: INSERT INTO "rate_limits" ("id", "key", "count", "window_start", "created_at", "updated_at") VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT ("key") DO UPDATE SET "count" = (CASE WHEN ("rate_limits"."window_start" < $7) THEN $8 ELSE "rate_limits"."count" + $9 END), "window_start" = (CASE WHEN ("rate_limits"."window_start" < $10) THEN $11 ELSE "rate_limits"."window_start" END), "updated_at" = $12
+params: ["rl1","ip:1.2.3.4",1,1000,"2026-10-27T00:00:00Z","2026-10-27T00:00:00Z",940,1,1,940,1000,"2026-10-27T00:00:00Z"]
+kinds: [String, String, BigInt, BigInt, String, String, BigInt, BigInt, Int, BigInt, BigInt, String]
+collection: rate_limits
+
+### upsert / windowed_counter_returning [postgres]
+sql: INSERT INTO "rate_limits" ("id", "key", "count", "window_start", "updated_at") VALUES ($1, $2, $3, $4, $5) ON CONFLICT ("key") DO UPDATE SET "count" = (CASE WHEN ("rate_limits"."window_start" < $6) THEN $7 ELSE "rate_limits"."count" + $8 END), "window_start" = (CASE WHEN ("rate_limits"."window_start" < $9) THEN $10 ELSE "rate_limits"."window_start" END), "updated_at" = $11 RETURNING *
+params: ["rl1","ip:1.2.3.4",1,1000,"2026-10-27T00:00:00Z",940,1,1,940,1000,"2026-10-27T00:00:00Z"]
+kinds: [String, String, BigInt, BigInt, String, BigInt, BigInt, Int, BigInt, BigInt, String]
+collection: rate_limits
+
+### guard / probe [postgres]
+sql: SELECT (CASE WHEN ((SELECT COUNT(*) FROM "files" WHERE "org_id" = $1) < $2) THEN 1 ELSE 0 END) AS "g0", (CASE WHEN ((SELECT COALESCE(SUM("bytes"), $3) FROM "files" WHERE "org_id" = $4 AND "deleted_at" IS NULL) + $5 <= $6) THEN 1 ELSE 0 END) AS "g1"
+params: ["o1",10,0,"o1",500,4096]
+kinds: [String, BigInt, BigInt, String, BigInt, BigInt]
+collection: files
+
+### guard / insert_guarded [postgres]
+sql: INSERT INTO "files" ("id", "name", "count") SELECT $1, $2, $3 WHERE (SELECT COUNT(*) FROM "files" WHERE "org_id" = $4) < $5 AND (SELECT COALESCE(SUM("bytes"), $6) FROM "files" WHERE "org_id" = $7 AND "deleted_at" IS NULL) + $8 <= $9 RETURNING *
+params: ["r1","Ann",42,"o1",10,0,"o1",500,4096]
+kinds: [String, String, BigInt, String, BigInt, BigInt, String, BigInt, BigInt]
+collection: files
+
+### guard / update_guarded [postgres]
+sql: UPDATE "files" SET "name" = $1, "count" = $2 WHERE "id" = $3 AND (SELECT COUNT(*) FROM "files" WHERE "org_id" = $4) < $5 AND (SELECT COALESCE(SUM("bytes"), $6) FROM "files" WHERE "org_id" = $7 AND "deleted_at" IS NULL) + $8 <= $9
+params: ["Ann",42,"r1","o1",10,0,"o1",500,4096]
+kinds: [String, BigInt, String, String, BigInt, BigInt, String, BigInt, BigInt]
+collection: files
+
+### guard / preamble_0 [postgres]
+sql: SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+params: []
+kinds: []
+collection: files
+
+### guard / preamble_1 [postgres]
+sql: SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
+params: ["wafer.guarded_write","files"]
+kinds: [String, String]
+collection: files
+
+### ddl / create_table [postgres]
+sql: CREATE TABLE IF NOT EXISTS "posts" (
+    "id" TEXT PRIMARY KEY,
+    "owner_id" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "views" INTEGER NOT NULL DEFAULT 0,
+    "draft" BOOLEAN NOT NULL,
+    "meta" JSONB NOT NULL,
+    "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY ("owner_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE SET NULL
+)
+params: []
+kinds: []
+collection: posts
+
+### ddl / create_index [postgres]
+sql: CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_owner_id_title ON "posts"("owner_id", "title")
+params: []
+kinds: []
+collection: posts
+
+### ddl / fk_index_0 [postgres]
+sql: CREATE INDEX IF NOT EXISTS idx_posts_owner_id ON "posts"("owner_id")
+params: []
+kinds: []
+collection: posts
+
+### ddl / add_column [postgres]
+sql: ALTER TABLE "posts" ADD COLUMN "likes" INTEGER NOT NULL DEFAULT 0
+params: []
+kinds: []
+collection: posts
+
+### ddl / add_column_for_value [postgres]
+sql: ALTER TABLE "posts" ADD COLUMN IF NOT EXISTS "score" DOUBLE PRECISION
+params: []
+kinds: []
+collection: posts
+
+### ddl / drop_table [postgres]
+sql: DROP TABLE IF EXISTS "posts"
+params: []
+kinds: []
+collection: posts
+
+### introspect / list_tables [postgres]
+sql: SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','f','v') AND pg_catalog.pg_table_is_visible(c.oid) AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY c.relname
+params: []
+
+### introspect / list_tables_like [postgres]
+sql: SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','f','v') AND pg_catalog.pg_table_is_visible(c.oid) AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relname LIKE $1 ORDER BY c.relname
+params: ["app__%"]
+
+### introspect / table_exists [postgres]
+sql: SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v')) AS present
+params: ["users"]
+
+### introspect / list_columns [postgres]
+sql: SELECT a.attname::text AS name, pg_catalog.format_type(a.atttypid, NULL) AS decl_type FROM pg_catalog.pg_attribute a WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum
+params: ["users"]
+
+### introspect / list_primary_key [postgres]
+sql: SELECT a.attname::text AS name FROM pg_catalog.pg_index i CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) JOIN pg_catalog.pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum WHERE i.indisprimary AND k.ord <= i.indnkeyatts AND i.indrelid = to_regclass(quote_ident($1)) ORDER BY k.ord
+params: ["users"]
+
+### introspect / id_policy [postgres]
+sql: SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v')) THEN 3::int8 WHEN a.attidentity <> '' OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' THEN 1::int8 WHEN a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype) THEN 2::int8 ELSE 0::int8 END AS id_policy FROM (SELECT 1) AS one LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' AND NOT a.attisdropped LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+params: ["users"]
+
+### introspect / table_info [postgres]
+sql: SELECT a.attname::text AS column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum
+params: ["users"]
+
+### introspect / table_row_count [postgres]
+sql: SELECT COUNT(*) AS cnt FROM "users"
+params: []
+
+### vector / create_vec_and_meta [sqlite]
+sql: CREATE VIRTUAL TABLE docs_vec USING vec0(embedding float[384]);
+CREATE TABLE docs_meta(
+id TEXT PRIMARY KEY,
+rowid INTEGER NOT NULL,
+metadata TEXT,
+text TEXT
+);
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / create_fts [sqlite]
+sql: CREATE VIRTUAL TABLE docs_fts USING fts5(id UNINDEXED, text);
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / drop_all_0 [sqlite]
+sql: DROP TABLE IF EXISTS docs_vec;
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / drop_all_1 [sqlite]
+sql: DROP TABLE IF EXISTS docs_fts;
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / drop_all_2 [sqlite]
+sql: DROP TABLE IF EXISTS docs_meta;
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / select_rowid_by_id [sqlite]
+sql: SELECT rowid FROM docs_meta WHERE id = ?1
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / insert_meta_autoinc [sqlite]
+sql: INSERT INTO docs_meta(id, rowid, metadata, text) VALUES (?1, (SELECT COALESCE(MAX(rowid), 0) + 1 FROM docs_meta), ?2, ?3)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / update_meta [sqlite]
+sql: UPDATE docs_meta SET metadata = ?1, text = ?2 WHERE id = ?3
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / count_meta [sqlite]
+sql: SELECT COUNT(*) FROM docs_meta
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / select_metadata_in [sqlite]
+sql: SELECT id, metadata FROM docs_meta WHERE id IN (?,?,?)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / select_ids_by_metadata [sqlite]
+sql: SELECT id FROM docs_meta WHERE json_extract(metadata, ?1) = ?2 AND json_extract(metadata, ?3) = ?4
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / select_rowid_in [sqlite]
+sql: SELECT rowid FROM docs_meta WHERE id IN (?,?)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / delete_meta_in [sqlite]
+sql: DELETE FROM docs_meta WHERE id IN (?,?)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / insert_vec [sqlite]
+sql: INSERT INTO docs_vec(rowid, embedding) VALUES (?1, ?2)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / delete_vec_by_rowid [sqlite]
+sql: DELETE FROM docs_vec WHERE rowid = ?1
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / insert_fts [sqlite]
+sql: INSERT INTO docs_fts(id, text) VALUES (?1, ?2)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / delete_fts_by_id [sqlite]
+sql: DELETE FROM docs_fts WHERE id = ?1
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / delete_fts_in [sqlite]
+sql: DELETE FROM docs_fts WHERE id IN (?,?)
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / vec_knn_select [sqlite]
+sql: SELECT m.id, v.distance FROM (SELECT rowid, distance FROM docs_vec WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2) v JOIN docs_meta m ON m.rowid = v.rowid ORDER BY v.distance
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / fts_bm25_select [sqlite]
+sql: SELECT id, bm25(docs_fts) AS score FROM docs_fts WHERE docs_fts MATCH ?1 ORDER BY score LIMIT ?2
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / vec_knn_select_filtered [sqlite]
+sql: SELECT m.id, v.distance FROM (SELECT rowid, distance FROM docs_vec WHERE embedding MATCH ?1 AND rowid IN (SELECT rowid FROM docs_meta WHERE wafer_vector_metadata_matches(metadata, ?3)) ORDER BY distance LIMIT ?2) v JOIN docs_meta m ON m.rowid = v.rowid ORDER BY v.distance
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / fts_bm25_select_filtered [sqlite]
+sql: SELECT id, bm25(docs_fts) AS score FROM docs_fts WHERE docs_fts MATCH ?1 AND id IN (SELECT id FROM docs_meta WHERE wafer_vector_metadata_matches(metadata, ?3)) ORDER BY score LIMIT ?2
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_0 [sqlite]
+sql: CREATE VIRTUAL TABLE "docs-rename_vec" USING embedding float[384]
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_1 [sqlite]
+sql: INSERT INTO "docs-rename_vec"(rowid, "embedding") SELECT rowid, "embedding" FROM "Docs_vec"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_2 [sqlite]
+sql: DROP TABLE "Docs_vec"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_3 [sqlite]
+sql: CREATE VIRTUAL TABLE "docs_vec" USING embedding float[384]
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_4 [sqlite]
+sql: INSERT INTO "docs_vec"(rowid, "embedding") SELECT rowid, "embedding" FROM "docs-rename_vec"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_5 [sqlite]
+sql: DROP TABLE "docs-rename_vec"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_6 [sqlite]
+sql: ALTER TABLE "Docs_meta" RENAME TO "docs-rename_meta"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_7 [sqlite]
+sql: ALTER TABLE "docs-rename_meta" RENAME TO "docs_meta"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_8 [sqlite]
+sql: ALTER TABLE "Docs_fts" RENAME TO "docs-rename_fts"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / rename_9 [sqlite]
+sql: ALTER TABLE "docs-rename_fts" RENAME TO "docs_fts"
+params: []
+kinds: []
+collection: docs_meta
+
+### vector / list_meta_tables [sqlite]
+sql: SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ESCAPE '\' ORDER BY name | app\_%\_meta
+params: []
+

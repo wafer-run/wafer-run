@@ -420,7 +420,8 @@ fn write_outcome_to_wire(outcome: service::WriteOutcome) -> wire::BatchWriteResu
 /// `DOUBLE PRECISION` for `Avg` — and anything else is `InvalidArgument`.
 /// `CaseWhenSum.when` and `SumWhere.when` are run through
 /// [`convert_filter_tree`] for depth/node bounds + operator validation (and
-/// rejected if empty); their `!Send` `CASE` predicates are built server-side in
+/// rejected if empty); their `CASE` predicates are built server-side, for the
+/// backend's dialect, in
 /// [`AggregateSpec::into_grouped_config`], so the spec carries the validated
 /// [`FilterTree`] forests, not sea-query expressions. `filters` are flattened
 /// to AND-of-leaves (a group or a column-to-column leaf → `InvalidArgument`,
@@ -567,7 +568,8 @@ pub fn to_aggregate_spec(
 }
 
 /// Bound and validate a conditional aggregate's `when` forest, rejecting an
-/// empty one. The `SimpleExpr` itself is built server-side (it is `!Send`).
+/// empty one. The `CASE` expression itself is built server-side, for the
+/// backend's dialect.
 fn convert_when(when: Vec<wire::FilterNode>, kind: &str) -> Result<Vec<FilterTree>, WaferError> {
     let tree = convert_filter_tree(when)?;
     if tree.is_empty() {

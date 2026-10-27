@@ -1,4 +1,4 @@
-use sea_query::{InsertStatement, OnConflict, Query, SimpleExpr};
+use sea_query::{Expr, ExprTrait, InsertStatement, OnConflict, Query};
 
 use crate::{
     ident::{validate_ident, DynCol},
@@ -58,7 +58,7 @@ fn upsert_query(
     query.into_table(DynCol(table.into()));
 
     let cols: Vec<DynCol> = data.iter().map(|(k, _)| DynCol(k.clone())).collect();
-    let vals: Vec<SimpleExpr> = data
+    let vals: Vec<Expr> = data
         .iter()
         .map(|(_, v)| json_to_sea_value(v).into())
         .collect();
@@ -275,10 +275,9 @@ fn windowed_counter_upsert_query(
     query.into_table(DynCol(table.into()));
     query.columns(column_names.iter().map(|name| DynCol((*name).into())));
 
-    let stamp = || -> SimpleExpr {
-        json_to_sea_value(&serde_json::Value::String(stamped_at.to_string())).into()
-    };
-    let mut values: Vec<SimpleExpr> = vec![
+    let stamp =
+        || -> Expr { json_to_sea_value(&serde_json::Value::String(stamped_at.to_string())).into() };
+    let mut values: Vec<Expr> = vec![
         json_to_sea_value(&serde_json::Value::String(id.to_string())).into(),
         json_to_sea_value(&serde_json::Value::String(conflict_value.to_string())).into(),
         json_to_sea_value(&serde_json::json!(1i64)).into(),
@@ -300,19 +299,19 @@ fn windowed_counter_upsert_query(
     let stored = |field: &str| sea_query::Expr::col((DynCol(table.into()), DynCol(field.into())));
 
     // {count_field} = CASE WHEN {table}.{window_field} < ? THEN 1 ELSE {table}.{count_field} + 1 END
-    let count_case: SimpleExpr = CaseStatement::new()
+    let count_case: Expr = CaseStatement::new()
         .case(
             stored(window_field).lt(window_cutoff),
-            SimpleExpr::Value(1i64.into()),
+            Expr::Value(1i64.into()),
         )
         .finally(stored(count_field).add(1))
         .into();
 
     // {window_field} = CASE WHEN {table}.{window_field} < ? THEN ? ELSE {table}.{window_field} END
-    let window_case: SimpleExpr = CaseStatement::new()
+    let window_case: Expr = CaseStatement::new()
         .case(
             stored(window_field).lt(window_cutoff),
-            SimpleExpr::Value(now.into()),
+            Expr::Value(now.into()),
         )
         .finally(stored(window_field))
         .into();
