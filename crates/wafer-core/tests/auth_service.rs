@@ -151,13 +151,18 @@ impl ScriptedAuth {
 
 #[async_trait::async_trait]
 impl AuthService for ScriptedAuth {
-    async fn require_user(&self, _msg: &wafer_block::Message) -> Result<UserId, AuthError> {
+    async fn require_user(
+        &self,
+        _ctx: &dyn wafer_block::context::Context,
+        _msg: &wafer_block::Message,
+    ) -> Result<UserId, AuthError> {
         self.record();
         Ok(UserId("bearer".into()))
     }
 
     async fn require_token(
         &self,
+        _ctx: &dyn wafer_block::context::Context,
         _msg: &wafer_block::Message,
         _scope: wafer_core::interfaces::auth::service::TokenScope,
     ) -> Result<UserId, AuthError> {
@@ -167,6 +172,7 @@ impl AuthService for ScriptedAuth {
 
     async fn require_role(
         &self,
+        _ctx: &dyn wafer_block::context::Context,
         _msg: &wafer_block::Message,
         _role: Role,
     ) -> Result<UserId, AuthError> {
@@ -176,6 +182,7 @@ impl AuthService for ScriptedAuth {
 
     async fn verify_org_admin(
         &self,
+        _ctx: &dyn wafer_block::context::Context,
         _user: UserId,
         _provider: &str,
         _org_ref: &str,
@@ -185,7 +192,11 @@ impl AuthService for ScriptedAuth {
         ))
     }
 
-    async fn user_profile(&self, _user: UserId) -> Result<UserProfile, AuthError> {
+    async fn user_profile(
+        &self,
+        _ctx: &dyn wafer_block::context::Context,
+        _user: UserId,
+    ) -> Result<UserProfile, AuthError> {
         self.record();
         match &self.response {
             ScriptedAuthResponse::Success(user) => Ok(user.clone()),

@@ -21,8 +21,26 @@
 //! Both sides use the SAME types below for both codecs — `serde_bytes`
 //! fields encode as integer arrays under JSON and as bin under
 //! MessagePack, so there is no per-version type surface to drift.
+//!
+//! # Who negotiates
+//!
+//! [`CoreCodec`] is the single implementation of the negotiation and of the
+//! frame codec. Two hosts load guests, and both call it:
+//!
+//! - the runtime's wasmi loader (`wafer-run`'s `wasm::wasmi_loader`), for
+//!   every `__wafer_info`, `__wafer_handle` and `__wafer_lifecycle` call;
+//! - the `wafer` CLI (`wafer-cli`'s `validate` for `wafer build` /
+//!   `wafer package`, and `test_runner` for `wafer test`).
+//!
+//! Each host picks the codec from the module's exports
+//! ([`CoreCodec::from_version_export`]), calls `__wafer_abi_version` after
+//! instantiation when it is exported, and refuses a version it does not
+//! speak ([`CoreCodec::check_declared`]), so the CLI accepts and decodes
+//! exactly the core-ABI frames the runtime does. The host-call codec
+//! ([`HOST_CODEC_EXPORT`]) is a separate negotiation that only the runtime
+//! performs; the CLI does not probe it.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::core_types::{Message, MetaEntry, WaferError};
 
@@ -59,6 +77,79 @@ pub const HOST_CODEC_JSON: i32 = 1;
 /// `__wafer_host_codec` return value meaning the guest speaks MessagePack host-call
 /// payloads — the same as the implicit default when the export is absent.
 pub const HOST_CODEC_RMP: i32 = 2;
+
+/// Wire codec of the core (non-streaming) guest ABI: the `__wafer_info`,
+/// `__wafer_handle` and `__wafer_lifecycle` frames. See the module doc for
+/// the two versions and who negotiates them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CoreCodec {
+    /// v1: JSON frames, spoken by guests built before the
+    /// [`ABI_VERSION_EXPORT`] export existed. Supported indefinitely so
+    /// already-shipped wasm artifacts keep working.
+    V1Json,
+    /// v2: MessagePack frames via [`crate::codec`], bodies as bin.
+    V2Rmp,
+}
+
+/// A guest declared a core-ABI version this host does not speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbiVersionError {
+    /// The value the guest's [`ABI_VERSION_EXPORT`] returned.
+    pub declared: i32,
+}
+
+impl std::fmt::Display for AbiVersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "guest declares core ABI v{}; this host supports v1 (implicit) and v{ABI_VERSION}",
+            self.declared
+        )
+    }
+}
+
+impl std::error::Error for AbiVersionError {}
+
+impl CoreCodec {
+    /// The codec a module speaks, from whether it exports
+    /// [`ABI_VERSION_EXPORT`] as a function. Exporting it means the versioned
+    /// (v2+) ABI; the host must then call it after instantiation and pass the
+    /// value to [`CoreCodec::check_declared`], so a future v3 guest fails loud
+    /// instead of being mis-decoded as v2. Absence means v1.
+    pub fn from_version_export(present: bool) -> Self {
+        if present {
+            CoreCodec::V2Rmp
+        } else {
+            CoreCodec::V1Json
+        }
+    }
+
+    /// Accept the version a guest's [`ABI_VERSION_EXPORT`] returned only if
+    /// this host speaks it, i.e. it is [`ABI_VERSION`].
+    pub fn check_declared(version: i32) -> Result<(), AbiVersionError> {
+        if version == ABI_VERSION {
+            Ok(())
+        } else {
+            Err(AbiVersionError { declared: version })
+        }
+    }
+
+    /// Encode a core-ABI frame with this codec.
+    pub fn encode<T: Serialize + ?Sized>(self, value: &T) -> Result<Vec<u8>, String> {
+        match self {
+            CoreCodec::V1Json => serde_json::to_vec(value).map_err(|e| e.to_string()),
+            CoreCodec::V2Rmp => crate::codec::encode(value).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Decode a core-ABI frame with this codec.
+    pub fn decode<T: DeserializeOwned>(self, bytes: &[u8]) -> Result<T, String> {
+        match self {
+            CoreCodec::V1Json => serde_json::from_slice(bytes).map_err(|e| e.to_string()),
+            CoreCodec::V2Rmp => crate::codec::decode(bytes).map_err(|e| e.to_string()),
+        }
+    }
+}
 
 /// Host→guest `__wafer_handle` frame, borrowed for encoding. Serializes as
 /// a 2-tuple, matching the v1 wire shape (`[Message, body]`) so one type
@@ -315,6 +406,43 @@ mod tests {
                 "json action must be a str"
             );
         }
+    }
+
+    #[test]
+    fn check_declared_accepts_only_the_spoken_version() {
+        assert_eq!(CoreCodec::check_declared(ABI_VERSION), Ok(()));
+        assert_eq!(CoreCodec::check_declared(2), Ok(()));
+        let err = CoreCodec::check_declared(3).unwrap_err();
+        assert_eq!(err.declared, 3);
+        assert_eq!(
+            err.to_string(),
+            "guest declares core ABI v3; this host supports v1 (implicit) and v2"
+        );
+    }
+
+    #[test]
+    fn version_export_presence_picks_the_codec() {
+        assert_eq!(CoreCodec::from_version_export(true), CoreCodec::V2Rmp);
+        assert_eq!(CoreCodec::from_version_export(false), CoreCodec::V1Json);
+    }
+
+    /// A frame encoded by one codec decodes under the same codec, and the two
+    /// wire forms differ: v1 is JSON text, v2 is MessagePack.
+    #[test]
+    fn call_frame_round_trips_under_both_codecs() {
+        let m = Message::new("echo.run");
+        let body: &[u8] = &[0, 1, 2, 255];
+        for codec in [CoreCodec::V1Json, CoreCodec::V2Rmp] {
+            let bytes = codec.encode(&CallFrameRef(&m, body)).unwrap();
+            let decoded: CallFrame = codec.decode(&bytes).unwrap();
+            assert_eq!(decoded.0.kind, "echo.run", "{codec:?}");
+            assert_eq!(decoded.1.as_slice(), body, "{codec:?}");
+        }
+        let json = CoreCodec::V1Json.encode(&CallFrameRef(&m, body)).unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&json).is_ok());
+        let rmp = CoreCodec::V2Rmp.encode(&CallFrameRef(&m, body)).unwrap();
+        assert!(serde_json::from_slice::<serde_json::Value>(&rmp).is_err());
+        assert!(CoreCodec::V1Json.decode::<CallFrame>(&rmp).is_err());
     }
 
     /// An unrecognized discriminator is a decode error (naming the bad value),

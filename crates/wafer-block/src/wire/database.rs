@@ -27,6 +27,28 @@ pub const STATEMENT_BUDGET_EXCEEDS_LIMIT: &str = "database.statement_budget_exce
 /// way; a fresh invocation (a new request) may run it.
 pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhausted";
 
+/// Meta key ([`crate::WaferError::meta`]) of the error answering a
+/// `database.ddl_transaction` that failed: the failing statement's zero-based
+/// position in [`DdlTransactionRequest::statements`], in decimal, when the
+/// backend can attribute the failure to one statement. Native SQLite and
+/// PostgreSQL always can; Cloudflare D1's `batch()` reports one error for the
+/// whole sequence, so a D1 error never carries it.
+///
+/// Its absence is not "no statement failed": it is also absent for a
+/// statement-budget refusal (nothing was sent) and for a failure to open or
+/// commit the transaction. Read it with [`failed_statement_index`].
+pub const META_FAILED_STATEMENT_INDEX: &str = "database.failed_statement_index";
+
+/// The failing statement's position a `database.ddl_transaction` error
+/// carries under [`META_FAILED_STATEMENT_INDEX`], or `None` when it carries
+/// none — which a caller must not read as "not a statement's failure" (see
+/// the key's docs).
+#[must_use]
+pub fn failed_statement_index(err: &crate::WaferError) -> Option<usize> {
+    crate::MetaGet::get(err.meta.as_slice(), META_FAILED_STATEMENT_INDEX)
+        .and_then(|index| index.parse().ok())
+}
+
 // --- Filter / sort sub-types ---
 
 /// A single WHERE-clause predicate: `field <operator> value`, or
@@ -35,7 +57,10 @@ pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhauste
 pub struct FilterDef {
     /// Column name to filter on.
     pub field: String,
-    /// Comparison operator (`eq`, `ne`, `lt`, `gt`, `like`, …). Defaults to `eq`.
+    /// Comparison operator, spelled as [`FilterOp::parse_wire`](crate::db::FilterOp::parse_wire)
+    /// accepts it (`eq`, `neq`, `lt`, `gt`, `like`, `contains_ignore_case`,
+    /// `starts_with`, …).
+    /// Defaults to `eq`.
     #[serde(default = "default_operator")]
     pub operator: String,
     /// JSON value compared against the column.
@@ -210,6 +235,25 @@ pub struct ExecRawRequest {
     /// Positional bind arguments for the placeholders.
     #[serde(default)]
     pub args: Vec<serde_json::Value>,
+}
+
+/// One statement of a [`DdlTransactionRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawStatement {
+    /// One SQL statement, in the backend's dialect (DDL or DML), with the
+    /// backend's placeholders.
+    pub query: String,
+    /// Positional bind arguments for the placeholders.
+    #[serde(default)]
+    pub args: Vec<serde_json::Value>,
+}
+
+/// Request for `database.ddl_transaction`: run `statements`, in order, as ONE
+/// transaction. Every statement commits or none does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DdlTransactionRequest {
+    /// The statements, run in this order.
+    pub statements: Vec<RawStatement>,
 }
 
 /// One column of a [`TableDef`] / [`AddColumnRequest`].
@@ -663,6 +707,17 @@ pub struct AggregateRequest {
     /// Optional `LIMIT N`; a value `<= 0` means no limit.
     #[serde(default)]
     pub limit: i64,
+    /// HAVING predicates: AND-combined leaves whose `field` is the alias of
+    /// one of [`aggregates`](Self::aggregates) (not a
+    /// [`CountGroups`](AggregateColumnDef::CountGroups)), compared with the
+    /// aggregate's value. Anything else is `InvalidArgument`.
+    #[serde(default)]
+    pub having: Vec<FilterNode>,
+    /// Groups to skip before the first returned, for paging; `<= 0` skips
+    /// none. A positive offset needs a positive [`limit`](Self::limit), or
+    /// the request is `InvalidArgument`.
+    #[serde(default)]
+    pub offset: i64,
 }
 
 /// One aggregate output column for [`AggregateRequest`].
@@ -744,6 +799,15 @@ pub enum AggregateColumnDef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_as: Option<String>,
     },
+    /// `COUNT(*) OVER () AS alias` — the number of groups the request
+    /// matched (after `filters`, `group_by` and `having`, before
+    /// `limit`/`offset`), the same on every row: the total a paged listing
+    /// shows. A request whose offset is past the last group gets no rows,
+    /// and so no total.
+    CountGroups {
+        /// Output alias for the group count.
+        alias: String,
+    },
 }
 
 /// One GROUP BY term for [`AggregateRequest`].
@@ -762,14 +826,30 @@ pub enum GroupByDef {
 
 // --- Responses ---
 
+/// The columns of one result row, name → value, **in the order the statement
+/// returned them**: a `SELECT b, a, c` row iterates `b`, `a`, `c`, and a
+/// `SELECT *` row iterates the table's columns in declaration order.
+///
+/// A backend fills it in result-column order, and the order survives the
+/// wire: the row encodes as a map whose keys are written in that order, so a
+/// peer decoding into an ordered map sees the statement's order. That is the
+/// whole contract — the encoded shape is the same map an unordered
+/// `HashMap<String, Value>` produced, so a peer built against an older
+/// `wafer-block` (which decodes into a `HashMap`) reads it unchanged, and a
+/// row from an older peer still decodes here (in whatever order it was sent).
+///
+/// Look a column up by name (`get`) as with any map. Remove one with
+/// `shift_remove`, which keeps the remaining columns in order.
+pub type RecordData = indexmap::IndexMap<String, serde_json::Value>;
+
 /// Single record returned by `get`, `create`, `update`. Matches
 /// `interfaces::database::service::Record`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     /// Primary-key id of the row.
     pub id: String,
-    /// Column → value map.
-    pub data: HashMap<String, serde_json::Value>,
+    /// Column → value map, in result-column order (see [`RecordData`]).
+    pub data: RecordData,
 }
 
 /// Paginated list of records returned by `list`.
@@ -826,6 +906,14 @@ pub struct TakeWhereResponse {
 pub struct ExecRawResponse {
     /// Number of rows affected by the statement.
     pub rows_affected: i64,
+}
+
+/// Response for `database.ddl_transaction`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DdlTransactionResponse {
+    /// Rows each statement affected, in the order of
+    /// [`DdlTransactionRequest::statements`].
+    pub rows_affected: Vec<i64>,
 }
 
 /// Response for `database.create_many`.
@@ -1008,7 +1096,7 @@ mod tests {
 
     #[test]
     fn record_round_trips() {
-        let mut data = HashMap::new();
+        let mut data = RecordData::new();
         data.insert("k".into(), serde_json::json!("v"));
         let original = Record {
             id: "r1".into(),
@@ -1020,12 +1108,64 @@ mod tests {
         assert_eq!(decoded.data.get("k"), Some(&serde_json::json!("v")));
     }
 
+    /// A `SELECT b, a, c` row in result-column order.
+    fn bac_record() -> Record {
+        Record {
+            id: String::new(),
+            data: RecordData::from([
+                ("b".to_string(), serde_json::json!(2)),
+                ("a".to_string(), serde_json::json!(1)),
+                ("c".to_string(), serde_json::json!(3)),
+            ]),
+        }
+    }
+
+    fn column_names(record: &Record) -> Vec<&str> {
+        record.data.keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn record_keeps_its_column_order_across_the_wire() {
+        let decoded: Record =
+            codec::decode(&codec::encode(&bac_record()).expect("encode")).expect("decode");
+        assert_eq!(column_names(&decoded), ["b", "a", "c"]);
+
+        // The JSON forms (core ABI v1, `HOST_CODEC_JSON` guests) write the
+        // keys in the same order.
+        let json = serde_json::to_string(&bac_record()).expect("to json");
+        assert_eq!(json, r#"{"id":"","data":{"b":2,"a":1,"c":3}}"#);
+        let decoded: Record = serde_json::from_str(&json).expect("from json");
+        assert_eq!(column_names(&decoded), ["b", "a", "c"]);
+    }
+
+    /// `Record` as `wafer-block` declared it before rows kept their column
+    /// order: the same field names, `data` an unordered map.
+    #[derive(Serialize, Deserialize)]
+    struct UnorderedRecord {
+        id: String,
+        data: HashMap<String, serde_json::Value>,
+    }
+
+    #[test]
+    fn an_ordered_record_is_wire_compatible_with_an_unordered_peer() {
+        // Newer host → older guest: the older peer decodes the same map.
+        let old: UnorderedRecord =
+            codec::decode(&codec::encode(&bac_record()).expect("encode")).expect("decode");
+        assert_eq!(old.data.len(), 3);
+        assert_eq!(old.data.get("a"), Some(&serde_json::json!(1)));
+
+        // Older peer → newer: its rows still decode, in the order it sent.
+        let new: Record = codec::decode(&codec::encode(&old).expect("encode")).expect("decode");
+        assert_eq!(new.data.len(), 3);
+        assert_eq!(new.data.get("b"), Some(&serde_json::json!(2)));
+    }
+
     #[test]
     fn record_list_round_trips() {
         let original = RecordList {
             records: vec![Record {
                 id: "r1".into(),
-                data: HashMap::new(),
+                data: RecordData::new(),
             }],
             total_count: 1,
             page: 1,
@@ -1147,6 +1287,8 @@ mod tests {
                 desc: true,
             }],
             limit: 50,
+            having: vec![],
+            offset: 0,
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: AggregateRequest = codec::decode(&encoded).expect("decode");
@@ -1185,6 +1327,8 @@ mod tests {
             group_by: vec![],
             sort: vec![],
             limit: 0,
+            having: vec![],
+            offset: 0,
         };
         let encoded = codec::encode(&original).expect("encode");
         let decoded: AggregateRequest = codec::decode(&encoded).expect("decode");
@@ -1269,7 +1413,7 @@ mod tests {
     fn schema_lock_record() {
         let r = Record {
             id: String::new(),
-            data: HashMap::new(),
+            data: RecordData::new(),
         };
         let encoded = codec::encode(&r).expect("encode");
         let hex: String = encoded.iter().map(|b| format!("{b:02x}")).collect();
@@ -1398,7 +1542,7 @@ mod tests {
     fn batch_response_round_trips_every_result() {
         let record = Record {
             id: "1".into(),
-            data: HashMap::new(),
+            data: RecordData::new(),
         };
         let original = BatchResponse {
             results: vec![
@@ -1459,7 +1603,7 @@ mod tests {
             InsertGuardedResponse::Inserted {
                 record: Record {
                     id: "1".into(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 },
             },
         ] {

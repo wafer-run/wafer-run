@@ -33,7 +33,8 @@ pub use types::{
 pub use wafer_block_macro::{wafer_async_trait, wafer_block};
 
 // All modules below are now wasm32-compatible: streams use
-// `spawn_producer` (tokio::spawn on native, spawn_local on wasm32), and other
+// `spawn_producer` (tokio::spawn on native; on wasm32, spawn_local through the
+// installed spawn wrapper, if any — see `spawn`), and other
 // modules either never used tokio or use only wasm32-safe tokio primitives
 // (channels, CancellationToken).
 pub mod block;

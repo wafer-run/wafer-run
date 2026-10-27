@@ -127,6 +127,15 @@ pub enum SqlBuildError {
         /// The repeated column name.
         column: String,
     },
+    /// A grouped query's `HAVING` filter named something other than one of
+    /// its own aggregates — a column, or the
+    /// [`CountGroups`](crate::aggregate::AggFunc::CountGroups) window, which
+    /// is computed after `HAVING` and so cannot be filtered by it.
+    #[error("HAVING filter {alias:?} does not name one of the query's aggregates")]
+    InvalidHaving {
+        /// The filter's `field`, as supplied by the caller.
+        alias: String,
+    },
 }
 
 /// Database backend dialect for SQL rendering.

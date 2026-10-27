@@ -29,8 +29,9 @@ use super::{
     codec::{self, encode_json_value, JsonColumns},
     schema_cache::{SchemaCache, TableColumns},
     service::{
-        AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, Record, RecordList,
-        StatementBudget, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+        AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, RawStatement, Record,
+        RecordData, RecordList, StatementBudget, TransactionError, UpsertConflict, UpsertSpec,
+        WriteOp, WriteOutcome,
     },
 };
 
@@ -171,6 +172,15 @@ pub fn mint_record_id() -> String {
 /// a caller can compare a stored stamp against any RFC 3339 cutoff.
 fn timestamp_now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// The row a write echoes back: the columns it wrote, in name order — the
+/// order the INSERT names them in ([`sorted_pairs`]), so the echo is the same
+/// on every run rather than following `HashMap` iteration.
+fn written_columns(data: HashMap<String, serde_json::Value>) -> RecordData {
+    let mut row: RecordData = data.into_iter().collect();
+    row.sort_unstable_keys();
+    row
 }
 
 /// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
@@ -550,13 +560,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     // each backend binds it natively. All callers pass single-statement SQL.
     // `json` names the result columns whose text is JSON: a row-returning
     // primitive decodes every row with it (`codec::decode_text` /
-    // `codec::record_from_json_row`) and never guesses from content. The
+    // `codec::record_from_columns`) and never guesses from content. The
     // executor derives it from the declared types of the table a statement
     // reads ([`json_columns`](Self::json_columns)); a statement with no single
     // source table passes `JsonColumns::NONE`.
+    // Every row-returning primitive fills `Record::data` in result-column
+    // order (`RecordData`): `query_raw`'s caller renders a `SELECT b, a, c`
+    // as `b`, `a`, `c`.
 
     /// Run a row-returning query and convert rows to `Record`s, decoding the
-    /// text of `json`'s columns as JSON.
+    /// text of `json`'s columns as JSON. Each record's columns are in the
+    /// order the statement returned them.
     ///
     /// Read path: the statement must have no side effects (a plain `SELECT`).
     /// Implementors that route work along separate read/write paths (e.g.
@@ -635,13 +649,22 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// on one connection, so each sees the writes of the ones before it, and
     /// no other writer's statements interleave with them.
     ///
+    /// A failure is classified as the single-statement primitives classify it
+    /// (a duplicate key is [`DatabaseError::AlreadyExists`]). A backend that
+    /// knows which op failed returns [`TransactionError::at`] its position in
+    /// `ops`, as one that runs the statements one at a time on a connection
+    /// does. A backend whose atomic API reports one error for the whole
+    /// sequence (D1's `batch()`) returns [`TransactionError::whole`]; it must
+    /// not guess a position. A failure to open or commit the transaction is
+    /// [`TransactionError::whole`] everywhere.
+    ///
     /// No default. Running the statements one by one, as
     /// [`run_batch`](Self::run_batch)'s default does, would leave the earlier
     /// ones applied when a later one fails — exactly what
     /// [`create_many`](Self::create_many) and [`batch`](Self::batch) promise
     /// not to do. A backend with a native atomic multi-statement API (D1's
     /// `batch()`) implements this with it.
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError>;
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError>;
 
     /// Run `ops` as one backend round-trip when the backend can, returning one
     /// [`BatchResult`] per op **in the same order**.
@@ -1108,7 +1131,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             let extra_cond = opts
                 .filter_tree
                 .as_deref()
-                .and_then(wafer_sql_utils::query::build_condition_tree);
+                .and_then(|tree| wafer_sql_utils::query::build_condition_tree(tree, Self::BACKEND));
 
             let count_stmt = (!opts.skip_count).then(|| {
                 wafer_sql_utils::aggregate::build_count_with_condition(
@@ -1280,14 +1303,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             data.insert("id".to_string(), id);
             return Ok(Record {
                 id: stored.id,
-                data,
+                data: written_columns(data),
             });
         }
         let stmt = wafer_sql_utils::query::build_insert(table, &pairs, Self::BACKEND);
         self.run_execute(&stmt.sql, &sea_values_to_json(stmt.values))
             .await?;
         let id = data.get("id").map(codec::record_id).unwrap_or_default();
-        Ok(Record { id, data })
+        Ok(Record {
+            id,
+            data: written_columns(data),
+        })
     }
 
     /// Shared `update`: timestamp stamping → lazy column-add → UPDATE-by-id →
@@ -1657,7 +1683,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .collect();
         self.require_columns(table, &columns).await?;
         let stmt = {
-            let cfg = spec.into_grouped_config(table.to_string());
+            let cfg = spec.into_grouped_config(table.to_string(), Self::BACKEND);
             wafer_sql_utils::aggregate::build_grouped_query(cfg, Self::BACKEND)?
         };
         // An aggregate row holds computed values and group keys, not stored
@@ -1707,6 +1733,59 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             cache.clear();
         }
         Ok(affected)
+    }
+
+    /// Shared `exec_raw_transaction`: admit every statement against the
+    /// [`statement_budget`](Self::statement_budget) at once, then run them as
+    /// ONE [`run_transaction`](Self::run_transaction) of
+    /// [`TxOp::Execute`]s.
+    ///
+    /// A budget refusal sends nothing and names no statement. Once the
+    /// transaction was sent, the whole [`schema_cache`](Self::schema_cache)
+    /// is cleared, as [`exec_raw`](Self::exec_raw) clears it, on success and
+    /// on failure alike: the statements' targets cannot be recovered from
+    /// their text, and a failed commit (a connection lost during `COMMIT`)
+    /// does not say whether the schema changed.
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        if statements.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.statement_budget()
+            .and_then(|budget| budget.admit(statements.len(), "exec_raw_transaction"))
+            .map_err(TransactionError::whole)?;
+        let ops: Vec<TxOp<'_>> = statements
+            .iter()
+            .map(|statement| TxOp::Execute {
+                sql: &statement.query,
+                params: &statement.args,
+            })
+            .collect();
+        let outcome = self.run_transaction(&ops).await;
+        if let Some(cache) = self.schema_cache() {
+            cache.clear();
+        }
+        let results = outcome?;
+        if results.len() != statements.len() {
+            return Err(TransactionError::whole(DatabaseError::Internal(format!(
+                "run_transaction returned {} results for {} statements",
+                results.len(),
+                statements.len()
+            ))));
+        }
+        results
+            .into_iter()
+            .map(|result| match result {
+                TxResult::Execute(affected) => Ok(affected),
+                other @ TxResult::Returning(_) => {
+                    Err(TransactionError::whole(DatabaseError::Internal(format!(
+                        "run_transaction returned {other:?} for an Execute statement"
+                    ))))
+                }
+            })
+            .collect()
     }
 
     /// Shared `schema_columns`: [`get_columns`](Self::get_columns) of
@@ -1860,7 +1939,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .collect();
         self.statement_budget()?.admit(ops.len(), "create_many")?;
         let mut inserted = 0;
-        for result in self.run_transaction(&ops).await? {
+        // The failing statement's position names one of the inserts planned
+        // here, nothing the caller can act on: the classified error is the
+        // answer.
+        let results = self
+            .run_transaction(&ops)
+            .await
+            .map_err(|failed| failed.error)?;
+        for result in results {
             match result {
                 TxResult::Execute(n) => inserted += n,
                 other @ TxResult::Returning(_) => {
@@ -2024,7 +2110,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             })
             .collect();
         self.statement_budget()?.admit(tx_ops.len(), "batch")?;
-        let results = self.run_transaction(&tx_ops).await?;
+        // The failing statement's position names a statement planned here,
+        // not an op: the classified error is the answer.
+        let results = self
+            .run_transaction(&tx_ops)
+            .await
+            .map_err(|failed| failed.error)?;
         if results.len() != statements.len() {
             return Err(DatabaseError::Internal(format!(
                 "run_transaction returned {} results for {} statements",
@@ -2133,7 +2224,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .collect();
         self.statement_budget()?
             .admit(ops.len(), "a guarded write")?;
-        let results = self.run_transaction(&ops).await?;
+        // The failing statement's position names one of the probes or the
+        // write planned here: the classified error is the answer.
+        let results = self
+            .run_transaction(&ops)
+            .await
+            .map_err(|failed| failed.error)?;
         if results.len() != ops.len() {
             return Err(DatabaseError::Internal(format!(
                 "run_transaction returned {} results for {} statements",
@@ -2349,10 +2445,13 @@ mod tests {
             Ok(0.0)
         }
 
-        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-            Err(DatabaseError::Internal(
+        async fn run_transaction(
+            &self,
+            _ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
+            Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
-            ))
+            )))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -2433,7 +2532,7 @@ mod tests {
             // id echoes the SQL so a decoded row proves which op produced it.
             Record {
                 id: sql.to_string(),
-                data: HashMap::new(),
+                data: RecordData::new(),
             }
         }
     }
@@ -2506,10 +2605,13 @@ mod tests {
             Ok(2.5)
         }
 
-        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-            Err(DatabaseError::Internal(
+        async fn run_transaction(
+            &self,
+            _ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
+            Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
-            ))
+            )))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -2813,7 +2915,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, decl_type)| Record {
                     id: String::new(),
-                    data: HashMap::from([
+                    data: RecordData::from([
                         ("name".to_string(), serde_json::json!(name)),
                         ("decl_type".to_string(), serde_json::json!(decl_type)),
                     ]),
@@ -2833,11 +2935,11 @@ mod tests {
             vec![
                 Record {
                     id: "r1".into(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 },
                 Record {
                     id: "r2".into(),
-                    data: HashMap::new(),
+                    data: RecordData::new(),
                 },
             ]
         }
@@ -2939,7 +3041,10 @@ mod tests {
             Ok(true)
         }
 
-        async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+        async fn run_transaction(
+            &self,
+            ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
             self.issue(ops.len());
             let recorded: Vec<(String, String)> = ops
                 .iter()
@@ -2969,7 +3074,7 @@ mod tests {
                     TxOp::Returning { sql, .. } if sql.starts_with("SELECT") => {
                         TxResult::Returning(vec![Record {
                             id: String::new(),
-                            data: HashMap::from([("g0".to_string(), serde_json::json!(1))]),
+                            data: RecordData::from([("g0".to_string(), serde_json::json!(1))]),
                         }])
                     }
                     TxOp::Returning { .. } => {
@@ -3154,7 +3259,7 @@ mod tests {
                 return Ok(exists
                     .then(|| Record {
                         id: String::new(),
-                        data: HashMap::from([
+                        data: RecordData::from([
                             ("name".to_string(), serde_json::json!("id")),
                             ("decl_type".to_string(), serde_json::json!("TEXT")),
                         ]),
@@ -3170,7 +3275,7 @@ mod tests {
                     .iter()
                     .map(|name| Record {
                         id: String::new(),
-                        data: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+                        data: RecordData::from([("name".to_string(), serde_json::json!(name))]),
                     })
                     .collect());
             }
@@ -3219,10 +3324,13 @@ mod tests {
             Ok(0.0)
         }
 
-        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-            Err(DatabaseError::Internal(
+        async fn run_transaction(
+            &self,
+            _ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
+            Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
-            ))
+            )))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -3441,7 +3549,7 @@ mod tests {
                 .into_iter()
                 .map(|name| Record {
                     id: String::new(),
-                    data: HashMap::from([("name".to_string(), serde_json::json!(name))]),
+                    data: RecordData::from([("name".to_string(), serde_json::json!(name))]),
                 })
                 .collect())
         }
@@ -3509,10 +3617,13 @@ mod tests {
             Ok(0.0)
         }
 
-        async fn run_transaction(&self, _ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
-            Err(DatabaseError::Internal(
+        async fn run_transaction(
+            &self,
+            _ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
+            Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
-            ))
+            )))
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
@@ -3724,6 +3835,98 @@ mod tests {
         DbExec::batch(&exact, two_creates())
             .await
             .expect("exactly enough budget");
+    }
+
+    fn raw(query: &str) -> RawStatement {
+        RawStatement {
+            query: query.to_string(),
+            args: vec![],
+        }
+    }
+
+    fn three_raw_statements() -> Vec<RawStatement> {
+        vec![
+            raw("CREATE TABLE a (id TEXT)"),
+            raw("CREATE TABLE b (id TEXT)"),
+            raw("INSERT INTO a (id) VALUES ('x')"),
+        ]
+    }
+
+    /// `exec_raw_transaction` runs every statement as ONE `run_transaction`
+    /// of `Execute`s, in the order given, and returns each one's count.
+    #[tokio::test]
+    async fn exec_raw_transaction_is_one_transaction_of_its_statements_in_order() {
+        let mock = BatchMock::new(0);
+        let counts = DbExec::exec_raw_transaction(&mock, &three_raw_statements())
+            .await
+            .expect("exec_raw_transaction");
+        assert_eq!(counts, vec![1, 1, 1]);
+        assert_eq!(
+            *mock.tx_calls.lock().unwrap(),
+            vec![three_raw_statements()
+                .into_iter()
+                .map(|statement| ("Execute".to_string(), statement.query))
+                .collect::<Vec<_>>()]
+        );
+        assert_eq!(mock.issued(), 3, "nothing else was sent");
+    }
+
+    /// The whole call is admitted before anything is sent: one that fits the
+    /// limit but not what this invocation has left is `ResourceExhausted`,
+    /// names no statement, and sends nothing. Given exactly what is left, the
+    /// same call runs.
+    #[tokio::test]
+    async fn exec_raw_transaction_over_what_is_left_is_exhausted_and_sends_nothing() {
+        let short = BatchMock::limited(5);
+        short.issue(3);
+        let err = DbExec::exec_raw_transaction(&short, &three_raw_statements())
+            .await
+            .expect_err("three statements with two left");
+        assert!(
+            matches!(err.error, DatabaseError::ResourceExhausted(_)),
+            "fits the limit, not what is left: {err:?}"
+        );
+        assert_eq!(err.statement, None, "a refusal names no statement");
+        assert!(
+            short.tx_calls.lock().unwrap().is_empty(),
+            "nothing was sent"
+        );
+        assert_eq!(short.issued(), 3, "nothing was sent");
+
+        let exact = BatchMock::limited(6);
+        exact.issue(3);
+        DbExec::exec_raw_transaction(&exact, &three_raw_statements())
+            .await
+            .expect("exactly what is left");
+        assert_eq!(exact.issued(), 6);
+    }
+
+    /// A call of more statements than the backend's whole limit can never
+    /// run: `StatementLimitExceeded`, no statement named, nothing sent.
+    #[tokio::test]
+    async fn exec_raw_transaction_over_the_limit_is_refused_and_sends_nothing() {
+        let mock = BatchMock::limited(2);
+        let err = DbExec::exec_raw_transaction(&mock, &three_raw_statements())
+            .await
+            .expect_err("three statements, a limit of two");
+        assert!(
+            matches!(err.error, DatabaseError::StatementLimitExceeded(_)),
+            "{err:?}"
+        );
+        assert_eq!(err.statement, None, "a refusal names no statement");
+        assert!(mock.tx_calls.lock().unwrap().is_empty(), "nothing was sent");
+        assert_eq!(mock.issued(), 0, "nothing was sent");
+    }
+
+    /// No statements, no transaction.
+    #[tokio::test]
+    async fn exec_raw_transaction_of_nothing_sends_nothing() {
+        let mock = BatchMock::limited(0);
+        let counts = DbExec::exec_raw_transaction(&mock, &[])
+            .await
+            .expect("an empty call runs nothing");
+        assert!(counts.is_empty());
+        assert!(mock.tx_calls.lock().unwrap().is_empty());
     }
 
     /// A write that needs more statements than the backend's whole
@@ -4006,6 +4209,8 @@ mod tests {
                 group_by: Vec::new(),
                 sort: Vec::new(),
                 limit: 0,
+                having: vec![],
+                offset: 0,
             },
         )
         .await
@@ -4099,11 +4304,14 @@ mod tests {
             Ok(true)
         }
 
-        async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
+        async fn run_transaction(
+            &self,
+            ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
             let verdict = |holds: i64| {
                 TxResult::Returning(vec![Record {
                     id: String::new(),
-                    data: HashMap::from([("g0".to_string(), serde_json::json!(holds))]),
+                    data: RecordData::from([("g0".to_string(), serde_json::json!(holds))]),
                 }])
             };
             let mut probes = [1, 0].into_iter();

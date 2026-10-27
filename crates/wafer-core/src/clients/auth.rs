@@ -121,28 +121,43 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AuthService for HappyAuth {
-        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
+        async fn require_user(
+            &self,
+            _ctx: &dyn Context,
+            _msg: &Message,
+        ) -> Result<UserId, AuthError> {
             Ok(UserId("u-1".to_string()))
         }
         async fn require_token(
             &self,
+            _ctx: &dyn Context,
             _msg: &Message,
             _scope: TokenScope,
         ) -> Result<UserId, AuthError> {
             Ok(UserId("u-1".to_string()))
         }
-        async fn require_role(&self, _msg: &Message, _role: Role) -> Result<UserId, AuthError> {
+        async fn require_role(
+            &self,
+            _ctx: &dyn Context,
+            _msg: &Message,
+            _role: Role,
+        ) -> Result<UserId, AuthError> {
             Ok(UserId("u-1".to_string()))
         }
         async fn verify_org_admin(
             &self,
+            _ctx: &dyn Context,
             _user: UserId,
             _provider: &str,
             _org_ref: &str,
         ) -> Result<bool, AuthError> {
             Ok(false)
         }
-        async fn user_profile(&self, user: UserId) -> Result<UserProfile, AuthError> {
+        async fn user_profile(
+            &self,
+            _ctx: &dyn Context,
+            user: UserId,
+        ) -> Result<UserProfile, AuthError> {
             Ok(UserProfile {
                 id: user,
                 email: "alice@example.test".to_string(),
@@ -157,11 +172,17 @@ mod tests {
     /// The block the typed-client calls come from.
     const CALLER: &str = "test/caller";
 
-    /// Single-block test context that routes every `call_block` to the
-    /// wrapped `AuthBlock`. wafer-core has no full-runtime infrastructure;
-    /// this tiny stub gives the typed-client tests a real round-trip
-    /// without pulling in `wafer-run`. The auth handler's WRAP check runs
-    /// the real `wrap::check_access` for [`CALLER`] against `grants`.
+    /// Single-block test context that routes `call_block("wafer-run/auth")`
+    /// to the wrapped `AuthBlock`. wafer-core has no full-runtime
+    /// infrastructure; this tiny stub gives the typed-client tests a real
+    /// round-trip without pulling in `wafer-run`. The auth handler's WRAP
+    /// check runs the real `wrap::check_access` for [`CALLER`] against
+    /// `grants`.
+    ///
+    /// It stands in for a database that WRAP refuses: every call to
+    /// `wafer-run/database` answers `PermissionDenied`. The handler hands
+    /// this same context to the service, so a service that reads the
+    /// database reaches that refusal through the `ctx` of its call.
     #[derive(Clone)]
     struct SingleAuthBlockCtx {
         block: Arc<AuthBlock>,
@@ -176,8 +197,14 @@ mod tests {
             msg: Message,
             input: InputStream,
         ) -> OutputStream {
-            assert_eq!(block_name, "wafer-run/auth");
-            self.block.handle(self, msg, input).await
+            match block_name {
+                "wafer-run/auth" => self.block.handle(self, msg, input).await,
+                "wafer-run/database" => OutputStream::error(WaferError::new(
+                    ErrorCode::PermissionDenied,
+                    "wafer-run/auth may not read wafer_run__auth__users",
+                )),
+                other => panic!("unexpected call_block({other})"),
+            }
         }
         fn is_cancelled(&self) -> bool {
             false
@@ -290,55 +317,21 @@ mod tests {
         assert_eq!(user_id, "u-1");
     }
 
-    /// Context standing in for a database that WRAP refuses: every call to
-    /// `wafer-run/database` answers `PermissionDenied`.
-    #[derive(Clone)]
-    struct RefusingDatabaseCtx;
-
-    #[async_trait::async_trait]
-    impl Context for RefusingDatabaseCtx {
-        async fn call_block(
-            &self,
-            block_name: &str,
-            _msg: Message,
-            _input: InputStream,
-        ) -> OutputStream {
-            assert_eq!(block_name, "wafer-run/database");
-            OutputStream::error(WaferError::new(
-                ErrorCode::PermissionDenied,
-                "wafer-run/auth may not read wafer_run__auth__users",
-            ))
-        }
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-        fn config_get(&self, _key: &str) -> Option<&str> {
-            None
-        }
-        fn clone_arc(&self) -> Arc<dyn Context> {
-            Arc::new(self.clone())
-        }
-        // Denies every access, as the trait's default `check_resource_access` does.
-        fn resource_access_admitted(
-            &self,
-            _resource: &str,
-            _resource_type: wafer_block::types::ResourceType,
-            _access: wafer_block::types::ResourceAccess,
-        ) -> bool {
-            false
-        }
-    }
-
     /// `AuthService` that resolves the user through the database, the way a
     /// real implementation looks up sessions and tokens.
-    struct DatabaseBackedAuth {
-        db: RefusingDatabaseCtx,
-    }
+    ///
+    /// It holds nothing: the database is reached through the `ctx` of the
+    /// call, never a stored context handle.
+    struct DatabaseBackedAuth;
 
     #[async_trait::async_trait]
     impl AuthService for DatabaseBackedAuth {
-        async fn require_user(&self, _msg: &Message) -> Result<UserId, AuthError> {
-            let row = crate::clients::database::get(&self.db, "wafer_run__auth__users", "u-1")
+        async fn require_user(
+            &self,
+            ctx: &dyn Context,
+            _msg: &Message,
+        ) -> Result<UserId, AuthError> {
+            let row = crate::clients::database::get(ctx, "wafer_run__auth__users", "u-1")
                 .await
                 .map_err(AuthError::Backend)?;
             Ok(UserId(row.id))
@@ -348,9 +341,7 @@ mod tests {
     #[tokio::test]
     async fn require_user_surfaces_a_database_refusal_with_its_code() {
         let ctx = SingleAuthBlockCtx {
-            block: Arc::new(AuthBlock::new(Arc::new(DatabaseBackedAuth {
-                db: RefusingDatabaseCtx,
-            }))),
+            block: Arc::new(AuthBlock::new(Arc::new(DatabaseBackedAuth))),
             grants: Vec::new(),
         };
         let err = super::require_user(&ctx, &Message::new("incoming.req"))

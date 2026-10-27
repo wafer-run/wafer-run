@@ -1,0 +1,26 @@
+# The wafer CLI's real-guest fixture: a block built with the current
+# `#[wafer_block]` macro, so it speaks the core ABI the macro emits today
+# (v2 MessagePack, `__wafer_abi_version`). Consumed by
+# crates/wafer-cli/tests/core_abi.rs; built by scripts/build-fixtures.sh.
+[workspace]
+
+[package]
+name = "macro-block"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+# The dependencies `wafer new` scaffolds, as path deps.
+[dependencies]
+wafer-sdk = { path = "../../../../../sdks/rust" }
+wafer-block = { path = "../../../../wafer-block" }
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 1
+panic = "abort"

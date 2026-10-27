@@ -20,8 +20,9 @@ use std::{
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-    RecordList, StatementBudget, Table, UpsertSpec, WriteOp, WriteOutcome,
+    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
+    RawStatement, Record, RecordData, RecordList, StatementBudget, Table, TransactionError,
+    UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ impl RecordingDb {
 fn row(id: &str) -> Record {
     Record {
         id: id.to_string(),
-        data: HashMap::new(),
+        data: RecordData::new(),
     }
 }
 
@@ -114,7 +115,7 @@ impl DatabaseService for RecordingDb {
         Ok(
             wafer_core::interfaces::database::service::GuardedInsert::Inserted(Record {
                 id: collection.to_string(),
-                data,
+                data: data.into_iter().collect(),
             }),
         )
     }
@@ -174,6 +175,13 @@ impl DatabaseService for RecordingDb {
     ) -> Result<i64, DatabaseError> {
         self.note("exec_raw");
         Ok(0)
+    }
+    async fn exec_raw_transaction(
+        &self,
+        statements: &[RawStatement],
+    ) -> Result<Vec<i64>, TransactionError> {
+        self.note("exec_raw_transaction");
+        Ok(vec![0; statements.len()])
     }
 
     async fn delete_where(
@@ -317,6 +325,7 @@ wafer_core::forward_database_service! {
             sum: forward,
             query_raw: forward,
             exec_raw: forward,
+            exec_raw_transaction: forward,
             delete_where: forward,
             delete_where_count: forward,
             take_where: forward,
@@ -414,8 +423,8 @@ async fn ensure_schema_tables_reaches_the_inner_service() {
     assert_eq!(inner.calls(), vec!["ensure_schema_tables".to_string()]);
 }
 
-/// `increment_field_where`'s default is a hard error, so a decorator that
-/// inherits it turns an atomic counter bump into a 500.
+/// `increment_field_where` has no default, so the ledger's `forward` is the
+/// only way a decorator gets it: the atomic bump must land on the inner service.
 #[tokio::test]
 async fn increment_field_where_reaches_the_inner_service() {
     let (dec, inner) = decorated();
@@ -486,6 +495,15 @@ async fn the_rest_of_the_surface_forwards() {
     dec.sum("t", "n", &[]).await.expect("sum");
     dec.query_raw("SELECT 1", &[]).await.expect("query_raw");
     dec.exec_raw("SELECT 1", &[]).await.expect("exec_raw");
+    assert_eq!(
+        dec.exec_raw_transaction(&[RawStatement {
+            query: "SELECT 1".into(),
+            args: vec![],
+        }])
+        .await
+        .expect("exec_raw_transaction"),
+        vec![0]
+    );
     dec.schema_table_exists("t").await.expect("ste");
     dec.schema_columns("t").await.expect("sc");
     dec.schema_drop_table("t").await.expect("sdt");
@@ -504,6 +522,7 @@ async fn the_rest_of_the_surface_forwards() {
             "sum".to_string(),
             "query_raw".to_string(),
             "exec_raw".to_string(),
+            "exec_raw_transaction".to_string(),
             "schema_table_exists".to_string(),
             "schema_columns".to_string(),
             "schema_drop_table".to_string(),

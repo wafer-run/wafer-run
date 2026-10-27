@@ -71,6 +71,9 @@ impl ServiceOp {
     /// `DATABASE_EXEC_RAW` so the DDL sentinel is host-authoritative — set by
     /// the op arm the host dispatches on, not a forgeable request meta.
     pub const DATABASE_DDL: &str = "database.ddl";
+    /// Execute raw statements, DDL included, as ONE transaction (cap-gated
+    /// exactly like `DATABASE_DDL`): every statement commits or none does.
+    pub const DATABASE_DDL_TRANSACTION: &str = "database.ddl_transaction";
     /// Create a table (and its indexes) if absent — structured, table-scoped DDL.
     pub const DATABASE_ENSURE_TABLE: &str = "database.ensure_table";
     /// Add one column to an existing table — structured, table-scoped DDL.
@@ -244,6 +247,7 @@ impl ServiceOp {
         Self::DATABASE_QUERY_RAW,
         Self::DATABASE_EXEC_RAW,
         Self::DATABASE_DDL,
+        Self::DATABASE_DDL_TRANSACTION,
         Self::DATABASE_ENSURE_TABLE,
         Self::DATABASE_ADD_COLUMN,
         Self::DATABASE_DROP_TABLE,

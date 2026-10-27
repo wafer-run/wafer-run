@@ -4,6 +4,7 @@
 //! one terminal event (`Complete`/`Error`/`Drop`/`Continue`/`Halt`).
 
 use std::{
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -291,10 +292,42 @@ pub(crate) fn new_streaming_channel(
 /// and terminates with exactly one terminal event.
 ///
 /// When dropped, fires the paired `CancellationToken` to signal the producer to abort.
+///
+/// A consumer that reads ahead — to look at a response's leading meta before
+/// deciding how to serve it — puts what it read back with [`Self::prepend`]
+/// (or reads with [`Self::peek`] / [`Self::take_leading_meta`], which do so
+/// themselves). The events it puts back are yielded before the rest of the
+/// channel, from this same stream: no task and no second channel sit between
+/// the producer and the consumer, so backpressure still reaches the producer
+/// and dropping the stream still cancels it. The only buffer added is the
+/// events read ahead: each one read out of the channel frees its slot there,
+/// and nothing else is read until the consumer asks.
+///
+/// A consumer that hands the stream on can also change what the rest of the
+/// producer's events mean to the next consumer with
+/// [`Self::rewrite_produced`], in the same way: in place, as they are read.
 pub struct OutputStream {
+    /// Events put back by [`Self::prepend`], yielded before `rx`.
+    prelude: VecDeque<StreamEvent>,
+    /// Applied to each event as it is read from `rx`; see
+    /// [`Self::rewrite_produced`].
+    rewrite: Option<Rewrite>,
     rx: ReceiverStream<StreamEvent>,
     cancel: CancellationToken,
 }
+
+/// An event rewrite installed by [`OutputStream::rewrite_produced`]. `Send +
+/// Sync` so the stream keeps the auto-traits it has without one (pinned
+/// below).
+type Rewrite = Box<dyn FnMut(StreamEvent) -> Option<StreamEvent> + Send + Sync>;
+
+// `OutputStream` is `Send + Sync` on every target: its events, channel and
+// token are, and a rewrite must not take either away — a consumer may hold
+// the stream across an await in a `Send` future or share a reference to it.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<OutputStream>();
+};
 
 impl OutputStream {
     /// Private helper: allocates a pre-filled channel from a fixed-size array of
@@ -310,6 +343,8 @@ impl OutputStream {
                 .expect("freshly-allocated channel always has capacity");
         }
         Self {
+            prelude: VecDeque::new(),
+            rewrite: None,
             rx: ReceiverStream::new(rx),
             cancel: CancellationToken::new(),
         }
@@ -385,6 +420,8 @@ impl OutputStream {
     pub fn new_streaming_with_capacity(capacity: usize) -> (Self, OutputSink, CancellationToken) {
         let (rx, sink, cancel) = new_streaming_channel(capacity);
         let stream = Self {
+            prelude: VecDeque::new(),
+            rewrite: None,
             rx: ReceiverStream::new(rx),
             cancel: cancel.clone(),
         };
@@ -396,6 +433,121 @@ impl OutputStream {
         &self.cancel
     }
 
+    /// Put `events` back at the front of the stream, in order: the next
+    /// events read are these, then whatever was next before the call.
+    ///
+    /// For a consumer that read events off the front — a response's leading
+    /// meta, the first body chunk — and hands the stream on as if it had not.
+    /// The stream is changed in place, so it keeps its producer, its channel
+    /// and its cancellation token: the producer is not cancelled, and
+    /// dropping the stream later cancels it as before.
+    pub fn prepend(&mut self, events: impl IntoIterator<Item = StreamEvent>) {
+        let mut events: VecDeque<StreamEvent> = events.into_iter().collect();
+        events.append(&mut self.prelude);
+        self.prelude = events;
+    }
+
+    /// The next event, without consuming it: the following read yields it.
+    /// `None` when the stream has ended (after its terminal, or a producer
+    /// that ended without one).
+    ///
+    /// Waits for the producer like a read does.
+    pub async fn peek(&mut self) -> Option<&StreamEvent> {
+        if self.prelude.is_empty() {
+            let next = self.next_produced().await?;
+            self.prelude.push_back(next);
+        }
+        self.prelude.front()
+    }
+
+    /// Read the `Meta` events off the front of the stream, up to the first
+    /// event that is not one, and return their entries in order.
+    ///
+    /// The stream is left positioned on that first non-`Meta` event (see
+    /// [`Self::peek`]): the next read yields it. A stream that ends right
+    /// after its meta is left ended.
+    ///
+    /// A producer that declares response headers before its body sends them
+    /// as these leading `Meta` events; this is how a consumer reads them
+    /// before deciding to stream the body or collect it (see
+    /// [`crate::http_codec::open_response`]). To hand the stream on whole,
+    /// [`Self::prepend`] the entries back as `Meta` events.
+    ///
+    /// Cancel-safe: the events are read ahead into the stream itself and
+    /// taken off it only once the first non-`Meta` event (or the end) has
+    /// arrived, so a call dropped while waiting for the producer — under a
+    /// `timeout` or a `select!` — leaves every event on the stream.
+    pub async fn take_leading_meta(&mut self) -> Vec<MetaEntry> {
+        let mut positioned = self
+            .prelude
+            .iter()
+            .any(|event| !matches!(event, StreamEvent::Meta(_)));
+        while !positioned {
+            // `next_produced()` loses nothing when dropped, and the event
+            // it returns goes onto the stream before the next await.
+            let Some(event) = self.next_produced().await else {
+                break;
+            };
+            positioned = !matches!(event, StreamEvent::Meta(_));
+            self.prelude.push_back(event);
+        }
+        let mut meta = Vec::new();
+        while let Some(StreamEvent::Meta(_)) = self.prelude.front() {
+            if let Some(StreamEvent::Meta(entry)) = self.prelude.pop_front() {
+                meta.push(entry);
+            }
+        }
+        meta
+    }
+
+    /// Rewrite every event read from the producer from now on: `rewrite`
+    /// gets each one as it is read and returns the event to yield in its
+    /// place, or `None` to skip it. Events already read ahead — put back by
+    /// [`Self::prepend`], or read by [`Self::peek`] /
+    /// [`Self::take_leading_meta`] — are not rewritten. A second call
+    /// rewrites what the first one yields.
+    ///
+    /// For a consumer that hands the stream on and decides what the rest of
+    /// the producer's events mean — the flow executor, which forwards a
+    /// streamed response after its head and decides what may still follow
+    /// it. Like [`Self::prepend`] it changes the stream in place: no task
+    /// and no channel are added, an event is read (and rewritten) only when
+    /// the consumer asks for one, so backpressure still reaches the
+    /// producer, and dropping the stream still cancels it.
+    pub fn rewrite_produced(
+        &mut self,
+        mut rewrite: impl FnMut(StreamEvent) -> Option<StreamEvent> + Send + Sync + 'static,
+    ) {
+        self.rewrite = Some(match self.rewrite.take() {
+            None => Box::new(rewrite),
+            Some(mut earlier) => Box::new(move |event| earlier(event).and_then(&mut rewrite)),
+        });
+    }
+
+    /// Poll the next event from the producer's channel, rewritten (events
+    /// the rewrite skips are consumed and never yielded).
+    fn poll_produced(&mut self, cx: &mut Context<'_>) -> Poll<Option<StreamEvent>> {
+        loop {
+            let Some(event) = futures::ready!(Pin::new(&mut self.rx).poll_next(cx)) else {
+                return Poll::Ready(None);
+            };
+            match &mut self.rewrite {
+                None => return Poll::Ready(Some(event)),
+                Some(rewrite) => {
+                    if let Some(event) = rewrite(event) {
+                        return Poll::Ready(Some(event));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The next event from the producer's channel, rewritten. Cancel-safe:
+    /// an event is returned from the same poll that reads it.
+    async fn next_produced(&mut self) -> Option<StreamEvent> {
+        std::future::poll_fn(|cx| self.poll_produced(cx)).await
+    }
+
     /// Test-only: build an `OutputStream` over a raw event channel, bypassing
     /// [`OutputSink`] entirely. Used to synthesize protocol-violating streams
     /// (e.g. ending without a terminal event) that the sink can no longer
@@ -405,6 +557,8 @@ impl OutputStream {
     #[cfg(test)]
     pub(crate) fn from_raw_receiver(rx: mpsc::Receiver<StreamEvent>) -> Self {
         Self {
+            prelude: VecDeque::new(),
+            rewrite: None,
             rx: ReceiverStream::new(rx),
             cancel: CancellationToken::new(),
         }
@@ -425,7 +579,10 @@ impl Stream for OutputStream {
     type Item = StreamEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.rx).poll_next(cx)
+        if let Some(event) = self.prelude.pop_front() {
+            return Poll::Ready(Some(event));
+        }
+        self.poll_produced(cx)
     }
 }
 
@@ -630,7 +787,8 @@ impl OutputStream {
     /// `Error` terminal (see [`OutputSink`]), so the consumer never mistakes a
     /// cut-off body for a complete one.
     ///
-    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser.
+    /// Platform-portable: uses `tokio::spawn` on native, `spawn_local` on wasm32 browser
+    /// (through the installed spawn wrapper, if any; see [`crate::spawn`]).
     /// Not available on wasm32-wasip1 (WASI) — use `GuestResult::respond` directly.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_producer<F, Fut>(f: F) -> Self
@@ -647,6 +805,13 @@ impl OutputStream {
     }
 
     /// Creates a streaming `OutputStream` driven by a producer closure (wasm32 browser variant).
+    ///
+    /// The producer task is handed to the thread's installed
+    /// [spawn wrapper](crate::spawn::set_spawn_wrapper), if any, on this
+    /// call's stack, before it is spawned: an adapter that scopes state to
+    /// the request being polled uses it to give the producer that request's
+    /// state. The producer must finish its work before its terminal; see the
+    /// [`spawn`](crate::spawn) module docs.
     #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
     pub fn from_producer<F, Fut>(f: F) -> Self
     where
@@ -873,6 +1038,278 @@ mod tests {
             observer.is_cancelled(),
             "dropping OutputStream should cancel paired token"
         );
+    }
+
+    fn entry(key: &str, value: &str) -> MetaEntry {
+        MetaEntry {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// Events read off the front and put back come out first, in the order
+    /// they were put back, then the rest of the stream in its own order.
+    #[tokio::test]
+    async fn prepended_events_come_first_then_the_rest_in_order() {
+        let (mut stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        sink.send_meta(entry("resp.status", "201")).await.unwrap();
+        sink.send_chunk(b"one".to_vec()).await.unwrap();
+        sink.send_chunk(b"two".to_vec()).await.unwrap();
+        sink.complete(vec![]).await.unwrap();
+
+        let meta = stream.take_leading_meta().await;
+        assert_eq!(
+            meta,
+            vec![
+                entry("resp.content_type", "text/event-stream"),
+                entry("resp.status", "201")
+            ]
+        );
+        assert_eq!(
+            stream.peek().await,
+            Some(&StreamEvent::Chunk(b"one".to_vec())),
+            "the stream is left on the first event after the meta"
+        );
+        stream.prepend(meta.into_iter().map(StreamEvent::Meta));
+        stream.prepend([StreamEvent::Meta(entry("first", "1"))]);
+
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Meta(entry("first", "1")),
+                StreamEvent::Meta(entry("resp.content_type", "text/event-stream")),
+                StreamEvent::Meta(entry("resp.status", "201")),
+                StreamEvent::Chunk(b"one".to_vec()),
+                StreamEvent::Chunk(b"two".to_vec()),
+                StreamEvent::Complete { meta: vec![] },
+            ]
+        );
+    }
+
+    /// Reading ahead and putting the events back changes the stream in
+    /// place: the producer is not cancelled and can keep sending through it.
+    #[tokio::test]
+    async fn reading_ahead_and_prepending_keeps_the_producer_alive() {
+        let (mut stream, sink, cancel) = OutputStream::new_streaming();
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        sink.send_chunk(b"one".to_vec()).await.unwrap();
+
+        let meta = stream.take_leading_meta().await;
+        stream.prepend(meta.into_iter().map(StreamEvent::Meta));
+        assert!(
+            !cancel.is_cancelled(),
+            "a stream read ahead and put back must not cancel its producer"
+        );
+        assert!(!stream.cancel_token().is_cancelled());
+
+        sink.send_chunk(b"two".to_vec())
+            .await
+            .expect("the consumer is still there");
+        sink.complete(vec![]).await.unwrap();
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 4, "{events:?}");
+        assert_eq!(events[2], StreamEvent::Chunk(b"two".to_vec()));
+    }
+
+    /// Dropping a stream holding put-back events cancels its producer and
+    /// closes its channel, as dropping any stream does.
+    #[tokio::test]
+    async fn dropping_a_stream_with_a_prelude_cancels_its_producer() {
+        let (mut stream, sink, cancel) = OutputStream::new_streaming();
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        sink.send_chunk(b"one".to_vec()).await.unwrap();
+        let meta = stream.take_leading_meta().await;
+        stream.prepend(meta.into_iter().map(StreamEvent::Meta));
+
+        drop(stream);
+        assert!(cancel.is_cancelled(), "dropping the stream cancels");
+        assert!(
+            sink.send_chunk(b"two".to_vec()).await.is_err(),
+            "the producer sees its consumer gone"
+        );
+    }
+
+    /// Put-back events add no buffer beyond the events read ahead: with a
+    /// one-slot channel, the producer stays blocked until the consumer has
+    /// read past the put-back events and into the channel.
+    #[tokio::test]
+    async fn a_prelude_does_not_relieve_backpressure() {
+        use futures::FutureExt;
+        let (mut stream, sink, _cancel) = OutputStream::new_streaming_with_capacity(1);
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        // `take_leading_meta` reads the meta, then waits for the next event.
+        let producer = async {
+            sink.send_chunk(b"one".to_vec()).await.unwrap();
+        };
+        let (meta, ()) = futures::join!(stream.take_leading_meta(), producer);
+        stream.prepend(meta.into_iter().map(StreamEvent::Meta));
+
+        sink.send_chunk(b"two".to_vec()).await.unwrap(); // fills the one slot
+        assert!(
+            sink.send_chunk(b"three".to_vec()).now_or_never().is_none(),
+            "the channel is full: the producer must wait"
+        );
+        // The put-back meta and chunk are read without touching the channel.
+        assert!(matches!(stream.next().await, Some(StreamEvent::Meta(_))));
+        assert_eq!(
+            stream.next().await,
+            Some(StreamEvent::Chunk(b"one".to_vec()))
+        );
+        assert!(
+            sink.send_chunk(b"three".to_vec()).now_or_never().is_none(),
+            "reading the prelude frees no channel slot"
+        );
+        assert_eq!(
+            stream.next().await,
+            Some(StreamEvent::Chunk(b"two".to_vec()))
+        );
+        assert!(
+            sink.send_chunk(b"three".to_vec())
+                .now_or_never()
+                .is_some_and(|sent| sent.is_ok()),
+            "reading from the channel frees its slot"
+        );
+    }
+
+    /// `rewrite_produced` rewrites the events not yet read, in order, and
+    /// skips those it maps to `None`; events already read ahead are yielded
+    /// as they were. A second rewrite applies to what the first yields.
+    #[tokio::test]
+    async fn rewrite_produced_rewrites_what_is_still_to_be_read() {
+        let (mut stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        sink.send_chunk(b"one".to_vec()).await.unwrap();
+        sink.send_meta(entry("late", "meta")).await.unwrap();
+        sink.send_chunk(b"two".to_vec()).await.unwrap();
+        sink.complete(vec![entry("trailing", "meta")])
+            .await
+            .unwrap();
+
+        // Positioned on the first chunk: the meta and `one` are read ahead.
+        let meta = stream.take_leading_meta().await;
+        stream.prepend(meta.into_iter().map(StreamEvent::Meta));
+        stream.rewrite_produced(|event| match event {
+            StreamEvent::Meta(_) => None,
+            StreamEvent::Complete { .. } => Some(StreamEvent::Complete { meta: vec![] }),
+            other => Some(other),
+        });
+        stream.rewrite_produced(|event| match event {
+            StreamEvent::Chunk(bytes) => Some(StreamEvent::Chunk(bytes.to_ascii_uppercase())),
+            other => Some(other),
+        });
+
+        let events: Vec<StreamEvent> = stream.collect().await;
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Meta(entry("resp.content_type", "text/event-stream")),
+                StreamEvent::Chunk(b"one".to_vec()),
+                StreamEvent::Chunk(b"TWO".to_vec()),
+                StreamEvent::Complete { meta: vec![] },
+            ]
+        );
+    }
+
+    /// A rewrite reads nothing ahead — with a one-slot channel the producer
+    /// stays blocked until the consumer asks for an event, even when the
+    /// rewrite skips events — and dropping the stream still cancels the
+    /// producer.
+    #[tokio::test]
+    async fn rewrite_produced_keeps_backpressure_and_cancellation() {
+        use futures::FutureExt;
+        let (mut stream, sink, cancel) = OutputStream::new_streaming_with_capacity(1);
+        stream.rewrite_produced(|event| match event {
+            StreamEvent::Meta(_) => None,
+            other => Some(other),
+        });
+        sink.send_meta(entry("skipped", "1")).await.unwrap(); // fills the one slot
+        assert!(
+            sink.send_chunk(b"one".to_vec()).now_or_never().is_none(),
+            "installing a rewrite reads nothing: the producer must wait"
+        );
+        let producer = async {
+            sink.send_chunk(b"one".to_vec()).await.unwrap();
+        };
+        let (first, ()) = futures::join!(stream.next(), producer);
+        assert_eq!(first, Some(StreamEvent::Chunk(b"one".to_vec())));
+        sink.send_chunk(b"two".to_vec()).await.unwrap(); // fills the slot again
+        assert!(
+            sink.send_chunk(b"three".to_vec()).now_or_never().is_none(),
+            "the rewrite did not read ahead"
+        );
+        assert!(!cancel.is_cancelled());
+        drop(stream);
+        assert!(cancel.is_cancelled(), "dropping the stream cancels");
+    }
+
+    /// A `take_leading_meta` dropped while it waits for the producer — the
+    /// meta has arrived, the body has not — leaves the meta on the stream.
+    #[tokio::test]
+    async fn take_leading_meta_dropped_mid_read_loses_nothing() {
+        use futures::FutureExt;
+        let (mut stream, sink, _cancel) = OutputStream::new_streaming();
+        sink.send_meta(entry("resp.content_type", "text/event-stream"))
+            .await
+            .unwrap();
+        sink.send_meta(entry("resp.status", "200")).await.unwrap();
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            stream.take_leading_meta(),
+        )
+        .await;
+        assert!(timed_out.is_err(), "the producer has sent no body yet");
+
+        sink.send_chunk(b"one".to_vec()).await.unwrap();
+        assert_eq!(
+            stream.take_leading_meta().await,
+            vec![
+                entry("resp.content_type", "text/event-stream"),
+                entry("resp.status", "200")
+            ],
+            "the meta read before the cancelled call is still there"
+        );
+        assert_eq!(
+            stream.next().now_or_never(),
+            Some(Some(StreamEvent::Chunk(b"one".to_vec()))),
+            "the stream is left on the body"
+        );
+    }
+
+    /// No leading meta: nothing is taken and the stream stays on its first
+    /// event. A stream that ends after its meta with no terminal is left
+    /// ended.
+    #[tokio::test]
+    async fn take_leading_meta_stops_at_the_first_other_event_or_the_end() {
+        let mut stream = OutputStream::respond(b"body".to_vec());
+        assert!(stream.take_leading_meta().await.is_empty());
+        assert_eq!(
+            stream.next().await,
+            Some(StreamEvent::Chunk(b"body".to_vec()))
+        );
+
+        let (tx, rx) = mpsc::channel::<StreamEvent>(2);
+        tx.try_send(StreamEvent::Meta(entry("resp.status", "200")))
+            .unwrap();
+        drop(tx);
+        let mut stream = OutputStream::from_raw_receiver(rx);
+        assert_eq!(
+            stream.take_leading_meta().await,
+            vec![entry("resp.status", "200")]
+        );
+        assert_eq!(stream.peek().await, None);
+        assert_eq!(stream.next().await, None);
     }
 
     #[tokio::test]
@@ -1444,10 +1881,7 @@ mod tests {
             }],
         })
         .unwrap();
-        OutputStream {
-            rx: ReceiverStream::new(rx),
-            cancel: CancellationToken::new(),
-        }
+        OutputStream::from_raw_receiver(rx)
     }
 
     /// Both buffered and streamed consumers fail a Halt that follows a

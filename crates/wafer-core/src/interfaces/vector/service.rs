@@ -79,6 +79,17 @@ pub enum VectorError {
     /// backend classifies its driver's errors into this variant.
     #[error("vector store unavailable: {0}")]
     Unavailable(String),
+    /// The engine that runs the embedding model cannot take this request now, and the
+    /// message says why in words a caller can act on — for example a browser
+    /// runtime whose models run in a page, with no open page running the
+    /// engine, or none holding the embedding model the request needs. Retrying after
+    /// that is put right (a tab opened, the embedding model loaded) may succeed.
+    ///
+    /// The message is returned to the caller as it is (with
+    /// `ErrorCode::Unavailable`), so it must be written for them: no paths,
+    /// hosts or driver text.
+    #[error("embedding engine unavailable: {0}")]
+    EngineUnavailable(String),
     /// Backend-internal failure.
     #[error("internal vector store error: {0}")]
     Internal(String),
@@ -148,37 +159,23 @@ pub trait VectorService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// meta tables live under `prefix`, in lexical order. The prefix matches
     /// literally — `_`/`%` in it are not LIKE wildcards.
     ///
-    /// Defaulted to `Internal` so existing backends keep compiling; backends
-    /// that can enumerate their catalog should override.
-    async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>> {
-        let _ = prefix;
-        Err(VectorError::Internal(
-            "list_indexes not implemented by this backend".into(),
-        ))
-    }
+    /// No default: a backend that forgot it would compile and fail every call
+    /// at runtime. A backend that genuinely cannot enumerate its catalog says
+    /// so in its own impl.
+    async fn list_indexes(&self, prefix: &str) -> Result<Vec<String>>;
     /// Describe `index`: existence, meta-table columns (declaration order),
     /// and keyword-search capability. Absence is data (`exists: false`), not
     /// an error — callers use this as an existence/capability probe.
     ///
-    /// Defaulted to `Internal` so existing backends keep compiling.
-    async fn describe_index(&self, index: &str) -> Result<DescribeIndexResponse> {
-        let _ = index;
-        Err(VectorError::Internal(
-            "describe_index not implemented by this backend".into(),
-        ))
-    }
+    /// No default, for the reason [`list_indexes`](Self::list_indexes) has none.
+    async fn describe_index(&self, index: &str) -> Result<DescribeIndexResponse>;
     /// Ids of entries in `index` whose metadata satisfies every
     /// `filter.equals` condition. The filter must be non-empty and its
     /// values JSON strings or numbers ([`VectorError::InvalidMetadataFilter`]
     /// otherwise); a missing index is [`VectorError::IndexNotFound`].
     ///
-    /// Defaulted to `Internal` so existing backends keep compiling.
-    async fn list_ids(&self, index: &str, filter: MetadataFilter) -> Result<Vec<String>> {
-        let _ = (index, filter);
-        Err(VectorError::Internal(
-            "list_ids not implemented by this backend".into(),
-        ))
-    }
+    /// No default, for the reason [`list_indexes`](Self::list_indexes) has none.
+    async fn list_ids(&self, index: &str, filter: MetadataFilter) -> Result<Vec<String>>;
 }
 
 /// Embedding model interface — convert text into fixed-dimensional vectors.

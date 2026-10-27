@@ -374,7 +374,7 @@ impl Block for RateLimitBlock {
                  returning ResourceExhausted. Set to 0 to disable.",
                 &DEFAULT_MAX_REQUESTS.to_string(),
             )
-            .name("Max Requests"),
+            .name("Max requests"),
             ConfigVar::new(
                 "window_seconds",
                 "Fixed window length in seconds for the per-client \

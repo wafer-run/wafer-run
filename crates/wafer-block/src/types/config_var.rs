@@ -66,7 +66,9 @@ pub struct SelectOption {
 pub struct ConfigVar {
     /// Full config key (e.g., `MY_ORG__AUTH__JWT_SECRET`).
     pub key: String,
-    /// Display label for the admin UI (e.g., "JWT Secret").
+    /// Display label for the admin UI (e.g., "JWT secret"), in sentence case:
+    /// only the first word is capitalised, and acronyms ("URL", "JWT",
+    /// "CORS") and proper nouns ("OAuth") keep their capitals.
     #[serde(default)]
     pub name: String,
     /// What this variable controls.

@@ -132,9 +132,10 @@ impl WebBlock {
         // caller sees the real failure instead of a synthetic 404.
         match try_serve_static(ctx, &config.folder, key, &config.index_file).await {
             Ok((data, info)) => {
-                // Use content_type from storage metadata, fall back to extension-based detection
+                // The type storage recorded, unless it recorded none or the
+                // unknown type: then the one table, by the key's extension.
                 let content_type = if info.content_type.is_empty()
-                    || info.content_type == "application/octet-stream"
+                    || info.content_type == wafer_core::mime::UNKNOWN
                 {
                     wafer_core::mime::mime_for_ext(Path::new(key)).to_string()
                 } else {
@@ -381,7 +382,7 @@ impl Block for WebBlock {
                 "Storage folder under which static files are served.",
                 DEFAULT_WEB_ROOT,
             )
-            .name("Web Root"),
+            .name("Web root"),
             ConfigVar::new(
                 "web_prefix",
                 "Optional URL path prefix (starting with `/`) that must \
@@ -389,33 +390,33 @@ impl Block for WebBlock {
                  stripped before the storage lookup and any other path is 404.",
                 DEFAULT_WEB_PREFIX,
             )
-            .name("URL Prefix"),
+            .name("URL prefix"),
             ConfigVar::new(
                 "web_spa",
                 "When true, requests for non-existent files fall back to \
                  the index file instead of 404 (single-page-app mode).",
                 &DEFAULT_WEB_SPA.to_string(),
             )
-            .name("SPA Mode"),
+            .name("SPA mode"),
             ConfigVar::new(
                 "web_index",
                 "File served at the prefix root and as the SPA fallback.",
                 DEFAULT_WEB_INDEX,
             )
-            .name("Index File"),
+            .name("Index file"),
             ConfigVar::new(
                 "cache_max_age",
                 "Cache-Control max-age (seconds) for unhashed assets.",
                 &DEFAULT_CACHE_MAX_AGE.to_string(),
             )
-            .name("Cache Max Age"),
+            .name("Cache max age"),
             ConfigVar::new(
                 "immutable_max_age",
                 "Cache-Control max-age (seconds) for content-hashed assets, \
                  which also receive the `immutable` directive.",
                 &DEFAULT_IMMUTABLE_MAX_AGE.to_string(),
             )
-            .name("Immutable Max Age"),
+            .name("Immutable max age"),
             ConfigVar::new(
                 "cache_mode",
                 "`normal` (HTML revalidates, hashed assets immutable) or `no-cache` \

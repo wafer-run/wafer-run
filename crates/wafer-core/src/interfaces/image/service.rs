@@ -38,8 +38,26 @@ pub enum ImageError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
     /// Network-level failure (e.g. upstream provider).
+    ///
+    /// The message is the provider client's own text. wafer-core's
+    /// `image::handler` only logs it: a caller of the block is told, with
+    /// `ErrorCode::Unavailable` and the handler's `PROVIDER_UNREACHABLE`,
+    /// that the provider could not be reached, never what this message says.
+    /// Code that calls the service directly gets the message itself and must
+    /// not return it to its own caller either.
     #[error("network error: {0}")]
     Network(String),
+    /// The engine that runs the model cannot take this request now, and the
+    /// message says why in words a caller can act on — for example a browser
+    /// runtime whose models run in a page, with no open page running the
+    /// engine, or none holding the model the request needs. Retrying after
+    /// that is put right (a tab opened, the model loaded) may succeed.
+    ///
+    /// The message is returned to the caller as it is (with
+    /// `ErrorCode::Unavailable`), so it must be written for them: no paths,
+    /// hosts or driver text.
+    #[error("engine unavailable: {0}")]
+    EngineUnavailable(String),
     /// Operation was cancelled via its `CancellationToken`.
     #[error("cancelled")]
     Cancelled,
@@ -65,6 +83,11 @@ pub trait ImageService: wafer_block::MaybeSend + wafer_block::MaybeSync + 'stati
 
     /// Begin loading `model_id`, emitting progress events.
     /// Default impl emits a single `NotSupported` error.
+    ///
+    /// Once `cancel` fires, the handler stops reading: it drops this stream
+    /// without polling it again. Cleanup on cancel therefore belongs in a task that
+    /// watches the token, or in `Drop` — never after `cancel.cancelled()`
+    /// inside the stream, which is not read any more.
     fn load_model(
         &self,
         _backend_id: &str,
