@@ -23,7 +23,9 @@ use wafer_block::error::RuntimeError;
 
 use crate::runtime::{
     config_source::{ConfigSource, StaticConfigSource},
-    wasm_state::{FuelLimit, DEFAULT_MAX_WASM_MEMORY_PAGES},
+    wasm_state::{
+        check_compilation_mode, FuelLimit, WasmCompilation, DEFAULT_MAX_WASM_MEMORY_PAGES,
+    },
     Wafer,
 };
 
@@ -54,6 +56,7 @@ pub struct WaferBuilder {
     config_source: Arc<dyn ConfigSource>,
     fuel: FuelLimit,
     max_wasm_memory_pages: u32,
+    compilation: WasmCompilation,
     init_timeout_cap: Option<std::time::Duration>,
 }
 
@@ -65,6 +68,7 @@ impl Default for WaferBuilder {
             config_source: Arc::new(StaticConfigSource::default()),
             fuel: FuelLimit::default(),
             max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
+            compilation: WasmCompilation::default(),
             init_timeout_cap: None,
         }
     }
@@ -138,6 +142,25 @@ impl WaferBuilder {
         self
     }
 
+    /// Set how the runtime's wasmi engines compile WASM modules.
+    ///
+    /// Defaults to [`WasmCompilation::Eager`]. A trusted single-user
+    /// embedder that runs [`FuelLimit::Unmetered`] and loads many modules at
+    /// start can pass [`WasmCompilation::LazyTranslation`], which still
+    /// validates every module at load but translates each function only when
+    /// a call first reaches it; see [`WasmCompilation`] for the trade-offs.
+    /// [`build`](Self::build) refuses `LazyTranslation` with a
+    /// [`Metered`](FuelLimit::Metered) fuel limit, because lazy translation
+    /// would make a call's fuel use depend on the calls before it.
+    ///
+    /// The selected mode is threaded into the runtime's shared wasmi engine
+    /// and into blocks loaded from `wafer.lock`, and is readable via
+    /// [`Wafer::resource_limits`] for consumers that load blocks directly.
+    pub fn wasm_compilation(mut self, compilation: WasmCompilation) -> Self {
+        self.compilation = compilation;
+        self
+    }
+
     /// Cap how long one attempt at any block's init may run: loading its
     /// config and its `lifecycle(Init)`.
     ///
@@ -164,10 +187,12 @@ impl WaferBuilder {
                 "init_timeout cap is zero: every block's init would time out at once".to_string(),
             ));
         }
+        check_compilation_mode(self.fuel, self.compilation)?;
         let mut w = Wafer::empty();
         w.config = crate::runtime::config_source::ConfigState::new(self.config_source);
         w.wasm.fuel = self.fuel;
         w.wasm.max_wasm_memory_pages = self.max_wasm_memory_pages;
+        w.wasm.compilation = self.compilation;
         w.init_timeout_cap = self.init_timeout_cap;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {

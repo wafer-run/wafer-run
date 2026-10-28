@@ -1892,6 +1892,22 @@
 
 ### Added
 
+- `WasmCompilation` (`Eager`, the default, or `LazyTranslation`) selects how
+  a runtime-created wasmi engine compiles a guest module: per load through
+  the new `ResourceLimits::compilation` field, or for a whole runtime with
+  `WaferBuilder::wasm_compilation`, which `Wafer::resource_limits` reports
+  back. `LazyTranslation` still validates every module at load, so a
+  malformed guest fails at load as before, but translates each function only
+  when a call first reaches it. Over 1440 real tool modules on wasmi 2.0,
+  loading took 4.2 s instead of 14.7 s (release) and 35 s instead of 208 s
+  (opt-level 0). It is accepted only with `FuelLimit::Unmetered`: lazy
+  translation bills a function's translation to the first call that reaches
+  it, so `Metered` fuel with `LazyTranslation` is refused with
+  `RuntimeError::Config` by `WaferBuilder::build` and by every `WasmiBlock`
+  constructor that takes `ResourceLimits`. Metered runtimes keep eager
+  translation and deterministic per-call fuel. A `ResourceLimits` struct
+  literal needs `..ResourceLimits::default()` (or the new field) to compile.
+
 - `database.ddl_transaction` (`ServiceOp::DATABASE_DDL_TRANSACTION`), the
   client `wafer_core::clients::database::ddl_transaction(ctx, &[RawStatement])`
   and the SDK's `ddl_transaction`: raw statements, DDL and DML, as one

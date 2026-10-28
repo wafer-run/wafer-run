@@ -414,16 +414,18 @@ impl Wafer {
 
     /// Return the per-guest-call [`ResourceLimits`](crate::ResourceLimits)
     /// configured on this runtime via
-    /// [`WaferBuilder::fuel_per_call`](crate::WaferBuilder::fuel_per_call) and
-    /// [`WaferBuilder::max_wasm_memory_pages`](crate::WaferBuilder::max_wasm_memory_pages).
+    /// [`WaferBuilder::fuel_per_call`](crate::WaferBuilder::fuel_per_call),
+    /// [`WaferBuilder::max_wasm_memory_pages`](crate::WaferBuilder::max_wasm_memory_pages)
+    /// and [`WaferBuilder::wasm_compilation`](crate::WaferBuilder::wasm_compilation).
     /// Defaults to the bounded [`ResourceLimits::default`](crate::ResourceLimits::default)
-    /// ([`DEFAULT_FUEL`](crate::DEFAULT_FUEL) metered fuel, 256-page / 16 MiB memory).
+    /// ([`DEFAULT_FUEL`](crate::DEFAULT_FUEL) metered fuel, 256-page / 16 MiB memory,
+    /// eager compilation).
     ///
     /// Consumers that load WASM blocks directly — rather than through the
     /// runtime's shared engine — read this back to pass to
     /// [`WasmiBlock::load_from_bytes_with_limits`](crate::WasmiBlock::load_from_bytes_with_limits)
-    /// so directly-registered blocks honour the same fuel budget and memory
-    /// cap.
+    /// so directly-registered blocks honour the same fuel budget, memory
+    /// cap and compilation mode.
     pub fn resource_limits(&self) -> crate::ResourceLimits {
         self.wasm.resource_limits()
     }
