@@ -332,8 +332,11 @@ pub struct TableDef {
 }
 
 /// Request for `database.ensure_table` — create the table and its indexes
-/// if they do not exist. Authorized on `table.name` and on `__schema__`
-/// (the `schema` capability); it does NOT require raw `__ddl__`.
+/// if they do not exist, and add any declared column an existing table
+/// lacks. The table must declare `updated_at`, which every write stamps; one
+/// without it is refused as `InvalidArgument`, naming it. Authorized on
+/// `table.name` and on `__schema__` (the `schema` capability); it does NOT
+/// require raw `__ddl__`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsureTableRequest {
     /// The table to ensure exists.

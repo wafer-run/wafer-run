@@ -35,31 +35,6 @@ use crate::interfaces::handler_util::{decode_and_authorize_all, to_output};
 
 // --- Helpers ---
 
-/// Config key for the `wafer-run/database` block's STRICT_SCHEMA mode. When
-/// enabled, SQL backends trust their migrated schema and skip per-operation
-/// schema introspection (see
-/// [`DbExec::strict_schema`](super::exec::DbExec::strict_schema)). Declared as
-/// a `ConfigVar` on that block and read from its Init config
-/// ([`strict_schema_from`]); a backend block that is its own `database@v1`
-/// block (`wafer-run/postgres`) declares a key under its own prefix.
-pub const STRICT_SCHEMA_CONFIG_KEY: &str = "WAFER_RUN__DATABASE__STRICT_SCHEMA";
-
-/// Whether the `lifecycle(Init)` config of `event` turns STRICT_SCHEMA on
-/// under `key` — the block's own declared key, which the runtime resolved
-/// through the embedder's `ConfigSource` into the Init payload. Absent is
-/// off.
-pub fn strict_schema_from(event: &LifecycleEvent, key: &str) -> bool {
-    config_flag_enabled(wafer_block::config::BlockConfig::from_event(event).str(key))
-}
-
-/// Interpret a config string as a boolean flag: `"true"`/`"1"`
-/// (case-insensitive, trimmed) enable it; anything else — including an unset
-/// key — is `false`. Matches the convention used by other toggle config vars.
-fn config_flag_enabled(value: &str) -> bool {
-    let v = value.trim();
-    v.eq_ignore_ascii_case("true") || v == "1"
-}
-
 /// Maximum nesting depth of a `FilterNode` tree accepted from the wire.
 pub(crate) const MAX_FILTER_DEPTH: usize = 16;
 /// Maximum total node count of a `FilterNode` tree accepted from the wire.
@@ -791,19 +766,16 @@ fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
 /// - it names only column names that pass [`check_name`];
 /// - it names none of [`SERVER_OWNED_COLUMNS`], which the server stamps;
 /// - every column it would write — the ones it names and the server-owned
-///   ones — already exists. Outside STRICT_SCHEMA the service adds an unseen
-///   column on insert, and the value's type fixes the column's type; that
-///   reshapes the owner's table, which an append-only grant does not confer.
-///   Columns are never dropped individually, so one present here is present
-///   when the insert runs.
+///   ones — already exists. The insert would fail in the backend on a
+///   missing one anyway, as an opaque internal error; refusing it here names
+///   the column to the grantee.
 ///
-/// A guarded insert's guard columns need no rule here: a guard never adds a
-/// column, the executor refuses one the table lacks.
+/// A guarded insert's guard columns need no rule here: the executor refuses
+/// a guard on a column the table lacks.
 ///
 /// So a collection lacking any of `id`, `created_at` or `updated_at` refuses
-/// EVERY append-only insert — the server would stamp the missing column and,
-/// outside STRICT_SCHEMA, add it. An owner that grants append declares all
-/// three columns.
+/// EVERY append-only insert — the server stamps all three. An owner that
+/// grants append declares all three columns.
 async fn check_append_only_rows<'a>(
     service: &dyn DatabaseService,
     collection: &str,
@@ -1620,25 +1592,14 @@ pub async fn handle_message(
     }
 }
 
-/// Handle database lifecycle events (config application + schema migration on
-/// Init).
-///
-/// `strict_schema` is the STRICT_SCHEMA flag the calling block read from its
-/// own `lifecycle(Init)` config (see [`strict_schema_from`]); it is applied
-/// here, before any migration or query, so the backend stores it off the
-/// per-call hot path.
+/// Handle database lifecycle events: on Init, ensure the block's declared
+/// schema tables.
 pub async fn handle_lifecycle(
     service: &dyn DatabaseService,
     tables: &[Table],
-    strict_schema: bool,
     event: &LifecycleEvent,
 ) -> std::result::Result<(), WaferError> {
     if event.event_type == LifecycleType::Init {
-        service.set_strict_schema(strict_schema);
-        if strict_schema {
-            tracing::info!("database STRICT_SCHEMA enabled — schema introspection disabled");
-        }
-
         if tables.is_empty() {
             tracing::debug!("no schema tables configured — skipping migration");
         } else {

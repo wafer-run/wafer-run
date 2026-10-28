@@ -5,7 +5,7 @@
 //!
 //! # The problem
 //!
-//! Five of the trait's operations carry defaults, and none of them is a
+//! Four of the trait's operations carry defaults, and none of them is a
 //! pass-through:
 //!
 //! | operation | default |
@@ -14,7 +14,6 @@
 //! | `delete_where_count` | `count` then `delete_where` (a TOCTOU window) |
 //! | `update_where_count` | `count` then `update_where` |
 //! | `ensure_schema_tables` | loop over `ensure_schema_table` |
-//! | `set_strict_schema` | a silent no-op |
 //!
 //! Those defaults exist for backends that genuinely cannot express the bulk
 //! statement. They are the wrong answer for a **decorator** — a cache, an
@@ -45,7 +44,7 @@
 //!   [`DbExec`](super::exec::DbExec); `forward` entries call the shared
 //!   executor's default of the same name, qualified so they cannot recurse into
 //!   the method being defined. `DbExec` provides twenty-six of the operations;
-//!   the other four must be `custom` or `inherit`.
+//!   the other three must be `custom` or `inherit`.
 //! - `forward_to <method>();` — the implementor is a decorator with an inherent
 //!   `fn <method>(&self) -> &dyn DatabaseService` returning the wrapped
 //!   service; `forward` entries call it.
@@ -116,7 +115,6 @@
 //!             schema_columns: forward,
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
-//!             set_strict_schema: forward,
 //!             statement_budget: forward,
 //!         }
 //!
@@ -238,7 +236,6 @@
 //!             schema_columns: forward,
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
-//!             set_strict_schema: forward,
 //!             statement_budget: forward,
 //!         }
 //!     }
@@ -331,7 +328,6 @@ macro_rules! __forward_database_ledger {
             schema_columns: $m_schema_columns:ident,
             schema_drop_table: $m_schema_drop_table:ident,
             schema_add_column: $m_schema_add_column:ident,
-            set_strict_schema: $m_set_strict_schema:ident,
             statement_budget: $m_statement_budget:ident $(,)?
         }
         $($custom:tt)*
@@ -367,7 +363,6 @@ macro_rules! __forward_database_ledger {
                 (schema_columns, $m_schema_columns)
                 (schema_drop_table, $m_schema_drop_table)
                 (schema_add_column, $m_schema_add_column)
-                (set_strict_schema, $m_set_strict_schema)
                 (statement_budget, $m_statement_budget)
             ],
             []
@@ -385,7 +380,7 @@ macro_rules! __forward_database_ledger {
              \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
              \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_columns,\n\
-             \x20   schema_drop_table, schema_add_column, set_strict_schema, statement_budget\n\
+             \x20   schema_drop_table, schema_add_column, statement_budget\n\
              The listing is the point: an operation left out of a decorator \
              silently inherits a non-pass-through trait default."
         );
@@ -1024,20 +1019,6 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::schema_add_column($recv(self), table, column).await
-                }
-            ]
-        );
-    };
-    (
-        $ty:ty, $target:path, $recv:path, $custom:tt,
-        [ (set_strict_schema, forward) $($todo:tt)* ], [ $($acc:tt)* ]
-    ) => {
-        $crate::__forward_database_step!(
-            $ty, $target, $recv, $custom, [ $($todo)* ],
-            [
-                $($acc)*
-                fn set_strict_schema(&self, enabled: bool) {
-                    <_ as $target>::set_strict_schema($recv(self), enabled);
                 }
             ]
         );

@@ -88,6 +88,8 @@ async fn seeded() -> SQLiteDatabaseService {
             Column::new("account", DataType::Text),
             Column::new("total_cents", DataType::Float),
             Column::new("refunded_cents", DataType::Float),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),

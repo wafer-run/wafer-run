@@ -193,7 +193,8 @@ pub fn ddl_transaction(
 
 /// Buffered: create a table and its indexes if absent (structured schema op,
 /// authorized on the table name and `__schema__` — the `schema` capability,
-/// not raw `ddl`).
+/// not raw `ddl`). The table must declare `updated_at`, which the host
+/// stamps on every write; one without it is refused as `InvalidArgument`.
 pub fn ensure_table(request: &EnsureTableRequest) -> Result<SchemaOpResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_ENSURE_TABLE, request)
 }

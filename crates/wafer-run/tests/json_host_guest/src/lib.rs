@@ -194,8 +194,9 @@ const ATTACH_PAYLOAD: [u8; 39] = [
     0x6c, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0xc0,
 ];
 
-/// `database.ensure_table` request for the guest's own table.
-const NOTES_TABLE: &str = r#"{"table":{"name":"test__json_host_guest__notes","columns":[{"name":"id","kind":"string","primary_key":true},{"name":"body","kind":"text","nullable":true}]}}"#;
+/// `database.ensure_table` request for the guest's own table, declaring the
+/// `created_at` and `updated_at` the host stamps on a create.
+const NOTES_TABLE: &str = r#"{"table":{"name":"test__json_host_guest__notes","columns":[{"name":"id","kind":"string","primary_key":true},{"name":"body","kind":"text","nullable":true},{"name":"created_at","kind":"text","nullable":true},{"name":"updated_at","kind":"text","nullable":true}]}}"#;
 
 const JSON: &str = "application/json";
 

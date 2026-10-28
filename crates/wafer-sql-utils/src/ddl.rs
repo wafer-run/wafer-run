@@ -328,90 +328,6 @@ pub fn build_add_column(
     Ok(crate::Statement::new(sql, vec![], table_name))
 }
 
-/// Generate an `ALTER TABLE <table> ADD COLUMN <column> <type_sql>` statement.
-///
-/// Both `table_name` and `column_name` are quoted as identifiers, and must be
-/// plain identifiers ([`validate_ident`]) or the call is `Err`. `type_sql` is
-/// spliced verbatim, so this stays private: its one caller,
-/// [`build_add_column_for_value`], passes a fixed type from
-/// [`column_type_for_value`].
-///
-/// Postgres emits `ADD COLUMN IF NOT EXISTS` for idempotency: the lazy
-/// column-add path may legitimately re-attempt the same add (two concurrent
-/// inserts of a record carrying a new column, or when the in-memory existence
-/// check and the stored column name differ), and Postgres surfaces a redundant
-/// `ADD COLUMN` as a hard error. SQLite does **not** support `IF NOT EXISTS` on
-/// `ADD COLUMN`, so its callers guard with an existence check and swallow the
-/// duplicate-column error instead.
-fn build_add_column_with_type(
-    table_name: &str,
-    column_name: &str,
-    type_sql: &'static str,
-    backend: Backend,
-) -> Result<crate::Statement, SqlBuildError> {
-    let if_not_exists = match backend {
-        Backend::Postgres => "IF NOT EXISTS ",
-        Backend::Sqlite => "",
-    };
-    let sql = format!(
-        "ALTER TABLE {} ADD COLUMN {}{} {}",
-        quote_ident(table_name)?,
-        if_not_exists,
-        quote_ident(column_name)?,
-        type_sql
-    );
-    Ok(crate::Statement::new(sql, vec![], table_name))
-}
-
-/// Pick the dialect column type for a lazily added column holding `value`.
-///
-/// Postgres maps the JSON value onto a native type (`BOOLEAN`, `BIGINT`,
-/// `DOUBLE PRECISION`, `JSONB`, `TEXT`). SQLite is dynamically typed, so only
-/// the one distinction a reader needs is declared: an object or array gets a
-/// [`SQLITE_JSON_TYPE`] column, so it reads back structured, and everything
-/// else `TEXT`.
-pub fn column_type_for_value(value: &serde_json::Value, backend: Backend) -> &'static str {
-    match backend {
-        Backend::Sqlite => match value {
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => SQLITE_JSON_TYPE,
-            _ => "TEXT",
-        },
-        Backend::Postgres => match value {
-            serde_json::Value::Null | serde_json::Value::String(_) => "TEXT",
-            serde_json::Value::Bool(_) => "BOOLEAN",
-            serde_json::Value::Number(n) => {
-                if n.is_i64() || n.is_u64() {
-                    "BIGINT"
-                } else {
-                    "DOUBLE PRECISION"
-                }
-            }
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => "JSONB",
-        },
-    }
-}
-
-/// Generate an `ALTER TABLE <table> ADD COLUMN` statement whose column type is
-/// derived from the JSON `value` being written (see [`column_type_for_value`]).
-///
-/// This is the lazy column-add primitive behind `create`/`update` write paths:
-/// a record field absent from the table is added with a type matching the
-/// value, so subsequent typed binds (e.g. JSONB on Postgres) line up with the
-/// column.
-pub fn build_add_column_for_value(
-    table_name: &str,
-    column_name: &str,
-    value: &serde_json::Value,
-    backend: Backend,
-) -> Result<crate::Statement, SqlBuildError> {
-    build_add_column_with_type(
-        table_name,
-        column_name,
-        column_type_for_value(value, backend),
-        backend,
-    )
-}
-
 /// Generate a DROP TABLE IF EXISTS statement. `Err` when the table name is
 /// not a plain identifier ([`validate_ident`]).
 pub fn build_drop_table(
@@ -533,19 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn test_add_column_with_type_sqlite() {
-        let stmt = build_add_column_with_type("users", "nickname", "TEXT", Backend::Sqlite)
-            .expect("plain identifiers");
-        // SQLite does not support `IF NOT EXISTS` on `ADD COLUMN`.
-        assert_eq!(
-            stmt.sql,
-            "ALTER TABLE \"users\" ADD COLUMN \"nickname\" TEXT"
-        );
-        assert_eq!(stmt.collection, "users");
-        assert!(stmt.values.is_empty());
-    }
-
-    #[test]
     fn test_ddl_refuses_names_that_are_not_plain_identifiers() {
         // A quote, a hyphen, uppercase or a name PostgreSQL would truncate
         // is refused, not escaped or rewritten into another table's name.
@@ -553,7 +456,8 @@ mod tests {
         for bad in ["weird\"name", "a-b", "Users", long.as_str()] {
             assert!(build_drop_table(bad, Backend::Sqlite).is_err(), "{bad:?}");
             assert!(
-                build_add_column_with_type("posts", bad, "TEXT", Backend::Sqlite).is_err(),
+                build_add_column("posts", &Column::new(bad, DataType::Text), Backend::Sqlite)
+                    .is_err(),
                 "{bad:?}"
             );
             assert!(
@@ -572,49 +476,6 @@ mod tests {
                 build_create_table(&table, Backend::Sqlite).is_err(),
                 "{bad:?}"
             );
-        }
-    }
-
-    #[test]
-    fn test_add_column_with_type_postgres_typed() {
-        let stmt = build_add_column_with_type("orders", "amount", "BIGINT", Backend::Postgres)
-            .expect("plain identifiers");
-        assert_eq!(
-            stmt.sql,
-            "ALTER TABLE \"orders\" ADD COLUMN IF NOT EXISTS \"amount\" BIGINT"
-        );
-        assert_eq!(stmt.collection, "orders");
-    }
-
-    #[test]
-    #[expect(
-        clippy::approx_constant,
-        reason = "test literal happens to look like PI; not an approximation"
-    )]
-    fn test_column_type_for_value() {
-        use serde_json::json;
-        // Postgres: native types derived from the value.
-        for (value, expected) in [
-            (serde_json::Value::Null, "TEXT"),
-            (json!("hello"), "TEXT"),
-            (json!(true), "BOOLEAN"),
-            (json!(42), "BIGINT"),
-            (json!(3.14), "DOUBLE PRECISION"),
-            (json!([1, 2, 3]), "JSONB"),
-            (json!({"key": "val"}), "JSONB"),
-        ] {
-            assert_eq!(column_type_for_value(&value, Backend::Postgres), expected);
-        }
-        // SQLite: JSON for a structured value, TEXT for everything else.
-        for (value, expected) in [
-            (serde_json::Value::Null, "TEXT"),
-            (json!("[1]"), "TEXT"),
-            (json!(true), "TEXT"),
-            (json!(42), "TEXT"),
-            (json!([1, 2, 3]), "JSON TEXT"),
-            (json!({"key": "val"}), "JSON TEXT"),
-        ] {
-            assert_eq!(column_type_for_value(&value, Backend::Sqlite), expected);
         }
     }
 
@@ -650,32 +511,6 @@ mod tests {
             assert_eq!(kind, "text", "{text:?} is kept as text");
             assert_eq!(stored, text);
         }
-    }
-
-    #[test]
-    fn test_add_column_for_value() {
-        let stmt = build_add_column_for_value(
-            "orders",
-            "meta",
-            &serde_json::json!({"a": 1}),
-            Backend::Postgres,
-        )
-        .expect("plain identifiers");
-        assert_eq!(
-            stmt.sql,
-            "ALTER TABLE \"orders\" ADD COLUMN IF NOT EXISTS \"meta\" JSONB"
-        );
-        let stmt = build_add_column_for_value(
-            "orders",
-            "meta",
-            &serde_json::json!({"a": 1}),
-            Backend::Sqlite,
-        )
-        .expect("plain identifiers");
-        assert_eq!(
-            stmt.sql,
-            "ALTER TABLE \"orders\" ADD COLUMN \"meta\" JSON TEXT"
-        );
     }
 
     #[test]

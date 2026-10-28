@@ -20,13 +20,6 @@ use crate::service::PostgresDatabaseService;
 
 const DATABASE_URL_ENV: &str = "WAFER_RUN__POSTGRES__DATABASE_URL";
 
-/// This block's STRICT_SCHEMA flag (see
-/// [`handler::STRICT_SCHEMA_CONFIG_KEY`] for what it does). Declared under
-/// the block's own prefix: the config-prefix rule refuses the
-/// `WAFER_RUN__DATABASE__` key the generic `wafer-run/database` block
-/// declares.
-const STRICT_SCHEMA_KEY: &str = "WAFER_RUN__POSTGRES__STRICT_SCHEMA";
-
 wafer_core::service_block! {
     /// The PostgreSQL database block.
     ///
@@ -55,17 +48,6 @@ wafer_core::service_block! {
         // A URL carries `user:password@`, so it is masked wherever config is
         // served back (admin API responses).
         .input_type(InputType::Password),
-        ConfigVar::new(
-            STRICT_SCHEMA_KEY,
-            "When \"true\", trust the migrated schema: skip the \
-             per-operation table-exists probe, the lazy ADD COLUMN a write \
-             makes for a new data key, and the column check of a filter or \
-             sort. Leave \"false\" (the default) for development. Applied \
-             once at Init.",
-            "false",
-        )
-        .name("Strict schema")
-        .input_type(InputType::Toggle),
     ]),
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
@@ -119,8 +101,7 @@ wafer_core::service_block! {
         if event.event_type == LifecycleType::Init {
             let tables = this.tables.get().map_or(&[][..], |t| t.as_slice());
             if let Some(service) = this.service.get() {
-                let strict = handler::strict_schema_from(&event, STRICT_SCHEMA_KEY);
-                handler::handle_lifecycle(service.as_ref(), tables, strict, &event).await?;
+                handler::handle_lifecycle(service.as_ref(), tables, &event).await?;
             }
         }
 

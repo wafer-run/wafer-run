@@ -136,12 +136,13 @@ pub fn build_list_columns(table: &str, backend: Backend) -> (String, Vec<serde_j
 ///
 /// SQLite has no JSON storage class: a JSON column holds JSON text, and is one
 /// declared [`JSON TEXT`](crate::ddl::SQLITE_JSON_TYPE) — what the DDL builders
-/// emit for [`DataType::Json`](wafer_schema::DataType::Json) and for a lazily
-/// added column first written with an object or array — or `JSON`, which
-/// earlier builds emitted (NUMERIC affinity, so still read as JSON but best
-/// migrated). Postgres reports its native `json` and `jsonb` types. Any other
-/// declaration, `TEXT` included, holds plain values: a string stored there is
-/// never read back as JSON, however it looks.
+/// emit for [`DataType::Json`](wafer_schema::DataType::Json), and which
+/// earlier builds' lazily added columns got when first written with an
+/// object or array — or `JSON`, which earlier builds emitted (NUMERIC
+/// affinity, so still read as JSON but best migrated). Postgres reports its
+/// native `json` and `jsonb` types. Any other declaration, `TEXT` included,
+/// holds plain values: a string stored there is never read back as JSON,
+/// however it looks.
 #[must_use]
 pub fn is_json_decl_type(decl_type: &str) -> bool {
     let decl = decl_type.trim();

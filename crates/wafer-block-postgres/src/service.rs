@@ -1,7 +1,4 @@
-use std::{
-    str::FromStr as _,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::str::FromStr as _;
 
 use base64ct::{Base64, Encoding};
 use sqlx::{
@@ -57,10 +54,6 @@ pub struct PostgresDatabaseService {
     /// Memoized table-exists / column-list facts (see [`SchemaCache`]).
     /// Invalidated on every schema mutation this service performs.
     schema_cache: SchemaCache,
-    /// STRICT_SCHEMA flag; applied once at lifecycle `Init` via
-    /// [`DatabaseService::set_strict_schema`]. When set, the shared executor
-    /// skips schema introspection entirely.
-    strict_schema: AtomicBool,
 }
 
 impl PostgresDatabaseService {
@@ -100,7 +93,6 @@ impl PostgresDatabaseService {
         Ok(Self {
             pool,
             schema_cache: SchemaCache::new(),
-            strict_schema: AtomicBool::new(false),
         })
     }
 
@@ -143,10 +135,6 @@ impl DbExec for PostgresDatabaseService {
 
     fn schema_cache(&self) -> Option<&SchemaCache> {
         Some(&self.schema_cache)
-    }
-
-    fn strict_schema(&self) -> bool {
-        self.strict_schema.load(Ordering::Relaxed)
     }
 
     /// PostgreSQL has no per-invocation statement limit. A write's cost is
@@ -300,11 +288,9 @@ forward_database_service! {
             ensure_schema_tables: inherit,
             schema_table_exists: forward,
             schema_columns: forward,
-            // `DbExec` has no schema-mutation primitives, and STRICT_SCHEMA is
-            // per-backend state.
+            // `DbExec` has no schema-mutation primitives.
             schema_drop_table: custom,
             schema_add_column: custom,
-            set_strict_schema: custom,
             statement_budget: forward,
         }
 
@@ -322,10 +308,6 @@ forward_database_service! {
             let result = self.schema_add_column_async(table, column).await;
             self.schema_cache.invalidate(table);
             result
-        }
-
-        fn set_strict_schema(&self, enabled: bool) {
-            self.strict_schema.store(enabled, Ordering::Relaxed);
         }
     }
 }
@@ -1030,9 +1012,6 @@ mod tests {
         let params = sea_values_to_json(stmt.values);
         assert_eq!(params.len(), 3);
     }
-
-    // pg type mapping for lazy column-add now lives in
-    // wafer_sql_utils::ddl::column_type_for_value (tested there).
 
     // Filter/clause/order tests now covered by wafer-sql-utils::query::tests
     // Schema DDL tests now live in wafer-sql-utils::ddl::tests

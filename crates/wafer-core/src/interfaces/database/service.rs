@@ -795,9 +795,7 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Set `data` on the rows of `collection` matching `filters` only while
     /// every guard in `guards` holds over the table as it stands before the
     /// update: [`GuardedUpdate::Updated`], [`GuardedUpdate::Refused`] naming
-    /// the guard, or [`GuardedUpdate::NoMatch`] when no row matched (a
-    /// missing table matches nothing, as
-    /// [`update_where_count`](Self::update_where_count)). A guard that should
+    /// the guard, or [`GuardedUpdate::NoMatch`] when no row matched. A guard that should
     /// not count a row the update replaces excludes it with a filter. Atomic
     /// as [`insert_guarded`](Self::insert_guarded) is; no default, for the
     /// same reason.
@@ -820,12 +818,11 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Delete removes a record by ID.
     async fn delete(&self, collection: &str, id: &str) -> Result<(), DatabaseError>;
 
-    /// Count returns the number of records matching the filters; `0` for a
-    /// table that does not exist.
+    /// Count returns the number of records matching the filters. A table
+    /// that does not exist is an error, as for every operation.
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError>;
 
-    /// Sum returns the sum of a numeric field for matching records; `0` for a
-    /// table that does not exist.
+    /// Sum returns the sum of a numeric field for matching records.
     async fn sum(
         &self,
         collection: &str,
@@ -1025,7 +1022,7 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
         spec: UpsertSpec,
     ) -> Result<Option<Record>, DatabaseError>;
 
-    /// Grouped aggregate query; no groups for a table that does not exist.
+    /// Grouped aggregate query.
     /// SQL backends implement this via `DbExec::aggregate`. No default —
     /// every backend states its choice.
     async fn aggregate(
@@ -1038,6 +1035,11 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Ensure a table exists matching the given schema definition.
     /// Creates the table if it doesn't exist and adds any missing columns.
+    ///
+    /// A table that does not declare `updated_at`, which every typed write
+    /// stamps, is refused as [`DatabaseError::InvalidArgument`] naming it,
+    /// before anything is created (see
+    /// [`require_stamped_columns`](super::exec::require_stamped_columns)).
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError>;
 
     /// Ensure multiple tables exist matching the given schema definitions.
@@ -1062,19 +1064,6 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Add a column to an existing table.
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError>;
-
-    /// Apply the resolved STRICT_SCHEMA flag. Called once at lifecycle `Init`
-    /// by the shared database handler, with the value the database block read
-    /// from its own Init config (`WAFER_RUN__DATABASE__STRICT_SCHEMA` on
-    /// `wafer-run/database`, `WAFER_RUN__POSTGRES__STRICT_SCHEMA` on
-    /// `wafer-run/postgres`).
-    ///
-    /// SQL backends store it so the shared executor
-    /// ([`DbExec::strict_schema`](super::exec::DbExec::strict_schema)) can skip
-    /// schema introspection on the hot path. The default is a no-op — backends
-    /// and test mocks that don't cache a schema (or don't run through
-    /// `DbExec`) simply ignore it.
-    fn set_strict_schema(&self, _enabled: bool) {}
 
     /// The statements this service may still run in the current invocation.
     /// The database handler admits a `create_many` or `batch` against it

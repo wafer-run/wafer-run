@@ -114,7 +114,12 @@ async fn a_warm_get_by_field_runs_one_select_and_no_count() {
     let svc = traced_service();
     svc.ensure_schema_table(&Table {
         name: "accounts".to_string(),
-        columns: vec![pk("id"), Column::new("email", DataType::String)],
+        columns: vec![
+            pk("id"),
+            Column::new("email", DataType::String),
+            Column::new("created_at", DataType::Text),
+            Column::new("updated_at", DataType::Text),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -235,8 +240,6 @@ async fn a_counter_increment_and_its_new_value_are_one_statement() {
     })
     .await
     .expect("create rate_limits");
-    // Migrations are authoritative in a deployment (D1 included).
-    svc.set_strict_schema(true);
     let ctx = DbCtx { svc: Arc::new(svc) };
 
     let t0 = 1_700_000_000;
@@ -272,51 +275,124 @@ async fn a_counter_increment_and_its_new_value_are_one_statement() {
 #[tokio::test]
 async fn the_second_create_into_an_insert_only_table_is_one_insert() {
     let _traced = TRACED.lock().await;
-    // Strict (how a deployment with migrations runs, D1 included) and
-    // non-strict schema take different probes on the first create; both must
-    // have cached everything a create needs by the second.
-    for strict in [true, false] {
-        let svc = traced_service();
-        svc.ensure_schema_table(&Table {
-            name: "login_events".to_string(),
-            columns: vec![
-                pk("id"),
-                Column::new("user_id", DataType::String),
-                Column::new("created_at", DataType::Text),
-                Column::new("updated_at", DataType::Text),
-            ],
-            indexes: Vec::new(),
-            primary_key: Vec::new(),
-            unique_keys: Vec::new(),
-        })
+    let svc = traced_service();
+    svc.ensure_schema_table(&login_events())
         .await
         .expect("create login_events");
-        svc.set_strict_schema(strict);
-        drain_statements();
+    drain_statements();
 
-        let event =
-            |n: u32| HashMap::from([("user_id".to_string(), serde_json::json!(format!("u{n}")))]);
-        svc.create("login_events", event(1))
-            .await
-            .expect("first create");
-        let first = drain_statements();
-        assert!(
-            first.len() > 1,
-            "strict={strict}: the first create probes the schema: {first:#?}"
-        );
+    let event =
+        |n: u32| HashMap::from([("user_id".to_string(), serde_json::json!(format!("u{n}")))]);
+    svc.create("login_events", event(1))
+        .await
+        .expect("first create");
+    let first = drain_statements();
+    assert!(
+        first.len() > 1,
+        "the first create probes the schema: {first:#?}"
+    );
 
-        svc.create("login_events", event(2))
-            .await
-            .expect("second create");
-        let second = drain_statements();
-        assert_eq!(
-            second.len(),
-            1,
-            "strict={strict}: the second create is the insert alone: {second:#?}"
-        );
-        assert!(
-            second[0].starts_with("INSERT"),
-            "strict={strict}: {second:#?}"
-        );
+    svc.create("login_events", event(2))
+        .await
+        .expect("second create");
+    let second = drain_statements();
+    assert_eq!(
+        second.len(),
+        1,
+        "the second create is the insert alone: {second:#?}"
+    );
+    assert!(second[0].starts_with("INSERT"), "{second:#?}");
+}
+
+/// A table of login events: an id, a user and the two stamped columns.
+fn login_events() -> Table {
+    Table {
+        name: "login_events".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("user_id", DataType::String),
+            Column::new("created_at", DataType::Text),
+            Column::new("updated_at", DataType::Text),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
     }
+}
+
+/// No write sends DDL: a write naming a column the table lacks fails on its
+/// own statement, and nothing before it adds the column, cold cache or warm.
+#[tokio::test]
+async fn a_write_sends_no_ddl() {
+    let _traced = TRACED.lock().await;
+    let svc = traced_service();
+    svc.ensure_schema_table(&login_events())
+        .await
+        .expect("create login_events");
+    drain_statements();
+
+    let with = |pairs: &[(&str, serde_json::Value)]| -> HashMap<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    };
+    let undeclared = with(&[
+        ("id", serde_json::json!("e1")),
+        ("user_id", serde_json::json!("u1")),
+        ("device", serde_json::json!("phone")),
+    ]);
+    svc.create("login_events", undeclared.clone())
+        .await
+        .expect_err("a create naming an undeclared column (cold cache)");
+    svc.create(
+        "login_events",
+        with(&[
+            ("id", serde_json::json!("e2")),
+            ("user_id", serde_json::json!("u2")),
+        ]),
+    )
+    .await
+    .expect("a declared create");
+    svc.create("login_events", undeclared)
+        .await
+        .expect_err("a create naming an undeclared column (warm cache)");
+    svc.update(
+        "login_events",
+        "e2",
+        with(&[("device", serde_json::json!("phone"))]),
+    )
+    .await
+    .expect_err("an update naming an undeclared column");
+    svc.update_where_count(
+        "login_events",
+        &[],
+        with(&[("device", serde_json::json!("phone"))]),
+    )
+    .await
+    .expect_err("an update_where naming an undeclared column");
+    svc.create_many(
+        "login_events",
+        vec![with(&[("device", serde_json::json!("phone"))])],
+    )
+    .await
+    .expect_err("a create_many naming an undeclared column");
+
+    let statements = drain_statements();
+    assert!(!statements.is_empty(), "the writes reached SQLite");
+    let ddl: Vec<&String> = statements
+        .iter()
+        .filter(|sql| {
+            let head = sql.trim_start().to_ascii_uppercase();
+            ["ALTER", "CREATE", "DROP"]
+                .iter()
+                .any(|verb| head.starts_with(verb))
+        })
+        .collect();
+    assert!(ddl.is_empty(), "a write sent DDL: {ddl:#?}");
+    assert_eq!(
+        svc.schema_columns("login_events").await.expect("columns"),
+        ["id", "user_id", "created_at", "updated_at"],
+        "no write added a column"
+    );
 }

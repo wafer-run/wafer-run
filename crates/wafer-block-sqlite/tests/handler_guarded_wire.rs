@@ -73,6 +73,8 @@ async fn empty_files() -> SQLiteDatabaseService {
             pk("id"),
             Column::new("owner", DataType::Text).null(),
             Column::new("size", DataType::Int64).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),

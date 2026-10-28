@@ -183,18 +183,53 @@ fn written_columns(data: HashMap<String, serde_json::Value>) -> RecordData {
     row
 }
 
+/// The column every typed write stamps ([`stamp_timestamps`]): `create`,
+/// `update`, `update_where`, a guarded write and a batch's creates and
+/// updates all set it. `upsert` and `increment_field_where` set nothing.
+pub const UPDATED_AT: &str = "updated_at";
+
+/// The column a create stamps as well ([`stamp_timestamps`]).
+pub const CREATED_AT: &str = "created_at";
+
 /// Stamp `updated_at` (and on create, `created_at`) if the caller didn't.
 fn stamp_timestamps(data: &mut HashMap<String, serde_json::Value>, include_created: bool) {
     let now = timestamp_now();
-    if include_created && !data.contains_key("created_at") {
+    if include_created && !data.contains_key(CREATED_AT) {
         data.insert(
-            "created_at".to_string(),
+            CREATED_AT.to_string(),
             serde_json::Value::String(now.clone()),
         );
     }
-    if !data.contains_key("updated_at") {
-        data.insert("updated_at".to_string(), serde_json::Value::String(now));
+    if !data.contains_key(UPDATED_AT) {
+        data.insert(UPDATED_AT.to_string(), serde_json::Value::String(now));
     }
+}
+
+/// Refuse a declared table that could take no typed write: one without
+/// [`UPDATED_AT`], which every typed write stamps. The refusal is a
+/// [`DatabaseError::InvalidArgument`] naming the table and the column, so a
+/// block that declares such a table (a guest's `db::ensure_table` from its
+/// `init`, a host's `register_with_tables`) fails when it starts instead of
+/// on its first write, where the backend's `no such column` would surface as
+/// an opaque internal error.
+///
+/// [`CREATED_AT`] is not required: only `create` stamps it, and a table that
+/// is only upserted or updated has no use for it. A create into a table
+/// without it fails in the backend, naming the column, as any undeclared
+/// column does.
+///
+/// Every backend's `ensure_schema_table` runs this before any DDL: the shared
+/// [`DbExec::ensure_schema_table`] and a backend's own sequence (SQLite's
+/// single write job).
+pub fn require_stamped_columns(table: &super::service::Table) -> Result<(), DatabaseError> {
+    if table.columns.iter().any(|column| column.name == UPDATED_AT) {
+        return Ok(());
+    }
+    Err(DatabaseError::InvalidArgument(format!(
+        "table `{}` declares no `{UPDATED_AT}` column, and every write stamps \
+         `{UPDATED_AT}`: declare it",
+        table.name
+    )))
 }
 
 /// Apply [`DbExec::create`]'s per-row policy to a row for `table`, then stamp
@@ -510,32 +545,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Per-backend schema-introspection cache, if the backend keeps one.
     ///
-    /// SQL backends return `Some` so the shared table-exists and column-list
-    /// paths memoize introspection instead of issuing a round-trip per logical
+    /// SQL backends return `Some` so the shared id-policy, column-list and
+    /// primary-key paths memoize introspection instead of issuing a round-trip per logical
     /// operation. The default `None` keeps every other implementor — and any
     /// backend that can't cache — on the always-introspect path, unchanged.
     fn schema_cache(&self) -> Option<&SchemaCache> {
         None
-    }
-
-    /// Whether the backend trusts its migrated schema (STRICT_SCHEMA mode,
-    /// `WAFER_RUN__DATABASE__STRICT_SCHEMA`).
-    ///
-    /// When `true`, the shared orchestration skips the per-operation
-    /// table-exists guard (migrations are authoritative — the table is assumed
-    /// present), the write path's lazy column-add `ALTER TABLE` (the migrated
-    /// schema is trusted — no columns are synthesized) and the column check a
-    /// read or filtered write runs ([`require_columns`](Self::require_columns);
-    /// the backend's own "no such column" error answers instead). The one
-    /// introspection left is the primary-key lookup a sorted or paged
-    /// [`list`](Self::list) orders by
-    /// ([`get_primary_key`](Self::get_primary_key)), which a backend with a
-    /// [`schema_cache`](Self::schema_cache) issues once per table, plus one
-    /// existence probe for a table whose key comes back empty. Default
-    /// `false` keeps the introspecting behaviour — a write adds the columns
-    /// its data names — for development, tests, and other implementors.
-    fn strict_schema(&self) -> bool {
-        false
     }
 
     /// The statements this backend may still run in the current invocation
@@ -754,40 +769,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     // forwards with explicit qualification (`DbExec::get(self, ...)`) to avoid
     // self-recursion.
 
-    /// Cache-consulting hot-path existence guard: `true` if the operation
-    /// should proceed against `table`.
-    ///
-    /// In STRICT_SCHEMA mode always `true` — migrations are authoritative, so
-    /// the table is assumed present and no probe is issued. Otherwise `true`
-    /// without a probe when the [`schema_cache`](Self::schema_cache) knows the
-    /// table exists, else one [`dbx_table_exists`](Self::dbx_table_exists)
-    /// probe, whose answer is memoized only when the table is there. A
-    /// missing table is probed again on every operation: another process can
-    /// create it at any moment, and a memoized "missing" would answer every
-    /// read of it as empty until this process happened to invalidate it. The
-    /// explicit [`schema_table_exists`](Self::schema_table_exists) API
-    /// deliberately bypasses this and stays a live probe for callers that
-    /// want ground truth.
-    async fn table_present_for_op(&self, table: &str) -> Result<bool, DatabaseError> {
-        if self.strict_schema() {
-            return Ok(true);
-        }
-        let cache = self.schema_cache();
-        if cache.is_some_and(|c| c.table_known_present(table)) {
-            return Ok(true);
-        }
-        // Snapshot the generation *before* the probe yields; the gen-guarded
-        // write-back below is dropped if a mutation raced the probe (see
-        // `SchemaCache` docs). Holding `Option<&SchemaCache>` across the await
-        // is fine — it is a plain reference, never a lock guard.
-        let gen0 = cache.map(SchemaCache::generation);
-        let exists = self.dbx_table_exists(table).await?;
-        if let (true, Some(cache), Some(gen0)) = (exists, cache, gen0) {
-            cache.mark_table_present_if_gen(table, gen0);
-        }
-        Ok(exists)
-    }
-
     /// Where the `id` of a row created in `table` without one comes from
     /// ([`IdPolicy`], see [`introspect::build_id_policy`]): minted by
     /// [`create`](Self::create), filled by the database (a SQLite rowid
@@ -795,8 +776,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// the caller (an integer `id` nothing fills).
     ///
     /// Consults [`schema_cache`](Self::schema_cache) first and populates it
-    /// on a miss. Runs in STRICT_SCHEMA mode too: nothing else tells the
-    /// executor which tables number their own rows. The probe also answers
+    /// on a miss. Nothing else tells the executor which tables number their
+    /// own rows. The probe also answers
     /// whether the table exists ([`IdPolicyProbe`]): an existing table's
     /// policy is cached, and marks the table present, whatever it is; a
     /// missing table answers [`IdPolicy::Mint`], uncached, so a table
@@ -850,8 +831,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// it is decoded with (see [`codec`](super::codec)); none if the table is
     /// missing.
     ///
-    /// Runs in STRICT_SCHEMA mode too: nothing else can tell a backend whose
-    /// driver reports no column types which text is JSON. A backend with a
+    /// Nothing else can tell a backend whose driver reports no column types
+    /// which text is JSON. A backend with a
     /// [`schema_cache`](Self::schema_cache) issues the introspection once per
     /// table.
     async fn json_columns(&self, table: &str) -> Result<JsonColumns, DatabaseError> {
@@ -914,13 +895,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Consults [`schema_cache`](Self::schema_cache) first and populates it on
     /// a miss via [`introspect::build_list_primary_key`], whose result shape
-    /// (`name` per key column) is identical in both dialects. Runs in
-    /// STRICT_SCHEMA mode too: nothing else can tell the executor which
-    /// columns identify a row.
+    /// (`name` per key column) is identical in both dialects. Nothing else
+    /// can tell the executor which columns identify a row.
     ///
     /// An empty answer is cached only for a table known to exist. The key
-    /// introspection of a missing table is empty too, and in STRICT_SCHEMA
-    /// mode nothing else probes existence, so a list against a table a later
+    /// introspection of a missing table is empty too, and no operation
+    /// probes existence before it runs, so a list against a table a later
     /// migration creates would otherwise pin "no key" for the cache's life.
     /// When the cache does not already know the table exists, an empty key
     /// costs one [`dbx_table_exists`](Self::dbx_table_exists) probe, once per
@@ -962,7 +942,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Add `column` to `table` via `stmt` unless a concurrent writer beat us
     /// to it.
     ///
-    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so the callers' check-then-add
+    /// SQLite has no `ADD COLUMN IF NOT EXISTS`, so
+    /// [`ensure_schema_table`](Self::ensure_schema_table)'s check-then-add
     /// has a race window between the existence check and the `ALTER`. On
     /// failure, re-check: a now-present column means another writer added it
     /// (benign); a still-missing column is a real DDL error and propagates.
@@ -993,58 +974,21 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Lazily add columns for every key in `data` missing from `table`.
-    ///
-    /// Column types are derived from the value being written
-    /// ([`ddl::build_add_column_for_value`]): Postgres picks a native type
-    /// (BOOLEAN/BIGINT/DOUBLE PRECISION/JSONB/TEXT), SQLite `JSON` for an
-    /// object or array and TEXT for anything else. The
-    /// table itself must already exist via the block's migration files — only
-    /// columns are added on demand, per the documented lazy column-add design.
-    ///
-    /// Every key must pass [`sql_name`]; one that does not refuses the whole
-    /// write before any column is added, in STRICT_SCHEMA mode too.
-    async fn ensure_data_columns(
-        &self,
-        table: &str,
-        data: &HashMap<String, serde_json::Value>,
-    ) -> Result<(), DatabaseError> {
-        for key in data.keys() {
-            sql_name(key)?;
-        }
-        // STRICT_SCHEMA trusts the migrated schema: no introspection, no lazy
-        // ALTER. A write referencing an unmigrated column fails loudly, which
-        // is the intended contract in strict mode.
-        if self.strict_schema() {
-            return Ok(());
-        }
-        let existing = self.get_columns(table).await?;
-        // Sorted for deterministic DDL order (HashMap iteration is random).
-        let mut keys: Vec<&String> = data.keys().collect();
-        keys.sort();
-        for key in keys {
-            let column = sql_name(key)?;
-            if existing.contains(&column.to_lowercase()) {
-                continue;
-            }
-            let stmt = ddl::build_add_column_for_value(table, column, &data[key], Self::BACKEND)?;
-            self.add_column_checked(table, column, &stmt).await?;
-        }
-        Ok(())
-    }
-
     /// Refuse a statement that names a column `table` does not have, before
-    /// it runs. A read — or the filter of a write — never adds a column: the
-    /// schema grows only through the write path's data columns and the
-    /// explicit schema ops. Without this check a filter on an unknown column
-    /// would fail in the backend as an opaque internal error; here it is a
-    /// [`DatabaseError::InvalidArgument`] that names the column.
+    /// it runs, as a [`DatabaseError::InvalidArgument`] that names the column.
+    /// Nothing ever adds a column on demand: the schema is what the block's
+    /// migrations and its explicit schema ops declared.
     ///
-    /// Every name must also pass [`sql_name`]. In STRICT_SCHEMA mode no column
-    /// set is read: the migrated schema is trusted, and a statement naming an
-    /// unknown column fails in the backend. A table with no columns does not
-    /// exist; the check passes and the statement fails in the backend, as it
-    /// did before the check.
+    /// The backend cannot be left to answer. The SQLite family (native
+    /// SQLite, D1, sql.js) reads a double-quoted name it cannot resolve as a
+    /// string literal where one is allowed, so a filter, sort or projection
+    /// on an unknown column would run — matching nothing, ordering by a
+    /// constant, or returning the column's name as its value — instead of
+    /// failing. PostgreSQL would fail, as an opaque internal error.
+    ///
+    /// Every name must also pass [`sql_name`]. A table with no columns does
+    /// not exist; the check passes and the statement fails in the backend
+    /// (`no such table`).
     ///
     /// A cached column list can predate a column another connection added, so
     /// a name missing from it is looked up once more, uncached
@@ -1057,7 +1001,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         for column in columns {
             sql_name(column)?;
         }
-        if self.strict_schema() || columns.is_empty() {
+        if columns.is_empty() {
             return Ok(());
         }
         let first_missing = |existing: &[String]| {
@@ -1102,7 +1046,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `list`: pagination check → table-exists guard →
+    /// Shared `list`: pagination check →
     /// [`require_columns`](Self::require_columns) → primary key → optional
     /// count → select.
     ///
@@ -1130,14 +1074,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<RecordList, DatabaseError> {
         let table = sql_name(collection)?;
         wafer_sql_utils::query::check_pagination(opts.limit, opts.offset)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(RecordList {
-                records: Vec::new(),
-                total_count: 0,
-                page: 1,
-                page_size: opts.limit.map_or(0, i64::from),
-            });
-        }
 
         self.require_columns(
             table,
@@ -1257,13 +1193,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         })
     }
 
-    /// Shared `count`: table-exists guard → [`require_columns`](Self::require_columns)
-    /// → COUNT(*).
+    /// Shared `count`: [`require_columns`](Self::require_columns) → COUNT(*).
     async fn count(&self, collection: &str, filters: &[Filter]) -> Result<i64, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(0);
-        }
         self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
         let stmt = wafer_sql_utils::aggregate::build_count(table, filters, Self::BACKEND);
@@ -1271,9 +1203,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `sum`: table-exists guard → [`require_columns`](Self::require_columns)
-    /// on `field` and the filters → SUM(field). A missing table sums to `0`,
-    /// as [`count`](Self::count) counts `0` rows in it.
+    /// Shared `sum`: [`require_columns`](Self::require_columns) on `field`
+    /// and the filters → SUM(field).
     async fn sum(
         &self,
         collection: &str,
@@ -1281,9 +1212,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<f64, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(0.0);
-        }
         let mut columns = query_columns(filters, &[], None, None);
         columns.push(field);
         self.require_columns(table, &columns).await?;
@@ -1292,7 +1220,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `create`: id/timestamp defaulting → lazy column-add → INSERT.
+    /// Shared `create`: id/timestamp defaulting → INSERT. Every column the
+    /// row names, the stamped `created_at` and `updated_at` included, must
+    /// already exist; a missing one fails in the backend.
     ///
     /// A missing `id` is settled by the table's [`IdPolicy`]
     /// ([`id_policy`](Self::id_policy)): a synthesized UUIDv7 string
@@ -1310,12 +1240,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
         let policy = self.created_row_id_policy(table, &data).await?;
         prepare_created_row(table, &mut data, policy)?;
-
-        // Ensure any new columns exist. Table creation itself is the block
-        // migration's job; a failure here is a real DDL error and propagates
-        // rather than letting the INSERT fail with a confusing
-        // "no such column".
-        self.ensure_data_columns(table, &data).await?;
 
         let json = self.json_columns(table).await?;
         let pairs = sorted_pairs(&data, &json)?;
@@ -1348,8 +1272,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         })
     }
 
-    /// Shared `update`: timestamp stamping → lazy column-add → UPDATE-by-id →
-    /// re-fetch. 0 rows affected → `NotFound`.
+    /// Shared `update`: timestamp stamping → UPDATE-by-id → re-fetch. 0 rows
+    /// affected → `NotFound`.
     async fn update(
         &self,
         collection: &str,
@@ -1359,7 +1283,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let table = sql_name(collection)?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(table, &data).await?;
 
         let json = self.json_columns(table).await?;
         let pairs = sorted_pairs(&data, &json)?;
@@ -1418,8 +1341,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Shared `delete_where`: bulk delete matching `filters`; missing table
-    /// is a no-op. See [`delete_where_count`](Self::delete_where_count).
+    /// Shared `delete_where`: bulk delete matching `filters`. See
+    /// [`delete_where_count`](Self::delete_where_count).
     async fn delete_where(
         &self,
         collection: &str,
@@ -1429,18 +1352,14 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Shared `delete_where_count`: table-exists guard →
-    /// [`require_columns`](Self::require_columns) → DELETE, returning the
-    /// affected-row count (0 for a missing table).
+    /// Shared `delete_where_count`: [`require_columns`](Self::require_columns)
+    /// → DELETE, returning the affected-row count.
     async fn delete_where_count(
         &self,
         collection: &str,
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(0);
-        }
         self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
         let stmt = wafer_sql_utils::query::build_delete_where(table, filters, Self::BACKEND);
@@ -1448,9 +1367,8 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `take_where`: DELETE ... RETURNING the deleted rows; missing
-    /// table → empty. The filter columns must exist
-    /// ([`require_columns`](Self::require_columns)).
+    /// Shared `take_where`: DELETE ... RETURNING the deleted rows. The filter
+    /// columns must exist ([`require_columns`](Self::require_columns)).
     ///
     /// `DELETE … RETURNING` has side effects, so it runs through
     /// [`run_execute_returning`](Self::run_execute_returning) (the write path)
@@ -1464,9 +1382,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(Vec::new());
-        }
         self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
         let json = self.json_columns(table).await?;
@@ -1476,9 +1391,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .await
     }
 
-    /// Shared `update_where`: bulk UPDATE matching `filters`; missing table →
-    /// `NotFound`. Lazily adds the SET columns (typed from the data); the
-    /// filter columns must exist ([`require_columns`](Self::require_columns)).
+    /// Shared `update_where`: bulk UPDATE matching `filters`. The filter
+    /// columns must exist ([`require_columns`](Self::require_columns)), and so
+    /// must the SET columns, `updated_at` included.
     async fn update_where(
         &self,
         collection: &str,
@@ -1486,14 +1401,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Err(DatabaseError::NotFound);
-        }
         self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
         let pairs = sorted_pairs(&data, &json)?;
         let stmt =
@@ -1503,10 +1414,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(())
     }
 
-    /// Shared `update_where_count`: table-exists guard →
-    /// [`require_columns`](Self::require_columns) on the filters → lazy
-    /// data-column add → UPDATE, returning the affected-row count (0 for a
-    /// missing table).
+    /// Shared `update_where_count`: [`require_columns`](Self::require_columns)
+    /// on the filters → timestamp stamping → UPDATE, returning the
+    /// affected-row count.
     async fn update_where_count(
         &self,
         collection: &str,
@@ -1514,14 +1424,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<i64, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(0);
-        }
         self.require_columns(table, &query_columns(filters, &[], None, None))
             .await?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
         let pairs = sorted_pairs(&data, &json)?;
         let stmt =
@@ -1532,7 +1438,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `increment_field_where`: single-statement atomic
     /// `SET col = col + delta` on matching rows, returning the affected-row
-    /// count (0 for a missing table). `col` and the filter columns must exist
+    /// count. `col` and the filter columns must exist
     /// ([`require_columns`](Self::require_columns)).
     async fn increment_field_where(
         &self,
@@ -1542,9 +1448,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(0);
-        }
         let mut columns = query_columns(filters, &[], None, None);
         columns.push(col);
         self.require_columns(table, &columns).await?;
@@ -1686,8 +1589,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// spec must pass [`sql_name`] (the handler's `to_aggregate_spec` checks
     /// the wire the same way), and every column it
     /// reads must exist ([`require_columns`](Self::require_columns); a sort
-    /// key may also name an output alias). A missing table has no groups, as
-    /// [`count`](Self::count) counts `0` rows in it.
+    /// key may also name an output alias).
     async fn aggregate(
         &self,
         collection: &str,
@@ -1697,9 +1599,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let aliases = spec.aliases();
         for alias in &aliases {
             sql_name(alias)?;
-        }
-        if !self.table_present_for_op(table).await? {
-            return Ok(Vec::new());
         }
         let columns: Vec<&str> = spec
             .read_columns()
@@ -1838,8 +1737,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.dbx_table_exists(sql_name(name)?).await
     }
 
-    /// Shared `ensure_schema_table`: `CREATE TABLE IF NOT EXISTS` → add every
-    /// declared column the table is missing → indexes → foreign-key indexes.
+    /// Shared `ensure_schema_table`: [`require_stamped_columns`] →
+    /// `CREATE TABLE IF NOT EXISTS` → add every declared column the table is
+    /// missing → indexes → foreign-key indexes.
     ///
     /// Every step is fail-loud. In particular the column adds go through
     /// [`add_column_checked`](Self::add_column_checked), which distinguishes the
@@ -1879,6 +1779,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         for column in &table.columns {
             sql_name(&column.name)?;
         }
+        require_stamped_columns(table)?;
         let create = ddl::build_create_table(table, Self::BACKEND)?;
         self.run_schema_execute(&create.sql, &[])
             .await
@@ -1923,11 +1824,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ///
     /// Returns the number of rows the backend reports as inserted. Rows may
     /// carry different column sets: each gets its own INSERT, and every column
-    /// any row names is lazily added (typed from the first non-null value
-    /// written to it) before the transaction starts. That schema step is not
-    /// part of the transaction, so a failed insert — or a transaction the
-    /// [`statement_budget`](Self::statement_budget) refuses — can leave an
-    /// added column behind, never a row.
+    /// any row names must already exist — a failed insert, or a transaction
+    /// the [`statement_budget`](Self::statement_budget) refuses, leaves no
+    /// row behind.
     async fn create_many(
         &self,
         collection: &str,
@@ -1943,22 +1842,10 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             None
         };
 
-        // One representative value per column across every row, for the lazy
-        // column-add's type choice.
-        let mut columns: HashMap<String, serde_json::Value> = HashMap::new();
         let mut rows = rows;
         for data in &mut rows {
             prepare_created_row(table, data, policy.filter(|_| !data.contains_key("id")))?;
-            for (key, value) in data.iter() {
-                match columns.get(key) {
-                    Some(seen) if !seen.is_null() || value.is_null() => {}
-                    _ => {
-                        columns.insert(key.clone(), value.clone());
-                    }
-                }
-            }
         }
-        self.ensure_data_columns(table, &columns).await?;
         let json = self.json_columns(table).await?;
         let mut statements: Vec<(String, Vec<serde_json::Value>)> = Vec::with_capacity(rows.len());
         for data in &rows {
@@ -1998,26 +1885,17 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `batch`: plan every op's statement (the same statement its
     /// single-op method runs, except that `Create` and `Update` return the
-    /// stored row via `RETURNING *`), lazily add the data columns the ops
-    /// write (an `UpdateWhere`'s or `DeleteWhere`'s filter columns must
-    /// already exist, as for [`update_where_count`](Self::update_where_count)
-    /// and [`delete_where_count`](Self::delete_where_count)), then run every
-    /// statement as ONE
-    /// [`run_transaction`](Self::run_transaction).
+    /// stored row via `RETURNING *`), then run every statement as ONE
+    /// [`run_transaction`](Self::run_transaction). Every column an op names
+    /// must already exist: an `UpdateWhere`'s or `DeleteWhere`'s filter
+    /// columns are checked as [`update_where_count`](Self::update_where_count)
+    /// and [`delete_where_count`](Self::delete_where_count) check them, and an
+    /// op against a missing table or naming a missing data column fails in
+    /// the backend, rolling every op back, as its single op fails.
     ///
-    /// An `UpdateWhere` or `DeleteWhere` against a missing table settles as
-    /// `UpdatedWhere`/`DeletedWhere { rows_affected: 0 }` without a
-    /// statement, exactly as [`update_where_count`](Self::update_where_count)
-    /// and [`delete_where_count`](Self::delete_where_count) return 0; every
-    /// other op fails on a missing table, as its single op does.
-    ///
-    /// The lazy column-adds run before the transaction and are not rolled
-    /// back with it, nor undone when the
-    /// [`statement_budget`](Self::statement_budget) refuses the transaction.
     /// An empty `ops` runs nothing.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
-        /// How the statement planned for an op decodes back into its outcome,
-        /// or the outcome of an op that needs no statement.
+        /// How the statement planned for an op decodes back into its outcome.
         enum Planned {
             Created(JsonColumns),
             Updated(JsonColumns),
@@ -2025,7 +1903,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             UpdatedWhere,
             DeletedWhere,
             Upserted,
-            Settled(WriteOutcome),
         }
 
         let mut planned = Vec::with_capacity(ops.len());
@@ -2039,7 +1916,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     let table = sql_name(&collection)?;
                     let policy = self.created_row_id_policy(table, &data).await?;
                     prepare_created_row(table, &mut data, policy)?;
-                    self.ensure_data_columns(table, &data).await?;
                     let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_insert_returning(
                         table,
@@ -2055,7 +1931,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 } => {
                     let table = sql_name(&collection)?;
                     stamp_timestamps(&mut data, false);
-                    self.ensure_data_columns(table, &data).await?;
                     let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_update_by_id_returning(
                         table,
@@ -2079,16 +1954,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     mut data,
                 } => {
                     let table = sql_name(&collection)?;
-                    if !self.table_present_for_op(table).await? {
-                        planned.push(Planned::Settled(WriteOutcome::UpdatedWhere {
-                            rows_affected: 0,
-                        }));
-                        continue;
-                    }
                     self.require_columns(table, &query_columns(&filters, &[], None, None))
                         .await?;
                     stamp_timestamps(&mut data, false);
-                    self.ensure_data_columns(table, &data).await?;
                     let json = self.json_columns(table).await?;
                     let stmt = wafer_sql_utils::query::build_update_where(
                         table,
@@ -2103,12 +1971,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                     filters,
                 } => {
                     let table = sql_name(&collection)?;
-                    if !self.table_present_for_op(table).await? {
-                        planned.push(Planned::Settled(WriteOutcome::DeletedWhere {
-                            rows_affected: 0,
-                        }));
-                        continue;
-                    }
                     self.require_columns(table, &query_columns(&filters, &[], None, None))
                         .await?;
                     let stmt =
@@ -2127,18 +1989,12 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             statements.push((stmt.sql, sea_values_to_json(stmt.values)));
         }
         if statements.is_empty() {
-            return Ok(planned
-                .into_iter()
-                .filter_map(|kind| match kind {
-                    Planned::Settled(outcome) => Some(outcome),
-                    _ => None,
-                })
-                .collect());
+            return Ok(Vec::new());
         }
 
         let tx_ops: Vec<TxOp<'_>> = statements
             .iter()
-            .zip(planned.iter().filter(|k| !matches!(k, Planned::Settled(_))))
+            .zip(&planned)
             .map(|((sql, params), kind)| match kind {
                 Planned::Created(json) | Planned::Updated(json) => {
                     TxOp::Returning { sql, params, json }
@@ -2165,9 +2021,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         planned
             .into_iter()
             .map(|kind| {
-                if let Planned::Settled(outcome) = kind {
-                    return Ok(outcome);
-                }
                 let result = results.next().ok_or_else(|| {
                     DatabaseError::Internal("run_transaction returned too few results".into())
                 })?;
@@ -2297,8 +2150,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Shared `insert_guarded`: [`require_columns`](Self::require_columns) on
     /// every column the guards name (a guard never adds one), then
-    /// [`create`](Self::create)'s id/timestamp policy and lazy data-column
-    /// add, then ONE [`guard::build_insert_guarded`]
+    /// [`create`](Self::create)'s id/timestamp policy, then ONE [`guard::build_insert_guarded`]
     /// statement (`INSERT … SELECT … WHERE {guards} RETURNING *`) through
     /// [`run_guarded`](Self::run_guarded).
     ///
@@ -2316,7 +2168,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         let mut data = data;
         let policy = self.created_row_id_policy(table, &data).await?;
         prepare_created_row(table, &mut data, policy)?;
-        self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
         let stmt =
             guard::build_insert_guarded(table, &sorted_pairs(&data, &json)?, guards, Self::BACKEND)
@@ -2336,10 +2187,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         }
     }
 
-    /// Shared `update_guarded`: table-exists guard (a missing table matches
-    /// nothing) → [`require_columns`](Self::require_columns) on the filters
-    /// and guards → timestamp stamping → lazy data-column add →
-    /// ONE [`guard::build_update_guarded`] statement through
+    /// Shared `update_guarded`: [`require_columns`](Self::require_columns) on
+    /// the filters and guards → timestamp stamping → ONE
+    /// [`guard::build_update_guarded`] statement through
     /// [`run_guarded`](Self::run_guarded).
     async fn update_guarded(
         &self,
@@ -2349,15 +2199,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         guards: &[CapGuard],
     ) -> Result<GuardedUpdate, DatabaseError> {
         let table = sql_name(collection)?;
-        if !self.table_present_for_op(table).await? {
-            return Ok(GuardedUpdate::NoMatch);
-        }
         let mut columns = query_columns(filters, &[], None, None);
         columns.extend(guard_columns(guards));
         self.require_columns(table, &columns).await?;
         let mut data = data;
         stamp_timestamps(&mut data, false);
-        self.ensure_data_columns(table, &data).await?;
         let json = self.json_columns(table).await?;
         let stmt = guard::build_update_guarded(
             table,
@@ -2501,9 +2347,10 @@ mod tests {
     }
 
     /// Exec-level proof of the linearizability guard: when an invalidation
-    /// lands while `table_present_for_op` is parked in its probe, the stale
-    /// "present" read (taken just before a concurrent DROP) is NOT written
-    /// back — the next op re-probes instead of trusting a resurrected entry.
+    /// lands while `get_primary_key` is parked in the existence probe it runs
+    /// for a keyless answer, the stale "present" read (taken just before a
+    /// concurrent DROP) is NOT written back — the next op re-probes instead
+    /// of trusting a resurrected entry.
     #[tokio::test]
     async fn probe_write_back_dropped_when_invalidated_mid_flight() {
         let backend = BarrierExec {
@@ -2515,7 +2362,7 @@ mod tests {
         let entered = backend.entered_probe.clone();
         let release = backend.release_probe.clone();
 
-        let probe = backend.table_present_for_op("orders");
+        let probe = backend.get_primary_key("orders");
         let racer = async {
             // Wait until the probe has snapshotted gen0 and parked in the DB call.
             entered.notified().await;
@@ -2526,11 +2373,11 @@ mod tests {
             release.notify_one();
         };
 
-        let (present, ()) = tokio::join!(probe, racer);
-        // The probe still returns what the DB told it at read time...
+        let (key, ()) = tokio::join!(probe, racer);
+        // The lookup still returns what the DB told it at read time...
         assert!(
-            present.expect("probe succeeds"),
-            "probe returns its read-time value"
+            key.expect("lookup succeeds").is_empty(),
+            "the mock table has no key"
         );
         // ...but that stale value must NOT have been cached.
         assert!(
@@ -2900,9 +2747,8 @@ mod tests {
     /// Backend that **overrides** `run_batch` to record the ops it receives and
     /// return canned, positionally-aligned results — so a test can prove
     /// `DbExec::list` hands it exactly `[ScalarI64(count), Rows(select)]`.
-    /// `strict_schema` is on so `list` skips the introspection round-trips and
-    /// goes straight to the count+select batch. `run_fetch` records itself for
-    /// the `skip_count` single-statement path.
+    /// `run_fetch` records itself for the `skip_count` single-statement path
+    /// (the column introspection aside).
     struct BatchMock {
         canned_count: i64,
         batch_calls: Mutex<Vec<Vec<(String, String)>>>,
@@ -2985,10 +2831,6 @@ mod tests {
     #[wafer_async_trait]
     impl DbExec for BatchMock {
         const BACKEND: Backend = Backend::Sqlite;
-
-        fn strict_schema(&self) -> bool {
-            true
-        }
 
         fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
             Ok(match self.limit {
@@ -3240,8 +3082,9 @@ mod tests {
     // list ordering: the primary-key tiebreak
     // -----------------------------------------------------------------------
 
-    /// Strict-schema backend with a schema cache whose `run_fetch` records
-    /// every statement and answers the primary-key introspection with `key`.
+    /// Backend with a schema cache whose `run_fetch` records every statement,
+    /// answers the column introspection with `id` and `created_at` (the
+    /// column the tests sort by) and the primary-key introspection with `key`.
     /// `exists` answers `dbx_table_exists`, and `exists_probes` counts them;
     /// a test flips `exists` and `key` to model a migration landing.
     struct KeyedMock {
@@ -3279,10 +3122,6 @@ mod tests {
             Some(&self.cache)
         }
 
-        fn strict_schema(&self) -> bool {
-            true
-        }
-
         async fn run_fetch(
             &self,
             sql: &str,
@@ -3291,17 +3130,20 @@ mod tests {
         ) -> Result<Vec<Record>, DatabaseError> {
             self.fetches.lock().unwrap().push(sql.to_string());
             if sql.contains("decl_type") {
-                // The column introspection: a table that exists has a column.
+                // The column introspection: a table that exists has columns.
                 let exists = *self.exists.lock().unwrap();
-                return Ok(exists
-                    .then(|| Record {
+                if !exists {
+                    return Ok(Vec::new());
+                }
+                return Ok(["id", "created_at"]
+                    .into_iter()
+                    .map(|name| Record {
                         id: String::new(),
                         data: RecordData::from([
-                            ("name".to_string(), serde_json::json!("id")),
+                            ("name".to_string(), serde_json::json!(name)),
                             ("decl_type".to_string(), serde_json::json!("TEXT")),
                         ]),
                     })
-                    .into_iter()
                     .collect());
             }
             if sql.contains("pk > 0") {
@@ -3389,9 +3231,8 @@ mod tests {
         }
     }
 
-    /// A sorted list orders by the introspected primary key last — even in
-    /// STRICT_SCHEMA mode — and a warm cache answers the key without another
-    /// round-trip.
+    /// A sorted list orders by the introspected primary key last, and a warm
+    /// cache answers the key without another round-trip.
     #[tokio::test]
     async fn sorted_list_breaks_ties_on_the_introspected_primary_key_once_per_table() {
         let mock = KeyedMock::new(&["token_hash"]);
@@ -3404,16 +3245,16 @@ mod tests {
         assert_eq!(
             fetches.len(),
             4,
-            "one key probe, one column probe, then two selects: {fetches:?}"
+            "one column probe, one key probe, then two selects: {fetches:?}"
         );
         assert!(
-            fetches[0].contains("pk > 0"),
-            "key probe first: {}",
+            fetches[0].contains("decl_type"),
+            "the column probe first (the sort column must exist): {}",
             fetches[0]
         );
         assert!(
-            fetches[1].contains("decl_type"),
-            "then the column probe: {}",
+            fetches[1].contains("pk > 0"),
+            "then the key probe: {}",
             fetches[1]
         );
         for select in &fetches[2..] {
@@ -3460,11 +3301,12 @@ mod tests {
         );
     }
 
-    /// In STRICT_SCHEMA mode a list can run before the migration that creates
-    /// its table. The key introspection of the missing table is empty, and
+    /// A list can run before the migration that creates its table (and fail
+    /// in the backend). The key introspection of the missing table is empty, and
     /// caching that would list the table without a tiebreak for the life of
     /// the cache once the migration lands. A keyless table that does exist is
-    /// cached after one existence probe.
+    /// cached with no existence probe: the column introspection that checks
+    /// the sort column already proved the table there.
     #[tokio::test]
     async fn an_empty_key_is_cached_only_for_a_table_that_exists() {
         let mock = KeyedMock::new(&[]);
@@ -3493,7 +3335,11 @@ mod tests {
                 .expect("list keyless");
         }
         assert_eq!(keyless.cache.primary_key("keyless"), Some(Vec::new()));
-        assert_eq!(*keyless.exists_probes.lock().unwrap(), 1, "probed once");
+        assert_eq!(
+            *keyless.exists_probes.lock().unwrap(),
+            0,
+            "the column introspection proved the table"
+        );
         let key_probes = keyless
             .fetches()
             .iter()
@@ -3502,11 +3348,11 @@ mod tests {
         assert_eq!(key_probes, 1, "the empty key is served from the cache");
     }
 
-    /// A page no backend can render is refused even when the table is
-    /// missing and no select would run, so the answer does not depend on
+    /// A page no backend can render is refused before any introspection,
+    /// even when the table is missing, so the answer does not depend on
     /// whether a migration has landed yet.
     #[tokio::test]
-    async fn an_unrenderable_page_is_refused_before_the_table_probe() {
+    async fn an_unrenderable_page_is_refused_before_any_introspection() {
         let mock = KeyedMock::new(&["id"]);
         *mock.exists.lock().unwrap() = false;
         for (limit, offset) in [(Some(0), 0), (None, 1)] {
@@ -3518,6 +3364,7 @@ mod tests {
                 "limit {limit:?} offset {offset}: {err:?}"
             );
         }
+        assert!(mock.fetches().is_empty(), "no introspection ran");
         assert_eq!(*mock.exists_probes.lock().unwrap(), 0, "no probe ran");
     }
 
@@ -3672,7 +3519,11 @@ mod tests {
         use crate::interfaces::database::service::{col_text, pk, Table};
         Table {
             name: "widgets".to_string(),
-            columns: vec![pk("id"), col_text("payload").null()],
+            columns: vec![
+                pk("id"),
+                col_text("payload").null(),
+                col_text("updated_at").null(),
+            ],
             indexes: Vec::new(),
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
@@ -3681,7 +3532,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_schema_table_creates_then_adds_only_the_missing_columns() {
-        let mock = DdlMock::new(&["id"], AddColumn::Succeeds);
+        let mock = DdlMock::new(&["id", "updated_at"], AddColumn::Succeeds);
         DbExec::ensure_schema_table(&mock, &ddl_table())
             .await
             .expect("ensure_schema_table succeeds");
@@ -3703,13 +3554,49 @@ mod tests {
         assert!(alters[0].contains("payload"), "{}", alters[0]);
     }
 
+    /// A table without `updated_at`, which every typed write stamps, is
+    /// refused by name before any DDL runs; one without `created_at` is not.
+    #[tokio::test]
+    async fn ensure_schema_table_refuses_a_table_without_updated_at_before_any_ddl() {
+        use crate::interfaces::database::service::{col_text, pk, Table};
+        let mock = DdlMock::new(&[], AddColumn::Succeeds);
+        let unstamped = Table {
+            name: "widgets".to_string(),
+            columns: vec![
+                pk("id"),
+                col_text("payload").null(),
+                col_text("created_at").null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        let err = DbExec::ensure_schema_table(&mock, &unstamped)
+            .await
+            .expect_err("a table without updated_at is refused");
+        assert!(
+            matches!(&err, DatabaseError::InvalidArgument(message)
+                if message.contains("`widgets`") && message.contains("`updated_at`")),
+            "the refusal names the table and the column: {err:?}"
+        );
+        assert!(
+            mock.executed().is_empty(),
+            "no DDL ran: {:?}",
+            mock.executed()
+        );
+
+        DbExec::ensure_schema_table(&mock, &ddl_table())
+            .await
+            .expect("a table declaring updated_at (and no created_at) is taken");
+    }
+
     /// The defect this default closes: SQLite's hand-written version demoted a
     /// failed `ADD COLUMN` to a `warn!` and returned `Ok(())`, so a migration
     /// that could not add a declared column reported success and every later
     /// write failed with "no such column" instead.
     #[tokio::test]
     async fn ensure_schema_table_propagates_a_real_add_column_failure() {
-        let mock = DdlMock::new(&["id"], AddColumn::Fails);
+        let mock = DdlMock::new(&["id", "updated_at"], AddColumn::Fails);
         let err = DbExec::ensure_schema_table(&mock, &ddl_table())
             .await
             .expect_err("a failed ADD COLUMN must not be swallowed");
@@ -3723,7 +3610,7 @@ mod tests {
     /// there, which is all the caller asked for.
     #[tokio::test]
     async fn ensure_schema_table_tolerates_a_lost_add_column_race() {
-        let mock = DdlMock::new(&["id"], AddColumn::FailsButRaced);
+        let mock = DdlMock::new(&["id", "updated_at"], AddColumn::FailsButRaced);
         DbExec::ensure_schema_table(&mock, &ddl_table())
             .await
             .expect("a lost ADD COLUMN race is not an error");
@@ -3734,7 +3621,7 @@ mod tests {
     /// where the DDL may have applied partway.
     #[tokio::test]
     async fn ensure_schema_table_invalidates_the_schema_cache_even_when_it_fails() {
-        let mock = DdlMock::new(&["id"], AddColumn::Fails);
+        let mock = DdlMock::new(&["id", "updated_at"], AddColumn::Fails);
         mock.cache.set_columns_if_gen(
             "widgets",
             TableColumns {
@@ -4280,10 +4167,6 @@ mod tests {
 
         fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
             Ok(StatementBudget::Unbounded)
-        }
-
-        fn strict_schema(&self) -> bool {
-            true
         }
 
         async fn run_fetch(

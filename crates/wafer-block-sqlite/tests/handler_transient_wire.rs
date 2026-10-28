@@ -100,7 +100,12 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         .expect("open file-backed sqlite");
     svc.ensure_schema_table(&Table {
         name: "notes".to_string(),
-        columns: vec![pk("id"), Column::new("body", DataType::Text).null()],
+        columns: vec![
+            pk("id"),
+            Column::new("body", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -129,12 +134,12 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
     };
     let tags = [Table {
         name: "tags".to_string(),
-        columns: vec![pk("id")],
+        columns: vec![pk("id"), Column::new("updated_at", DataType::Text).null()],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
     }];
-    let err = handle_lifecycle(&svc, &tags, false, &init)
+    let err = handle_lifecycle(&svc, &tags, &init)
         .await
         .expect_err("the Init migration cannot take the lock");
     assert_eq!(
@@ -147,7 +152,7 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
     create(&svc, "n1")
         .await
         .expect("the same write succeeds once the lock is released");
-    handle_lifecycle(&svc, &tags, false, &init)
+    handle_lifecycle(&svc, &tags, &init)
         .await
         .expect("the same Init migration succeeds once the lock is released");
 

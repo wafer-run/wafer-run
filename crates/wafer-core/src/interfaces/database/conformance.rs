@@ -217,9 +217,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// Drive every [`DatabaseService`] op against `svc` and assert correct
 /// observable behavior. Panics (fails the test) on the first divergence.
 ///
-/// Covers, in order: schema management (`ensure_schema_table[s]`,
-/// `schema_table_exists`, `schema_add_column`, `schema_drop_table`,
-/// `set_strict_schema`); `create`/`get` (a taken id refused, the row
+/// Covers, in order: schema management (`ensure_schema_table[s]`, which
+/// refuses a table without `updated_at`, `schema_table_exists`,
+/// `schema_add_column`, `schema_drop_table`); `create`/`get` (a taken id refused, the row
 /// untouched) and `schema_columns`; a table that numbers its own rows
 /// ([`pk_int`]) filling the id of every create path; `count`/`sum` across the full
 /// [`FilterOp`] surface; `ContainsIgnoreCase` text search (`%`, `_` and `\`
@@ -249,16 +249,12 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// declared-type value round trip that every backend's row decoder must agree
 /// on (see [`check_json_value_round_trip`]); values — `NULL` included — bound
 /// by the type of the column they are written to (see
-/// [`check_typed_values_round_trip`]); and that a name is never rewritten
+/// [`check_typed_values_round_trip`]); that a name is never rewritten
 /// and a read never adds a column (see
-/// [`check_names_are_verbatim_and_reads_never_reshape`]).
+/// [`check_names_are_verbatim_and_reads_never_reshape`]); and that a write
+/// naming an undeclared column fails and adds nothing (see
+/// [`check_writes_never_add_a_column`]).
 pub async fn run_conformance(svc: &dyn DatabaseService) {
-    // Exercise the (sync, default-no-op) strict-schema toggle and pin the
-    // service into non-strict mode so the suite's explicit schemas drive the
-    // behavior. Strict-mode *semantics* are backend-specific (a no-op on
-    // adapters that don't cache a schema), so they aren't asserted here.
-    svc.set_strict_schema(false);
-
     check_schema_management(svc).await;
     check_create_get(svc).await;
     check_generated_ids(svc).await;
@@ -289,6 +285,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_json_value_round_trip(svc).await;
     check_typed_values_round_trip(svc).await;
     check_names_are_verbatim_and_reads_never_reshape(svc).await;
+    check_writes_never_add_a_column(svc).await;
     check_names_longer_than_postgres_keeps_are_refused(svc).await;
 }
 
@@ -303,21 +300,16 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
 /// relies on: a table `a` saw missing that `b` then creates is visible to
 /// `a`'s next read, and `a`'s next create takes its `id` from where the new
 /// table says, without `a` having done anything to its own cache.
-///
-/// Both services are pinned to non-strict mode, the mode in which a read
-/// probes the table before running; the id-source check runs `a` in
-/// STRICT_SCHEMA mode for its duration and pins it back.
 pub async fn run_two_instance_conformance(a: &dyn DatabaseService, b: &dyn DatabaseService) {
-    a.set_strict_schema(false);
-    b.set_strict_schema(false);
     check_table_created_by_another_instance_is_seen(a, b).await;
     check_id_source_of_a_table_created_by_another_instance(a, b).await;
 }
 
-/// `a` reads a table while it is missing, `b` creates it and inserts a row,
-/// and every guarded read on `a` then sees the row. A backend that memoized
-/// "missing" would answer each of them empty (or zero) until something in
-/// `a`'s own process invalidated its cache.
+/// `a` reads a table while it is missing, which fails; `b` creates it and
+/// inserts a row, and every read on `a` then sees the row. A backend that
+/// memoized anything about the missing table (no columns, no key) would
+/// answer from that until something in `a`'s own process invalidated its
+/// cache.
 async fn check_table_created_by_another_instance_is_seen(
     a: &dyn DatabaseService,
     b: &dyn DatabaseService,
@@ -327,15 +319,20 @@ async fn check_table_created_by_another_instance_is_seen(
         .await
         .expect("schema_drop_table (idempotent) must succeed");
 
-    let before = a
-        .list(&table.name, &ListOptions::default())
+    // Sorted, so the list also asks for the table's primary key.
+    let sorted = ListOptions {
+        sort: vec![SortField {
+            field: "name".to_string(),
+            desc: false,
+        }],
+        ..ListOptions::default()
+    };
+    a.list(&table.name, &sorted)
         .await
-        .expect("list a missing table");
-    assert!(
-        before.records.is_empty(),
-        "the table is missing: {before:?}"
-    );
-    assert_eq!(a.count(&table.name, &[]).await.expect("count"), 0);
+        .expect_err("a list of a missing table fails");
+    a.count(&table.name, &[eq("name", serde_json::json!("seen"))])
+        .await
+        .expect_err("a count of a missing table fails");
 
     b.ensure_schema_table(&table)
         .await
@@ -353,7 +350,7 @@ async fn check_table_created_by_another_instance_is_seen(
         .expect("the other instance inserts a row");
 
     let after = a
-        .list(&table.name, &ListOptions::default())
+        .list(&table.name, &sorted)
         .await
         .expect("list after the other instance created the table");
     assert_eq!(
@@ -387,11 +384,6 @@ async fn check_table_created_by_another_instance_is_seen(
 /// executor mints one for a table it knows nothing about) would mint a
 /// string id for the new table, which it refuses.
 ///
-/// `a` runs in STRICT_SCHEMA mode, as a deployment with migrations does (D1
-/// included). In non-strict mode the failed first create also tries to add
-/// its columns to the missing table, and that failed `ALTER TABLE`
-/// invalidates the table's cache entry, which would hide a remembered
-/// answer.
 async fn check_id_source_of_a_table_created_by_another_instance(
     a: &dyn DatabaseService,
     b: &dyn DatabaseService,
@@ -411,7 +403,6 @@ async fn check_id_source_of_a_table_created_by_another_instance(
     b.schema_drop_table(&table.name)
         .await
         .expect("schema_drop_table (idempotent) must succeed");
-    a.set_strict_schema(true);
 
     a.create(&table.name, row([("name", serde_json::json!("early"))]))
         .await
@@ -429,7 +420,6 @@ async fn check_id_source_of_a_table_created_by_another_instance(
         "the id is the one the database assigned: {created:?}"
     );
 
-    a.set_strict_schema(false);
     b.schema_drop_table(&table.name)
         .await
         .expect("drop the shared table");
@@ -575,15 +565,12 @@ async fn check_generated_ids(svc: &dyn DatabaseService) {
 ///
 /// - a column **declared TEXT** holding text that is valid JSON — an array, an
 ///   empty object, an already-serialized object — reads back as that text;
-/// - a **lazily added** column first written with a string that looks like
-///   JSON (it gets a text type) reads back as the string;
 /// - a column **declared JSON** holding a *string* — `"123"`, `"true"`,
 ///   `"null"`, `"[1]"`, `"{}"`, a serialized object, a word — reads back as
 ///   that string;
 /// - a column declared JSON holding an object, a number (up to `u64::MAX`,
-///   which SQLite's NUMERIC affinity would round), a boolean or `null`, and
-///   a **lazily added** one first written with an object or array (`JSON
-///   TEXT` on SQLite, `JSONB` on Postgres), read back structured;
+///   which SQLite's NUMERIC affinity would round), a boolean, `null` or an
+///   array reads back structured;
 /// - an id that looks like JSON is still the record's id;
 /// - `get`, `list` and `update`'s re-read decode alike, and `update` writes a
 ///   JSON column the way `create` does.
@@ -601,20 +588,22 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
         "big_json",
         "bool_json",
         "null_json",
+        "array_json",
     ];
     let mut columns = vec![
         pk("id"),
         Column::new("declared_text", DataType::Text).null(),
         Column::new("empty_object_text", DataType::Text).null(),
         Column::new("serialized_text", DataType::Text).null(),
+        Column::new("plain", DataType::Text).null(),
+        Column::new("created_at", DataType::Text).null(),
+        Column::new("updated_at", DataType::Text).null(),
     ];
     columns.extend(
         json_columns
             .iter()
             .map(|name| Column::new(*name, DataType::Json).null()),
     );
-    // `lazy_*` and `plain` are absent so the lazy column-add picks their
-    // types from the first value written.
     let table = Table {
         name: "conf_json".to_string(),
         columns,
@@ -631,7 +620,6 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
         ("declared_text", text("[1]")),
         ("empty_object_text", text("{}")),
         ("serialized_text", text(&object.to_string())),
-        ("lazy_text", text("{\"a\":1}")),
         ("declared_json", object.clone()),
         ("serialized_json", text(&object.to_string())),
         ("word_json", text("not json")),
@@ -644,8 +632,7 @@ async fn check_json_value_round_trip(svc: &dyn DatabaseService) {
         ("big_json", serde_json::json!(u64::MAX)),
         ("bool_json", serde_json::json!(true)),
         ("null_json", serde_json::Value::Null),
-        ("lazy_json", object.clone()),
-        ("lazy_array", array.clone()),
+        ("array_json", array.clone()),
         ("plain", text("not json")),
     ];
     let id = "[1]";
@@ -719,6 +706,8 @@ async fn check_typed_values_round_trip(svc: &dyn DatabaseService) {
             Column::new("flag", DataType::Bool).null(),
             Column::new("doc", DataType::Json).null(),
             Column::new("amount", DataType::Float).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
@@ -1100,45 +1089,31 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
         "sum of category=y scores == 10, got {sum_score_y}"
     );
 
-    // count, sum and aggregate on a missing table fail safe to zero rows, not
-    // an error.
-    assert_eq!(
-        svc.count("conf_absent_table", &[])
-            .await
-            .expect("count missing table"),
-        0,
-        "count on a non-existent table returns 0"
-    );
-    assert!(
-        svc.sum("conf_absent_table", "score", &[])
-            .await
-            .expect("sum missing table")
-            .abs()
-            < f64::EPSILON,
-        "sum on a non-existent table returns 0"
-    );
-    let groups = svc
-        .aggregate(
-            "conf_absent_table",
-            AggregateSpec {
-                select_columns: vec!["category".into()],
-                aggregates: vec![AggregateColumnSpec::Count {
-                    alias: "cnt".into(),
-                }],
-                filters: vec![],
-                group_by: vec![GroupBySpec::Column("category".into())],
-                sort: vec![],
-                limit: 0,
-                having: vec![],
-                offset: 0,
-            },
-        )
+    // count, sum and aggregate on a missing table fail: a table is what the
+    // block's migrations declared, never something a read can find absent.
+    svc.count("conf_absent_table", &[])
         .await
-        .expect("aggregate missing table");
-    assert!(
-        groups.is_empty(),
-        "aggregate on a non-existent table has no groups: {groups:?}"
-    );
+        .expect_err("count on a non-existent table fails");
+    svc.sum("conf_absent_table", "score", &[])
+        .await
+        .expect_err("sum on a non-existent table fails");
+    svc.aggregate(
+        "conf_absent_table",
+        AggregateSpec {
+            select_columns: vec!["category".into()],
+            aggregates: vec![AggregateColumnSpec::Count {
+                alias: "cnt".into(),
+            }],
+            filters: vec![],
+            group_by: vec![GroupBySpec::Column("category".into())],
+            sort: vec![],
+            limit: 0,
+            having: vec![],
+            offset: 0,
+        },
+    )
+    .await
+    .expect_err("aggregate on a non-existent table fails");
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,7 +1128,12 @@ async fn check_count_and_sum(svc: &dyn DatabaseService) {
 async fn check_contains_ignore_case(svc: &dyn DatabaseService) {
     let table = Table {
         name: "conf_search".to_string(),
-        columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+        columns: vec![
+            pk("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -1256,7 +1236,12 @@ async fn check_contains_ignore_case(svc: &dyn DatabaseService) {
 async fn check_starts_with(svc: &dyn DatabaseService) {
     let table = Table {
         name: "conf_prefix".to_string(),
-        columns: vec![pk("id"), Column::new("key", DataType::Text).null()],
+        columns: vec![
+            pk("id"),
+            Column::new("key", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -1563,13 +1548,10 @@ async fn check_list(svc: &dyn DatabaseService) {
         "total_count must apply the group predicate too"
     );
 
-    // list on a missing table is empty, not an error.
-    let empty = svc
-        .list("conf_absent_table", &ListOptions::default())
+    // list on a missing table fails.
+    svc.list("conf_absent_table", &ListOptions::default())
         .await
-        .expect("list missing table");
-    assert!(empty.records.is_empty());
-    assert_eq!(empty.total_count, 0);
+        .expect_err("list on a non-existent table fails");
 }
 
 // ---------------------------------------------------------------------------
@@ -1636,7 +1618,10 @@ async fn check_list_tiebreak(svc: &dyn DatabaseService) {
         name: table.to_string(),
         columns: key_cols
             .into_iter()
-            .chain([Column::new("created_at", DataType::Text)])
+            .chain([
+                Column::new("created_at", DataType::Text),
+                Column::new("updated_at", DataType::Text).null(),
+            ])
             .collect(),
         indexes: Vec::new(),
         primary_key,
@@ -1811,13 +1796,16 @@ async fn check_list_tiebreak(svc: &dyn DatabaseService) {
         svc,
         &tied(
             "conf_tie_keyless",
-            vec![Column::new("label", DataType::Text)],
+            vec![
+                Column::new("label", DataType::Text),
+                Column::new("id", DataType::Text).null(),
+            ],
             Vec::new(),
         ),
     )
     .await;
-    // `create` adds an `id` column here (lazily, not as a key), which is
-    // fine: the table still has no primary key.
+    // `create` mints an `id` into the declared `id` column, which is not a
+    // key: the table still has no primary key.
     for label in order {
         svc.create(
             "conf_tie_keyless",
@@ -2442,43 +2430,38 @@ async fn check_batch(svc: &dyn DatabaseService) {
         .expect("an empty batch")
         .is_empty());
 
-    // An `UpdateWhere` against a missing table matches nothing, as the single
-    // `update_where_count` does: it does not abort the batch around it.
+    // An `UpdateWhere` against a missing table fails, as the single
+    // `update_where_count` does, and rolls back the op beside it.
     svc.schema_drop_table("conf_batch_missing")
         .await
         .expect("drop (idempotent)");
-    assert_eq!(
-        svc.update_where_count(
-            "conf_batch_missing",
-            &[eq("category", serde_json::json!("a"))],
-            row([("name", serde_json::json!("Z"))]),
-        )
-        .await
-        .expect("single op on a missing table"),
-        0
-    );
-    let outcomes = svc
-        .batch(vec![
-            WriteOp::Create {
-                collection: "conf_batch".into(),
-                data: row([("id", serde_json::json!("beside_missing"))]),
-            },
-            WriteOp::UpdateWhere {
-                collection: "conf_batch_missing".into(),
-                filters: vec![eq("category", serde_json::json!("a"))],
-                data: row([("name", serde_json::json!("Z"))]),
-            },
-        ])
-        .await
-        .expect("an update-where on a missing table does not fail the batch");
+    svc.update_where_count(
+        "conf_batch_missing",
+        &[eq("category", serde_json::json!("a"))],
+        row([("name", serde_json::json!("Z"))]),
+    )
+    .await
+    .expect_err("update_where_count on a missing table fails");
+    svc.batch(vec![
+        WriteOp::Create {
+            collection: "conf_batch".into(),
+            data: row([("id", serde_json::json!("beside_missing"))]),
+        },
+        WriteOp::UpdateWhere {
+            collection: "conf_batch_missing".into(),
+            filters: vec![eq("category", serde_json::json!("a"))],
+            data: row([("name", serde_json::json!("Z"))]),
+        },
+    ])
+    .await
+    .expect_err("an update-where on a missing table fails the batch");
     assert!(
-        matches!(outcomes[1], WriteOutcome::UpdatedWhere { rows_affected: 0 }),
-        "{:?}",
-        outcomes[1]
+        matches!(
+            svc.get("conf_batch", "beside_missing").await,
+            Err(DatabaseError::NotFound)
+        ),
+        "the op beside it was rolled back"
     );
-    svc.get("conf_batch", "beside_missing")
-        .await
-        .expect("the op beside it committed");
 }
 
 /// `batch` with a `DeleteWhere`: the replace-a-table shape — delete the rows
@@ -2575,29 +2558,30 @@ async fn check_batch_delete_where(svc: &dyn DatabaseService) {
         "the failed replacement left the original rows in place"
     );
 
-    // A `DeleteWhere` against a missing table matches nothing, as the single
-    // `delete_where_count` does: it does not abort the batch around it.
+    // A `DeleteWhere` against a missing table fails, as the single
+    // `delete_where_count` does, and rolls back the op beside it.
     svc.schema_drop_table("conf_batch_replace_missing")
         .await
         .expect("drop (idempotent)");
-    let outcomes = svc
-        .batch(vec![
-            WriteOp::DeleteWhere {
-                collection: "conf_batch_replace_missing".into(),
-                filters: Vec::new(),
-            },
-            create("beside_missing"),
-        ])
+    svc.delete_where_count("conf_batch_replace_missing", &[])
         .await
-        .expect("a delete-where on a missing table does not fail the batch");
+        .expect_err("delete_where_count on a missing table fails");
+    svc.batch(vec![
+        WriteOp::DeleteWhere {
+            collection: "conf_batch_replace_missing".into(),
+            filters: Vec::new(),
+        },
+        create("beside_missing"),
+    ])
+    .await
+    .expect_err("a delete-where on a missing table fails the batch");
     assert!(
-        matches!(outcomes[0], WriteOutcome::DeletedWhere { rows_affected: 0 }),
-        "{:?}",
-        outcomes[0]
+        matches!(
+            svc.get(t, "beside_missing").await,
+            Err(DatabaseError::NotFound)
+        ),
+        "the op beside it was rolled back"
     );
-    svc.get(t, "beside_missing")
-        .await
-        .expect("the op beside it committed");
 }
 
 // ---------------------------------------------------------------------------
@@ -2816,19 +2800,14 @@ async fn check_guarded_writes(svc: &dyn DatabaseService) {
         .await
         .expect("update_guarded (no match)");
     assert!(matches!(got, GuardedUpdate::NoMatch), "{got:?}");
-    let got = svc
-        .update_guarded(
-            "conf_guarded_missing",
-            &[],
-            row([("size", serde_json::json!(1))]),
-            &[],
-        )
-        .await
-        .expect("update_guarded (missing table)");
-    assert!(
-        matches!(got, GuardedUpdate::NoMatch),
-        "a missing table matches nothing, as update_where_count: {got:?}"
-    );
+    svc.update_guarded(
+        "conf_guarded_missing",
+        &[],
+        row([("size", serde_json::json!(1))]),
+        &[],
+    )
+    .await
+    .expect_err("update_guarded on a missing table fails, as update_where_count does");
 
     // Ten concurrent inserts under a cap of three: the check and the insert
     // are one step, so exactly three land. (Every write waits on SQLite's one
@@ -2952,7 +2931,12 @@ async fn check_increment(svc: &dyn DatabaseService) {
 async fn check_upsert_set_columns(svc: &dyn DatabaseService) {
     let table = Table {
         name: "conf_upsert".to_string(),
-        columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+        columns: vec![
+            pk("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
@@ -3536,6 +3520,8 @@ async fn check_aggregate_money(svc: &dyn DatabaseService) {
             Column::new("account", DataType::Text),
             Column::new("total_cents", DataType::Int64),
             Column::new("refunded_cents", DataType::Int64),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
@@ -3808,12 +3794,14 @@ fn raw(query: &str) -> RawStatement {
     }
 }
 
-/// A table of a text primary key `id` and the nullable text `columns`.
+/// A table of a text primary key `id`, the nullable text `columns` and the
+/// two stamped columns.
 fn keyed_table(name: &str, columns: &[&str]) -> Table {
     let mut all = vec![pk("id")];
     all.extend(
         columns
             .iter()
+            .chain(&["created_at", "updated_at"])
             .map(|column| Column::new(*column, DataType::Text).null()),
     );
     Table {
@@ -3923,7 +3911,7 @@ async fn check_raw_transaction(svc: &dyn DatabaseService) {
         svc.schema_columns("conf_tx_base")
             .await
             .expect("schema_columns"),
-        vec!["id".to_string(), "name".to_string()],
+        ["id", "name", "created_at", "updated_at"],
         "the ALTER rolled back"
     );
     assert_eq!(
@@ -4034,12 +4022,16 @@ async fn check_raw_transaction(svc: &dyn DatabaseService) {
     svc.exec_raw_transaction(&[raw("DROP TABLE conf_tx_gone")])
         .await
         .expect("the DROP commits");
-    assert_eq!(
-        svc.count("conf_tx_gone", &[])
+    assert!(
+        svc.schema_columns("conf_tx_gone")
             .await
-            .expect("a dropped table reads as empty, not as a stale present one"),
-        0
+            .expect("schema_columns after the DROP")
+            .is_empty(),
+        "a dropped table has no columns, not a stale cached list"
     );
+    svc.count("conf_tx_gone", &[])
+        .await
+        .expect_err("a dropped table is missing, not a stale present one");
 }
 
 /// A `Context` that grants every resource, so [`check_raw_transaction_through_the_host_op`]
@@ -4264,6 +4256,79 @@ async fn check_schema_management(svc: &dyn DatabaseService) {
         serde_json::json!("v"),
         "value stored in the newly added column round-trips"
     );
+
+    // Re-ensuring a table that a revision of its declaration grew adds the
+    // declared column it lacks, and keeps its rows.
+    let mut grown = crud_table("conf_schema_x");
+    grown
+        .columns
+        .push(Column::new("declared_later", DataType::Text).null());
+    svc.ensure_schema_table(&grown)
+        .await
+        .expect("ensure x with a newly declared column");
+    assert!(
+        svc.schema_columns("conf_schema_x")
+            .await
+            .expect("schema_columns x")
+            .iter()
+            .any(|c| c == "declared_later"),
+        "ensure_schema_table adds a declared column the table lacks"
+    );
+    svc.update(
+        "conf_schema_x",
+        "sx1",
+        row([("declared_later", serde_json::json!("w"))]),
+    )
+    .await
+    .expect("write to the declared-later column");
+
+    // A table without `updated_at`, which every typed write stamps, is
+    // refused by name before anything is created. One without `created_at`
+    // (which only `create` stamps) is not.
+    svc.schema_drop_table("conf_schema_unstamped")
+        .await
+        .expect("pre-drop unstamped");
+    let unstamped = Table {
+        name: "conf_schema_unstamped".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("created_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    match svc.ensure_schema_table(&unstamped).await {
+        Err(DatabaseError::InvalidArgument(message)) => assert!(
+            message.contains("conf_schema_unstamped") && message.contains("`updated_at`"),
+            "the refusal names the table and the column: {message}"
+        ),
+        other => panic!("a table without updated_at must be refused, got {other:?}"),
+    }
+    assert!(
+        !svc.schema_table_exists("conf_schema_unstamped")
+            .await
+            .expect("exists unstamped"),
+        "a refused table is not created"
+    );
+    let updated_only = Table {
+        name: "conf_schema_unstamped".to_string(),
+        columns: vec![
+            pk("id"),
+            Column::new("name", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    svc.ensure_schema_table(&updated_only)
+        .await
+        .expect("a table with updated_at and no created_at is accepted");
+    svc.schema_drop_table("conf_schema_unstamped")
+        .await
+        .expect("drop unstamped");
 
     // ensure_schema_tables (the plural default) creates several at once.
     svc.schema_drop_table("conf_schema_a")
@@ -4527,6 +4592,103 @@ async fn check_names_are_verbatim_and_reads_never_reshape(svc: &dyn DatabaseServ
         .expect("list conf_ab");
     let ids: Vec<&str> = rows.records.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, ["r1"], "no refused request changed a row");
+}
+
+/// A write naming a column the table does not declare fails, on every write
+/// path, and adds nothing: the schema is what the block's migrations
+/// declared. That includes the columns the executor stamps — a table lacking
+/// `updated_at` takes no update, and one lacking `created_at` no create.
+async fn check_writes_never_add_a_column(svc: &dyn DatabaseService) {
+    let t = "conf_undeclared";
+    reset(svc, &crud_table(t)).await;
+    svc.create(
+        t,
+        row([
+            ("id", serde_json::json!("r1")),
+            ("name", serde_json::json!("a")),
+        ]),
+    )
+    .await
+    .expect("seed conf_undeclared");
+    let columns = svc.schema_columns(t).await.expect("schema_columns");
+    let undeclared = || row([("zz", serde_json::json!("x"))]);
+
+    let mut created = undeclared();
+    created.insert("id".to_string(), serde_json::json!("r2"));
+    svc.create(t, created)
+        .await
+        .expect_err("create naming an undeclared column");
+    svc.create_many(t, vec![undeclared(), undeclared()])
+        .await
+        .expect_err("create_many naming an undeclared column");
+    svc.update(t, "r1", undeclared())
+        .await
+        .expect_err("update naming an undeclared column");
+    svc.update_where_count(t, &[eq("id", serde_json::json!("r1"))], undeclared())
+        .await
+        .expect_err("update_where_count naming an undeclared column");
+    svc.batch(vec![WriteOp::Create {
+        collection: t.to_string(),
+        data: undeclared(),
+    }])
+    .await
+    .expect_err("a batch create naming an undeclared column");
+    svc.insert_guarded(t, undeclared(), &[])
+        .await
+        .expect_err("insert_guarded naming an undeclared column");
+    svc.update_guarded(t, &[eq("id", serde_json::json!("r1"))], undeclared(), &[])
+        .await
+        .expect_err("update_guarded naming an undeclared column");
+    assert_eq!(
+        svc.schema_columns(t).await.expect("schema_columns"),
+        columns,
+        "no write added a column"
+    );
+    assert_eq!(
+        svc.get(t, "r1").await.expect("get r1").data["name"],
+        serde_json::json!("a"),
+        "no refused write changed the row"
+    );
+    assert_eq!(svc.count(t, &[]).await.expect("count"), 1, "nor added one");
+
+    // A table that never declared the stamped columns (raw DDL: an
+    // `ensure_schema_table` would refuse it) takes neither stamp.
+    let bare = "conf_unstamped_raw";
+    svc.schema_drop_table(bare)
+        .await
+        .expect("drop (idempotent)");
+    svc.exec_raw(
+        "CREATE TABLE conf_unstamped_raw (id TEXT PRIMARY KEY, name TEXT)",
+        &[],
+    )
+    .await
+    .expect("create a table without stamped columns");
+    svc.create(
+        bare,
+        row([
+            ("id", serde_json::json!("b1")),
+            ("name", serde_json::json!("n")),
+        ]),
+    )
+    .await
+    .expect_err("a create stamps created_at and updated_at, which the table lacks");
+    svc.exec_raw(
+        "INSERT INTO conf_unstamped_raw (id, name) VALUES ('b1', 'n')",
+        &[],
+    )
+    .await
+    .expect("seed the bare table");
+    svc.update(bare, "b1", row([("name", serde_json::json!("m"))]))
+        .await
+        .expect_err("an update stamps updated_at, which the table lacks");
+    assert_eq!(
+        svc.schema_columns(bare).await.expect("schema_columns"),
+        ["id", "name"],
+        "no write added a stamped column"
+    );
+    svc.schema_drop_table(bare)
+        .await
+        .expect("drop the bare table");
 }
 
 /// A name longer than PostgreSQL's 63-byte identifier limit is refused: the

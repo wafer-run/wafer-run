@@ -289,10 +289,6 @@ impl DatabaseService for RecordingDb {
         self.note("schema_add_column");
         Ok(())
     }
-
-    fn set_strict_schema(&self, _enabled: bool) {
-        self.note("set_strict_schema");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +339,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            set_strict_schema: forward,
             statement_budget: forward,
         }
 
@@ -433,15 +428,6 @@ async fn increment_field_where_reaches_the_inner_service() {
         1
     );
     assert_eq!(inner.calls(), vec!["increment_field_where".to_string()]);
-}
-
-/// `set_strict_schema` is the sync method; its default is a silent no-op, so a
-/// decorator that inherits it leaves the wrapped backend in non-strict mode.
-#[tokio::test]
-async fn set_strict_schema_reaches_the_inner_service() {
-    let (dec, inner) = decorated();
-    dec.set_strict_schema(true);
-    assert_eq!(inner.calls(), vec!["set_strict_schema".to_string()]);
 }
 
 /// The budget is the wrapped backend's: a decorator is not a second database

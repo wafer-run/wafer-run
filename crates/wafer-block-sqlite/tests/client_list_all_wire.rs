@@ -80,7 +80,12 @@ async fn ctx_with_rows(rows: u32) -> DbCtx {
     let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
     svc.ensure_schema_table(&Table {
         name: TABLE.to_string(),
-        columns: vec![pk("id"), Column::new("n", DataType::Int)],
+        columns: vec![
+            pk("id"),
+            Column::new("n", DataType::Int),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
+        ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
