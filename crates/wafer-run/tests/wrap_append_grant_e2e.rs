@@ -106,6 +106,8 @@ async fn build() -> (Arc<Wafer>, Arc<SQLiteDatabaseService>) {
                 pk("id"),
                 Column::new("action", DataType::Text).null(),
                 Column::new("n", DataType::Int).null(),
+                Column::new("created_at", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
             ],
             indexes: Vec::new(),
             primary_key: Vec::new(),
@@ -412,10 +414,10 @@ async fn insert_guarded_needs_read_alongside_append() {
     assert_eq!(sqlite.count(AUDIT, &[]).await.expect("count"), 2);
 }
 
-/// An append-only insert may not add a column: outside STRICT_SCHEMA the
-/// service would ALTER an unseen column into the owner's table (typed by the
-/// first value). Every insert path refuses it before the service runs; a
-/// read-write grantee still grows the table as before.
+/// An append-only insert naming a column the table lacks is refused, on
+/// every insert path, before the service runs, naming the column to the
+/// grantee. A read-write grantee's insert of it fails in the backend
+/// instead: no write adds a column.
 #[tokio::test]
 async fn append_only_inserts_cannot_add_columns() {
     let (wafer, sqlite) = build().await;
@@ -462,14 +464,16 @@ async fn append_only_inserts_cannot_add_columns() {
     assert!(!columns.contains(&"evil".to_string()), "{columns:?}");
     assert_eq!(sqlite.count(AUDIT, &[]).await.expect("count"), 1);
 
-    // A read-write grantee is not append-only: the column is added.
+    // A read-write grantee is not append-only: its insert reaches the
+    // backend, which has no such column either.
     let grown = json!({ "collection": AUDIT, "data": { "action": "w", "grown": 1 } });
     assert_eq!(
         call(&wafer, WRITER, ServiceOp::DATABASE_CREATE, &grown).await,
-        Ok(())
+        Err(ErrorCode::Internal)
     );
     let columns = sqlite.schema_columns(AUDIT).await.expect("columns");
-    assert!(columns.contains(&"grown".to_string()), "{columns:?}");
+    assert!(!columns.contains(&"grown".to_string()), "{columns:?}");
+    assert_eq!(sqlite.count(AUDIT, &[]).await.expect("count"), 1);
 }
 
 /// An append-only insert may not choose a row's `id`, `created_at` or
@@ -590,21 +594,26 @@ async fn append_only_inserts_cannot_set_server_owned_columns() {
 }
 
 /// A table missing any of `id`, `created_at`, `updated_at` refuses every
-/// append-only insert: the server would stamp the missing column, and
-/// outside STRICT_SCHEMA stamping it would add it to the table.
+/// append-only insert, naming the column: the server stamps all three. Here
+/// the table lacks `created_at` (one lacking `updated_at` cannot be declared
+/// at all).
 #[tokio::test]
 async fn append_only_inserts_need_the_server_owned_columns() {
     let (wafer, sqlite) = build().await;
     sqlite
         .ensure_schema_table(&Table {
             name: BARE.to_string(),
-            columns: vec![pk("id"), Column::new("action", DataType::Text).null()],
+            columns: vec![
+                pk("id"),
+                Column::new("action", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
             indexes: Vec::new(),
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
         })
         .await
-        .expect("create a table without timestamps");
+        .expect("create a table without created_at");
     let request = json!({ "collection": BARE, "data": { "action": "a" } });
     assert_eq!(
         call(&wafer, APPENDER, ServiceOp::DATABASE_CREATE, &request).await,

@@ -27,11 +27,8 @@ use std::sync::Arc;
 
 use wafer_block::{Block, STATIC_BLOCK_REGISTRATIONS};
 use wafer_core::{
-    interfaces::{
-        database::service::DatabaseService,
-        network::service::{NetworkError, NetworkService, Request, Response},
-    },
-    service_blocks::{database::DatabaseBlock, network::NetworkBlock},
+    interfaces::network::service::{NetworkError, NetworkService, Request, Response},
+    service_blocks::network::NetworkBlock,
 };
 
 /// Links each named crate with `use $krate as _;` and lists the same names,
@@ -69,18 +66,7 @@ pub type BuildBlock = fn() -> NamedBlock;
 /// Each `wafer-core` service block that declares config: its file under
 /// `wafer-core/src/service_blocks/`, and the constructor [`every_block`]
 /// builds it from.
-pub const SERVICE_BLOCKS_WITH_CONFIG: &[(&str, BuildBlock)] = &[
-    ("database.rs", database_block),
-    ("network.rs", network_block),
-];
-
-/// The database block over an in-memory SQLite database.
-fn database_block() -> NamedBlock {
-    let db: Arc<dyn DatabaseService> = Arc::new(
-        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory().expect("sqlite"),
-    );
-    (DatabaseBlock::NAME, Arc::new(DatabaseBlock::new(db)))
-}
+pub const SERVICE_BLOCKS_WITH_CONFIG: &[(&str, BuildBlock)] = &[("network.rs", network_block)];
 
 /// The network block over [`NoNetwork`].
 fn network_block() -> NamedBlock {

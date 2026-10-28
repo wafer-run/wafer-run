@@ -75,6 +75,8 @@ async fn seeded() -> SQLiteDatabaseService {
             Column::new("name", DataType::Text).null(),
             Column::new("kind", DataType::Text).null(),
             Column::new("qty", DataType::Int).null(),
+            Column::new("created_at", DataType::Text).null(),
+            Column::new("updated_at", DataType::Text).null(),
         ],
         indexes: Vec::new(),
         primary_key: Vec::new(),
@@ -306,7 +308,6 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            set_strict_schema: forward,
             statement_budget: custom,
         }
 

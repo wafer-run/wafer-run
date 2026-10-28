@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use base64ct::{Base64, Encoding};
 use rusqlite::{types::Value as SqlValue, Connection, OpenFlags, Row, TransactionBehavior};
@@ -9,7 +9,7 @@ use wafer_core::{
     forward_database_service,
     interfaces::database::{
         codec::{self, JsonColumns},
-        exec::{DbExec, TxOp, TxResult},
+        exec::{require_stamped_columns, DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
         service::{
             Column, DatabaseError, Record, RecordData, StatementBudget, Table, TransactionError,
@@ -43,10 +43,6 @@ pub struct SQLiteDatabaseService {
     /// Memoized table-exists / column-list facts (see [`SchemaCache`]).
     /// Invalidated on every schema mutation this service performs.
     schema_cache: SchemaCache,
-    /// STRICT_SCHEMA flag; applied once at lifecycle `Init` via
-    /// [`DatabaseService::set_strict_schema`]. When set, the shared executor
-    /// skips schema introspection entirely.
-    strict_schema: AtomicBool,
 }
 
 /// Apply the standard connection PRAGMAs: WAL journaling, foreign-key
@@ -74,7 +70,6 @@ impl SQLiteDatabaseService {
             readers: Vec::new(),
             next_reader: AtomicUsize::new(0),
             schema_cache: SchemaCache::new(),
-            strict_schema: AtomicBool::new(false),
         }
     }
 
@@ -120,7 +115,6 @@ impl SQLiteDatabaseService {
             readers,
             next_reader: AtomicUsize::new(0),
             schema_cache: SchemaCache::new(),
-            strict_schema: AtomicBool::new(false),
         })
     }
 
@@ -345,10 +339,6 @@ impl DbExec for SQLiteDatabaseService {
         Some(&self.schema_cache)
     }
 
-    fn strict_schema(&self) -> bool {
-        self.strict_schema.load(Ordering::Relaxed)
-    }
-
     /// A local SQLite file has no per-invocation statement limit. A write's cost is
     /// bounded by what its caller sends, as for any single statement.
     fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
@@ -508,11 +498,12 @@ impl SQLiteDatabaseService {
     /// job so create/alter/index share a single continuous lock hold. That
     /// atomicity is the only reason this backend overrides the shared
     /// [`DbExec::ensure_schema_table`] default rather than inheriting it; the
-    /// policy below is the same one.
+    /// policy below is the same one, [`require_stamped_columns`] first.
     ///
     /// All SQL is built on the async side (no connection needed); only
     /// execution queues to the write worker.
     async fn ensure_schema_table_in_one_job(&self, table: &Table) -> Result<(), DatabaseError> {
+        require_stamped_columns(table)?;
         let table_name = table.name.clone();
         let create_sql = ddl::build_create_table(table, Backend::Sqlite)?.sql;
         // (lowercased name, display name, ALTER sql) per declared column.
@@ -607,9 +598,8 @@ forward_database_service! {
             batch: forward,
             insert_guarded: forward,
             update_guarded: forward,
-            // The four below are not `DbExec` operations: the shared executor
-            // has no schema-mutation primitives, and STRICT_SCHEMA is per-backend
-            // state.
+            // The customs below are not `DbExec` operations: the shared
+            // executor has no schema-mutation primitives.
             ensure_schema_table: custom,
             // The trait default loops over `ensure_schema_table`, which is
             // exactly right here — each table already gets its own write job.
@@ -618,7 +608,6 @@ forward_database_service! {
             schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
-            set_strict_schema: custom,
             statement_budget: forward,
         }
 
@@ -647,10 +636,6 @@ forward_database_service! {
             self.run_execute(&stmt.sql, &[]).await?;
             self.schema_cache.invalidate(table);
             Ok(())
-        }
-
-        fn set_strict_schema(&self, enabled: bool) {
-            self.strict_schema.store(enabled, Ordering::Relaxed);
         }
     }
 }
@@ -1075,17 +1060,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_where_count_on_missing_table_returns_zero() {
+    async fn delete_where_count_on_missing_table_errors() {
         let svc = make_test_svc();
         let filters = vec![Filter {
             field: "status".to_string(),
             operator: FilterOp::Equal,
             value: serde_json::json!("active"),
         }];
-        let count = DatabaseService::delete_where_count(&svc, "no_such_table", &filters)
+        let err = DatabaseService::delete_where_count(&svc, "no_such_table", &filters)
             .await
-            .unwrap();
-        assert_eq!(count, 0);
+            .expect_err("a missing table is an error");
+        assert_no_such_table(&err);
     }
 
     #[tokio::test]
@@ -1145,17 +1130,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_where_on_missing_table_returns_empty() {
+    async fn take_where_on_missing_table_errors() {
         let svc = make_test_svc();
         let filters = vec![Filter {
             field: "code".to_string(),
             operator: FilterOp::Equal,
             value: serde_json::json!("abc"),
         }];
-        let taken = DatabaseService::take_where(&svc, "no_such_table", &filters)
+        let err = DatabaseService::take_where(&svc, "no_such_table", &filters)
             .await
-            .unwrap();
-        assert!(taken.is_empty());
+            .expect_err("a missing table is an error");
+        assert_no_such_table(&err);
     }
 
     /// B1 (PR #333 review): a statement-level failure on the write-returning
@@ -1264,14 +1249,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn increment_field_where_on_missing_table_returns_zero() {
+    async fn increment_field_where_on_missing_table_errors() {
         let svc = make_test_svc();
         let filters = vec![Filter {
             field: "id".into(),
             operator: FilterOp::Equal,
             value: serde_json::json!("nope"),
         }];
-        let rows = DatabaseService::increment_field_where(
+        let err = DatabaseService::increment_field_where(
             &svc,
             "no_such_table",
             "access_count",
@@ -1279,8 +1264,8 @@ mod tests {
             &filters,
         )
         .await
-        .unwrap();
-        assert_eq!(rows, 0);
+        .expect_err("a missing table is an error");
+        assert_no_such_table(&err);
     }
 
     // -----------------------------------------------------------------------
@@ -1294,7 +1279,11 @@ mod tests {
         let svc = make_test_svc();
         let table = Table {
             name: "widgets".into(),
-            columns: vec![pk("id"), Column::new("name", DataType::Text).null()],
+            columns: vec![
+                pk("id"),
+                Column::new("name", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
             indexes: Vec::new(),
             primary_key: Vec::new(),
             unique_keys: Vec::new(),
@@ -1663,7 +1652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_where_adds_set_columns_but_refuses_a_missing_filter_column() {
+    async fn update_where_refuses_a_missing_filter_column_and_a_missing_set_column() {
         let svc = make_test_svc();
         seed_rows(
             &svc,
@@ -1678,7 +1667,7 @@ mod tests {
             .await
             .unwrap();
 
-        // `category` (WHERE) does not exist: refused before `flag` is added.
+        // `category` (WHERE) does not exist: refused by name.
         let mut patch = std::collections::HashMap::new();
         patch.insert("flag".to_string(), serde_json::json!("on"));
         let err = DatabaseService::update_where(
@@ -1697,24 +1686,26 @@ mod tests {
             before
         );
 
-        // A filter on a present column: the new SET column `flag` is added.
+        // A filter on a present column: the SET column `flag` the table lacks
+        // fails in the backend, and is not added.
         let filters = vec![Filter {
             field: "name".to_string(),
             operator: FilterOp::Equal,
             value: serde_json::json!("alpha"),
         }];
-        DatabaseService::update_where(&svc, "items", &filters, patch)
+        let err = DatabaseService::update_where(&svc, "items", &filters, patch)
             .await
-            .expect("a new SET column is added from the data");
-        let rows = DatabaseService::list(&svc, "items", &ListOptions::default())
-            .await
-            .unwrap();
-        let flagged = rows
-            .records
-            .iter()
-            .filter(|r| r.data["flag"] == serde_json::json!("on"))
-            .count();
-        assert_eq!(flagged, 1);
+            .expect_err("an undeclared SET column is not added");
+        assert!(
+            err.to_string().contains("no such column: flag"),
+            "the backend names the column: {err}"
+        );
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "items")
+                .await
+                .unwrap(),
+            before
+        );
     }
 
     #[tokio::test]
@@ -1745,7 +1736,8 @@ mod tests {
         let svc = make_test_svc();
         DatabaseService::exec_raw(
             &svc,
-            "CREATE TABLE legacy (id TEXT PRIMARY KEY, meta JSON)",
+            "CREATE TABLE legacy \
+             (id TEXT PRIMARY KEY, meta JSON, created_at TEXT, updated_at TEXT)",
             &[],
         )
         .await
@@ -1771,10 +1763,25 @@ mod tests {
     async fn create_stores_objects_as_json_and_roundtrips() {
         // Objects flow through the shared create default →
         // wafer_sql_utils::query::build_insert → Value::Json → TEXT bind on
-        // SQLite, into a column the lazy add declares `JSON`; the read path
+        // SQLite, into a column declared `DataType::Json`; the read path
         // parses that column's text back into a value.
         let svc = make_test_svc();
-        seed_rows(&svc, "items", vec![serde_json::json!({"name": "seed"})]).await;
+        let table = Table {
+            name: "items".into(),
+            columns: vec![
+                pk("id"),
+                Column::new("name", DataType::Text).null(),
+                Column::new("meta", DataType::Json).null(),
+                Column::new("created_at", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        };
+        DatabaseService::ensure_schema_table(&svc, &table)
+            .await
+            .unwrap();
         let mut data = std::collections::HashMap::new();
         data.insert("name".to_string(), serde_json::json!("with-meta"));
         data.insert("meta".to_string(), serde_json::json!({"a": 1, "b": [true]}));
@@ -1798,7 +1805,8 @@ mod tests {
         let svc = make_test_svc();
         exec_batch_for_tests(
             &svc,
-            "CREATE TABLE counters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
+            "CREATE TABLE counters (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, \
+             created_at TEXT, updated_at TEXT)",
         )
         .await;
         let mut data = std::collections::HashMap::new();
@@ -1991,39 +1999,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn count_on_missing_table_returns_zero() {
+    async fn count_on_missing_table_errors() {
         let svc = make_test_svc();
-        let n = DatabaseService::count(&svc, "no_such_table", &[])
+        let err = DatabaseService::count(&svc, "no_such_table", &[])
             .await
-            .unwrap();
-        assert_eq!(n, 0);
+            .expect_err("a missing table is an error");
+        assert_no_such_table(&err);
     }
 
+    /// `err` is the backend's missing-table error.
+    fn assert_no_such_table(err: &DatabaseError) {
+        assert!(
+            err.to_string().contains("no such table: no_such_table"),
+            "expected the backend's missing-table error, got: {err}"
+        );
+    }
+
+    /// An update naming a column the table does not declare fails and adds
+    /// nothing: the schema is what the block declared.
     #[tokio::test]
-    async fn update_lazily_adds_a_column_absent_from_the_schema() {
-        // Regression for the M18 fix: SQLite `update` ensures columns from
-        // the update payload (matching Postgres) — now via the shared
-        // `DbExec::ensure_data_columns` default. Previously updating a key
-        // absent from the table failed with a confusing "no such column";
-        // now the column is added.
+    async fn update_naming_an_undeclared_column_fails_and_adds_nothing() {
         let svc = make_test_svc();
         seed_rows(&svc, "widgets", vec![serde_json::json!({"name": "a"})]).await;
         let created = DatabaseService::list(&svc, "widgets", &ListOptions::default())
             .await
             .unwrap();
         let id = created.records[0].id.clone();
+        let before = DatabaseService::schema_columns(&svc, "widgets")
+            .await
+            .unwrap();
 
         let mut patch = std::collections::HashMap::new();
         // `nickname` is not in the seeded schema.
         patch.insert("nickname".to_string(), serde_json::json!("ace"));
-        let updated = DatabaseService::update(&svc, "widgets", &id, patch)
+        let err = DatabaseService::update(&svc, "widgets", &id, patch)
             .await
-            .expect("update should add the missing column and succeed");
-        assert_eq!(updated.data["nickname"], serde_json::json!("ace"));
-
-        // The column now exists and round-trips on a fresh read.
-        let reread = DatabaseService::get(&svc, "widgets", &id).await.unwrap();
-        assert_eq!(reread.data["nickname"], serde_json::json!("ace"));
+            .expect_err("an undeclared column is not added");
+        assert!(
+            err.to_string().contains("no such column: nickname"),
+            "the backend names the column: {err}"
+        );
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "widgets")
+                .await
+                .unwrap(),
+            before,
+            "no column was added"
+        );
     }
 
     #[tokio::test]
@@ -2251,38 +2273,27 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // STRICT_SCHEMA mode + schema-cache invalidation
+    // Missing tables and undeclared columns + schema-cache invalidation
     // -----------------------------------------------------------------------
 
-    /// STRICT_SCHEMA skips the per-op table-exists guard: a query against a
-    /// missing table errors (the SELECT runs) instead of returning empty.
+    /// A query against a missing table runs and errors; nothing answers it as
+    /// an empty table.
     #[tokio::test]
-    async fn strict_schema_skips_table_exists_guard() {
+    async fn a_query_against_a_missing_table_errors() {
         let svc = make_test_svc();
-
-        // Non-strict: the exists guard fires, so a missing table lists empty.
-        let empty = DatabaseService::list(&svc, "ghost", &ListOptions::default())
-            .await
-            .expect("non-strict list on a missing table is empty, not an error");
-        assert!(empty.records.is_empty());
-
-        // Strict: the guard is skipped, so the SELECT hits the missing table
-        // and errors — proving the (now-cached exists=false) probe was bypassed.
-        svc.set_strict_schema(true);
         let err = DatabaseService::list(&svc, "ghost", &ListOptions::default())
             .await
-            .expect_err("strict mode skips the exists guard; a missing table must error");
+            .expect_err("a missing table must error");
         assert!(
             err.to_string().to_lowercase().contains("no such table"),
             "expected a missing-table error, got: {err}"
         );
     }
 
-    /// STRICT_SCHEMA skips the lazy column-add ALTER path: a write referencing
-    /// an unmigrated column fails loudly instead of the column being
-    /// synthesized. The same write succeeds (column auto-added) when strict.
+    /// A create naming a column the table does not declare fails in the
+    /// backend, naming the column, and adds nothing.
     #[tokio::test]
-    async fn strict_schema_skips_lazy_column_add() {
+    async fn a_create_naming_an_undeclared_column_fails() {
         let svc = make_test_svc();
         let table = Table {
             name: "t".into(),
@@ -2299,31 +2310,25 @@ mod tests {
             .await
             .unwrap();
 
-        svc.set_strict_schema(true);
         let mut row = std::collections::HashMap::new();
         row.insert("id".to_string(), serde_json::json!("r1"));
         row.insert("extra".to_string(), serde_json::json!("v"));
         let err = DatabaseService::create(&svc, "t", row)
             .await
-            .expect_err("strict mode must not synthesize the missing `extra` column");
+            .expect_err("the missing `extra` column is not synthesized");
         assert!(
-            err.to_string().to_lowercase().contains("no column"),
+            err.to_string().contains("has no column named extra"),
             "expected a missing-column error, got: {err}"
         );
-
-        // Non-strict lazily adds the column and the identical write succeeds.
-        svc.set_strict_schema(false);
-        let mut row2 = std::collections::HashMap::new();
-        row2.insert("id".to_string(), serde_json::json!("r2"));
-        row2.insert("extra".to_string(), serde_json::json!("v"));
-        DatabaseService::create(&svc, "t", row2)
-            .await
-            .expect("non-strict lazily adds the column");
+        assert_eq!(
+            DatabaseService::schema_columns(&svc, "t").await.unwrap(),
+            ["id", "created_at", "updated_at"]
+        );
     }
 
-    /// Dropping a table must invalidate its cached exists=true fact, so a
-    /// follow-up query re-probes and returns empty rather than trusting the
-    /// stale entry and erroring on a SELECT against the vanished table.
+    /// Dropping a table must invalidate its cached facts, so a follow-up query
+    /// on the vanished table reports it missing rather than being planned
+    /// from the stale entry.
     #[tokio::test]
     async fn schema_cache_invalidated_on_drop_table() {
         let svc = make_test_svc();
@@ -2339,11 +2344,18 @@ mod tests {
             .await
             .unwrap();
 
-        let after = DatabaseService::list(&svc, "temp", &ListOptions::default())
+        let cache = DbExec::schema_cache(&svc).expect("the SQLite backend caches");
+        assert!(
+            cache.columns("temp").is_none() && !cache.table_known_present("temp"),
+            "drop_table drops the entry"
+        );
+        let err = DatabaseService::list(&svc, "temp", &ListOptions::default())
             .await
-            .expect("a stale exists cache would error here; invalidation returns empty");
-        assert!(after.records.is_empty());
-        assert_eq!(after.total_count, 0);
+            .expect_err("the dropped table is missing");
+        assert!(
+            err.to_string().contains("no such table"),
+            "expected a missing-table error, got: {err}"
+        );
     }
 
     /// A request naming an unknown column is refused without evicting the

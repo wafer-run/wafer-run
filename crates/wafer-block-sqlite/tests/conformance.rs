@@ -92,29 +92,35 @@ async fn only_the_rowid_alias_numbers_its_own_rows() {
     let caller_supplied = [
         (
             "t_int",
-            "CREATE TABLE t_int (id INT PRIMARY KEY, name TEXT)",
+            "CREATE TABLE t_int (id INT PRIMARY KEY, name TEXT, \
+             created_at TEXT, updated_at TEXT)",
         ),
         (
             "t_bigint",
-            "CREATE TABLE t_bigint (id BIGINT PRIMARY KEY, name TEXT)",
+            "CREATE TABLE t_bigint (id BIGINT PRIMARY KEY, name TEXT, \
+             created_at TEXT, updated_at TEXT)",
         ),
         (
             "t_composite",
-            "CREATE TABLE t_composite (id INTEGER, name TEXT, PRIMARY KEY (id, name))",
+            "CREATE TABLE t_composite (id INTEGER, name TEXT, created_at TEXT, \
+             updated_at TEXT, PRIMARY KEY (id, name))",
         ),
         (
             "t_no_rowid",
-            "CREATE TABLE t_no_rowid (id INTEGER PRIMARY KEY, name TEXT) WITHOUT ROWID",
+            "CREATE TABLE t_no_rowid (id INTEGER PRIMARY KEY, name TEXT, created_at TEXT, \
+             updated_at TEXT) WITHOUT ROWID",
         ),
     ];
     let filled = [
         (
             "t_alias",
-            "CREATE TABLE t_alias (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE TABLE t_alias (id INTEGER PRIMARY KEY, name TEXT, \
+             created_at TEXT, updated_at TEXT)",
         ),
         (
             "t_text",
-            "CREATE TABLE t_text (id TEXT PRIMARY KEY, name TEXT)",
+            "CREATE TABLE t_text (id TEXT PRIMARY KEY, name TEXT, \
+             created_at TEXT, updated_at TEXT)",
         ),
     ];
     for (_, ddl) in caller_supplied.iter().chain(&filled) {

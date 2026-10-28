@@ -314,8 +314,8 @@ pub fn apply_order_with_unique_key(
 /// [`SqlBuildError::ZeroLimit`] and a positive offset without a limit is
 /// [`SqlBuildError::OffsetWithoutLimit`] (SQLite and D1 have no `OFFSET`
 /// without `LIMIT`). [`apply_pagination`] applies the same check; an
-/// executor that can answer without rendering a select (a missing table)
-/// calls this first so it refuses the same requests.
+/// executor calls this first so it refuses such a request before it spends a
+/// schema-introspection round-trip on it.
 pub fn check_pagination(limit: Option<u32>, offset: i64) -> Result<(), SqlBuildError> {
     match limit {
         Some(0) => Err(SqlBuildError::ZeroLimit),

@@ -22,7 +22,7 @@ use wafer_core::{
     clients::database::{self as db, RawStatement},
     interfaces::database::{
         handler::handle_message,
-        service::{pk, DatabaseService, Table},
+        service::{pk, Column, DataType, DatabaseService, Table},
     },
 };
 
@@ -90,7 +90,7 @@ async fn ctx() -> DbCtx {
     let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
     svc.ensure_schema_table(&Table {
         name: LEDGER.to_string(),
-        columns: vec![pk("id")],
+        columns: vec![pk("id"), Column::new("updated_at", DataType::Text).null()],
         indexes: Vec::new(),
         primary_key: Vec::new(),
         unique_keys: Vec::new(),

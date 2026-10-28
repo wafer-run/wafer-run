@@ -189,7 +189,7 @@ fn sentence_case_validator_examples() {
         "Max Age (seconds)",
         "Max age (Seconds)",
         "Read-Only",
-        "Strict Schema",
+        "Statement Budget",
         "max age",
         "Is As",
     ] {

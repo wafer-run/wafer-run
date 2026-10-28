@@ -4,6 +4,51 @@
 
 ### Breaking changes
 
+- Strict schema is the only behaviour: the schema is what a block's
+  migrations and explicit schema ops declared, on every backend. Removed:
+  - the `WAFER_RUN__DATABASE__STRICT_SCHEMA` config var of
+    `wafer-run/database` (the block now declares no config) and
+    `WAFER_RUN__POSTGRES__STRICT_SCHEMA` of `wafer-run/postgres`; a
+    deployment that sets either sets nothing;
+  - `DbExec::strict_schema`, `DatabaseService::set_strict_schema` and its
+    `set_strict_schema` entry in the `forward_database_service!` ledger
+    (delete the line), `handler::STRICT_SCHEMA_CONFIG_KEY` and
+    `handler::strict_schema_from`; `handler::handle_lifecycle` loses its
+    `strict_schema: bool` parameter;
+  - the lazy column add: a write naming a column the table does not have
+    (`create`, `create_many`, `update`, `update_where[_count]`, a guarded
+    write, a batch op) no longer runs `ALTER TABLE … ADD COLUMN`; it fails in
+    the backend (`… has no column named c` / `no such column: c`). That
+    includes the `created_at`/`updated_at` the executor stamps: a table
+    lacking `updated_at` takes no typed write, one lacking `created_at` no
+    create. `wafer_sql_utils::ddl::build_add_column_for_value` and
+    `ddl::column_type_for_value` are gone with it;
+  - the missing-table tolerance: `list`, `count`, `sum`, `aggregate`,
+    `delete_where[_count]`, `take_where`, `update_where[_count]`,
+    `increment_field_where`, `update_guarded` and a batch's `UpdateWhere` /
+    `DeleteWhere` on a table that does not exist now run their statement and
+    fail (`no such table`), as every other operation did; a batch with such
+    an op rolls back whole.
+
+  The column check of a read or filtered write stays, on every backend: a
+  filter, sort, projection, guard or aggregate naming a column the table
+  lacks is `InvalidArgument` naming it, before the statement runs. It is not
+  left to the backend because the SQLite family (native SQLite, D1, sql.js)
+  reads an unresolvable double-quoted name as a string literal, so such a
+  read would run and answer wrongly. On a backend that ran with
+  STRICT_SCHEMA on (D1) this costs the column introspection of a table a
+  `count`, `sum`, `aggregate`, `delete_where_count` or
+  `increment_field_where` names, once per table per schema cache.
+
+  New: `ensure_schema_table` (and so `database.ensure_table` from a guest,
+  and the tables a database block migrates at Init) refuses a table that
+  does not declare `updated_at` with `InvalidArgument` naming the table and
+  the column, before any DDL (`exec::require_stamped_columns`; the column
+  names are `exec::UPDATED_AT` / `exec::CREATED_AT`). `created_at` is not
+  required: only a create stamps it. A block that declared such a table
+  fails at its Init instead of on its first write; add
+  `updated_at` (and `created_at` where rows are created) to its declaration.
+
 - `DatabaseService` has a new required method,
   `exec_raw_transaction(&self, &[RawStatement]) -> Result<Vec<i64>,
   TransactionError>`: run raw statements, DDL included, in order as ONE

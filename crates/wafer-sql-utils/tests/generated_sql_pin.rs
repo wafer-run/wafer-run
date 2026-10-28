@@ -677,12 +677,6 @@ fn render_ddl(out: &mut Out, backend: Backend, b: &str) {
         b,
         ddl::build_add_column("posts", &col_int("likes").def(default_int(0)), backend),
     );
-    out.stmt_result(
-        D,
-        "add_column_for_value",
-        b,
-        ddl::build_add_column_for_value("posts", "score", &json!(1.5), backend),
-    );
     out.stmt_result(D, "drop_table", b, ddl::build_drop_table("posts", backend));
 }
 

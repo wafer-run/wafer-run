@@ -1,12 +1,13 @@
 //! Per-backend schema-introspection cache.
 //!
 //! SQL [`DatabaseService`](super::service::DatabaseService) backends probe the
-//! schema before most logical CRUD operations: a table-exists check plus a
-//! column-list introspection query, issued *before* the actual data query. On
-//! a local SQLite file those are cheap, but on Cloudflare D1 each is a network
-//! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes both
-//! facts per table — the column list together with which columns are declared
-//! to hold JSON, which every row read decodes by — plus the table's primary
+//! schema before most logical CRUD operations: a column-list introspection
+//! query (the columns a statement names must exist, and the JSON columns its
+//! rows decode by), issued *before* the actual data query. On a local SQLite
+//! file that is cheap, but on Cloudflare D1 each probe is a network
+//! round-trip that dwarfs the data query itself. [`SchemaCache`] memoizes it
+//! per table — the column list together with which columns are declared to
+//! hold JSON, which every row read decodes by — plus the table's primary
 //! key, which a sorted or paged `list` appends to its `ORDER BY`, and where a
 //! created row's `id` comes from, which `create` asks before minting one, so a
 //! warm backend issues zero introspection round-trips in steady state.
@@ -14,9 +15,10 @@
 //! Only facts about a table that exists are kept. That a table is *missing*
 //! is never memoized: another process (a second replica, a migration run out
 //! of band) can create it at any moment, and nothing in this process would
-//! learn of it — a cached "missing" would answer every read of that table as
-//! empty for the life of the cache. A missing table therefore costs one
-//! existence probe per operation against it.
+//! learn of it — a cached "missing" (no columns, no key) would plan every
+//! statement against that table from a stale answer for the life of the
+//! cache. A missing table is therefore introspected again by every operation
+//! against it, and that operation then fails in the backend.
 //!
 //! # Correctness
 //!
@@ -26,10 +28,11 @@
 //! whole cache. A stale entry after an `ALTER TABLE` would let the executor
 //! build SQL against a column set that no longer matches the database: a
 //! correctness bug, not merely a performance one. The invalidation call sites
-//! live in [`DbExec`](super::exec::DbExec) (the shared lazy-column-add and
-//! `exec_raw` paths, and the column check's uncached re-read of a column list
-//! that lacks a name a request uses) and in each backend's schema-management
-//! methods (`ensure_schema_table`, `schema_drop_table`, `schema_add_column`).
+//! live in [`DbExec`](super::exec::DbExec) (the shared `ensure_schema_table`
+//! and `exec_raw` paths, and the column check's uncached re-read of a column
+//! list that lacks a name a request uses) and in each backend's
+//! schema-management methods (`ensure_schema_table`, `schema_drop_table`,
+//! `schema_add_column`).
 //!
 //! ## Probe/invalidate linearizability (the TOCTOU guard)
 //!
@@ -274,8 +277,8 @@ impl SchemaCache {
     }
 
     /// Invalidate every cached fact for `table` and bump the generation.
-    /// Called after a targeted schema mutation (migration, drop, add-column,
-    /// lazy `ALTER TABLE`), or before re-reading a column list that may be
+    /// Called after a targeted schema mutation (migration, drop, add-column),
+    /// or before re-reading a column list that may be
     /// stale: the next read re-introspects, and any write-back still in
     /// flight from before this call is dropped.
     pub fn invalidate(&self, table: &str) {

@@ -454,7 +454,9 @@ dual_api! {
     /// Create `table` (and its indexes) if absent. Authorized on the table
     /// name and on `__schema__` (the `schema` capability), NOT on raw
     /// `__ddl__` — the host builds the statement from `table`. A block may
-    /// only ensure its own `{org}__{block}__*` tables.
+    /// only ensure its own `{org}__{block}__*` tables. The table must declare
+    /// `updated_at`, which the host stamps on every write; one without it is
+    /// refused as `InvalidArgument`, naming it.
     pub fn ensure_table(ctx, table: &TableDef) -> Result<SchemaOpResponse, WaferError> {
         let req = EnsureTableRequest { table: table.clone() };
         let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_ENSURE_TABLE, &req, Some(&table.name), true, Some("db"))?;

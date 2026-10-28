@@ -181,28 +181,3 @@ mod network {
         assert!(service.configured.lock().unwrap().is_empty());
     }
 }
-
-mod database {
-    use wafer_block_sqlite::service::SQLiteDatabaseService;
-    use wafer_core::interfaces::database::{
-        exec::DbExec, handler::STRICT_SCHEMA_CONFIG_KEY, service::DatabaseService,
-    };
-
-    use super::*;
-
-    /// STRICT_SCHEMA set only in the ConfigSource reaches the backend at the
-    /// database block's Init.
-    #[tokio::test]
-    async fn database_init_reads_strict_schema_from_the_config_source() {
-        let mut wafer = runtime(&[(STRICT_SCHEMA_CONFIG_KEY, "true")]);
-        let service = Arc::new(SQLiteDatabaseService::open_in_memory().expect("sqlite"));
-        let as_service: Arc<dyn DatabaseService> = service.clone();
-        wafer_core::service_blocks::database::register_with(&mut wafer, as_service)
-            .expect("register");
-        wafer.init_block("wafer-run/database").await.expect("Init");
-        assert!(
-            DbExec::strict_schema(service.as_ref()),
-            "the ConfigSource's STRICT_SCHEMA must reach the backend"
-        );
-    }
-}
