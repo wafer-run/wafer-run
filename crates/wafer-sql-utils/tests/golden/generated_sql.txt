@@ -250,8 +250,8 @@ sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite
 params: []
 
 ### introspect / list_tables_like [sqlite]
-sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND name NOT LIKE '\_cf\_%' ESCAPE '\' AND name LIKE ?1 ORDER BY name
-params: ["app__%"]
+sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND name NOT LIKE '\_cf\_%' ESCAPE '\' AND name LIKE ?1 ESCAPE '\' ORDER BY name
+params: ["app\\_\\_%"]
 
 ### introspect / table_exists [sqlite]
 sql: SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present
@@ -275,6 +275,10 @@ params: []
 
 ### introspect / table_row_count [sqlite]
 sql: SELECT COUNT(*) AS cnt FROM "users"
+params: []
+
+### introspect / catalog_table_row_count [sqlite]
+sql: SELECT COUNT(*) AS cnt FROM "Mixed""Case"
 params: []
 
 ### query / select_every_filter_sorted_paged [postgres]
@@ -541,8 +545,8 @@ sql: SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.p
 params: []
 
 ### introspect / list_tables_like [postgres]
-sql: SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','f','v') AND pg_catalog.pg_table_is_visible(c.oid) AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relname LIKE $1 ORDER BY c.relname
-params: ["app__%"]
+sql: SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','f','v') AND pg_catalog.pg_table_is_visible(c.oid) AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relname LIKE $1 ESCAPE E'\\' ORDER BY c.relname
+params: ["app\\_\\_%"]
 
 ### introspect / table_exists [postgres]
 sql: SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v')) AS present
@@ -566,6 +570,10 @@ params: ["users"]
 
 ### introspect / table_row_count [postgres]
 sql: SELECT COUNT(*) AS cnt FROM "users"
+params: []
+
+### introspect / catalog_table_row_count [postgres]
+sql: SELECT COUNT(*) AS cnt FROM "Mixed""Case"
 params: []
 
 ### vector / create_vec_and_meta [sqlite]

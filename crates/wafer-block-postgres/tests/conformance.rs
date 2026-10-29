@@ -92,7 +92,10 @@ async fn a_search_path_without_public_is_conformant() {
 
     use sqlx::postgres::{PgConnectOptions, PgPool};
     use wafer_sql_utils::{
-        introspect::{build_list_tables, build_list_tables_like, build_table_info},
+        introspect::{
+            build_catalog_table_row_count, build_list_tables, build_list_tables_like,
+            build_table_info,
+        },
         Backend,
     };
 
@@ -148,6 +151,37 @@ async fn a_search_path_without_public_is_conformant() {
         .await
         .expect("list tables like");
     assert_eq!(like, ["conf_sp_probe"]);
+    // The prefix is literal: `_` is not a wildcard.
+    let (sql, params) = build_list_tables_like("conf_spx", Backend::Postgres);
+    let like: Vec<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+        .bind(params[0].as_str().expect("pattern"))
+        .fetch_all(&session)
+        .await
+        .expect("list tables like");
+    assert!(like.is_empty(), "{like:?}");
+    // A table created outside the database layer, under a name that is not a
+    // plain identifier, is listed and counted under exactly that name.
+    sqlx::query(r#"CREATE TABLE "Conf_Sp_Mixed""Case" (id TEXT PRIMARY KEY)"#)
+        .execute(&session)
+        .await
+        .expect("create the mixed-case table");
+    sqlx::query(r#"INSERT INTO "Conf_Sp_Mixed""Case" (id) VALUES ('a'), ('b')"#)
+        .execute(&session)
+        .await
+        .expect("insert rows");
+    let tables: Vec<String> =
+        sqlx::query_scalar(AssertSqlSafe(build_list_tables(Backend::Postgres)))
+            .fetch_all(&session)
+            .await
+            .expect("list tables");
+    let mixed = "Conf_Sp_Mixed\"Case";
+    assert!(tables.iter().any(|t| t == mixed), "{tables:?}");
+    let sql = build_catalog_table_row_count(mixed, Backend::Postgres).expect("a catalog name");
+    let n: i64 = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
+        .fetch_one(&session)
+        .await
+        .expect("count the mixed-case table");
+    assert_eq!(n, 2);
     let (sql, params) = build_table_info("conf_sp_probe", Backend::Postgres).expect("valid name");
     let info: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
         "SELECT column_name, data_type, is_nullable FROM ({sql}) AS info"

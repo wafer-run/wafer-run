@@ -1937,6 +1937,14 @@
 
 ### Added
 
+- `introspect::build_catalog_table_row_count` counts the rows of a table
+  whose name was read from the catalog (a row of `build_list_tables[_like]`),
+  quoting it as a delimited identifier (`"` doubled) instead of requiring a
+  plain identifier. The catalog lists tables the database layer never
+  created (`Foo`, `a-b`, `a"b`, made by a console, a migration or another
+  tool), and `build_table_row_count` refused every one of them, so a caller
+  that listed the tables and counted each one failed on the first. Names a
+  caller supplies keep `build_table_row_count` and its plain-identifier rule.
 - `WasmCompilation` (`Eager`, the default, or `LazyTranslation`) selects how
   a runtime-created wasmi engine compiles a guest module: per load through
   the new `ResourceLimits::compilation` field, or for a whole runtime with
@@ -2556,6 +2564,10 @@
 
 ### Fixed
 
+- `introspect::build_list_tables_like` matches its prefix literally: the
+  prefix is LIKE-escaped under `ESCAPE '\'` (`E'\\'` on Postgres), so
+  `app_` no longer also matches `appx…`. A caller that relied on `_` or `%`
+  in the prefix as a wildcard gets literal matching now.
 - `introspect::build_list_tables[_like]` on SQLite no longer list
   Cloudflare D1's internal `_cf_*` tables (`_cf_KV`, `_cf_METADATA`). D1
   answers any read of one with `SQLITE_AUTH`, so a caller that counted or
