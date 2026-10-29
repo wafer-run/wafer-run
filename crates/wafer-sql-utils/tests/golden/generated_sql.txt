@@ -246,11 +246,11 @@ kinds: []
 collection: posts
 
 ### introspect / list_tables [sqlite]
-sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name
+sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND name NOT LIKE '\_cf\_%' ESCAPE '\' ORDER BY name
 params: []
 
 ### introspect / list_tables_like [sqlite]
-sql: SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ORDER BY name
+sql: SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND name NOT LIKE '\_cf\_%' ESCAPE '\' AND name LIKE ?1 ORDER BY name
 params: ["app__%"]
 
 ### introspect / table_exists [sqlite]
