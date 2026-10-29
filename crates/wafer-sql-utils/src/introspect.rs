@@ -12,23 +12,53 @@
 //! `pg_table_is_visible`, which is true for the tables an unqualified name
 //! reaches. None of them names a schema.
 
-use crate::{ident::validate_ident, Backend, SqlBuildError};
+use crate::{ident::validate_ident, vector::escape_like, Backend, SqlBuildError};
 
 /// The Postgres relation kinds an unqualified table name in a statement can
 /// read from: ordinary, partitioned and foreign tables, and views — the set
 /// `information_schema.tables` lists.
 const PG_TABLE_KINDS: &str = "('r','p','f','v')";
 
+/// Table-name prefixes that an engine speaking the SQLite dialect reserves
+/// for its own internal tables. [`Backend::Sqlite`] is the dialect of every
+/// SQLite engine wafer runs on — the native and in-browser SQLite libraries
+/// and Cloudflare D1 — so a table under a prefix any of them reserves belongs
+/// to the engine, not to the schema, and the listings below leave it out:
+///
+/// - `sqlite_`: SQLite's own (`sqlite_sequence`, `sqlite_stat1`, …). SQLite
+///   refuses to create a table under it, matching the prefix without regard
+///   to ASCII case.
+/// - `_cf_`: Cloudflare D1's (`_cf_KV`, `_cf_METADATA`). D1 lists them in
+///   `sqlite_master` like any table but answers a read of one with
+///   `SQLITE_AUTH`, so a caller that lists the tables and then reads each one
+///   (a row count, a schema browser) fails on the first of them.
+///
+/// Each prefix is matched as a literal (its `_` is escaped, not a LIKE
+/// wildcard) and, like SQLite's own check, without regard to ASCII case.
+const SQLITE_RESERVED_TABLE_PREFIXES: &[&str] = &["sqlite_", "_cf_"];
+
+/// The SQLite `WHERE` conjuncts that drop every table named under one of the
+/// [`SQLITE_RESERVED_TABLE_PREFIXES`], each starting with ` AND `.
+fn sqlite_not_reserved() -> String {
+    SQLITE_RESERVED_TABLE_PREFIXES
+        .iter()
+        .map(|prefix| format!(" AND name NOT LIKE '{}%' ESCAPE '\\'", escape_like(prefix)))
+        .collect()
+}
+
 /// Build query to list all user tables (excludes system tables).
 ///
-/// SQLite: `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+/// SQLite: the `type='table'` rows of `sqlite_master` whose name is not under
+/// one of the [`SQLITE_RESERVED_TABLE_PREFIXES`] (SQLite's and D1's internal
+/// tables).
 /// Postgres: the tables an unqualified name reaches through the session's
 /// `search_path` (see the module docs), outside the system schemas.
 pub fn build_list_tables(backend: Backend) -> String {
     match backend {
-        Backend::Sqlite => {
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name".to_string()
-        }
+        Backend::Sqlite => format!(
+            "SELECT name FROM sqlite_master WHERE type='table'{} ORDER BY name",
+            sqlite_not_reserved()
+        ),
         Backend::Postgres => format!(
             "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -41,14 +71,17 @@ pub fn build_list_tables(backend: Backend) -> String {
 
 /// Build query to list tables matching a name prefix.
 ///
-/// Returns (sql, params) with one parameter for the LIKE pattern. On
-/// Postgres the candidates are the ones [`build_list_tables`] lists.
+/// Returns (sql, params) with one parameter for the LIKE pattern. On both
+/// dialects the candidates are the ones [`build_list_tables`] lists, so a
+/// prefix never reaches an engine's internal tables.
 pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
     let pattern = format!("{prefix}%");
     match backend {
         Backend::Sqlite => (
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?1 ORDER BY name"
-                .to_string(),
+            format!(
+                "SELECT name FROM sqlite_master WHERE type='table'{} AND name LIKE ?1 ORDER BY name",
+                sqlite_not_reserved()
+            ),
             vec![serde_json::Value::String(pattern)],
         ),
         Backend::Postgres => (
@@ -380,6 +413,75 @@ mod tests {
     fn test_list_tables_sqlite() {
         let sql = build_list_tables(Backend::Sqlite);
         assert!(sql.contains("sqlite_master"));
+    }
+
+    /// Create `tables` in a fresh in-memory SQLite database and return what
+    /// `build_list_tables` / `build_list_tables_like` list there.
+    fn listed_on_sqlite(tables: &[&str], like_prefix: Option<&str>) -> Vec<String> {
+        let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        for t in tables {
+            conn.execute_batch(&format!("CREATE TABLE \"{t}\" (id INTEGER PRIMARY KEY)"))
+                .expect("create table");
+        }
+        // An AUTOINCREMENT key makes SQLite create its own `sqlite_sequence`.
+        conn.execute_batch("CREATE TABLE \"auto\" (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            .expect("create autoincrement table");
+        let (sql, params) = match like_prefix {
+            None => (build_list_tables(Backend::Sqlite), Vec::new()),
+            Some(prefix) => build_list_tables_like(prefix, Backend::Sqlite),
+        };
+        let params: Vec<String> = params
+            .iter()
+            .map(|p| p.as_str().expect("text param").to_string())
+            .collect();
+        let mut stmt = conn.prepare(&sql).expect("prepare listing");
+        stmt.query_map(rusqlite::params_from_iter(params), |row| row.get(0))
+            .expect("run listing")
+            .collect::<Result<_, _>>()
+            .expect("read listing")
+    }
+
+    /// D1 keeps its own tables (`_cf_KV`, `_cf_METADATA`) in `sqlite_master`
+    /// and refuses to read them (`SQLITE_AUTH`), so listing one hands every
+    /// caller that reads the listed tables a failure. Plain SQLite stands in
+    /// for D1 here: it lets the tables be created, and the listing must still
+    /// leave them out.
+    #[test]
+    fn list_tables_sqlite_omits_engine_reserved_tables() {
+        let listed = listed_on_sqlite(&["_cf_KV", "_cf_METADATA", "users"], None);
+        assert_eq!(listed, ["auto", "users"], "{listed:?}");
+    }
+
+    /// The reserved prefixes match literally: `_` in them is not a LIKE
+    /// wildcard, so a table that merely has some character where the prefix
+    /// has `_` stays listed.
+    #[test]
+    fn list_tables_sqlite_keeps_names_that_only_resemble_a_reserved_prefix() {
+        let lookalikes = ["acf_orders", "xcfxdata", "sqlitex_data", "sqlite1"];
+        let listed = listed_on_sqlite(&lookalikes, None);
+        assert_eq!(
+            listed,
+            ["acf_orders", "auto", "sqlite1", "sqlitex_data", "xcfxdata"],
+            "{listed:?}"
+        );
+    }
+
+    /// Like SQLite's own reservation of `sqlite_`, the prefixes are matched
+    /// without regard to ASCII case.
+    #[test]
+    fn list_tables_sqlite_matches_reserved_prefixes_case_insensitively() {
+        let listed = listed_on_sqlite(&["_CF_kv", "_Cf_Other", "users"], None);
+        assert_eq!(listed, ["auto", "users"], "{listed:?}");
+    }
+
+    /// The prefix listing draws from the same candidates as the full one: a
+    /// prefix that covers a reserved table does not bring it back.
+    #[test]
+    fn list_tables_like_sqlite_omits_engine_reserved_tables() {
+        let tables = ["_cf_KV", "_cart"];
+        assert_eq!(listed_on_sqlite(&tables, Some("_c")), ["_cart"]);
+        assert!(listed_on_sqlite(&tables, Some("_cf_")).is_empty());
+        assert!(listed_on_sqlite(&tables, Some("sqlite_")).is_empty());
     }
 
     #[test]

@@ -2556,6 +2556,15 @@
 
 ### Fixed
 
+- `introspect::build_list_tables[_like]` on SQLite no longer list
+  Cloudflare D1's internal `_cf_*` tables (`_cf_KV`, `_cf_METADATA`). D1
+  answers any read of one with `SQLITE_AUTH`, so a caller that counted or
+  described every listed table (an admin database browser) failed outright
+  on D1. The reserved prefixes (`sqlite_`, `_cf_`) are now matched
+  literally under `LIKE … ESCAPE '\'`; the old `NOT LIKE 'sqlite_%'` read
+  `_` as a wildcard and also hid user tables such as `sqlite1` or
+  `sqlitex_data`. `build_list_tables_like` draws from the same candidates,
+  so a prefix no longer reaches an engine's internal tables.
 - `wafer build`, `wafer package` and `wafer test` speak the runtime's core
   ABI. They decoded every guest's `__wafer_info` and `__wafer_handle` output
   as JSON, but a block built with the current `#[wafer_block]` macro speaks
