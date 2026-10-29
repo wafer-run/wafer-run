@@ -49,8 +49,9 @@ fn sqlite_not_reserved() -> String {
 /// Build query to list all user tables (excludes system tables).
 ///
 /// SQLite: the `type='table'` rows of `sqlite_master` whose name is not under
-/// one of the [`SQLITE_RESERVED_TABLE_PREFIXES`] (SQLite's and D1's internal
-/// tables).
+/// a prefix a SQLite-dialect engine reserves for its internal tables —
+/// SQLite's `sqlite_` and Cloudflare D1's `_cf_` — matched literally and
+/// without regard to ASCII case.
 /// Postgres: the tables an unqualified name reaches through the session's
 /// `search_path` (see the module docs), outside the system schemas.
 pub fn build_list_tables(backend: Backend) -> String {
