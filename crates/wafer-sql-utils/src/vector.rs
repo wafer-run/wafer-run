@@ -488,9 +488,8 @@ pub fn escape_like(s: &str) -> String {
 /// `(sql, bind_pattern)` to list the `_meta` tables of every vector index
 /// under `prefix` in `sqlite_master`.
 ///
-/// The prefix is LIKE-escaped so `_`/`%` inside it match literally — unlike
-/// `introspect::build_list_tables_like`, whose pattern treats `_` as a
-/// single-character wildcard. Bind the returned pattern as `?1`; row column
+/// The prefix is LIKE-escaped so `_`/`%` inside it match literally, as in
+/// `introspect::build_list_tables_like`. Bind the returned pattern as `?1`; row column
 /// is `name` (the full `{stem}_meta` table name), in lexical order.
 pub fn build_list_meta_tables(prefix: &str) -> (String, String) {
     (

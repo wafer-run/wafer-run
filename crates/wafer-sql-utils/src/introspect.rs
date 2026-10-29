@@ -70,17 +70,20 @@ pub fn build_list_tables(backend: Backend) -> String {
     }
 }
 
-/// Build query to list tables matching a name prefix.
+/// Build query to list tables whose name starts with `prefix`.
 ///
-/// Returns (sql, params) with one parameter for the LIKE pattern. On both
-/// dialects the candidates are the ones [`build_list_tables`] lists, so a
-/// prefix never reaches an engine's internal tables.
+/// Returns (sql, params) with one parameter for the LIKE pattern. The prefix
+/// is matched literally: its `_`, `%` and `\\` are escaped under
+/// `ESCAPE '\\'`, so `app_` does not also match `appx…`. On both dialects
+/// the candidates are the ones [`build_list_tables`] lists, so a prefix never
+/// reaches an engine's internal tables.
 pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<serde_json::Value>) {
-    let pattern = format!("{prefix}%");
+    let pattern = format!("{}%", escape_like(prefix));
     match backend {
         Backend::Sqlite => (
             format!(
-                "SELECT name FROM sqlite_master WHERE type='table'{} AND name LIKE ?1 ORDER BY name",
+                "SELECT name FROM sqlite_master WHERE type='table'{} \
+                 AND name LIKE ?1 ESCAPE '\\' ORDER BY name",
                 sqlite_not_reserved()
             ),
             vec![serde_json::Value::String(pattern)],
@@ -91,7 +94,7 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
                  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
                  WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
                  AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-                 AND c.relname LIKE $1 ORDER BY c.relname"
+                 AND c.relname LIKE $1 ESCAPE E'\\\\' ORDER BY c.relname"
             ),
             vec![serde_json::Value::String(pattern)],
         ),
@@ -372,9 +375,10 @@ pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json
 /// Postgres returns `column_name`, `data_type`, `is_nullable`, `column_default`.
 ///
 /// Returns [`SqlBuildError::InvalidIdentifier`] if `table` is not a plain
-/// identifier (`[A-Za-z0-9_]`). The SQLite arm interpolates the name into the
-/// `PRAGMA` text, so this is a fail-closed guard; the Postgres arm binds the
-/// name but validates anyway so both dialects share one contract.
+/// identifier (lowercase ASCII letters, digits and `_`). The SQLite arm
+/// interpolates the name into the `PRAGMA` text, so this is a fail-closed
+/// guard; the Postgres arm binds the name but validates anyway so both
+/// dialects share one contract.
 pub fn build_table_info(
     table: &str,
     backend: Backend,
@@ -397,13 +401,44 @@ pub fn build_table_info(
     })
 }
 
-/// Build query to count rows in a table.
+/// Build query to count rows in a table the database layer can name.
 ///
-/// Returns [`SqlBuildError::InvalidIdentifier`] if `table` is not a plain
-/// identifier (`[A-Za-z0-9_]`) — rejected rather than silently rewritten.
+/// For a name a caller supplies (a URL path, a form field): returns
+/// [`SqlBuildError::InvalidIdentifier`] if `table` is not a plain identifier
+/// ([`wafer_block::db::is_plain_ident`]: lowercase ASCII letters, digits and
+/// `_`) — rejected rather than silently rewritten. A name read back from the
+/// catalog takes [`build_catalog_table_row_count`] instead.
 pub fn build_table_row_count(table: &str, _backend: Backend) -> Result<String, SqlBuildError> {
     let safe = validate_ident(table)?;
     Ok(format!("SELECT COUNT(*) AS cnt FROM \"{safe}\""))
+}
+
+/// Build query to count rows in a table whose name was read from the catalog
+/// — a row of [`build_list_tables`] or [`build_list_tables_like`].
+///
+/// The catalog lists every table the database holds, not only the ones the
+/// database layer created: a migration, a console or another tool can
+/// create `Foo`, `a-b` or `a"b`, none of which is a plain identifier, so
+/// [`build_table_row_count`] would refuse to count a table the listing just
+/// returned. This builder quotes the name as a delimited identifier instead
+/// — wrapped in `"`, each embedded `"` doubled, the same rule on SQLite and
+/// PostgreSQL — so the statement names exactly the catalog's table, and no
+/// name can end the identifier early.
+///
+/// Returns [`SqlBuildError::InvalidIdentifier`] only for a name no catalog
+/// holds: an empty one, or one containing a NUL byte (which neither engine
+/// accepts in an identifier).
+pub fn build_catalog_table_row_count(
+    table: &str,
+    _backend: Backend,
+) -> Result<String, SqlBuildError> {
+    if table.is_empty() || table.contains('\0') {
+        return Err(SqlBuildError::InvalidIdentifier {
+            value: table.to_string(),
+        });
+    }
+    let quoted = table.replace('"', "\"\"");
+    Ok(format!("SELECT COUNT(*) AS cnt FROM \"{quoted}\""))
 }
 
 #[cfg(test)]
@@ -496,7 +531,7 @@ mod tests {
     fn test_list_tables_like() {
         let (sql, params) = build_list_tables_like("custom_", Backend::Sqlite);
         assert!(sql.contains("LIKE"));
-        assert_eq!(params[0], serde_json::json!("custom_%"));
+        assert_eq!(params[0], serde_json::json!("custom\\_%"));
     }
 
     #[test]
@@ -516,7 +551,8 @@ mod tests {
     #[test]
     fn test_table_info_rejects_non_identifier() {
         // Fail-closed: the table name is interpolated into the PRAGMA text on
-        // SQLite, so anything outside [A-Za-z0-9_] is rejected, not stripped.
+        // SQLite, so anything but lowercase ASCII letters, digits and `_` is
+        // rejected, not stripped.
         for backend in [Backend::Sqlite, Backend::Postgres] {
             let err = build_table_info("users\"); DROP TABLE x;--", backend)
                 .expect_err("non-identifier table name must be rejected");
@@ -528,6 +564,99 @@ mod tests {
     fn test_table_row_count() {
         let sql = build_table_row_count("users", Backend::Sqlite).expect("valid identifier");
         assert_eq!(sql, "SELECT COUNT(*) AS cnt FROM \"users\"");
+    }
+
+    /// Create `tables` (each holding `rows` rows) in a fresh in-memory SQLite
+    /// database, list them, and count each listed table with
+    /// [`build_catalog_table_row_count`].
+    fn counted_on_sqlite(tables: &[(&str, i64)]) -> Vec<(String, i64)> {
+        let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+        for (name, rows) in tables {
+            let quoted = name.replace('"', "\"\"");
+            conn.execute_batch(&format!(
+                "CREATE TABLE \"{quoted}\" (id INTEGER PRIMARY KEY)"
+            ))
+            .expect("create table");
+            for id in 0..*rows {
+                conn.execute(&format!("INSERT INTO \"{quoted}\" (id) VALUES (?1)"), [id])
+                    .expect("insert row");
+            }
+        }
+        let mut list = conn
+            .prepare(&build_list_tables(Backend::Sqlite))
+            .expect("prepare listing");
+        let listed: Vec<String> = list
+            .query_map([], |row| row.get(0))
+            .expect("run listing")
+            .collect::<Result<_, _>>()
+            .expect("read listing");
+        listed
+            .into_iter()
+            .map(|name| {
+                let sql = build_catalog_table_row_count(&name, Backend::Sqlite)
+                    .unwrap_or_else(|e| panic!("count {name:?}: {e}"));
+                let n = conn
+                    .query_row(&sql, [], |row| row.get(0))
+                    .unwrap_or_else(|e| panic!("{sql}: {e}"));
+                (name, n)
+            })
+            .collect()
+    }
+
+    /// Every table the listing returns can be counted, whatever its name: a
+    /// table created outside the database layer need not be a plain
+    /// identifier, and the count must reach exactly that table.
+    #[test]
+    fn catalog_row_count_counts_every_listed_table() {
+        let counted = counted_on_sqlite(&[
+            ("Foo", 2),
+            ("foo_bar", 1),
+            ("a-b", 3),
+            ("a\"b", 4),
+            ("with space", 0),
+        ]);
+        let expected: Vec<(String, i64)> = [
+            ("Foo", 2),
+            ("a\"b", 4),
+            ("a-b", 3),
+            ("foo_bar", 1),
+            ("with space", 0),
+        ]
+        .into_iter()
+        .map(|(n, c)| (n.to_string(), c))
+        .collect();
+        assert_eq!(counted, expected);
+    }
+
+    /// An embedded `"` is doubled, so it cannot end the identifier: the
+    /// statement counts the table of that exact name and nothing else runs.
+    #[test]
+    fn catalog_row_count_quotes_embedded_quotes() {
+        let sql = build_catalog_table_row_count("x\" ; DROP TABLE t; --", Backend::Sqlite)
+            .expect("a catalog name");
+        assert_eq!(
+            sql,
+            "SELECT COUNT(*) AS cnt FROM \"x\"\" ; DROP TABLE t; --\""
+        );
+        let sql = build_catalog_table_row_count("Foo", Backend::Postgres).expect("a catalog name");
+        assert_eq!(sql, "SELECT COUNT(*) AS cnt FROM \"Foo\"");
+    }
+
+    #[test]
+    fn catalog_row_count_rejects_names_no_catalog_holds() {
+        for bad in ["", "a\0b"] {
+            let err = build_catalog_table_row_count(bad, Backend::Sqlite)
+                .expect_err("not a catalog name");
+            assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+        }
+    }
+
+    /// The prefix is matched literally: `_` and `%` in it are not wildcards.
+    #[test]
+    fn list_tables_like_sqlite_matches_the_prefix_literally() {
+        let tables = ["app_users", "appxusers", "app%x", "apply"];
+        assert_eq!(listed_on_sqlite(&tables, Some("app_")), ["app_users"]);
+        assert_eq!(listed_on_sqlite(&tables, Some("app%")), ["app%x"]);
     }
 
     #[test]

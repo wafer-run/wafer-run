@@ -713,6 +713,13 @@ fn render_introspect(out: &mut Out, backend: Backend, b: &str) {
             writeln!(out.0, "error: {e:?}\n").unwrap();
         }
     }
+    match introspect::build_catalog_table_row_count("Mixed\"Case", backend) {
+        Ok(sql) => out.raw(I, "catalog_table_row_count", b, &sql, &[]),
+        Err(e) => {
+            out.header(I, "catalog_table_row_count", b);
+            writeln!(out.0, "error: {e:?}\n").unwrap();
+        }
+    }
 }
 
 /// The vector builders are SQLite-only (sqlite-vec / FTS5); rendered once.
