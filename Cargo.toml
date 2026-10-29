@@ -137,7 +137,7 @@ toml = "1"
 sqlx = { version = "0.9", features = ["runtime-tokio", "postgres", "json", "chrono", "uuid", "bigdecimal"] }
 
 # Node.js bindings
-napi = { version = "2", features = ["napi4", "async"] }
+napi = { version = "3", features = ["napi4", "async"] }
 napi-derive = "2"
 
 # Dev
