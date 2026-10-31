@@ -188,16 +188,17 @@ pub enum InitWait {
     /// Run the block's init in the dispatch, or wait for the attempt
     /// already in flight, then dispatch. The default: lazy first-dispatch
     /// init, for hosts where a dispatch that stops part-way still releases
-    /// the slot's lock (native, browser).
+    /// the slot's attempt lock (native, browser).
     #[default]
     Await,
     /// Never run init in a dispatch. A block whose outcome is not settled —
     /// never initialized, an attempt in flight, or past a transient
     /// failure's backoff — answers `Unavailable` at once, without taking or
-    /// waiting for its slot's lock; only [`Wafer::init_block`] (and the
-    /// Inits it reaches) initializes. For hosts that may stop a request
+    /// waiting for its slot's attempt lock; only [`Wafer::init_block`] (and
+    /// the Inits it reaches) initializes. For hosts that may stop a request
     /// without running its destructors (Cloudflare Workers): an init begun
-    /// by such a request would hold the slot's lock for the runtime's life.
+    /// by such a request would hold the slot's attempt lock for the
+    /// runtime's life.
     /// The embedder initializes every block before publishing the runtime
     /// and retries a failed one by building a fresh runtime, so no
     /// dispatch's init failure names a `Retry-After` under `Refuse`, not
@@ -756,10 +757,10 @@ pub(crate) fn retry_after_meta(
 /// `template` is the context of the frame that needs `name` initialized.
 /// When that frame runs on behalf of another block's Init (its
 /// `init_attempt`), reaching `name`'s init is a wait of that Init: the wait
-/// is recorded in the runtime-wide wait-for graph before the slot is locked,
-/// and refused with [`InitError::Cycle`] if it would close an init cycle —
-/// otherwise the slot lock would deadlock. The wait lasts until `name`'s
-/// init outcome is known.
+/// is recorded in the runtime-wide wait-for graph before the slot's attempt
+/// lock is taken, and refused with [`InitError::Cycle`] if it would close an
+/// init cycle — otherwise that lock would deadlock. The wait lasts until
+/// `name`'s init outcome is known.
 ///
 /// Init itself runs on [`RuntimeContext::for_init`], owned by a fresh
 /// attempt, with a panic caught (native) and reported as
@@ -813,7 +814,7 @@ pub(crate) async fn run_init_pipeline(
 
     slot.get_or_init(|| async move {
         // Owner of `name` for as long as its init runs, which is while the
-        // slot lock is held.
+        // slot's attempt lock is held.
         let _owner = init_waits.own(&attempt);
         // The attempt's deadline, counted from when it takes the slot: the
         // Init context reports it (`is_cancelled`, `call_block`).

@@ -369,9 +369,11 @@ async fn a_transient_config_error_is_not_cached() {
     match wafer.init_states().get("test/flaky") {
         Some(BlockInitState::Retrying { reason, retry_in }) => {
             assert!(reason.contains("daily row read limit"), "{reason}");
-            assert!(*retry_in > Duration::ZERO && *retry_in <= TRANSIENT_RETRY_BASE);
+            // At most the first backoff; it may already have elapsed on a
+            // slow runner (then zero), so no lower bound is asserted.
+            assert!(*retry_in <= TRANSIENT_RETRY_BASE, "{retry_in:?}");
         }
-        other => panic!("expected Retrying inside the backoff, got {other:?}"),
+        other => panic!("expected Retrying after a transient failure, got {other:?}"),
     }
 
     tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;

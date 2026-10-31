@@ -32,8 +32,12 @@
   permanent. A statement no invocation can run (`StatementLimitExceeded`,
   `InvalidArgument` with `STATEMENT_BUDGET_EXCEEDS_LIMIT`) stays permanent.
   An Init that met a spent budget was cached dead for the runtime's life; it
-  is now retried. The config path classifies the same refusal the same way
-  (`ConfigError::Transient`).
+  is now retried. The rule is the new public
+  `init_failure_is_transient(code, detail_code)`, which
+  `from_lifecycle_error` applies; a `ConfigSource` whose backend errors
+  carry codes (a database-backed one: `DatabaseError::code()` /
+  `detail_code()`) chooses `ConfigError::Transient` or `SourceFault` with the
+  same function, so both paths classify a refusal alike.
 
 - Strict schema is the only behaviour: the schema is what a block's
   migrations and explicit schema ops declared, on every backend. Removed:
@@ -2003,7 +2007,14 @@
   dispatches, so a health endpoint can call it on a published `Refuse`
   runtime. `BlockSlot::init_state` reads one slot. The `Context` default is
   an empty map (test mocks, FFI shims); a Context that wraps another
-  forwards it.
+  forwards it. It is not capability-gated and each `reason` is another
+  block's failure text, so it assumes trusted, host-compiled native blocks
+  (a wasm guest cannot reach it); a health body reports the class, never
+  `reason`.
+- `init_failure_is_transient(code, detail_code)`: the one rule for whether
+  a failure is one a retry can clear, used by
+  `InitError::from_lifecycle_error` and by a `ConfigSource` choosing
+  between `ConfigError::Transient` and `SourceFault`.
 - `introspect::build_catalog_table_row_count` counts the rows of a table
   whose name was read from the catalog (a row of `build_list_tables[_like]`),
   quoting it as a delimited identifier (`"` doubled) instead of requiring a
@@ -3049,12 +3060,16 @@
 
 ### Refactored
 
-- `BlockSlot` keeps its settled outcome and transient backoff under a
-  synchronous state lock, separate from the async lock that serializes init
-  attempts and is held across one. `try_cached`, `pending_retry_in` and
-  `init_state` read only the state lock, so a reader never waits on an
-  attempt, and a settled slot is never reported unsettled because another
-  caller was holding the attempt lock.
+- `BlockSlot` keeps its settled outcome, transient backoff and an
+  "attempt in flight" flag under a synchronous state lock, separate from the
+  async attempt lock that serializes init attempts and is held across one.
+  `try_cached`, `pending_retry_in` and `init_state` read only the state lock
+  and never touch the attempt lock: a reader never waits on an attempt, a
+  settled slot is never reported unsettled, and an idle one never reported
+  `Initializing`, because another caller is looking. The flag is cleared in
+  the critical section that records the attempt's outcome (or when a
+  cancelled attempt is dropped), so a reader never sees an attempt's state
+  go backwards.
 - `wafer-block-crypto` is built on argon2 0.6 (was 0.5). argon2 0.5 pulled
   in blake2 0.10 and with it a second copy of `digest` (0.10) beside the
   0.11 line the rest of the crate's crypto uses, in every build that links

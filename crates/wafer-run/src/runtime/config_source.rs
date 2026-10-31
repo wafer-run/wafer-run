@@ -63,8 +63,12 @@ pub enum ConfigError {
     /// on its own: a backend down, overloaded or over a quota that resets,
     /// a network timeout, or a per-invocation statement budget this
     /// invocation has spent (`STATEMENT_BUDGET_EXHAUSTED`: a fresh invocation
-    /// may run the read). Retrying can succeed, so the block's init fails
-    /// with [`InitError::Transient`](crate::runtime::slot::InitError::Transient):
+    /// may run the read). A source with a coded backend error chooses
+    /// between this and [`SourceFault`](Self::SourceFault) with
+    /// [`init_failure_is_transient`](crate::init_failure_is_transient), the
+    /// rule `lifecycle(Init)` failures are classified by. Retrying can
+    /// succeed, so the block's init fails with
+    /// [`InitError::Transient`](crate::runtime::slot::InitError::Transient):
     /// not cached in the block slot.
     #[error("transient error fetching config for `{block}`: {source}")]
     Transient {
@@ -133,6 +137,11 @@ pub trait ConfigSource: MaybeSend + MaybeSync + 'static {
     /// - Return [`ConfigError::SourceFault`] when the source answers with an
     ///   error retrying cannot fix (a missing table, a read no invocation
     ///   can run, an answer it cannot interpret).
+    /// - For a backend error that carries an error code (and detail code),
+    ///   choose between the two with
+    ///   [`init_failure_is_transient`](crate::init_failure_is_transient), so
+    ///   the same refusal is classified the same way here as in a block's
+    ///   `lifecycle(Init)`.
     /// - Ignore source keys that are not in `declared_keys`.
     async fn load_for_block(
         &self,

@@ -1,14 +1,14 @@
 //! Runtime-wide wait-for graph of in-flight block inits, for init-cycle
 //! detection.
 //!
-//! A block's [`BlockSlot`](crate::runtime::slot::BlockSlot) holds its lock
-//! across `lifecycle(Init)`. Code running inside one block's Init that needs
-//! another block initialised waits on that block's slot lock, so an init
-//! cycle (A's Init calls B, B's Init calls A) deadlocks unless something
-//! refuses the wait that closes it. Whether the two inits run inside one
-//! dispatch (A's Init reaches B's Init inline) or in two concurrent ones
-//! (each holds one slot lock), the shape is the same, so one graph shared by
-//! the whole runtime sees both.
+//! A block's [`BlockSlot`](crate::runtime::slot::BlockSlot) holds its
+//! attempt lock across `lifecycle(Init)`. Code running inside one block's
+//! Init that needs another block initialised waits on that block's attempt
+//! lock, so an init cycle (A's Init calls B, B's Init calls A) deadlocks
+//! unless something refuses the wait that closes it. Whether the two inits
+//! run inside one dispatch (A's Init reaches B's Init inline) or in two
+//! concurrent ones (each holds one attempt lock), the shape is the same, so
+//! one graph shared by the whole runtime sees both.
 //!
 //! - Every `lifecycle(Init)` run is an [`InitAttempt`]. While it runs, the
 //!   graph records it as the *owner* of its block.
@@ -25,8 +25,8 @@
 //! deadlock is waiting, and each wait is checked against the owners and
 //! waits recorded when it is made, so the last edge of any cycle always
 //! sees the rest of it. Code that runs outside every Init (top-level
-//! dispatch) holds no slot lock and adds no edge, so concurrent callers of
-//! one block simply queue on its lock.
+//! dispatch) holds no attempt lock and adds no edge, so concurrent callers of
+//! one block simply queue on its attempt lock.
 //!
 //! The critical sections are a few map operations with no `.await`, so the
 //! lock is a sync `parking_lot::Mutex`, and the guards' `Drop` needs no async
@@ -119,7 +119,7 @@ impl InitWaits {
     }
 
     /// Record `attempt` as running its block's init, until the guard drops.
-    /// Called with the block's slot lock held, so there is one owner per
+    /// Called with the block's attempt lock held, so there is one owner per
     /// block at a time.
     pub(crate) fn own(self: &Arc<Self>, attempt: &InitAttempt) -> OwnerGuard {
         self.graph

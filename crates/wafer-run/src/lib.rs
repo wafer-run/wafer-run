@@ -38,7 +38,7 @@ pub use runtime::{
     config_source::{
         resolve_declared, ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource,
     },
-    slot::{BlockSlot, InitError, InitializedState},
+    slot::{init_failure_is_transient, BlockSlot, InitError, InitializedState},
     wasm_state::{
         FuelLimit, ResourceLimits, WasmCompilation, DEFAULT_FUEL, DEFAULT_MAX_WASM_MEMORY_PAGES,
     },

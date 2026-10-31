@@ -84,44 +84,62 @@ pub enum InitError {
 }
 
 impl InitError {
-    /// Classify a `lifecycle(Init)` failure by its code.
-    ///
-    /// `Unavailable`, `DeadlineExceeded`, `Cancelled` and `Aborted` say the
-    /// attempt met a condition that can clear on its own (a backend down or
-    /// busy, a deadline or cancellation, a conflict), so they are
-    /// [`Transient`](Self::Transient). Every other code describes the block
-    /// or its configuration, which a retry does not change, so it is
-    /// [`Permanent`](Self::Permanent).
-    ///
-    /// # The `ResourceExhausted` rule
-    ///
-    /// The detail code [`STATEMENT_BUDGET_EXHAUSTED`] is checked first, and
-    /// is **transient** whatever the code: the database refused a statement
-    /// because *this invocation* has spent its per-invocation statement
-    /// budget, and a fresh invocation (a rebuild in a new request) may run
-    /// it. The config path classifies the same refusal the same way (a
-    /// [`ConfigError::Transient`](crate::ConfigError::Transient)).
-    ///
-    /// Every other `ResourceExhausted` stays **permanent**: the runtime's
-    /// own limits raise it (call depth, the wasm host-memory budget, a
-    /// flow's `max_steps`), and an Init that exceeds one does so again on
-    /// every run. So does a statement no invocation can run at all — the
-    /// database's `StatementLimitExceeded`, answered as `InvalidArgument`
-    /// with `STATEMENT_BUDGET_EXCEEDS_LIMIT`. An Init that meets another
-    /// limit which does clear (a rate limit) reports it as `Unavailable`.
+    /// Classify a `lifecycle(Init)` failure by
+    /// [`init_failure_is_transient`] over its code and detail code.
     pub fn from_lifecycle_error(e: &WaferError) -> Self {
         let msg = format!("lifecycle init failed: {e}");
-        if e.detail_code() == Some(STATEMENT_BUDGET_EXHAUSTED) {
-            return Self::Transient(msg);
-        }
-        match e.code {
-            ErrorCode::Unavailable
-            | ErrorCode::DeadlineExceeded
-            | ErrorCode::Cancelled
-            | ErrorCode::Aborted => Self::Transient(msg),
-            _ => Self::Permanent(msg),
+        if init_failure_is_transient(e.code, e.detail_code()) {
+            Self::Transient(msg)
+        } else {
+            Self::Permanent(msg)
         }
     }
+}
+
+/// Whether a failure with error code `code` and detail code `detail` is
+/// one a retry can clear — the one rule behind every transient/permanent
+/// split of a block's init.
+///
+/// [`InitError::from_lifecycle_error`] applies it to a `lifecycle(Init)`
+/// error. A [`ConfigSource`](crate::ConfigSource) applies it to its
+/// backend's error to choose [`ConfigError::Transient`](crate::ConfigError::Transient)
+/// (`true`) or [`ConfigError::SourceFault`](crate::ConfigError::SourceFault)
+/// (`false`) — for a database-backed source, over `DatabaseError::code()`
+/// and `DatabaseError::detail_code()` — so the config path and the
+/// lifecycle path cannot classify the same refusal differently.
+///
+/// `Unavailable`, `DeadlineExceeded`, `Cancelled` and `Aborted` say the
+/// attempt met a condition that can clear on its own (a backend down or
+/// busy, a deadline or cancellation, a conflict): transient. Every other
+/// code describes the block or its configuration, which a retry does not
+/// change: permanent.
+///
+/// # The `ResourceExhausted` rule
+///
+/// The detail code [`STATEMENT_BUDGET_EXHAUSTED`] is checked first, and is
+/// **transient** whatever the code: the database refused a statement
+/// because *this invocation* has spent its per-invocation statement budget,
+/// and a fresh invocation (a rebuild in a new request) may run it.
+///
+/// Every other `ResourceExhausted` stays **permanent**: the runtime's own
+/// limits raise it (call depth, the wasm host-memory budget, a flow's
+/// `max_steps`), and an Init that exceeds one does so again on every run.
+/// So does a statement no invocation can run at all — the database's
+/// `StatementLimitExceeded`, answered as `InvalidArgument` with
+/// `STATEMENT_BUDGET_EXCEEDS_LIMIT`. An Init that meets another limit which
+/// does clear (a rate limit) reports it as `Unavailable`.
+#[must_use]
+pub fn init_failure_is_transient(code: ErrorCode, detail: Option<&str>) -> bool {
+    if detail == Some(STATEMENT_BUDGET_EXHAUSTED) {
+        return true;
+    }
+    matches!(
+        code,
+        ErrorCode::Unavailable
+            | ErrorCode::DeadlineExceeded
+            | ErrorCode::Cancelled
+            | ErrorCode::Aborted
+    )
 }
 
 /// The opaque result of a successful `lifecycle(Init)`.
@@ -189,6 +207,12 @@ struct SlotState {
     outcome: Option<CachedOutcome>,
     /// The backoff of the last run of consecutive transient failures.
     backoff: Option<TransientBackoff>,
+    /// An init attempt is running: set by [`BlockSlot::get_or_init`] once it
+    /// holds the attempt lock and finds the slot unsettled, and cleared in
+    /// the same state-lock critical section that records the attempt's
+    /// outcome (or by [`InFlight`]'s drop when the attempt is cancelled).
+    /// Readers learn "in flight" from it, never from the attempt lock.
+    in_flight: bool,
 }
 
 impl SlotState {
@@ -202,6 +226,19 @@ impl SlotState {
             });
         }
         self.backoff.as_ref().and_then(|b| b.pending(now)).map(Err)
+    }
+}
+
+/// Clears [`SlotState::in_flight`] when an init attempt is dropped before
+/// it records an outcome (its dispatch was cancelled). A completed attempt
+/// forgets it and clears the flag itself, together with the outcome.
+struct InFlight<'a> {
+    state: &'a parking_lot::Mutex<SlotState>,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.state.lock().in_flight = false;
     }
 }
 
@@ -263,8 +300,9 @@ impl BlockSlot {
             .map(|b| b.retry_at.saturating_duration_since(now))
     }
 
-    /// Where this slot's init stands, read without running, waiting for or
-    /// holding up an init attempt:
+    /// Where this slot's init stands, read under the state lock alone —
+    /// never the attempt lock, so it neither waits for nor holds up an init
+    /// attempt, and one reader never makes another see "in flight":
     ///
     /// - a cached success → [`Ready`](BlockInitState::Ready);
     /// - a cached permanent failure → [`Failed`](BlockInitState::Failed);
@@ -295,15 +333,11 @@ impl BlockSlot {
                         retry_in: b.retry_at.saturating_duration_since(now),
                     };
                 }
+                _ if state.in_flight => return BlockInitState::Initializing,
                 Some(b) => Some(b.message.clone()),
                 None => None,
             }
         };
-        // `try_lock` never waits, and a guard it gets is dropped here,
-        // before this returns: a reader cannot strand the attempt lock.
-        if self.attempt.try_lock().is_err() {
-            return BlockInitState::Initializing;
-        }
         match last_transient {
             Some(reason) => BlockInitState::Retrying {
                 reason,
@@ -334,15 +368,26 @@ impl BlockSlot {
 
         // Fast path: outcome cached, or a transient failure still backing
         // off — including one an attempt this caller waited for just stored.
-        if let Some(settled) = self.try_cached() {
-            return settled;
-        }
+        // Otherwise mark the attempt in flight, in the same critical section
+        // that found the slot unsettled.
+        let in_flight = {
+            let mut state = self.state.lock();
+            if let Some(settled) = state.settled(Instant::now()) {
+                return settled;
+            }
+            state.in_flight = true;
+            InFlight { state: &self.state }
+        };
 
         // Slow path: run init while holding the attempt lock so concurrent
-        // callers serialize (see module-level doc for rationale). The state
-        // lock is taken only to record the outcome.
+        // callers serialize (see module-level doc for rationale).
         let outcome = init().await;
+        // The flag is cleared below, under the lock that records the
+        // outcome, so no reader sees the attempt over before its outcome
+        // is stored; the guard only clears it for a cancelled attempt.
+        std::mem::forget(in_flight);
         let mut state = self.state.lock();
+        state.in_flight = false;
         match outcome {
             Ok(init_state) => {
                 state.outcome = Some(CachedOutcome::Ok(init_state.clone()));
@@ -448,5 +493,44 @@ mod tests {
             InitError::from_lifecycle_error(&runtime_limit),
             InitError::Permanent(_)
         ));
+    }
+
+    /// The public rule a `ConfigSource` classifies its backend errors by is
+    /// the one `from_lifecycle_error` applies.
+    #[test]
+    fn init_failure_is_transient_is_the_lifecycle_rule() {
+        use wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT;
+
+        let cases = [
+            (ErrorCode::Unavailable, None, true),
+            (
+                ErrorCode::ResourceExhausted,
+                Some(STATEMENT_BUDGET_EXHAUSTED),
+                true,
+            ),
+            (ErrorCode::ResourceExhausted, None, false),
+            (
+                ErrorCode::InvalidArgument,
+                Some(STATEMENT_BUDGET_EXCEEDS_LIMIT),
+                false,
+            ),
+            (ErrorCode::Internal, None, false),
+        ];
+        for (code, detail, transient) in cases {
+            assert_eq!(
+                init_failure_is_transient(code, detail),
+                transient,
+                "{code:?} {detail:?}"
+            );
+            let mut e = WaferError::new(code, "x");
+            if let Some(detail) = detail {
+                e = e.with_detail_code(detail);
+            }
+            assert_eq!(
+                matches!(InitError::from_lifecycle_error(&e), InitError::Transient(_)),
+                transient,
+                "{code:?} {detail:?}"
+            );
+        }
     }
 }

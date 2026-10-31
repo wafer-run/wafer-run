@@ -177,6 +177,17 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// Default impl returns an empty map. Context impls that don't run
     /// inside the WAFER runtime (test mocks, FFI shims) have no blocks to
     /// report; a Context that wraps another forwards this to it.
+    ///
+    /// # Trust
+    ///
+    /// It is not capability-gated, and each `reason` is another block's
+    /// init failure text, which can quote a backend's error. It assumes the
+    /// caller is a trusted, host-compiled native block — the same
+    /// assumption [`Self::validate_all_block_configs`] makes. A wasm guest
+    /// cannot reach it (there is no host import; a guest's context answers
+    /// the empty default). Should untrusted native blocks ever run, gate it
+    /// behind a capability. A health endpoint built on it reports each
+    /// state's class, never `reason`.
     fn block_init_states(
         &self,
     ) -> std::collections::BTreeMap<String, crate::init_state::BlockInitState> {
