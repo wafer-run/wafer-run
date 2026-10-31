@@ -1937,6 +1937,25 @@
 
 ### Added
 
+- `InitWait` (`Await`, the default, or `Refuse`), set with
+  `WaferBuilder::init_wait` and read back with `Wafer::init_wait()`, chooses
+  what a dispatch does on reaching a block whose init outcome is not settled.
+  `Await` is the existing lazy first-dispatch init. Under `Refuse` a
+  dispatch outside every Init (`run_block`, a flow step, a handler's
+  `call_block`) never runs init and never
+  takes the block's slot lock: a never-initialized block, or one past the
+  backoff of a transient failure, answers `Unavailable` ("block `x` is not
+  initialized in this runtime"); init runs only through `Wafer::init_block`,
+  and a `call_block` from inside an Init still runs the callee's init inline.
+  For hosts that can stop a request without running its destructors
+  (Cloudflare Workers), where an init begun by such a request would hold the
+  slot lock for the runtime's life. An embedder that publishes a runtime with
+  unsettled blocks checks `init_wait() == Refuse` first.
+- A transient init failure inside its retry backoff now answers its
+  `Unavailable` with a `resp.header.Retry-After` (the remaining backoff,
+  whole seconds rounded up, at least 1), in either mode; the HTTP codec
+  emits it as the `Retry-After` header. `BlockSlot::pending_retry_in` reads
+  that backoff.
 - `introspect::build_catalog_table_row_count` counts the rows of a table
   whose name was read from the catalog (a row of `build_list_tables[_like]`),
   quoting it as a delimited identifier (`"` doubled) instead of requiring a

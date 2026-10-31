@@ -58,7 +58,10 @@ pub(crate) struct DispatchInit<'a> {
 /// 1. Lazy init — fast path on `slot`'s settled outcome; on the first
 ///    dispatch (or while init is in flight or may be retried) run the init
 ///    pipeline, returning a failure as the typed error (`Err`) the caller
-///    turns into its terminal.
+///    turns into its terminal. Under [`InitWait::Refuse`](super::InitWait::Refuse)
+///    a dispatch outside every Init answers `Unavailable` instead of running
+///    the pipeline. A transient failure inside its backoff carries the
+///    remaining backoff as `Retry-After`.
 /// 2. Observability — bracket the dispatch in the opt-in
 ///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
 ///
@@ -85,15 +88,23 @@ where
     // that would close an init cycle before taking that lock.
     match target.slot.try_cached() {
         Some(Ok(_)) => {}
-        Some(Err(e)) => {
-            return Err(super::init_error_to_wafer_error(target.resolved, e));
+        Some(Err(e)) => return Err(init_failure(&target, e)),
+        // `InitWait::Refuse`: a dispatch outside every Init never runs init
+        // and never takes the slot's lock. A dispatch inside an Init (its
+        // template carries the attempt; only `RuntimeContext::for_init` sets
+        // one) is how one block's Init reaches another's during
+        // `Wafer::init_block`, so it still runs the callee's init inline.
+        None if init.template.init_wait == super::InitWait::Refuse
+            && init.template.init_attempt.is_none() =>
+        {
+            return Err(super::not_initialized_error(target.resolved));
         }
         None => {
             if let Err(e) =
                 super::run_init_pipeline(target.resolved, init.block, target.slot, init.template)
                     .await
             {
-                return Err(super::init_error_to_wafer_error(target.resolved, e));
+                return Err(init_failure(&target, e));
             }
         }
     }
@@ -104,6 +115,16 @@ where
         span.end();
     }
     Ok(out)
+}
+
+/// The dispatch error for `target`'s init failure `e`: a transient one names
+/// the slot's pending backoff as its `Retry-After`.
+fn init_failure(target: &DispatchTarget<'_>, e: super::slot::InitError) -> WaferError {
+    let retry_in = match e {
+        super::slot::InitError::Transient(_) => target.slot.pending_retry_in(),
+        _ => None,
+    };
+    super::init_error_to_wafer_error(target.resolved, e, retry_in)
 }
 
 /// The error for a flow id that names no flow. `Unimplemented`, like every

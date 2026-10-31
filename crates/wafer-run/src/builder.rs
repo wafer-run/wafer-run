@@ -58,6 +58,7 @@ pub struct WaferBuilder {
     max_wasm_memory_pages: u32,
     compilation: WasmCompilation,
     init_timeout_cap: Option<std::time::Duration>,
+    init_wait: crate::runtime::InitWait,
 }
 
 impl Default for WaferBuilder {
@@ -70,6 +71,7 @@ impl Default for WaferBuilder {
             max_wasm_memory_pages: DEFAULT_MAX_WASM_MEMORY_PAGES,
             compilation: WasmCompilation::default(),
             init_timeout_cap: None,
+            init_wait: crate::runtime::InitWait::Await,
         }
     }
 }
@@ -180,6 +182,21 @@ impl WaferBuilder {
         self
     }
 
+    /// Choose what a dispatch does on reaching a block whose init outcome
+    /// is not settled.
+    ///
+    /// [`InitWait::Await`](crate::InitWait::Await) (the default) runs the
+    /// block's init in the dispatch — lazy first-dispatch init.
+    /// [`InitWait::Refuse`](crate::InitWait::Refuse) never does: such a
+    /// dispatch answers `Unavailable`, and init runs only through
+    /// [`Wafer::init_block`] (and the Inits it reaches). Choose `Refuse` on
+    /// a host that can stop a request without running its destructors, and
+    /// initialize every block before the runtime takes requests.
+    pub fn init_wait(mut self, mode: crate::InitWait) -> Self {
+        self.init_wait = mode;
+        self
+    }
+
     /// Construct the `Wafer`. Runs Path A first, then Path B.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         if self.init_timeout_cap == Some(std::time::Duration::ZERO) {
@@ -194,6 +211,7 @@ impl WaferBuilder {
         w.wasm.max_wasm_memory_pages = self.max_wasm_memory_pages;
         w.wasm.compilation = self.compilation;
         w.init_timeout_cap = self.init_timeout_cap;
+        w.init_wait = self.init_wait;
         #[cfg(not(target_arch = "wasm32"))]
         if self.enable_inventory {
             w.load_inventory_blocks()?;

@@ -212,6 +212,27 @@ impl BlockSlot {
         guard.settled(Instant::now())
     }
 
+    /// How long until a transient failure's backoff lets init run again:
+    /// `Some` while one is pending, `None` when none is (no transient
+    /// failure, a cached outcome, or the backoff has elapsed) — and, like
+    /// [`try_cached`](Self::try_cached), `None` while the mutex is held by
+    /// an attempt in flight.
+    ///
+    /// The dispatch paths name this delay as the `Retry-After` of the
+    /// `Unavailable` a transient failure answers.
+    pub fn pending_retry_in(&self) -> Option<Duration> {
+        let guard = self.state.try_lock().ok()?;
+        if guard.outcome.is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        guard
+            .backoff
+            .as_ref()
+            .filter(|b| now < b.retry_at)
+            .map(|b| b.retry_at.saturating_duration_since(now))
+    }
+
     /// Run `init` unless the outcome is settled, otherwise return it.
     ///
     /// - `Ok(_)` → cached; all future callers see the same `InitializedState`.
