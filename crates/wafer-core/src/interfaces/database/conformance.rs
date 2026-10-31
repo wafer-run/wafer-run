@@ -107,14 +107,16 @@ use wafer_block::{
     wire::database as wire,
     ErrorCode, Message, WaferError,
 };
-use wafer_sql_utils::aggregate::CastType;
+use wafer_sql_utils::{aggregate::CastType, introspect};
 
 use super::{
+    codec::JsonColumns,
+    exec::{DbExec, TxOp, TxResult},
     handler::handle_message,
     service::{
         pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
         DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, RawStatement, Record, Table,
-        UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+        TransactionError, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 
@@ -4990,4 +4992,191 @@ async fn check_names_longer_than_postgres_keeps_are_refused(svc: &dyn DatabaseSe
     svc.schema_drop_table(&kept)
         .await
         .expect("drop the 63-byte table");
+}
+
+// ---------------------------------------------------------------------------
+// Existence-probe decode (DbExec backends)
+// ---------------------------------------------------------------------------
+
+/// Drive the shared table-existence probe over `exec`'s own driver and
+/// assert it reads "absent" only from a definite answer. Panics on the first
+/// divergence.
+///
+/// [`table_exists`] (and with it `schema_table_exists`) and the
+/// probe behind [`DbExec::catalog_columns`]'s missing table decode whatever
+/// rows the backend's [`run_fetch`](DbExec::run_fetch) returns. A caller may
+/// read `Ok(false)` as proof there is nothing to load (impresspress's grant
+/// loader does, after a failed read), so the answers a lenient decode read as
+/// `0` — no row, `NULL`, text — must each fail.
+///
+/// The real builder's answers come first: a table `exec` created is
+/// present, a missing one absent. Then [`ProbeAnswer`] puts a malformed
+/// answer in the probe's place — a statement `exec` itself runs, so the row
+/// is the one its driver decodes. The decode is [`table_exists`]'s, which
+/// no backend can replace, so these answers are the ones every backend's
+/// probe gets. A backend adapter (D1, sql.js) calls this from its own tests,
+/// as the native backends do.
+pub async fn run_existence_probe_conformance<E>(exec: &E)
+where
+    E: DbExec + DatabaseService,
+{
+    let table = crud_table("conf_probe_present");
+    reset(exec, &table).await;
+    let missing = "conf_probe_missing";
+    DatabaseService::schema_drop_table(exec, missing)
+        .await
+        .expect("schema_drop_table (idempotent) must succeed");
+
+    assert!(
+        DbExec::schema_table_exists(exec, &table.name)
+            .await
+            .expect("probe a present table"),
+        "a created table is present"
+    );
+    assert!(
+        !DbExec::schema_table_exists(exec, missing)
+            .await
+            .expect("probe a missing table"),
+        "a missing table is absent"
+    );
+
+    for (answer, want) in [
+        ("SELECT 0 AS present", false),
+        ("SELECT 1 AS present", true),
+    ] {
+        let probe = ProbeAnswer {
+            inner: exec,
+            answer,
+        };
+        assert_eq!(
+            DbExec::schema_table_exists(&probe, missing)
+                .await
+                .unwrap_or_else(|e| panic!("{answer}: {e}")),
+            want,
+            "{answer}"
+        );
+    }
+
+    for answer in [
+        // No row.
+        "SELECT 1 AS present WHERE 1 = 0",
+        // NULL.
+        "SELECT CAST(NULL AS BIGINT) AS present",
+        // Text, even text that spells a valid answer.
+        "SELECT CAST('0' AS TEXT) AS present",
+        "SELECT CAST('absent' AS TEXT) AS present",
+        // A number but not 0 or 1.
+        "SELECT 2 AS present",
+        "SELECT -1 AS present",
+        "SELECT 0.5 AS present",
+        // More than one row.
+        "SELECT 0 AS present UNION ALL SELECT 0 AS present",
+        // No `present` column.
+        "SELECT 0 AS absent",
+    ] {
+        let probe = ProbeAnswer {
+            inner: exec,
+            answer,
+        };
+        let got = DbExec::schema_table_exists(&probe, missing).await;
+        assert!(
+            matches!(got, Err(DatabaseError::Internal(_))),
+            "schema_table_exists on {answer:?} must be Internal, got {got:?}"
+        );
+        // The catalog's probe of a table with no columns decodes the same
+        // way: a malformed answer is never the `NotFound` of a missing table.
+        let got = DbExec::catalog_columns(&probe, missing).await;
+        assert!(
+            matches!(got, Err(DatabaseError::Internal(_))),
+            "catalog_columns on {answer:?} must be Internal, got {got:?}"
+        );
+    }
+
+    DatabaseService::schema_drop_table(exec, &table.name)
+        .await
+        .expect("drop the probe table");
+}
+
+/// `inner` with every table-existence probe it is sent replaced by `answer`,
+/// run by `inner` itself; every other statement reaches `inner` unchanged.
+struct ProbeAnswer<'a, E> {
+    inner: &'a E,
+    answer: &'static str,
+}
+
+impl<E: DbExec> ProbeAnswer<'_, E> {
+    /// Whether `sql` is one of the shared existence probes.
+    fn is_probe(sql: &str) -> bool {
+        let probe = |name: &str| {
+            sql == introspect::build_table_exists(name, E::BACKEND).0
+                || introspect::build_catalog_table_exists(name, E::BACKEND)
+                    .is_ok_and(|(probe, _)| sql == probe)
+        };
+        // Both builders bind the name, so any name gives the statement text.
+        probe("t")
+    }
+}
+
+#[wafer_block_macro::wafer_async_trait]
+impl<E: DbExec> DbExec for ProbeAnswer<'_, E> {
+    const BACKEND: wafer_sql_utils::Backend = E::BACKEND;
+
+    async fn run_fetch(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        json: &JsonColumns,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        if Self::is_probe(sql) {
+            self.inner.run_fetch(self.answer, &[], json).await
+        } else {
+            self.inner.run_fetch(sql, params, json).await
+        }
+    }
+
+    async fn run_fetch_one(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        json: &JsonColumns,
+    ) -> Result<Record, DatabaseError> {
+        self.inner.run_fetch_one(sql, params, json).await
+    }
+
+    async fn run_execute(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        self.inner.run_execute(sql, params).await
+    }
+
+    async fn run_execute_returning(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        json: &JsonColumns,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        self.inner.run_execute_returning(sql, params, json).await
+    }
+
+    async fn run_scalar_i64(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<i64, DatabaseError> {
+        self.inner.run_scalar_i64(sql, params).await
+    }
+
+    async fn run_scalar_f64(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+    ) -> Result<f64, DatabaseError> {
+        self.inner.run_scalar_f64(sql, params).await
+    }
+
+    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
+        self.inner.run_transaction(ops).await
+    }
 }

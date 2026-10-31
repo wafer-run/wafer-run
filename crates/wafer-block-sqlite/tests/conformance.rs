@@ -12,7 +12,7 @@
 
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::interfaces::database::conformance::{
-    run_conformance, run_two_instance_conformance,
+    run_conformance, run_existence_probe_conformance, run_two_instance_conformance,
 };
 
 /// The SQLite `DatabaseService` implementation must satisfy every op in the
@@ -21,6 +21,15 @@ use wafer_core::interfaces::database::conformance::{
 async fn sqlite_database_service_is_conformant() {
     let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
     run_conformance(&svc).await;
+}
+
+/// The shared table-existence probe reads "absent" only from the one row
+/// with `present` `0` that SQLite's driver decodes; no row, `NULL`, text or
+/// another number is an error.
+#[tokio::test]
+async fn sqlite_existence_probe_is_strict() {
+    let svc = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
+    run_existence_probe_conformance(&svc).await;
 }
 
 /// Unique on-disk DB path; minimal tempfile stand-in (no new dev-dep) — the

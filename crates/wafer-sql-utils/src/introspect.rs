@@ -108,9 +108,11 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
 
 /// Build query to check whether a table exists.
 ///
-/// Returns `(sql, params)`. The result is a single row with one column
-/// `present` — `1`/`0` on SQLite, `true`/`false` on Postgres — so callers can
-/// decode it as a scalar in either dialect.
+/// Returns `(sql, params)`. The result is a single row with one integer
+/// column `present`, `1` or `0` on both dialects, so it decodes the same way
+/// everywhere — the shared executor's `table_exists` refuses any other
+/// answer (no row, `NULL`, a non-integer, any other number) rather than read
+/// it as "absent".
 ///
 /// SQLite: `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) AS present`
 /// Postgres: whether the name resolves, through the session's `search_path`,
@@ -128,9 +130,9 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
         ),
         Backend::Postgres => (
             format!(
-                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                "SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
                  WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN {PG_TABLE_KINDS}) \
-                 AS present"
+                 THEN 1::int8 ELSE 0::int8 END AS present"
             ),
             params,
         ),
@@ -457,7 +459,8 @@ pub fn build_table_info(
 /// declared with no columns (`CREATE TABLE t ()`).
 ///
 /// Returns `(sql, params)`: one row, one integer column `present`, `1` or
-/// `0` on both dialects, so it reads as an `i64` scalar everywhere. Unlike [`build_table_exists`], which asks
+/// `0` on both dialects, the shape [`build_table_exists`] answers in. Unlike
+/// [`build_table_exists`], which asks
 /// whether a statement's table resolves, this keeps to what the listing
 /// keeps: SQLite's tables outside the engines' reserved prefixes; Postgres's
 /// tables and views outside the system schemas.
@@ -834,7 +837,10 @@ mod tests {
     fn test_table_exists_postgres() {
         let (sql, params) = build_table_exists("users", Backend::Postgres);
         assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
-        assert!(sql.contains("AS present"), "{sql}");
+        assert!(
+            sql.contains("THEN 1::int8 ELSE 0::int8 END AS present"),
+            "present is an integer, as on SQLite: {sql}"
+        );
         assert!(sql.contains("$1"), "table name must be bound: {sql}");
         assert_eq!(params, vec![serde_json::json!("users")]);
     }

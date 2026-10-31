@@ -585,6 +585,34 @@ fn catalog_column(row: &Record) -> Result<CatalogColumn, DatabaseError> {
     })
 }
 
+/// Whether `table` exists (already-sanitized or raw name, per call site):
+/// [`introspect::build_table_exists`] through [`DbExec::run_fetch`], decoded
+/// by [`codec::table_presence`].
+///
+/// `Ok(false)` is a definite "absent": the probe answered its one row with
+/// `present` `0`. Any other answer — no row, more than one, `NULL`, a
+/// non-integer, any other number — is [`DatabaseError::Internal`], so a
+/// caller that reads "nothing to load" from `Ok(false)` after a failed read
+/// never does so on a malformed answer.
+///
+/// A free function rather than a [`DbExec`] method, so no backend can
+/// replace the decode with its own: every backend supplies only the
+/// [`run_fetch`](DbExec::run_fetch) it runs on, which counts the probe's one
+/// call where the platform limits calls.
+///
+/// # Errors
+///
+/// The error of [`run_fetch`](DbExec::run_fetch), or
+/// [`DatabaseError::Internal`] for a malformed answer.
+pub async fn table_exists<E: DbExec + ?Sized>(
+    exec: &E,
+    table: &str,
+) -> Result<bool, DatabaseError> {
+    let (sql, params) = introspect::build_table_exists(table, E::BACKEND);
+    let rows = exec.run_fetch(&sql, &params, JsonColumns::NONE).await?;
+    codec::table_presence(&rows)
+}
+
 /// Execution primitives + shared orchestration for SQL `DatabaseService` backends.
 ///
 /// # Per-invocation call limits
@@ -596,8 +624,10 @@ fn catalog_column(row: &Record) -> Result<CatalogColumn, DatabaseError> {
 /// - A lone statement is one call: [`run_fetch`](Self::run_fetch),
 ///   [`run_fetch_one`](Self::run_fetch_one), [`run_execute`](Self::run_execute),
 ///   [`run_execute_returning`](Self::run_execute_returning), the
-///   `run_scalar_*` pair, [`dbx_table_exists`](Self::dbx_table_exists), and
+///   `run_scalar_*` pair, and
 ///   [`DatabaseService::query_raw`](super::service::DatabaseService::query_raw).
+///   The existence probe ([`table_exists`]) is the one
+///   [`run_fetch`](Self::run_fetch) it sends.
 /// - A transaction is one call, whatever its length: the backend implements
 ///   [`run_transaction`](Self::run_transaction) as one round trip (D1: one
 ///   `db.batch()`).
@@ -760,9 +790,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     ) -> Result<Vec<TxResult>, TransactionError> {
         self.run_transaction(ops).await
     }
-
-    /// Whether `table` exists (already-sanitized or raw name, per call site).
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError>;
 
     /// Run `ops` as ONE transaction on the write path, returning one
     /// [`TxResult`] per op in the same order.
@@ -970,7 +997,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// probes existence before it runs, so a list against a table a later
     /// migration creates would otherwise pin "no key" for the cache's life.
     /// When the cache does not already know the table exists, an empty key
-    /// costs one [`dbx_table_exists`](Self::dbx_table_exists) probe, once per
+    /// costs one [`table_exists`] probe, once per
     /// keyless table.
     async fn get_primary_key(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
         let cache = self.schema_cache();
@@ -997,7 +1024,7 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             // lookup asks again.
             if key.is_empty()
                 && !cache.table_known_present(table)
-                && self.dbx_table_exists(table).await?
+                && table_exists(self, table).await?
             {
                 cache.mark_table_present_if_gen(table, gen0);
             }
@@ -1794,11 +1821,11 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.get_columns(sql_name(table)?).await
     }
 
-    /// Shared `schema_table_exists`: pass-through to `dbx_table_exists`
-    /// (the primitive preserves each backend's error text) for a `name` that
-    /// passes [`sql_name`].
+    /// Shared `schema_table_exists`: [`table_exists`] (whose primitive
+    /// preserves each backend's error text) for a `name` that passes
+    /// [`sql_name`].
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
-        self.dbx_table_exists(sql_name(name)?).await
+        table_exists(self, sql_name(name)?).await
     }
 
     /// Shared `catalog_tables`: the rows of
@@ -1833,15 +1860,19 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// catalog — except for a Postgres table declared with no columns. So an
     /// empty answer is followed by one
     /// [`introspect::build_catalog_table_exists`] probe through
-    /// [`run_scalar_i64`](Self::run_scalar_i64), which keeps to what the
-    /// listing keeps: a table it would not list is
-    /// [`DatabaseError::NotFound`], a listed one has no columns.
+    /// [`run_fetch`](Self::run_fetch), decoded as [`table_exists`] decodes
+    /// its own
+    /// ([`codec::table_presence`]), which keeps to what the listing keeps: a
+    /// table it would not list is [`DatabaseError::NotFound`], a listed one
+    /// has no columns, and a malformed probe answer is
+    /// [`DatabaseError::Internal`], never `NotFound`.
     async fn catalog_columns(&self, table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
         let (sql, params) = introspect::build_table_info(table, Self::BACKEND)?;
         let rows = self.run_fetch(&sql, &params, JsonColumns::NONE).await?;
         if rows.is_empty() {
             let (sql, params) = introspect::build_catalog_table_exists(table, Self::BACKEND)?;
-            if self.run_scalar_i64(&sql, &params).await? == 0 {
+            let probe = self.run_fetch(&sql, &params, JsonColumns::NONE).await?;
+            if !codec::table_presence(&probe)? {
                 return Err(DatabaseError::NotFound);
             }
         }
@@ -2351,6 +2382,20 @@ mod tests {
 
     use super::*;
 
+    /// The answer of [`table_exists`]'s probe when `sql` is that probe: one
+    /// row with `present` `1` or `0`. `None` for any other statement.
+    fn probe_answer(sql: &str, present: bool) -> Option<Vec<Record>> {
+        sql.contains(" AS present").then(|| {
+            vec![Record {
+                id: String::new(),
+                data: RecordData::from([(
+                    "present".to_string(),
+                    serde_json::json!(i64::from(present)),
+                )]),
+            }]
+        })
+    }
+
     /// Minted ids are UUIDv7 and sort in the order they were minted, even
     /// many to a millisecond, so a list that breaks ties on the key lists
     /// same-stamp rows in creation order.
@@ -2371,7 +2416,7 @@ mod tests {
         }
     }
 
-    /// Mock backend whose `dbx_table_exists` parks on a barrier mid-probe, so a
+    /// Mock backend whose existence probe parks on a barrier mid-probe, so a
     /// test can fire an invalidation into the exact TOCTOU window between the
     /// probe's generation snapshot and its cache write-back. Every other
     /// primitive is an inert stub.
@@ -2392,11 +2437,18 @@ mod tests {
 
         async fn run_fetch(
             &self,
-            _sql: &str,
+            sql: &str,
             _params: &[serde_json::Value],
             _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
-            Ok(Vec::new())
+            let Some(answer) = probe_answer(sql, self.exists) else {
+                return Ok(Vec::new());
+            };
+            // Announce that we've captured gen0 and are parked in the probe,
+            // then wait to be released — the window an invalidation must win.
+            self.entered_probe.notify_one();
+            self.release_probe.notified().await;
+            Ok(answer)
         }
 
         async fn run_fetch_one(
@@ -2448,14 +2500,6 @@ mod tests {
             Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
             )))
-        }
-
-        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            // Announce that we've captured gen0 and are parked in the probe,
-            // then wait to be released — the window an invalidation must win.
-            self.entered_probe.notify_one();
-            self.release_probe.notified().await;
-            Ok(self.exists)
         }
     }
 
@@ -2544,6 +2588,9 @@ mod tests {
             _params: &[serde_json::Value],
             _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
+            if let Some(answer) = probe_answer(sql, true) {
+                return Ok(answer);
+            }
             self.record(format!("fetch:{sql}"));
             Ok(vec![Self::record_row(sql)])
         }
@@ -2606,15 +2653,11 @@ mod tests {
                 "run_transaction is not exercised by this mock".into(),
             )))
         }
-
-        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            Ok(true)
-        }
     }
 
-    /// Backend for the catalog reads: answers the listing and the column
-    /// description through [`DbExec::run_fetch`] and the count and the
-    /// existence probe through [`DbExec::run_scalar_i64`], records each, and
+    /// Backend for the catalog reads: answers the listing, the column
+    /// description and the existence probe through [`DbExec::run_fetch`] and
+    /// the count through [`DbExec::run_scalar_i64`], records each, and
     /// panics if anything reaches [`DbExec::query_raw`] — the path a backend
     /// may serve without accounting for its cost (D1's `raw()`), which the
     /// catalog reads exist to avoid.
@@ -2622,6 +2665,19 @@ mod tests {
         calls: Mutex<Vec<&'static str>>,
         /// Whether the column description answers no rows.
         no_columns: bool,
+        /// The existence probe's answer: one row per entry, each entry its
+        /// `present` value.
+        probe: Vec<serde_json::Value>,
+    }
+
+    impl CatalogMock {
+        fn new(no_columns: bool, probe: Vec<serde_json::Value>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                no_columns,
+                probe,
+            }
+        }
     }
 
     #[wafer_async_trait]
@@ -2643,6 +2699,21 @@ mod tests {
             _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             let mut data = RecordData::new();
+            if sql.contains("AS present") {
+                self.calls.lock().unwrap().push("fetch:exists");
+                return Ok(self
+                    .probe
+                    .iter()
+                    .map(|present| {
+                        let mut data = RecordData::new();
+                        data.insert("present".into(), present.clone());
+                        Record {
+                            id: String::new(),
+                            data,
+                        }
+                    })
+                    .collect());
+            }
             if sql.contains("pragma_table_xinfo") {
                 self.calls.lock().unwrap().push("fetch:columns");
                 if self.no_columns {
@@ -2694,13 +2765,12 @@ mod tests {
             sql: &str,
             _params: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
-            if sql.contains("EXISTS") {
-                self.calls.lock().unwrap().push("scalar:exists");
-                Ok(0)
-            } else {
-                self.calls.lock().unwrap().push("scalar:count");
-                Ok(3)
-            }
+            assert!(
+                !sql.contains("EXISTS"),
+                "a probe went through a scalar: {sql}"
+            );
+            self.calls.lock().unwrap().push("scalar:count");
+            Ok(3)
         }
 
         async fn run_scalar_f64(
@@ -2717,10 +2787,6 @@ mod tests {
         ) -> Result<Vec<TxResult>, TransactionError> {
             panic!("unexpected run_transaction")
         }
-
-        async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-            panic!("unexpected dbx_table_exists: {table}")
-        }
     }
 
     /// The catalog reads run through the read primitives every typed read
@@ -2731,10 +2797,7 @@ mod tests {
     /// does.
     #[tokio::test]
     async fn catalog_reads_take_the_read_primitives_never_query_raw() {
-        let mock = CatalogMock {
-            calls: Mutex::new(Vec::new()),
-            no_columns: false,
-        };
+        let mock = CatalogMock::new(false, Vec::new());
         assert_eq!(mock.catalog_tables().await.unwrap(), ["Foo"]);
         let columns = mock.catalog_columns("Foo").await.unwrap();
         assert_eq!(columns.len(), 1);
@@ -2746,19 +2809,76 @@ mod tests {
         );
 
         // A description with no rows is followed by the existence probe,
-        // through the scalar primitive too.
-        let mock = CatalogMock {
-            calls: Mutex::new(Vec::new()),
-            no_columns: true,
-        };
+        // through the read primitive too.
+        let mock = CatalogMock::new(true, vec![serde_json::json!(0)]);
         assert!(matches!(
             mock.catalog_columns("Foo").await,
             Err(DatabaseError::NotFound)
         ));
         assert_eq!(
             *mock.calls.lock().unwrap(),
-            ["fetch:columns", "scalar:exists"]
+            ["fetch:columns", "fetch:exists"]
         );
+    }
+
+    /// The shared [`table_exists`] answers `false` only on the probe's one
+    /// row with `present` `0`. No row, two rows, `NULL`, a string, a
+    /// fractional or out-of-range number are each `Internal` — the answers a
+    /// lenient decode read as `0`, "absent".
+    #[tokio::test]
+    async fn table_exists_answers_absent_only_on_a_definite_zero() {
+        let exists = |probe: Vec<serde_json::Value>| async move {
+            let mock = CatalogMock::new(false, probe);
+            let answer = mock.schema_table_exists("widgets").await;
+            assert_eq!(*mock.calls.lock().unwrap(), ["fetch:exists"]);
+            answer
+        };
+        assert!(!exists(vec![serde_json::json!(0)]).await.unwrap());
+        assert!(exists(vec![serde_json::json!(1)]).await.unwrap());
+        // A JavaScript number (D1, sql.js) can carry the integer as a float.
+        assert!(exists(vec![serde_json::json!(1.0)]).await.unwrap());
+        assert!(!exists(vec![serde_json::json!(0.0)]).await.unwrap());
+        for probe in [
+            Vec::new(),
+            vec![serde_json::Value::Null],
+            vec![serde_json::json!("1")],
+            vec![serde_json::json!("absent")],
+            vec![serde_json::json!(true)],
+            vec![serde_json::json!(0.5)],
+            vec![serde_json::json!(2)],
+            vec![serde_json::json!(-1)],
+            vec![serde_json::json!(1), serde_json::json!(1)],
+        ] {
+            assert!(
+                matches!(exists(probe.clone()).await, Err(DatabaseError::Internal(_))),
+                "probe {probe:?}"
+            );
+        }
+    }
+
+    /// A table the description finds no columns of is missing only on the
+    /// probe's definite `0`: `1` is a table with no columns, and a malformed
+    /// answer is `Internal`, never the `NotFound` a missing table gets.
+    #[tokio::test]
+    async fn catalog_columns_reads_missing_only_from_a_definite_probe_answer() {
+        let present = CatalogMock::new(true, vec![serde_json::json!(1)]);
+        assert!(present.catalog_columns("Foo").await.unwrap().is_empty());
+        for probe in [
+            Vec::new(),
+            vec![serde_json::Value::Null],
+            vec![serde_json::json!("0")],
+            vec![serde_json::json!(2)],
+            vec![serde_json::json!(0), serde_json::json!(0)],
+        ] {
+            let mock = CatalogMock::new(true, probe.clone());
+            assert!(
+                matches!(
+                    mock.catalog_columns("Foo").await,
+                    Err(DatabaseError::Internal(_))
+                ),
+                "probe {probe:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3113,6 +3233,9 @@ mod tests {
             json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
             self.call();
+            if let Some(answer) = probe_answer(sql, true) {
+                return Ok(answer);
+            }
             if sql.contains("decl_type") {
                 return Ok(Self::declared_columns());
             }
@@ -3177,11 +3300,6 @@ mod tests {
         ) -> Result<f64, DatabaseError> {
             self.call();
             Ok(0.0)
-        }
-
-        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            self.call();
-            Ok(true)
         }
 
         async fn run_transaction(
@@ -3354,7 +3472,8 @@ mod tests {
     /// Backend with a schema cache whose `run_fetch` records every statement,
     /// answers the column introspection with `id` and `created_at` (the
     /// column the tests sort by) and the primary-key introspection with `key`.
-    /// `exists` answers `dbx_table_exists`, and `exists_probes` counts them;
+    /// `exists` answers the existence probe ([`table_exists`]), which
+    /// `exists_probes` counts and `fetches` does not record;
     /// a test flips `exists` and `key` to model a migration landing.
     struct KeyedMock {
         cache: SchemaCache,
@@ -3393,6 +3512,10 @@ mod tests {
             _params: &[serde_json::Value],
             _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
+            if let Some(answer) = probe_answer(sql, *self.exists.lock().unwrap()) {
+                *self.exists_probes.lock().unwrap() += 1;
+                return Ok(answer);
+            }
             self.fetches.lock().unwrap().push(sql.to_string());
             if sql.contains("decl_type") {
                 // The column introspection: a table that exists has columns.
@@ -3475,11 +3598,6 @@ mod tests {
             Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
             )))
-        }
-
-        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            *self.exists_probes.lock().unwrap() += 1;
-            Ok(*self.exists.lock().unwrap())
         }
     }
 
@@ -3685,10 +3803,13 @@ mod tests {
 
         async fn run_fetch(
             &self,
-            _sql: &str,
+            sql: &str,
             _params: &[serde_json::Value],
             _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
+            if let Some(answer) = probe_answer(sql, true) {
+                return Ok(answer);
+            }
             let columns = self.columns.lock().unwrap().clone();
             Ok(columns
                 .into_iter()
@@ -3769,10 +3890,6 @@ mod tests {
             Err(TransactionError::whole(DatabaseError::Internal(
                 "run_transaction is not exercised by this mock".into(),
             )))
-        }
-
-        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            Ok(true)
         }
     }
 
@@ -4324,11 +4441,11 @@ mod tests {
 
         async fn run_fetch(
             &self,
-            _sql: &str,
+            sql: &str,
             _params: &[serde_json::Value],
             _json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
-            Ok(Vec::new())
+            Ok(probe_answer(sql, true).unwrap_or_default())
         }
 
         async fn run_fetch_one(
@@ -4371,10 +4488,6 @@ mod tests {
             _params: &[serde_json::Value],
         ) -> Result<f64, DatabaseError> {
             Ok(0.0)
-        }
-
-        async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            Ok(true)
         }
 
         async fn run_transaction(

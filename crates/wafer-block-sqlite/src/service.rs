@@ -432,11 +432,6 @@ impl DbExec for SQLiteDatabaseService {
         .await?
     }
 
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let (sql, params) = introspect::build_table_exists(table, Backend::Sqlite);
-        Ok(self.run_scalar_i64(&sql, &params).await? > 0)
-    }
-
     /// One write-worker job: the transaction holds the only writable
     /// connection from `BEGIN IMMEDIATE` to `COMMIT`, so no other write
     /// interleaves with it, and returning early on a failed statement drops

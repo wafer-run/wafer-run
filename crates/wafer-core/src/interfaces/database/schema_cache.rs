@@ -83,7 +83,7 @@ pub struct TableColumns {
 }
 
 /// Memoized introspection facts for one table. Each fact is independently
-/// populated (`dbx_table_exists` sets `present`, the column-list
+/// populated (the existence probe, `exec::table_exists`, sets `present`, the column-list
 /// introspection fills `columns`, the primary-key introspection fills
 /// `primary_key`, the id-policy introspection fills `id_policy`), so
 /// each optional fact's `None` means "not yet probed".

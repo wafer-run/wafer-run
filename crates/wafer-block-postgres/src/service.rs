@@ -20,7 +20,7 @@ use wafer_core::{
 };
 #[cfg(test)]
 use wafer_sql_utils::value::sea_values_to_json;
-use wafer_sql_utils::{ddl, introspect, Backend};
+use wafer_sql_utils::{ddl, Backend};
 
 use crate::{
     errors::{is_stale_plan, sqlx_error},
@@ -237,12 +237,6 @@ impl DbExec for PostgresDatabaseService {
         let outcome = transaction(&mut conn, ops).await;
         forget_statements(&mut conn).await;
         outcome
-    }
-
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let (sql, params) = introspect::build_table_exists(table, Backend::Postgres);
-        let mut conn = self.connection().await?;
-        fetch_scalar(&mut conn, &sql, &params).await
     }
 }
 
