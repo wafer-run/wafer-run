@@ -325,25 +325,33 @@ async fn refuse_keeps_failed_precondition_for_a_permanent_failure() {
 // --- transient: inside the backoff, then past it -----------------------------
 
 #[tokio::test]
-async fn refuse_transient_slot_answers_unavailable_with_retry_after_then_after_backoff() {
+async fn refuse_transient_slot_answers_unavailable_without_retry_after_then_after_backoff() {
     let probe = Probe::failing("test/probe");
     let w = runtime(InitWait::Refuse, &[&probe]).await;
 
     assert!(w.init_block("test/probe").await.is_err(), "Init fails");
     assert_eq!(probe.inits(), 1);
 
-    // Inside the backoff: the pending transient failure, with its delay.
+    // Right after the failure — inside the slot's backoff unless this runner
+    // stalled past it, in which case the slot is already unsettled — the
+    // answer is `Unavailable` with no `Retry-After` either way: under
+    // `Refuse` nothing retries when the backoff ends, so the slot's backoff
+    // is no delay to name.
     for out in [
         run_block(&w, "test/probe").await,
         run_flow(&w, "test/probe").await,
     ] {
         let e = error_of(out).await;
         assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
-        assert!(e.message.contains("init transient failure"), "{e:?}");
+        assert!(
+            e.message.contains("init transient failure")
+                || e.message.contains("is not initialized in this runtime"),
+            "{e:?}"
+        );
         assert_eq!(
             retry_after(&e),
-            Some("1"),
-            "a backoff under a second rounds up to 1 s: {e:?}"
+            None,
+            "Refuse names no slot backoff as Retry-After: {e:?}"
         );
     }
 
@@ -433,8 +441,43 @@ async fn await_retries_init_in_dispatch_after_the_backoff() {
 
 // --- Retry-After reaches the HTTP response -----------------------------------
 
+/// Under `Await` the dispatch whose Init fails transiently names the backoff
+/// it has just started, and the header reaches the HTTP response. The
+/// backoff is read in that same dispatch, right after the failure, so the
+/// assertion does not race the 100 ms window.
 #[tokio::test]
-async fn retry_after_reaches_the_http_codec_headers() {
+async fn await_retry_after_reaches_the_http_codec_headers() {
+    for via_flow in [false, true] {
+        let probe = Probe::failing("test/probe");
+        let w = runtime(InitWait::Await, &[&probe]).await;
+        let out = if via_flow {
+            run_flow(&w, "test/probe").await
+        } else {
+            run_block(&w, "test/probe").await
+        };
+        let parts = collect_http_response(out).await;
+        assert_eq!(parts.status, 503);
+        assert!(
+            parts
+                .headers
+                .contains(&("Retry-After".to_string(), "1".to_string())),
+            "via_flow={via_flow} headers: {:?}",
+            parts.headers
+        );
+        assert_eq!(probe.inits(), 1);
+    }
+}
+
+fn has_retry_after_header(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("Retry-After"))
+}
+
+/// Under `Refuse` a transient slot's 503 carries no `Retry-After`, so the
+/// embedder's own delay (its rebuild window) is the one the client sees.
+#[tokio::test]
+async fn refuse_transient_failure_is_a_503_without_retry_after() {
     let probe = Probe::failing("test/probe");
     let w = runtime(InitWait::Refuse, &[&probe]).await;
     assert!(w.init_block("test/probe").await.is_err());
@@ -446,9 +489,7 @@ async fn retry_after_reaches_the_http_codec_headers() {
         let parts = collect_http_response(out).await;
         assert_eq!(parts.status, 503);
         assert!(
-            parts
-                .headers
-                .contains(&("Retry-After".to_string(), "1".to_string())),
+            !has_retry_after_header(&parts.headers),
             "headers: {:?}",
             parts.headers
         );
@@ -463,11 +504,146 @@ async fn an_unsettled_refusal_is_a_503_without_retry_after() {
     let parts = collect_http_response(run_block(&w, "test/probe").await).await;
     assert_eq!(parts.status, 503);
     assert!(
-        !parts
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("Retry-After")),
+        !has_retry_after_header(&parts.headers),
         "headers: {:?}",
         parts.headers
     );
+}
+
+// --- an Init in flight: refused at once, never awaited ------------------------
+
+/// Parks its Init until released, so a dispatch can arrive while the
+/// attempt holds the slot's lock.
+struct GatedInit {
+    inits: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl Block for GatedInit {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new("test/gated", "0.1.0", "test/iface@v1", "gated init")
+    }
+
+    async fn lifecycle(&self, _: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init {
+            self.inits.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn handle(&self, _: &dyn Context, _: Message, _: InputStream) -> OutputStream {
+        OutputStream::respond(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn refuse_answers_at_once_while_an_init_is_in_flight() {
+    let gated = Arc::new(GatedInit {
+        inits: AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .init_wait(InitWait::Refuse)
+        .build()
+        .unwrap();
+    w.register_block("test/gated", gated.clone()).unwrap();
+    w.seal().await.unwrap();
+
+    let boot = w.init_block("test/gated");
+    let request = async {
+        gated.entered.notified().await;
+        // The attempt holds the slot's lock now. A dispatch that waited for
+        // it would never finish, since the Init is released only below.
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_block(&w, "test/gated"),
+        )
+        .await;
+        gated.release.notify_one();
+        answered
+    };
+    let (booted, answered) = tokio::join!(boot, request);
+
+    let out = answered.expect("a Refuse dispatch must not wait for an Init in flight");
+    assert_not_initialized(&error_of(out).await, "test/gated");
+    booted.expect("the parked Init completes once released");
+    assert_eq!(
+        gated.inits.load(Ordering::SeqCst),
+        1,
+        "the dispatch ran no Init"
+    );
+    assert_responds(run_block(&w, "test/gated").await).await;
+}
+
+// --- a context kept past its Init is not inside it ----------------------------
+
+/// Keeps its Init context (`clone_arc`) for use after the Init returns, as
+/// deferred work queued during an Init would.
+struct KeepsInitContext {
+    kept: std::sync::Mutex<Option<Arc<dyn Context>>>,
+}
+
+#[async_trait]
+impl Block for KeepsInitContext {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/keeper",
+            "0.1.0",
+            "test/iface@v1",
+            "keeps its Init ctx",
+        )
+    }
+
+    async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
+        if event.event_type == LifecycleType::Init {
+            *self.kept.lock().unwrap() = Some(ctx.clone_arc());
+        }
+        Ok(())
+    }
+
+    async fn handle(&self, _: &dyn Context, _: Message, _: InputStream) -> OutputStream {
+        OutputStream::respond(Vec::new())
+    }
+}
+
+#[tokio::test]
+async fn refuse_a_context_kept_past_its_init_does_not_run_init() {
+    let keeper = Arc::new(KeepsInitContext {
+        kept: std::sync::Mutex::new(None),
+    });
+    let other = Probe::new("test/other");
+    let mut w = Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .init_wait(InitWait::Refuse)
+        .build()
+        .unwrap();
+    w.register_block("test/keeper", keeper.clone()).unwrap();
+    w.register_block("test/other", Arc::clone(&other) as Arc<dyn Block>)
+        .unwrap();
+    w.seal().await.unwrap();
+
+    w.init_block("test/keeper").await.expect("keeper init");
+    // Taken out of the block so the handle (which reaches every block)
+    // does not keep the runtime alive through a cycle.
+    let kept = keeper
+        .kept
+        .lock()
+        .unwrap()
+        .take()
+        .expect("Init kept its ctx");
+
+    let out = kept
+        .call_block("test/other", Message::new(""), InputStream::empty())
+        .await;
+    assert_not_initialized(&error_of(out).await, "test/other");
+    assert_eq!(other.inits(), 0, "a kept Init context must not run Init");
+    assert_eq!(other.handles(), 0);
 }

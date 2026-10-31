@@ -148,7 +148,7 @@ impl TransientBackoff {
         (now < self.retry_at).then(|| {
             let wait = self.retry_at.saturating_duration_since(now);
             InitError::Transient(format!(
-                "{} (init is retried in {} ms)",
+                "{} (retry backoff: {} ms left)",
                 self.message,
                 wait.as_millis()
             ))
@@ -218,8 +218,9 @@ impl BlockSlot {
     /// [`try_cached`](Self::try_cached), `None` while the mutex is held by
     /// an attempt in flight.
     ///
-    /// The dispatch paths name this delay as the `Retry-After` of the
-    /// `Unavailable` a transient failure answers.
+    /// Under [`InitWait::Await`](crate::InitWait::Await) the dispatch paths
+    /// name this delay as the `Retry-After` of the `Unavailable` a transient
+    /// failure answers.
     pub fn pending_retry_in(&self) -> Option<Duration> {
         let guard = self.state.try_lock().ok()?;
         if guard.outcome.is_some() {

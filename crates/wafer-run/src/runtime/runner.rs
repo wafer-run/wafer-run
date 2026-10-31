@@ -59,9 +59,10 @@ pub(crate) struct DispatchInit<'a> {
 ///    dispatch (or while init is in flight or may be retried) run the init
 ///    pipeline, returning a failure as the typed error (`Err`) the caller
 ///    turns into its terminal. Under [`InitWait::Refuse`](super::InitWait::Refuse)
-///    a dispatch outside every Init answers `Unavailable` instead of running
-///    the pipeline. A transient failure inside its backoff carries the
-///    remaining backoff as `Retry-After`.
+///    a dispatch outside every running Init answers `Unavailable` instead of
+///    running the pipeline or waiting for an attempt in flight. Under
+///    [`InitWait::Await`](super::InitWait::Await) a transient failure inside
+///    its backoff carries the remaining backoff as `Retry-After`.
 /// 2. Observability — bracket the dispatch in the opt-in
 ///    `block_start`/`block_end` hooks via [`ObservabilityBus::block_span`].
 ///
@@ -88,14 +89,17 @@ where
     // that would close an init cycle before taking that lock.
     match target.slot.try_cached() {
         Some(Ok(_)) => {}
-        Some(Err(e)) => return Err(init_failure(&target, e)),
-        // `InitWait::Refuse`: a dispatch outside every Init never runs init
-        // and never takes the slot's lock. A dispatch inside an Init (its
-        // template carries the attempt; only `RuntimeContext::for_init` sets
-        // one) is how one block's Init reaches another's during
-        // `Wafer::init_block`, so it still runs the callee's init inline.
+        Some(Err(e)) => return Err(init_failure(&target, init.template, e)),
+        // `InitWait::Refuse`: a dispatch outside every running Init never
+        // runs init and never takes the slot's lock. A dispatch made while
+        // an Init runs (its template carries that attempt — only
+        // `RuntimeContext::for_init` sets one — and the attempt still owns
+        // its block) is how one block's Init reaches another's during
+        // `Wafer::init_block`, so it still runs the callee's init inline. A
+        // context kept past its Init (`clone_arc` for deferred work) carries
+        // an attempt that has ended, and is refused like any request.
         None if init.template.init_wait == super::InitWait::Refuse
-            && init.template.init_attempt.is_none() =>
+            && !inside_running_init(init.template) =>
         {
             return Err(super::not_initialized_error(target.resolved));
         }
@@ -104,7 +108,7 @@ where
                 super::run_init_pipeline(target.resolved, init.block, target.slot, init.template)
                     .await
             {
-                return Err(init_failure(&target, e));
+                return Err(init_failure(&target, init.template, e));
             }
         }
     }
@@ -117,11 +121,30 @@ where
     Ok(out)
 }
 
-/// The dispatch error for `target`'s init failure `e`: a transient one names
-/// the slot's pending backoff as its `Retry-After`.
-fn init_failure(target: &DispatchTarget<'_>, e: super::slot::InitError) -> WaferError {
-    let retry_in = match e {
-        super::slot::InitError::Transient(_) => target.slot.pending_retry_in(),
+/// Whether `ctx` runs on behalf of an Init that is still running.
+fn inside_running_init(ctx: &RuntimeContext) -> bool {
+    ctx.init_attempt
+        .as_ref()
+        .is_some_and(|attempt| ctx.init_waits.is_running(attempt))
+}
+
+/// The dispatch error for `target`'s init failure `e`.
+///
+/// Under [`InitWait::Await`](super::InitWait::Await) a transient failure
+/// names the slot's pending backoff as its `Retry-After`: the first dispatch
+/// after it runs init again, so the delay is real. Under
+/// [`InitWait::Refuse`](super::InitWait::Refuse) no dispatch retries when the
+/// backoff ends — the embedder's rebuild is the retry, and it names its own
+/// delay — so the error carries none.
+fn init_failure(
+    target: &DispatchTarget<'_>,
+    template: &RuntimeContext,
+    e: super::slot::InitError,
+) -> WaferError {
+    let retry_in = match (&e, template.init_wait) {
+        (super::slot::InitError::Transient(_), super::InitWait::Await) => {
+            target.slot.pending_retry_in()
+        }
         _ => None,
     };
     super::init_error_to_wafer_error(target.resolved, e, retry_in)

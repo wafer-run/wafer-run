@@ -175,10 +175,12 @@ pub struct Wafer {
 /// What a dispatch does on reaching a block whose init outcome is not
 /// settled: never initialized, or past the backoff of a transient failure.
 ///
-/// The choice only matters outside an Init. A dispatch made from inside a
-/// block's `lifecycle(Init)` (a `call_block` on its Init context) runs the
+/// The choice only matters outside an Init. A dispatch made while a block's
+/// `lifecycle(Init)` runs (a `call_block` on its Init context) runs the
 /// callee's init inline in either mode: that is how one block's Init
-/// reaches another's during [`Wafer::init_block`].
+/// reaches another's during [`Wafer::init_block`]. Only a call made
+/// *during* the Init counts: a context kept past it (a `clone_arc` handle
+/// for deferred work) dispatches like any request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InitWait {
     /// Run the block's init in the dispatch, or wait for the attempt
@@ -187,16 +189,18 @@ pub enum InitWait {
     /// the slot's lock (native, browser).
     #[default]
     Await,
-    /// Never run init in a dispatch. A block whose outcome is not settled
-    /// answers `Unavailable` without taking its slot's lock; only
-    /// [`Wafer::init_block`] (and the Inits it reaches) initializes. For
-    /// hosts that may stop a request without running its destructors
-    /// (Cloudflare Workers): an init begun by such a request would hold the
-    /// slot's lock for the runtime's life. The embedder initializes every
-    /// block before publishing the runtime and retries a failed one by
-    /// building a fresh runtime, so a `Refuse` dispatch's `Unavailable`
-    /// names no retry delay unless the slot has a pending backoff — the
-    /// embedder supplies its own.
+    /// Never run init in a dispatch. A block whose outcome is not settled —
+    /// never initialized, an attempt in flight, or past a transient
+    /// failure's backoff — answers `Unavailable` at once, without taking or
+    /// waiting for its slot's lock; only [`Wafer::init_block`] (and the
+    /// Inits it reaches) initializes. For hosts that may stop a request
+    /// without running its destructors (Cloudflare Workers): an init begun
+    /// by such a request would hold the slot's lock for the runtime's life.
+    /// The embedder initializes every block before publishing the runtime
+    /// and retries a failed one by building a fresh runtime, so no
+    /// dispatch's init failure names a `Retry-After` under `Refuse`, not
+    /// even inside the slot's backoff (nothing retries when it ends): the
+    /// embedder names its own retry delay.
     Refuse,
 }
 
@@ -672,10 +676,10 @@ impl Wafer {
 /// is `OutputStream::error(...)`.
 ///
 /// - `Permanent` / `Cycle` → `FAILED_PRECONDITION` (caller cannot recover by retrying).
-/// - `Transient` → `UNAVAILABLE` (caller may retry). `retry_in` is the
-///   remaining backoff of the slot's pending transient failure, if it has
-///   one; it becomes the error's `Retry-After` response header (see
-///   [`retry_after_meta`]). Ignored for the other variants.
+/// - `Transient` → `UNAVAILABLE` (caller may retry). `retry_in`, when the
+///   caller passes one, is the delay before a retry will run; it becomes the
+///   error's `Retry-After` response header (see [`retry_after_meta`]).
+///   Ignored for the other variants.
 pub(crate) fn init_error_to_wafer_error(
     block: &str,
     e: crate::runtime::slot::InitError,
@@ -716,12 +720,12 @@ pub(crate) fn not_initialized_error(block: &str) -> wafer_block::core_types::Waf
 }
 
 /// The `resp.header.Retry-After` meta entry for a retry `retry_in` from now:
-/// whole seconds, rounded up, at least 1 (`Retry-After: 0` would invite an
+/// whole seconds, rounded up (any fraction of a second counts), at least 1 (`Retry-After: 0` would invite an
 /// immediate retry that the backoff still refuses).
 pub(crate) fn retry_after_meta(
     retry_in: std::time::Duration,
 ) -> wafer_block::core_types::MetaEntry {
-    let secs = retry_in.as_millis().div_ceil(1000).max(1);
+    let secs = retry_in.as_nanos().div_ceil(1_000_000_000).max(1);
     wafer_block::core_types::MetaEntry {
         key: format!("{}Retry-After", wafer_block::meta::META_RESP_HEADER_PREFIX),
         value: secs.to_string(),
@@ -1151,6 +1155,7 @@ mod tests {
             (Duration::from_millis(100), "1"),
             (Duration::from_millis(1000), "1"),
             (Duration::from_millis(1001), "2"),
+            (Duration::from_nanos(1_000_000_001), "2"),
             (Duration::from_secs(30), "30"),
         ] {
             let meta = retry_after_meta(retry_in);
