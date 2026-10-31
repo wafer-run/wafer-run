@@ -205,24 +205,104 @@ pub fn first_scalar(row: serde_json::Value) -> Option<serde_json::Value> {
 
 /// The single scalar column of a `COUNT`-shaped row as `i64`.
 ///
-/// A missing row or a non-numeric value is `0` — the same answer the SQL
-/// aggregate itself gives for an empty table, so an absent row cannot be
-/// mistaken for a count.
-#[must_use]
-pub fn scalar_i64(row: Option<serde_json::Value>) -> i64 {
-    row.and_then(first_scalar)
-        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f.trunc() as i64)))
-        .unwrap_or(0)
+/// `row` is the first row the statement returned. The shared builders whose
+/// answer is read this way (`COUNT`, the id-policy probe, the catalog row
+/// count) always return one row holding one integer, so anything else — no
+/// row, `NULL`, a non-numeric value, a number with a fractional part or out
+/// of `i64` range — is a malformed answer and an
+/// [`Internal`](DatabaseError::Internal) error, never a `0`. Native SQLite
+/// and PostgreSQL refuse the same answers in their drivers; this keeps a
+/// backend that decodes through JSON (D1, sql.js) to the same rule. A number
+/// carried as an integral float (a JavaScript number) is that integer.
+///
+/// # Errors
+///
+/// [`DatabaseError::Internal`] for any answer but one integer.
+pub fn scalar_i64(row: Option<serde_json::Value>) -> Result<i64, DatabaseError> {
+    let value = scalar_of(row)?;
+    exact_i64(&value).ok_or_else(|| malformed_scalar("an integer", &value))
 }
 
-/// The single scalar column of a `SUM`-shaped row as `f64`. `0.0` when absent,
-/// for the same reason as [`scalar_i64`].
-#[must_use]
-pub fn scalar_f64(row: Option<serde_json::Value>) -> f64 {
-    row.and_then(first_scalar)
-        .and_then(|v| {
-            #[allow(clippy::cast_precision_loss)]
-            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
-        })
-        .unwrap_or(0.0)
+/// The single scalar column of a `SUM`-shaped row as `f64`.
+///
+/// As [`scalar_i64`]: `SUM` is built `COALESCE`d (`build_sum`), so its row
+/// always holds a number, and no row, `NULL` or a non-numeric value is an
+/// [`Internal`](DatabaseError::Internal) error rather than `0.0`.
+///
+/// # Errors
+///
+/// [`DatabaseError::Internal`] for any answer but one number.
+pub fn scalar_f64(row: Option<serde_json::Value>) -> Result<f64, DatabaseError> {
+    let value = scalar_of(row)?;
+    value
+        .as_f64()
+        .ok_or_else(|| malformed_scalar("a number", &value))
+}
+
+/// Whether a table-existence probe answered "present": the rows of
+/// `introspect::build_table_exists` or `introspect::build_catalog_table_exists`,
+/// each of which answers exactly one row whose integer column `present` is
+/// `1` or `0`.
+///
+/// Only that answer is definite. Anything else — no row, more than one, a
+/// row without `present`, `NULL`, a non-integer, any other number — is an
+/// [`Internal`](DatabaseError::Internal) error. A caller may treat
+/// `Ok(false)` as proof the table is absent (`impresspress`'s grant loader
+/// reads "no grants" from it after a failed read), so a malformed answer must
+/// never decode as `false`.
+///
+/// # Errors
+///
+/// [`DatabaseError::Internal`] for any answer but one row with `present`
+/// `0` or `1`.
+pub fn table_presence(rows: &[Record]) -> Result<bool, DatabaseError> {
+    let [row] = rows else {
+        return Err(DatabaseError::Internal(format!(
+            "table-existence probe answered {} rows; expected exactly one",
+            rows.len()
+        )));
+    };
+    match row.data.get(PRESENT).map(exact_i64) {
+        Some(Some(1)) => Ok(true),
+        Some(Some(0)) => Ok(false),
+        Some(_) => Err(malformed_scalar(
+            "`present` 0 or 1",
+            row.data.get(PRESENT).unwrap_or(&serde_json::Value::Null),
+        )),
+        None => Err(DatabaseError::Internal(
+            "table-existence probe answered a row without `present`".to_string(),
+        )),
+    }
+}
+
+/// The column the table-existence probes answer in.
+const PRESENT: &str = "present";
+
+/// The scalar of `row`, or the error for a statement that returned no row,
+/// or a row with no column.
+fn scalar_of(row: Option<serde_json::Value>) -> Result<serde_json::Value, DatabaseError> {
+    row.and_then(first_scalar).ok_or_else(|| {
+        DatabaseError::Internal("scalar query answered no row; expected one".to_string())
+    })
+}
+
+/// `value` as an `i64` when it is exactly one: an integer, or a float with
+/// no fractional part inside `i64`'s range.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn exact_i64(value: &serde_json::Value) -> Option<i64> {
+    // `i64::MIN` is exactly representable; `i64::MAX as f64` rounds up to
+    // 2^63, which is out of range, hence the strict upper bound.
+    let (min, max) = (i64::MIN as f64, i64::MAX as f64);
+    value.as_i64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|f| f.fract() == 0.0 && *f >= min && *f < max)
+            .map(|f| f as i64)
+    })
+}
+
+fn malformed_scalar(expected: &str, value: &serde_json::Value) -> DatabaseError {
+    DatabaseError::Internal(format!(
+        "scalar query answered {value}; expected {expected}"
+    ))
 }

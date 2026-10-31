@@ -9,7 +9,10 @@
 //! `conformance::run_conformance`.
 
 use serde_json::json;
-use wafer_core::interfaces::database::codec::{self, JsonColumns};
+use wafer_core::interfaces::database::{
+    codec::{self, JsonColumns},
+    service::{DatabaseError, Record},
+};
 
 fn json_columns(names: &[&str]) -> JsonColumns {
     JsonColumns::new(names.iter().copied())
@@ -200,19 +203,113 @@ fn first_scalar_takes_the_only_column_whatever_its_alias() {
 }
 
 #[test]
-fn scalar_i64_accepts_either_numeric_shape_and_defaults_to_zero() {
-    assert_eq!(codec::scalar_i64(Some(serde_json::json!({ "c": 7 }))), 7);
-    assert_eq!(codec::scalar_i64(Some(serde_json::json!({ "c": 7.9 }))), 7);
-    assert_eq!(codec::scalar_i64(Some(serde_json::json!({ "c": "x" }))), 0);
-    assert_eq!(codec::scalar_i64(None), 0);
+fn scalar_i64_reads_one_integer_in_either_numeric_shape() {
+    assert_eq!(codec::scalar_i64(Some(json!({ "c": 7 }))).unwrap(), 7);
+    assert_eq!(codec::scalar_i64(Some(json!({ "c": 0 }))).unwrap(), 0);
+    // A JavaScript number (D1, sql.js) carries the integer as a float.
+    assert_eq!(codec::scalar_i64(Some(json!({ "c": 7.0 }))).unwrap(), 7);
+    assert_eq!(codec::scalar_i64(Some(json!(-3))).unwrap(), -3);
+}
+
+/// No row, `NULL`, text, a fraction or a float outside `i64` is a malformed
+/// answer, an `Internal` error — never the `0` it once defaulted to, which
+/// read as "absent" or "none" to the caller.
+#[test]
+fn scalar_i64_refuses_every_answer_but_one_integer() {
+    for row in [
+        None,
+        Some(json!({})),
+        Some(json!({ "c": null })),
+        Some(json!(null)),
+        Some(json!({ "c": "7" })),
+        Some(json!({ "c": "x" })),
+        Some(json!({ "c": true })),
+        Some(json!({ "c": 7.9 })),
+        Some(json!({ "c": 1e19 })),
+    ] {
+        assert!(
+            matches!(
+                codec::scalar_i64(row.clone()),
+                Err(DatabaseError::Internal(_))
+            ),
+            "{row:?}"
+        );
+    }
 }
 
 #[test]
-fn scalar_f64_accepts_either_numeric_shape_and_defaults_to_zero() {
-    assert!((codec::scalar_f64(Some(serde_json::json!({ "s": 2.5 }))) - 2.5).abs() < f64::EPSILON);
-    assert!((codec::scalar_f64(Some(serde_json::json!({ "s": 2 }))) - 2.0).abs() < f64::EPSILON);
-    assert!(codec::scalar_f64(Some(serde_json::json!({ "s": "x" }))).abs() < f64::EPSILON);
-    assert!(codec::scalar_f64(None).abs() < f64::EPSILON);
+fn scalar_f64_reads_one_number_in_either_numeric_shape() {
+    assert!((codec::scalar_f64(Some(json!({ "s": 2.5 }))).unwrap() - 2.5).abs() < f64::EPSILON);
+    assert!((codec::scalar_f64(Some(json!({ "s": 2 }))).unwrap() - 2.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn scalar_f64_refuses_every_answer_but_one_number() {
+    for row in [
+        None,
+        Some(json!({})),
+        Some(json!({ "s": null })),
+        Some(json!({ "s": "2.5" })),
+    ] {
+        assert!(
+            matches!(
+                codec::scalar_f64(row.clone()),
+                Err(DatabaseError::Internal(_))
+            ),
+            "{row:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// table_presence
+// ---------------------------------------------------------------------------
+
+fn probe_rows(rows: &[serde_json::Value]) -> Vec<Record> {
+    rows.iter()
+        .map(|row| Record {
+            id: String::new(),
+            data: serde_json::from_value(row.clone()).unwrap(),
+        })
+        .collect()
+}
+
+#[test]
+fn table_presence_reads_the_one_row_present_zero_or_one() {
+    assert!(codec::table_presence(&probe_rows(&[json!({ "present": 1 })])).unwrap());
+    assert!(!codec::table_presence(&probe_rows(&[json!({ "present": 0 })])).unwrap());
+    assert!(codec::table_presence(&probe_rows(&[json!({ "present": 1.0 })])).unwrap());
+    assert!(!codec::table_presence(&probe_rows(&[json!({ "present": 0.0 })])).unwrap());
+}
+
+/// Every answer but one row with `present` `0` or `1` is `Internal`. The
+/// empty answer, `NULL` and a non-integer are the ones a lenient decode read
+/// as `0` — "absent" — which a caller may take as proof there is nothing to
+/// load.
+#[test]
+fn table_presence_refuses_every_answer_but_a_definite_one() {
+    for rows in [
+        vec![],
+        vec![json!({ "present": null })],
+        vec![json!({ "present": "0" })],
+        vec![json!({ "present": "1" })],
+        vec![json!({ "present": false })],
+        vec![json!({ "present": 0.5 })],
+        vec![json!({ "present": 2 })],
+        vec![json!({ "present": -1 })],
+        vec![json!({ "exists": 0 })],
+        vec![json!({})],
+        vec![json!({ "present": 0 }), json!({ "present": 0 })],
+        vec![json!({ "present": 1 }), json!({ "present": 1 })],
+    ] {
+        assert!(
+            matches!(
+                codec::table_presence(&probe_rows(&rows)),
+                Err(DatabaseError::Internal(_))
+            ),
+            "{rows:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

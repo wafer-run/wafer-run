@@ -4,6 +4,44 @@
 
 ### Breaking changes
 
+- **The table-existence probe and the scalar decoders are strict: a
+  malformed answer is an error, never "absent" or `0`.** `codec::scalar_i64`
+  read a missing row, `NULL` or a non-numeric value as `0`, so a backend that
+  decodes through it (D1, sql.js) answered `dbx_table_exists` with
+  `Ok(false)` — "absent" — for a probe that succeeded without a decodable
+  row. A caller that reads "nothing to load" from that answer after a failed
+  read (impresspress's grant loader) failed open.
+  - `DbExec::dbx_table_exists` is now a provided default, the same for every
+    backend: `introspect::build_table_exists` through `run_fetch`, decoded by
+    the new `codec::table_presence`. Only exactly one row whose integer
+    `present` is `0` or `1` is an answer; no row, more than one, a row
+    without `present`, `NULL`, text, a fraction or any other number is
+    `DatabaseError::Internal`. The native SQLite and PostgreSQL overrides
+    are gone (SQLite's read `-1` as absent and `2` as present; PostgreSQL's
+    decoded a boolean). It sends one `run_fetch`, so a call-limited backend
+    counts it there.
+  - `introspect::build_table_exists` answers an integer `present` (`1`/`0`)
+    on PostgreSQL too, as it already did on SQLite and as
+    `build_catalog_table_exists` does; it was a boolean.
+  - `catalog_columns`'s probe of a table with no columns decodes the same
+    way, so a malformed answer is `Internal`, never the `NotFound` of a
+    missing table.
+  - `codec::scalar_i64` and `codec::scalar_f64` return
+    `Result<_, DatabaseError>`: no row, `NULL` or a non-numeric value (and,
+    for `scalar_i64`, a fraction or a float outside `i64`) is `Internal`,
+    as native SQLite and PostgreSQL already refused them in their drivers.
+    An integral float (a JavaScript number) is still that integer.
+  - Conformance: `run_existence_probe_conformance` (feature `conformance`)
+    takes a backend that is both `DbExec` and `DatabaseService`, checks the
+    real probe's present and absent answers, then puts malformed answers in
+    the probe's place — statements the backend itself runs, so its own
+    driver decodes them — and requires `Internal` from `schema_table_exists`
+    and `catalog_columns`. Run for native SQLite and PostgreSQL.
+  - Migrating: a backend adapter deletes its `dbx_table_exists` override
+    (keeping one keeps its own decode), propagates the `Result` of
+    `scalar_i64`/`scalar_f64` with `?` in `run_scalar_*` and its batch
+    decode, and calls `run_existence_probe_conformance` from its tests.
+
 - **Per-invocation database limits are counted in calls, not statements,
   and the shared admission layer is gone.** Cloudflare D1 counts a
   `db.batch()` as one query of its 1,000 per Worker invocation, whatever its
@@ -34,8 +72,9 @@
     platform limits the database round trips one invocation may make counts
     one call per round trip it actually sends, once, where it is sent: one
     per lone statement (`run_fetch`, `run_fetch_one`, `run_execute`,
-    `run_execute_returning`, `run_scalar_*`, `dbx_table_exists`,
-    `query_raw`) and one per `run_transaction`, whatever its length. A
+    `run_execute_returning`, `run_scalar_*`, `query_raw`; `dbx_table_exists`
+    is the one `run_fetch` it sends) and one per `run_transaction`, whatever
+    its length. A
     default that delegates is counted where it lands (`run_schema_execute`
     → `run_execute`, `run_schema_transaction` → `run_transaction`).
     `run_batch`'s default sends one call per op, so a call-limited backend

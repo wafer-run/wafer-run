@@ -553,7 +553,7 @@ sql: SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.p
 params: ["app\\_\\_%"]
 
 ### introspect / table_exists [postgres]
-sql: SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v')) AS present
+sql: SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v')) THEN 1::int8 ELSE 0::int8 END AS present
 params: ["users"]
 
 ### introspect / list_columns [postgres]
