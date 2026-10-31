@@ -4215,8 +4215,9 @@ async fn seed_catalog_odd_table(svc: &dyn DatabaseService) {
 /// - `catalog_tables` lists a table the database layer could not have named,
 ///   beside one it created;
 /// - `catalog_columns` describes each column the same way on every backend —
-///   declaration order, declared type, `NOT NULL`, default, key position —
-///   and reads the schema as it is now, not as a cache last saw it;
+///   declaration order, declared type, `NOT NULL`, default, key position, a
+///   generated column listed with no default — and reads the schema as it
+///   is now, not as a cache last saw it;
 /// - `catalog_row_count` counts every row of the table;
 /// - a table the database does not hold is `NotFound`, and a name no catalog
 ///   can hold is `InvalidArgument`.
@@ -4300,6 +4301,30 @@ async fn check_catalog_reads(svc: &dyn DatabaseService) {
         columns.last().map(|c| c.name.as_str()),
         Some("extra"),
         "{columns:?}"
+    );
+
+    // A generated column is described on every backend, with no default:
+    // its expression is not one.
+    drop_all(svc, &["conf_cat_gen"]).await;
+    svc.exec_raw(
+        "CREATE TABLE conf_cat_gen (a INTEGER DEFAULT 7, \
+         b INTEGER GENERATED ALWAYS AS (a * 2) STORED)",
+        &[],
+    )
+    .await
+    .expect("create a table with a generated column");
+    let columns = svc
+        .catalog_columns("conf_cat_gen")
+        .await
+        .expect("catalog_columns of a table with a generated column");
+    let described: Vec<(&str, Option<&str>)> = columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.default_value.as_deref()))
+        .collect();
+    assert_eq!(
+        described,
+        [("a", Some("7")), ("b", None)],
+        "the generated column is listed, without its expression as a default"
     );
 
     assert!(

@@ -274,6 +274,79 @@ async fn a_select_only_role_still_breaks_ties_on_the_primary_key() {
     );
 }
 
+/// `catalog_columns` describes only what `catalog_tables` lists. On
+/// PostgreSQL `to_regclass` also resolves an index, a sequence and the system
+/// catalogs (`pg_catalog` is searched first by every `search_path`); each is
+/// `NotFound`, as a missing table is. A table declared with no columns is
+/// listed and described as having none. Skipped unless
+/// `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn catalog_columns_describes_only_what_the_listing_lists() {
+    use sqlx::postgres::PgPool;
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres catalog_columns relation-kind check: set {URL_ENV} to run");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect");
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_cat_kinds",
+        "DROP TABLE IF EXISTS conf_cat_zero",
+        "DROP SEQUENCE IF EXISTS conf_cat_seq",
+        "CREATE TABLE conf_cat_kinds (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE INDEX conf_cat_kinds_email_idx ON conf_cat_kinds (email)",
+        "CREATE SEQUENCE conf_cat_seq",
+        "CREATE TABLE conf_cat_zero ()",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let svc = PostgresDatabaseService::from_pool(admin.clone()).expect("service");
+    for not_a_table in [
+        "conf_cat_kinds_pkey",
+        "conf_cat_kinds_email_idx",
+        "conf_cat_seq",
+        "pg_class",
+        "pg_authid",
+    ] {
+        assert!(
+            matches!(
+                svc.catalog_columns(not_a_table).await,
+                Err(DatabaseError::NotFound)
+            ),
+            "{not_a_table} is not a table the listing lists"
+        );
+    }
+    assert_eq!(
+        svc.catalog_columns("conf_cat_kinds")
+            .await
+            .expect("catalog_columns")
+            .len(),
+        2
+    );
+    let tables = svc.catalog_tables().await.expect("catalog_tables");
+    assert!(tables.iter().any(|t| t == "conf_cat_zero"), "{tables:?}");
+    assert_eq!(
+        svc.catalog_columns("conf_cat_zero")
+            .await
+            .expect("a listed table with no columns is described, not NotFound"),
+        []
+    );
+    for stmt in [
+        "DROP TABLE conf_cat_kinds",
+        "DROP TABLE conf_cat_zero",
+        "DROP SEQUENCE conf_cat_seq",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+}
+
 /// A `PRIMARY KEY (...) INCLUDE (...)` index lists its covering columns in
 /// `indkey` after its `indnkeyatts` key columns. They do not identify a row,
 /// so the key introspection must stop at the key — the executor's, and the

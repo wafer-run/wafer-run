@@ -422,11 +422,15 @@ pub struct CatalogColumn {
     /// for a column declared without one), PostgreSQL's `format_type`
     /// (`integer`, `character varying(20)`, `jsonb`, …).
     pub decl_type: String,
-    /// Whether the column is declared `NOT NULL`.
+    /// Whether the engine holds the column to `NOT NULL`: on SQLite, when it
+    /// was declared so (a primary-key column need not be); on PostgreSQL,
+    /// also for every primary-key column, which the key makes `NOT NULL`
+    /// whether or not it was declared.
     pub not_null: bool,
     /// The text of the column's default expression as the backend renders
     /// it (`'x'`, `CURRENT_TIMESTAMP`, `nextval('t_id_seq'::regclass)`), or
-    /// `None` when it has none.
+    /// `None` when it has none. A generated column (`GENERATED ALWAYS AS
+    /// (…)`) is listed with `None`: its expression is not a default.
     pub default_value: Option<String>,
     /// The column's 1-based position in the table's primary key, or `None`
     /// when it is not part of the key.

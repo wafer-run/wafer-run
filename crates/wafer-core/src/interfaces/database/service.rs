@@ -1072,12 +1072,14 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// themselves (`sqlite_*`, D1's `_cf_*`); PostgreSQL lists the tables and
     /// views an unqualified name reaches through the session's `search_path`.
     ///
-    /// This and the other `catalog_*` reads are the admin database browser's
-    /// typed reads. Each runs one builder-generated statement through the
-    /// backend's ordinary read path — the same one `list` and `count` take —
-    /// never through [`query_raw`](Self::query_raw), so a backend that
-    /// accounts for what its reads cost (D1's rows read) accounts for these
-    /// too. No default: a backend that cannot read its catalog must say so.
+    /// This and the other `catalog_*` reads are a database browser's typed
+    /// reads. Each runs builder-generated statements — one, or for
+    /// [`catalog_columns`](Self::catalog_columns) a second, an existence
+    /// probe, only when the first answers no rows — through the backend's
+    /// ordinary read path, the one `list` and `count` take, never through
+    /// [`query_raw`](Self::query_raw), so a backend that accounts for what
+    /// its reads cost (D1's rows read) accounts for these too. No default: a
+    /// backend that cannot read its catalog must say so.
     async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError>;
 
     /// The columns of `table`, in declaration order, described the same way
@@ -1088,7 +1090,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`catalog_tables`](Self::catalog_tables) entry such as `Foo`, `a-b` or
     /// `a"b`, or a plain identifier. A name no catalog can hold (empty, or
     /// containing a NUL byte) is [`DatabaseError::InvalidArgument`]; a table
-    /// the database does not hold is [`DatabaseError::NotFound`].
+    /// [`catalog_tables`](Self::catalog_tables) would not list — a missing
+    /// one, and on Postgres an index, a sequence or a system catalog — is
+    /// [`DatabaseError::NotFound`].
     async fn catalog_columns(&self, table: &str) -> Result<Vec<CatalogColumn>, DatabaseError>;
 
     /// How many rows `table` holds: a `COUNT(*)` over the whole table, from

@@ -17,11 +17,17 @@
   `PRAGMA table_info`'s `name`, `type`, `notnull`, `dflt_value`, `pk` and
   PostgreSQL `column_name`, `data_type`, `is_nullable`, `column_default`, with
   no key at all. It binds the table name (SQLite reads
-  `pragma_table_info(?1)`), so it accepts any name a catalog can hold (`Foo`,
-  `a-b`, `a"b`) and refuses only an empty one or one with a NUL byte, as
-  `build_catalog_table_row_count` does; it refused anything but a plain
-  identifier. A caller reading the old column names reads the new ones, or
-  moves to `db::catalog_columns`.
+  `pragma_table_xinfo(?1)`), so it accepts any name a catalog can hold
+  (`Foo`, `a-b`, `a"b`) and refuses only an empty one or one with a NUL
+  byte, as `build_catalog_table_row_count` does; it refused anything but a
+  plain identifier. It describes only what `build_list_tables` lists: on
+  PostgreSQL an index, a sequence or a relation in `pg_catalog` /
+  `information_schema` (all of which `to_regclass` resolves) now yields no
+  rows, where it was described as a table. Generated columns are listed on
+  both dialects (SQLite's `pragma_table_info` left them out) with no
+  default (PostgreSQL reported the generation expression as one). A caller
+  reading the old column names reads the new ones, or moves to
+  `db::catalog_columns`.
 
 - `ConfigError` has a new variant, `SourceFault { block, source }`: the
   config source answered with an error retrying cannot fix (its table
@@ -2004,8 +2010,10 @@
     catalog spells it (`introspect::build_list_tables`); `catalog_columns`
     describes one table's columns the same way on every backend — name,
     declared type, `NOT NULL`, default, primary-key position
-    (`build_table_info`) — and answers `NotFound` for a table the database
-    does not hold; `catalog_row_count` counts every row of one table
+    (`build_table_info`) — and answers `NotFound` for a table the listing
+    would not list (telling a PostgreSQL table with no columns apart through
+    the new `introspect::build_catalog_table_exists`); `catalog_row_count`
+    counts every row of one table
     (`build_catalog_table_row_count`). Each takes a table named as the
     catalog spells it, not only a plain identifier.
   - **Authorization:** each is authorized as `query_raw` is — one `Read` of
@@ -2019,7 +2027,8 @@
     through `raw()`, which answers no row counts) accounts for these reads as
     it does for `list` and `count`.
   - The shared conformance suite covers them (`check_catalog_reads`, and
-    through the host ops), on SQLite and PostgreSQL.
+    through the host ops), on SQLite and PostgreSQL; a `DbExec` unit test
+    pins that none of them reaches `query_raw`.
 
 - `InitWait` (`Await`, the default, or `Refuse`), set with
   `WaferBuilder::init_wait` and read back with `Wafer::init_wait()`, chooses

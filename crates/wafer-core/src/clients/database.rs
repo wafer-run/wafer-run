@@ -512,8 +512,10 @@ dual_api! {
 
     /// The columns of `table` (named as [`catalog_tables`] lists it), in
     /// declaration order: name, declared type, `NOT NULL`, default and
-    /// primary-key position, the same shape on every backend. A table the
-    /// database does not hold is [`ErrorCode::NotFound`]; an empty name, or
+    /// primary-key position, the same shape on every backend. A table
+    /// [`catalog_tables`] would not list (a missing one; on Postgres also an
+    /// index, a sequence or a system catalog) is [`ErrorCode::NotFound`]; an
+    /// empty name, or
     /// one containing a NUL byte, is [`ErrorCode::InvalidArgument`].
     pub fn catalog_columns(ctx, table: &str) -> Result<Vec<CatalogColumn>, WaferError> {
         let req = CatalogColumnsRequest { table: table.to_string() };
