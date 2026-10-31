@@ -121,8 +121,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordData,
-        RecordList, StatementBudget, TransactionError, UpsertSpec,
+        AggregateSpec, CatalogColumn, DatabaseError, DatabaseService, RawStatement, Record,
+        RecordData, RecordList, StatementBudget, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -319,6 +319,18 @@ mod db_fakes {
             _column: &Column,
         ) -> Result<(), DatabaseError> {
             Ok(())
+        }
+
+        async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+            Ok(0)
         }
     }
 }

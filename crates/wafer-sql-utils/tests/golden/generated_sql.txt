@@ -269,9 +269,13 @@ params: ["users"]
 sql: SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1) THEN 3 WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk = 1 AND name = 'id' COLLATE NOCASE) AND NOT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE pk > 1) AND NOT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE origin = 'pk') THEN 1 WHEN EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = 'id' COLLATE NOCASE AND upper(type) LIKE '%INT%') THEN 2 ELSE 0 END AS id_policy
 params: ["users"]
 
+### introspect / catalog_table_exists [sqlite]
+sql: SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\' AND name NOT LIKE '\_cf\_%' ESCAPE '\' AND name=?1) AS present
+params: ["users"]
+
 ### introspect / table_info [sqlite]
-sql: PRAGMA table_info("users")
-params: []
+sql: SELECT name, type AS decl_type, "notnull" AS not_null, dflt_value AS default_value, pk FROM pragma_table_xinfo(?1) WHERE hidden <> 1 ORDER BY cid
+params: ["users"]
 
 ### introspect / table_row_count [sqlite]
 sql: SELECT COUNT(*) AS cnt FROM "users"
@@ -564,8 +568,12 @@ params: ["users"]
 sql: SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v')) THEN 3::int8 WHEN a.attidentity <> '' OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' THEN 1::int8 WHEN a.atttypid IN ('int2'::regtype, 'int4'::regtype, 'int8'::regtype) THEN 2::int8 ELSE 0::int8 END AS id_policy FROM (SELECT 1) AS one LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = to_regclass(quote_ident($1)) AND a.attname = 'id' AND NOT a.attisdropped LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 params: ["users"]
 
+### introspect / catalog_table_exists [postgres]
+sql: SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v') AND n.nspname NOT IN ('pg_catalog', 'information_schema')) THEN 1::int8 ELSE 0::int8 END AS present
+params: ["users"]
+
 ### introspect / table_info [postgres]
-sql: SELECT a.attname::text AS column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default FROM pg_catalog.pg_attribute a LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum
+sql: SELECT a.attname::text AS name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS decl_type, CASE WHEN a.attnotnull THEN 1::int8 ELSE 0::int8 END AS not_null, CASE WHEN a.attgenerated = '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END AS default_value, COALESCE((SELECT k.ord FROM pg_catalog.pg_index i CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) WHERE i.indrelid = a.attrelid AND i.indisprimary AND k.ord <= i.indnkeyatts AND k.attnum = a.attnum), 0)::int8 AS pk FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = to_regclass(quote_ident($1)) AND c.relkind IN ('r','p','f','v') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum
 params: ["users"]
 
 ### introspect / table_row_count [postgres]

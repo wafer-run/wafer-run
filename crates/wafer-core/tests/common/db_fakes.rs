@@ -23,7 +23,7 @@ use wafer_block::{
     ErrorCode, Message, WaferError,
 };
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
+    AggregateSpec, CatalogColumn, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
     StatementBudget, TransactionError, UpsertSpec,
 };
 use wafer_schema::{Column, Table};
@@ -263,6 +263,21 @@ impl DatabaseService for RecordingDb {
     async fn schema_add_column(&self, _table: &str, _column: &Column) -> Result<(), DatabaseError> {
         self.record("schema_add_column");
         Ok(())
+    }
+
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        self.record("catalog_tables");
+        Ok(Vec::new())
+    }
+
+    async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        self.record("catalog_columns");
+        Ok(Vec::new())
+    }
+
+    async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+        self.record("catalog_row_count");
+        Ok(0)
     }
 }
 

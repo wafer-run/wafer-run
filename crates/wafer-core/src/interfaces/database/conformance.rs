@@ -11,7 +11,8 @@
 //! [`run_conformance`] closes the gap: it drives **every** method on the
 //! trait against a live service, asserting the concrete observable behavior
 //! (round-trips, counts, filtered/sorted/paginated results, atomic increments,
-//! insert-vs-update upserts, grouped aggregates, raw SQL, schema management).
+//! insert-vs-update upserts, grouped aggregates, raw SQL, catalog reads,
+//! schema management).
 //! The assertions are strong enough that a no-op or fail-open implementation
 //! of any single op fails a test rather than passing silently.
 //!
@@ -281,6 +282,8 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_raw_sql(svc).await;
     check_raw_transaction(svc).await;
     check_raw_transaction_through_the_host_op(svc).await;
+    check_catalog_reads(svc).await;
+    check_catalog_reads_through_the_host_ops(svc).await;
     check_rows_keep_their_column_order(svc).await;
     check_json_value_round_trip(svc).await;
     check_typed_values_round_trip(svc).await;
@@ -4165,6 +4168,268 @@ async fn check_raw_transaction_through_the_host_op(svc: &dyn DatabaseService) {
         2,
         "w3 rolled back"
     );
+}
+
+// ---------------------------------------------------------------------------
+// catalog reads
+// ---------------------------------------------------------------------------
+
+/// A table the database layer could not have named: mixed case, a `-` and an
+/// embedded `"`. Its key spans two columns, declared in the opposite order.
+const CATALOG_ODD_TABLE: &str = "conf_Cat-Odd\"Name";
+
+/// `CATALOG_ODD_TABLE` quoted for the suite's raw SQL.
+const CATALOG_ODD_TABLE_SQL: &str = "\"conf_Cat-Odd\"\"Name\"";
+
+/// Recreate [`CATALOG_ODD_TABLE`] holding three rows. A migration or a
+/// console makes such a table with raw SQL; so does this.
+async fn seed_catalog_odd_table(svc: &dyn DatabaseService) {
+    svc.exec_raw(
+        &format!("DROP TABLE IF EXISTS {CATALOG_ODD_TABLE_SQL}"),
+        &[],
+    )
+    .await
+    .expect("drop the odd table");
+    svc.exec_raw(
+        &format!(
+            "CREATE TABLE {CATALOG_ODD_TABLE_SQL} (b TEXT NOT NULL DEFAULT 'x', \
+             a INTEGER NOT NULL, note TEXT, PRIMARY KEY (a, b))"
+        ),
+        &[],
+    )
+    .await
+    .expect("create the odd table");
+    svc.exec_raw(
+        &format!(
+            "INSERT INTO {CATALOG_ODD_TABLE_SQL} (a, b, note) \
+             VALUES (1, 'p', NULL), (2, 'q', 'n'), (3, 'r', NULL)"
+        ),
+        &[],
+    )
+    .await
+    .expect("seed the odd table");
+}
+
+/// The catalog reads see every table the database holds under the name its
+/// catalog spells it, and describe and count it there:
+/// - `catalog_tables` lists a table the database layer could not have named,
+///   beside one it created;
+/// - `catalog_columns` describes each column the same way on every backend —
+///   declaration order, declared type, `NOT NULL`, default, key position, a
+///   generated column listed with no default — and reads the schema as it
+///   is now, not as a cache last saw it;
+/// - `catalog_row_count` counts every row of the table;
+/// - a table the database does not hold is `NotFound`, and a name no catalog
+///   can hold is `InvalidArgument`.
+async fn check_catalog_reads(svc: &dyn DatabaseService) {
+    seed_read_fixture(svc).await;
+    seed_catalog_odd_table(svc).await;
+
+    let tables = svc.catalog_tables().await.expect("catalog_tables");
+    for table in [CATALOG_ODD_TABLE, "conf_read"] {
+        assert!(
+            tables.iter().any(|t| t == table),
+            "{table} is listed: {tables:?}"
+        );
+    }
+    let mut sorted = tables.clone();
+    sorted.sort();
+    assert_eq!(tables, sorted, "the listing is in name order");
+    assert!(
+        !tables
+            .iter()
+            .any(|t| t.to_ascii_lowercase().starts_with("sqlite_")),
+        "an engine's own tables are left out: {tables:?}"
+    );
+
+    let columns = svc
+        .catalog_columns(CATALOG_ODD_TABLE)
+        .await
+        .expect("catalog_columns");
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["b", "a", "note"], "declaration order: {columns:?}");
+    let (b, a, note) = (&columns[0], &columns[1], &columns[2]);
+    // SQLite reports the declared spelling, PostgreSQL its canonical one.
+    assert!(b.decl_type.eq_ignore_ascii_case("text"), "{b:?}");
+    assert!(a.decl_type.eq_ignore_ascii_case("integer"), "{a:?}");
+    assert!(note.decl_type.eq_ignore_ascii_case("text"), "{note:?}");
+    assert!(b.not_null && a.not_null && !note.not_null, "{columns:?}");
+    // SQLite renders the default as written, PostgreSQL with a cast.
+    assert!(
+        b.default_value
+            .as_deref()
+            .is_some_and(|d| d.starts_with("'x'")),
+        "{b:?}"
+    );
+    assert_eq!((&a.default_value, &note.default_value), (&None, &None));
+    assert_eq!(
+        (
+            a.primary_key_position,
+            b.primary_key_position,
+            note.primary_key_position
+        ),
+        (Some(1), Some(2), None),
+        "key positions follow PRIMARY KEY (a, b), not declaration order"
+    );
+
+    assert_eq!(
+        svc.catalog_row_count(CATALOG_ODD_TABLE)
+            .await
+            .expect("catalog_row_count"),
+        3
+    );
+    assert_eq!(
+        svc.catalog_row_count("conf_read")
+            .await
+            .expect("catalog_row_count of a plain name"),
+        svc.count("conf_read", &[]).await.expect("count"),
+        "a plain name counts as `count` does"
+    );
+
+    // A column added since the last description is described.
+    svc.exec_raw(
+        &format!("ALTER TABLE {CATALOG_ODD_TABLE_SQL} ADD COLUMN extra TEXT"),
+        &[],
+    )
+    .await
+    .expect("add a column");
+    let columns = svc
+        .catalog_columns(CATALOG_ODD_TABLE)
+        .await
+        .expect("catalog_columns after ADD COLUMN");
+    assert_eq!(
+        columns.last().map(|c| c.name.as_str()),
+        Some("extra"),
+        "{columns:?}"
+    );
+
+    // A generated column is described on every backend, with no default:
+    // its expression is not one.
+    drop_all(svc, &["conf_cat_gen"]).await;
+    svc.exec_raw(
+        "CREATE TABLE conf_cat_gen (a INTEGER DEFAULT 7, \
+         b INTEGER GENERATED ALWAYS AS (a * 2) STORED)",
+        &[],
+    )
+    .await
+    .expect("create a table with a generated column");
+    let columns = svc
+        .catalog_columns("conf_cat_gen")
+        .await
+        .expect("catalog_columns of a table with a generated column");
+    let described: Vec<(&str, Option<&str>)> = columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.default_value.as_deref()))
+        .collect();
+    assert_eq!(
+        described,
+        [("a", Some("7")), ("b", None)],
+        "the generated column is listed, without its expression as a default"
+    );
+
+    assert!(
+        matches!(
+            svc.catalog_columns("conf_cat_missing").await,
+            Err(DatabaseError::NotFound)
+        ),
+        "a missing table is NotFound"
+    );
+    for bad in ["", "a\0b"] {
+        assert!(
+            matches!(
+                svc.catalog_columns(bad).await,
+                Err(DatabaseError::InvalidArgument(_))
+            ),
+            "catalog_columns({bad:?})"
+        );
+        assert!(
+            matches!(
+                svc.catalog_row_count(bad).await,
+                Err(DatabaseError::InvalidArgument(_))
+            ),
+            "catalog_row_count({bad:?})"
+        );
+    }
+}
+
+/// Send `request` as `op` through the database handler, as a block's
+/// `db::catalog_*` client does, and decode the response.
+async fn catalog_op_via_handler<Req, Resp>(
+    svc: &dyn DatabaseService,
+    op: &str,
+    request: &Req,
+) -> Result<Resp, WaferError>
+where
+    Req: serde::Serialize,
+    Resp: serde::de::DeserializeOwned,
+{
+    let body = codec::encode(request).expect("encode the request");
+    match handle_message(svc, &GrantAllContext, &Message::new(op), &body)
+        .await
+        .collect_buffered()
+        .await
+    {
+        Ok(resp) => Ok(codec::decode(&resp.body).expect("decode the response")),
+        Err(TerminalNotResponse::Error(e)) => Err(e),
+        Err(_) => panic!("the handler ended without a response or an error"),
+    }
+}
+
+/// Through the host ops a block calls, the catalog reads answer what the
+/// service does, and a missing table is `NotFound` on the wire.
+async fn check_catalog_reads_through_the_host_ops(svc: &dyn DatabaseService) {
+    seed_catalog_odd_table(svc).await;
+
+    let tables: wire::CatalogTablesResponse = catalog_op_via_handler(
+        svc,
+        ServiceOp::DATABASE_CATALOG_TABLES,
+        &wire::CatalogTablesRequest {},
+    )
+    .await
+    .expect("catalog_tables");
+    assert!(
+        tables.tables.iter().any(|t| t == CATALOG_ODD_TABLE),
+        "{tables:?}"
+    );
+
+    let columns: wire::CatalogColumnsResponse = catalog_op_via_handler(
+        svc,
+        ServiceOp::DATABASE_CATALOG_COLUMNS,
+        &wire::CatalogColumnsRequest {
+            table: CATALOG_ODD_TABLE.into(),
+        },
+    )
+    .await
+    .expect("catalog_columns");
+    assert_eq!(columns.table, CATALOG_ODD_TABLE);
+    assert_eq!(
+        columns.columns,
+        svc.catalog_columns(CATALOG_ODD_TABLE)
+            .await
+            .expect("catalog_columns")
+    );
+
+    let count: wire::CatalogRowCountResponse = catalog_op_via_handler(
+        svc,
+        ServiceOp::DATABASE_CATALOG_ROW_COUNT,
+        &wire::CatalogRowCountRequest {
+            table: CATALOG_ODD_TABLE.into(),
+        },
+    )
+    .await
+    .expect("catalog_row_count");
+    assert_eq!((count.table.as_str(), count.count), (CATALOG_ODD_TABLE, 3));
+
+    let err = catalog_op_via_handler::<_, wire::CatalogColumnsResponse>(
+        svc,
+        ServiceOp::DATABASE_CATALOG_COLUMNS,
+        &wire::CatalogColumnsRequest {
+            table: "conf_cat_missing".into(),
+        },
+    )
+    .await
+    .expect_err("no such table");
+    assert_eq!(err.code, ErrorCode::NotFound, "{err:?}");
 }
 
 // ---------------------------------------------------------------------------

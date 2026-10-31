@@ -15,6 +15,14 @@ use crate::{
 /// Set by the client wrapper when a block issues a raw SQL statement and
 /// matched here (and in the runtime's capability check) to gate the
 /// privilege. Same literal on both sides — no translation.
+///
+/// The catalog reads (`database.catalog_tables`, `catalog_columns` and
+/// `catalog_row_count`) are authorized on it too. They run no caller SQL,
+/// but they reach what only raw SQL reached before them: every table the
+/// database holds, whatever its namespace, under names that need not be
+/// plain identifiers (so no per-table grant could name them). Their reach is
+/// a raw read's, so their gate is the raw-SQL gate: the admin block, holding
+/// the `raw_sql` capability.
 pub const RAW_SQL_RESOURCE: &str = "__raw_sql__";
 
 /// Sentinel `wrap.resource` value for DDL access. Open to any attributable
@@ -684,8 +692,8 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseOpAccess {
     /// Every listed access is checked on the op's resource — its collection
-    /// or table, or the raw-SQL / DDL sentinel for `query_raw`, `exec_raw`
-    /// and `ddl` — and all of them must be admitted.
+    /// or table, or the raw-SQL / DDL sentinel for `query_raw`, `exec_raw`,
+    /// `ddl` and the `catalog_*` reads — and all of them must be admitted.
     On(&'static [ResourceAccess]),
     /// `database.batch`: each write is checked on its own collection with
     /// the access [`crate::wire::database::BatchWrite::access`] names.
@@ -743,6 +751,9 @@ pub const DATABASE_OP_ACCESS: &[(&str, DatabaseOpAccess)] = {
         (ServiceOp::DATABASE_ADD_COLUMN, On(&[Write])),
         (ServiceOp::DATABASE_DROP_TABLE, On(&[Write])),
         (ServiceOp::DATABASE_TABLE_EXISTS, On(&[Read])),
+        (ServiceOp::DATABASE_CATALOG_TABLES, On(&[Read])),
+        (ServiceOp::DATABASE_CATALOG_COLUMNS, On(&[Read])),
+        (ServiceOp::DATABASE_CATALOG_ROW_COUNT, On(&[Read])),
     ]
 };
 

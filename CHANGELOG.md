@@ -4,6 +4,31 @@
 
 ### Breaking changes
 
+- `DatabaseService` has three new required methods, the catalog reads:
+  `catalog_tables()`, `catalog_columns(table)` and
+  `catalog_row_count(table)` (see Added). A `forward_database_service!`
+  ledger names them, in that order, after `schema_add_column`; a SQL
+  backend forwards them to `DbExec`, which implements all three, and a
+  decorator forwards them to the service it wraps. A hand-written impl adds
+  them.
+- `wafer_sql_utils::introspect::build_table_info` answers the same columns on
+  both dialects — `name`, `decl_type`, `not_null` (`0`/`1`), `default_value`
+  and `pk` (the 1-based key position, `0` off the key) — where SQLite answered
+  `PRAGMA table_info`'s `name`, `type`, `notnull`, `dflt_value`, `pk` and
+  PostgreSQL `column_name`, `data_type`, `is_nullable`, `column_default`, with
+  no key at all. It binds the table name (SQLite reads
+  `pragma_table_xinfo(?1)`), so it accepts any name a catalog can hold
+  (`Foo`, `a-b`, `a"b`) and refuses only an empty one or one with a NUL
+  byte, as `build_catalog_table_row_count` does; it refused anything but a
+  plain identifier. It describes only what `build_list_tables` lists: on
+  PostgreSQL an index, a sequence or a relation in `pg_catalog` /
+  `information_schema` (all of which `to_regclass` resolves) now yields no
+  rows, where it was described as a table. Generated columns are listed on
+  both dialects (SQLite's `pragma_table_info` left them out) with no
+  default (PostgreSQL reported the generation expression as one). A caller
+  reading the old column names reads the new ones, or moves to
+  `db::catalog_columns`.
+
 - `ConfigError` has a new variant, `SourceFault { block, source }`: the
   config source answered with an error retrying cannot fix (its table
   missing, a read no invocation can run, an answer it cannot interpret). The
@@ -1971,6 +1996,39 @@
   returns as `InvalidArgument`.
 
 ### Added
+
+- Typed catalog reads for a database browser, so its reads stop going
+  through `query_raw`: `database.catalog_tables`, `database.catalog_columns`
+  and `database.catalog_row_count` (`ServiceOp::DATABASE_CATALOG_*`, in
+  `DATABASE_OPS`), with their wire types (`CatalogTablesRequest` /
+  `CatalogTablesResponse`, `CatalogColumnsRequest` / `CatalogColumnsResponse`
+  and `CatalogColumn`, `CatalogRowCountRequest` / `CatalogRowCountResponse`),
+  the `DatabaseService` methods above, `DbExec` implementations, the
+  `wafer_core::clients::database::{catalog_tables, catalog_columns,
+  catalog_row_count}` helpers and the `wafer-sdk` wrappers.
+  - `catalog_tables` lists every table the database holds under the name its
+    catalog spells it (`introspect::build_list_tables`); `catalog_columns`
+    describes one table's columns the same way on every backend — name,
+    declared type, `NOT NULL`, default, primary-key position
+    (`build_table_info`) — and answers `NotFound` for a table the listing
+    would not list (telling a PostgreSQL table with no columns apart through
+    the new `introspect::build_catalog_table_exists`); `catalog_row_count`
+    counts every row of one table
+    (`build_catalog_table_row_count`). Each takes a table named as the
+    catalog spells it, not only a plain identifier.
+  - **Authorization:** each is authorized as `query_raw` is — one `Read` of
+    `wrap::RAW_SQL_RESOURCE`, which only the admin block passes, and the
+    `raw_sql` capability. They reach every table, whatever its namespace,
+    under names no per-table grant can name, which is a raw read's reach; a
+    block holding a table grant, even a wildcard one, is refused.
+  - **Cost accounting:** `DbExec` runs each through `run_fetch` /
+    `run_scalar_i64`, the read primitives every typed read uses, never through
+    `query_raw`. A backend that serves `query_raw` differently (D1 reads it
+    through `raw()`, which answers no row counts) accounts for these reads as
+    it does for `list` and `count`.
+  - The shared conformance suite covers them (`check_catalog_reads`, and
+    through the host ops), on SQLite and PostgreSQL; a `DbExec` unit test
+    pins that none of them reaches `query_raw`.
 
 - `InitWait` (`Await`, the default, or `Refuse`), set with
   `WaferBuilder::init_wait` and read back with `Wafer::init_wait()`, chooses

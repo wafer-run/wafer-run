@@ -81,8 +81,8 @@ mod db_fakes {
     use async_trait::async_trait;
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
-        StatementBudget, TransactionError, UpsertSpec,
+        AggregateSpec, CatalogColumn, DatabaseError, DatabaseService, RawStatement, Record,
+        RecordList, StatementBudget, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -334,6 +334,18 @@ mod db_fakes {
             _column: &Column,
         ) -> Result<(), DatabaseError> {
             Ok(())
+        }
+
+        async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+            Ok(Vec::new())
+        }
+
+        async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+            Ok(0)
         }
     }
 }
@@ -1086,6 +1098,13 @@ fn database_op_body(op: &str) -> Vec<u8> {
             table: "my_org__auth__widgets".into(),
         }),
         ServiceOp::DATABASE_TABLE_EXISTS => codec::encode(&wire::TableExistsRequest {
+            table: "my_org__auth__widgets".into(),
+        }),
+        ServiceOp::DATABASE_CATALOG_TABLES => codec::encode(&wire::CatalogTablesRequest {}),
+        ServiceOp::DATABASE_CATALOG_COLUMNS => codec::encode(&wire::CatalogColumnsRequest {
+            table: "my_org__auth__widgets".into(),
+        }),
+        ServiceOp::DATABASE_CATALOG_ROW_COUNT => codec::encode(&wire::CatalogRowCountRequest {
             table: "my_org__auth__widgets".into(),
         }),
         other => panic!(

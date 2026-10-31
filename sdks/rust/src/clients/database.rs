@@ -12,8 +12,10 @@
 
 use wafer_block::{
     wire::database::{
-        AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, CountRequest,
-        CountResponse, CreateManyRequest, CreateManyResponse, CreateRequest, DdlTransactionRequest,
+        AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, CatalogColumnsRequest,
+        CatalogColumnsResponse, CatalogRowCountRequest, CatalogRowCountResponse,
+        CatalogTablesRequest, CatalogTablesResponse, CountRequest, CountResponse,
+        CreateManyRequest, CreateManyResponse, CreateRequest, DdlTransactionRequest,
         DdlTransactionResponse, DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse,
         DeleteWhereRequest, DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse,
         GetRequest, IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse,
@@ -212,6 +214,25 @@ pub fn drop_table(request: &DropTableRequest) -> Result<SchemaOpResponse, WaferE
 pub fn table_exists(request: &TableExistsRequest) -> Result<TableExistsResponse, WaferError> {
     call(BLOCK, ServiceOp::DATABASE_TABLE_EXISTS, request)
 }
+/// Buffered: every table the database holds, under its catalog name. A
+/// catalog read: authorized like `query_raw` (admin-only, `raw_sql`).
+pub fn catalog_tables(request: &CatalogTablesRequest) -> Result<CatalogTablesResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_CATALOG_TABLES, request)
+}
+/// Buffered: a table's columns, the table named as the catalog spells it. A
+/// catalog read: authorized like `query_raw` (admin-only, `raw_sql`).
+pub fn catalog_columns(
+    request: &CatalogColumnsRequest,
+) -> Result<CatalogColumnsResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_CATALOG_COLUMNS, request)
+}
+/// Buffered: a table's row count, the table named as the catalog spells it.
+/// A catalog read: authorized like `query_raw` (admin-only, `raw_sql`).
+pub fn catalog_row_count(
+    request: &CatalogRowCountRequest,
+) -> Result<CatalogRowCountResponse, WaferError> {
+    call(BLOCK, ServiceOp::DATABASE_CATALOG_ROW_COUNT, request)
+}
 
 /// Every database op this client wraps. Kept set-equal to
 /// [`ServiceOp::DATABASE_OPS`] by the `sdk_covers_every_database_op` test —
@@ -245,6 +266,9 @@ const SUPPORTED_DATABASE_OPS: &[&str] = &[
     ServiceOp::DATABASE_ADD_COLUMN,
     ServiceOp::DATABASE_DROP_TABLE,
     ServiceOp::DATABASE_TABLE_EXISTS,
+    ServiceOp::DATABASE_CATALOG_TABLES,
+    ServiceOp::DATABASE_CATALOG_COLUMNS,
+    ServiceOp::DATABASE_CATALOG_ROW_COUNT,
 ];
 
 #[cfg(test)]

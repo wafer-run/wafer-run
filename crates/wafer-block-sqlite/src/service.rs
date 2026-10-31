@@ -608,6 +608,9 @@ forward_database_service! {
             schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
             statement_budget: forward,
         }
 

@@ -43,7 +43,7 @@
 //! - `forward_to DbExec;` — the implementor is a SQL backend that implements
 //!   [`DbExec`](super::exec::DbExec); `forward` entries call the shared
 //!   executor's default of the same name, qualified so they cannot recurse into
-//!   the method being defined. `DbExec` provides twenty-six of the operations;
+//!   the method being defined. `DbExec` provides twenty-nine of the operations;
 //!   the other three must be `custom` or `inherit`.
 //! - `forward_to <method>();` — the implementor is a decorator with an inherent
 //!   `fn <method>(&self) -> &dyn DatabaseService` returning the wrapped
@@ -115,6 +115,9 @@
 //!             schema_columns: forward,
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
+//!             catalog_tables: forward,
+//!             catalog_columns: forward,
+//!             catalog_row_count: forward,
 //!             statement_budget: forward,
 //!         }
 //!
@@ -236,6 +239,9 @@
 //!             schema_columns: forward,
 //!             schema_drop_table: forward,
 //!             schema_add_column: forward,
+//!             catalog_tables: forward,
+//!             catalog_columns: forward,
+//!             catalog_row_count: forward,
 //!             statement_budget: forward,
 //!         }
 //!     }
@@ -328,6 +334,9 @@ macro_rules! __forward_database_ledger {
             schema_columns: $m_schema_columns:ident,
             schema_drop_table: $m_schema_drop_table:ident,
             schema_add_column: $m_schema_add_column:ident,
+            catalog_tables: $m_catalog_tables:ident,
+            catalog_columns: $m_catalog_columns:ident,
+            catalog_row_count: $m_catalog_row_count:ident,
             statement_budget: $m_statement_budget:ident $(,)?
         }
         $($custom:tt)*
@@ -363,6 +372,9 @@ macro_rules! __forward_database_ledger {
                 (schema_columns, $m_schema_columns)
                 (schema_drop_table, $m_schema_drop_table)
                 (schema_add_column, $m_schema_add_column)
+                (catalog_tables, $m_catalog_tables)
+                (catalog_columns, $m_catalog_columns)
+                (catalog_row_count, $m_catalog_row_count)
                 (statement_budget, $m_statement_budget)
             ],
             []
@@ -380,7 +392,8 @@ macro_rules! __forward_database_ledger {
              \x20   update_where_count, increment_field_where, upsert, aggregate, batch,\n\
              \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_columns,\n\
-             \x20   schema_drop_table, schema_add_column, statement_budget\n\
+             \x20   schema_drop_table, schema_add_column, catalog_tables, catalog_columns,\n\
+             \x20   catalog_row_count, statement_budget\n\
              The listing is the point: an operation left out of a decorator \
              silently inherits a non-pass-through trait default."
         );
@@ -1019,6 +1032,65 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::schema_add_column($recv(self), table, column).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (catalog_tables, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn catalog_tables(
+                    &self,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<::std::string::String>,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::catalog_tables($recv(self)).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (catalog_columns, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn catalog_columns(
+                    &self,
+                    table: &str,
+                ) -> ::core::result::Result<
+                    ::std::vec::Vec<$crate::interfaces::database::service::CatalogColumn>,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::catalog_columns($recv(self), table).await
+                }
+            ]
+        );
+    };
+    (
+        $ty:ty, $target:path, $recv:path, $custom:tt,
+        [ (catalog_row_count, forward) $($todo:tt)* ], [ $($acc:tt)* ]
+    ) => {
+        $crate::__forward_database_step!(
+            $ty, $target, $recv, $custom, [ $($todo)* ],
+            [
+                $($acc)*
+                async fn catalog_row_count(
+                    &self,
+                    table: &str,
+                ) -> ::core::result::Result<
+                    i64,
+                    $crate::interfaces::database::service::DatabaseError,
+                > {
+                    <_ as $target>::catalog_row_count($recv(self), table).await
                 }
             ]
         );

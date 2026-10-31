@@ -8,9 +8,9 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 use async_trait::async_trait;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, CapGuard, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
-    RawStatement, Record, RecordData, RecordList, StatementBudget, TransactionError, UpsertSpec,
-    WriteOp, WriteOutcome,
+    AggregateSpec, CapGuard, CatalogColumn, DatabaseError, DatabaseService, GuardedInsert,
+    GuardedUpdate, RawStatement, Record, RecordData, RecordList, StatementBudget, TransactionError,
+    UpsertSpec, WriteOp, WriteOutcome,
 };
 use wafer_schema::{Column, Table};
 
@@ -201,6 +201,18 @@ impl DatabaseService for MemDb {
     }
     async fn schema_add_column(&self, _table: &str, _column: &Column) -> Result<(), DatabaseError> {
         Err(unused("schema_add_column"))
+    }
+
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        Err(unused("catalog_tables"))
+    }
+
+    async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        Err(unused("catalog_columns"))
+    }
+
+    async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+        Err(unused("catalog_row_count"))
     }
 }
 
