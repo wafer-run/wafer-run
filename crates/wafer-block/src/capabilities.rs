@@ -255,7 +255,10 @@ pub struct BlockCapabilities {
     /// `"*"` meant all — see [`Allowlist`].
     #[serde(default)]
     pub collections: Allowlist,
-    /// Can use query_raw/exec_raw.
+    /// Can use query_raw/exec_raw, and the catalog reads
+    /// (`database.catalog_tables` / `catalog_columns` / `catalog_row_count`),
+    /// which are authorized on the same raw-SQL sentinel
+    /// ([`crate::wrap::RAW_SQL_RESOURCE`]).
     #[serde(default)]
     pub raw_sql: bool,
     /// Can issue RAW DDL via `db::ddl()` (an arbitrary `CREATE TABLE` /

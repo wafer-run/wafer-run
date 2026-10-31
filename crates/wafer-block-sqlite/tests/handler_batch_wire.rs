@@ -308,6 +308,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
             statement_budget: custom,
         }
 

@@ -142,7 +142,7 @@ pub enum SqlBuildError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// SQLite dialect — quoted identifiers, `?` parameter placeholders,
-    /// `PRAGMA table_info` for introspection.
+    /// `sqlite_master` and `pragma_table_info` for introspection.
     Sqlite,
     /// PostgreSQL dialect — quoted identifiers, `$N` numbered parameter
     /// placeholders, `pg_catalog` for introspection.

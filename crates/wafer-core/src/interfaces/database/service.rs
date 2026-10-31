@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
-pub use wafer_block::wire::database::{RawStatement, RecordData};
+pub use wafer_block::wire::database::{CatalogColumn, RawStatement, RecordData};
 use wafer_block::wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
@@ -1064,6 +1064,48 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
 
     /// Add a column to an existing table.
     async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError>;
+
+    /// Every table the database holds, under the name its catalog spells it,
+    /// in name order: the rows of
+    /// [`introspect::build_list_tables`](wafer_sql_utils::introspect::build_list_tables).
+    /// The SQLite family leaves out the tables its engines reserve for
+    /// themselves (`sqlite_*`, D1's `_cf_*`); PostgreSQL lists the tables and
+    /// views an unqualified name reaches through the session's `search_path`.
+    ///
+    /// This and the other `catalog_*` reads are a database browser's typed
+    /// reads. Each runs builder-generated statements — one, or for
+    /// [`catalog_columns`](Self::catalog_columns) a second, an existence
+    /// probe, only when the first answers no rows — through the backend's
+    /// ordinary read path, the one `list` and `count` take, never through
+    /// [`query_raw`](Self::query_raw), so a backend that accounts for what
+    /// its reads cost (D1's rows read) accounts for these too. No default: a
+    /// backend that cannot read its catalog must say so.
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError>;
+
+    /// The columns of `table`, in declaration order, described the same way
+    /// on every backend (see [`CatalogColumn`]), from
+    /// [`introspect::build_table_info`](wafer_sql_utils::introspect::build_table_info).
+    ///
+    /// `table` is named as the catalog spells it — a
+    /// [`catalog_tables`](Self::catalog_tables) entry such as `Foo`, `a-b` or
+    /// `a"b`, or a plain identifier. A name no catalog can hold (empty, or
+    /// containing a NUL byte) is [`DatabaseError::InvalidArgument`]; a table
+    /// [`catalog_tables`](Self::catalog_tables) would not list — a missing
+    /// one, and on Postgres an index, a sequence or a system catalog — is
+    /// [`DatabaseError::NotFound`].
+    async fn catalog_columns(&self, table: &str) -> Result<Vec<CatalogColumn>, DatabaseError>;
+
+    /// How many rows `table` holds: a `COUNT(*)` over the whole table, from
+    /// [`introspect::build_catalog_table_row_count`](wafer_sql_utils::introspect::build_catalog_table_row_count).
+    ///
+    /// `table` is named as for [`catalog_columns`](Self::catalog_columns),
+    /// and quoted as a delimited identifier, so the count reaches exactly
+    /// the catalog's table. A name no catalog can hold is
+    /// [`DatabaseError::InvalidArgument`]; a table the database does not hold
+    /// fails as the backend reports it, as [`count`](Self::count) does. One
+    /// statement, with no existence probe before it: the admin table list
+    /// counts every table it lists.
+    async fn catalog_row_count(&self, table: &str) -> Result<i64, DatabaseError>;
 
     /// The statements this service may still run in the current invocation.
     /// The database handler admits a `create_many` or `batch` against it

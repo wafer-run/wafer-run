@@ -82,6 +82,17 @@ impl ServiceOp {
     pub const DATABASE_DROP_TABLE: &str = "database.drop_table";
     /// Whether a table exists — a read.
     pub const DATABASE_TABLE_EXISTS: &str = "database.table_exists";
+    /// List every table the database holds, under the names its catalog
+    /// spells them — a read of the whole catalog, so it is authorized like
+    /// raw SQL (admin-only).
+    pub const DATABASE_CATALOG_TABLES: &str = "database.catalog_tables";
+    /// Describe one table's columns (name, declared type, `NOT NULL`,
+    /// default, primary-key position), the table named as the catalog spells
+    /// it — authorized like raw SQL (admin-only).
+    pub const DATABASE_CATALOG_COLUMNS: &str = "database.catalog_columns";
+    /// Count every row of one table, named as the catalog spells it —
+    /// authorized like raw SQL (admin-only).
+    pub const DATABASE_CATALOG_ROW_COUNT: &str = "database.catalog_row_count";
     /// Delete every row matching a filter.
     pub const DATABASE_DELETE_WHERE: &str = "database.delete_where";
     /// Delete every row matching a filter and return the affected count.
@@ -252,6 +263,9 @@ impl ServiceOp {
         Self::DATABASE_ADD_COLUMN,
         Self::DATABASE_DROP_TABLE,
         Self::DATABASE_TABLE_EXISTS,
+        Self::DATABASE_CATALOG_TABLES,
+        Self::DATABASE_CATALOG_COLUMNS,
+        Self::DATABASE_CATALOG_ROW_COUNT,
     ];
 
     /// Every `vector.*` op — drives the `vector@v1` action catalog in

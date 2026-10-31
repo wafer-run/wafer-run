@@ -19,6 +19,13 @@ use crate::{ident::validate_ident, vector::escape_like, Backend, SqlBuildError};
 /// `information_schema.tables` lists.
 const PG_TABLE_KINDS: &str = "('r','p','f','v')";
 
+/// The Postgres `WHERE` conjunct that leaves out the system schemas, whose
+/// relations are the engine's catalog rather than the database's tables
+/// (`pg_catalog` is searched first by every `search_path`, so an unqualified
+/// `pg_class` resolves there). Every catalog read here applies it, so what
+/// [`build_list_tables`] lists is exactly what [`build_table_info`] describes.
+const PG_NOT_SYSTEM_SCHEMA: &str = "n.nspname NOT IN ('pg_catalog', 'information_schema')";
+
 /// Table-name prefixes that an engine speaking the SQLite dialect reserves
 /// for its own internal tables. [`Backend::Sqlite`] is the dialect of every
 /// SQLite engine wafer runs on — the native and in-browser SQLite libraries
@@ -64,8 +71,7 @@ pub fn build_list_tables(backend: Backend) -> String {
             "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
-             AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-             ORDER BY c.relname"
+             AND {PG_NOT_SYSTEM_SCHEMA} ORDER BY c.relname"
         ),
     }
 }
@@ -93,8 +99,7 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
                 "SELECT c.relname::text AS name FROM pg_catalog.pg_class c \
                  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
                  WHERE c.relkind IN {PG_TABLE_KINDS} AND pg_catalog.pg_table_is_visible(c.oid) \
-                 AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
-                 AND c.relname LIKE $1 ESCAPE E'\\\\' ORDER BY c.relname"
+                 AND {PG_NOT_SYSTEM_SCHEMA} AND c.relname LIKE $1 ESCAPE E'\\\\' ORDER BY c.relname"
             ),
             vec![serde_json::Value::String(pattern)],
         ),
@@ -137,9 +142,10 @@ pub fn build_table_exists(table: &str, backend: Backend) -> (String, Vec<serde_j
 /// Returns `(sql, params)`. The result shape is identical across dialects —
 /// one row per table column, in declaration order, with a `name` column and a
 /// `decl_type` column (the type as the schema declares it; decide JSON-ness
-/// with [`is_json_decl_type`]) — unlike [`build_table_info`], whose result
-/// columns differ per backend. A missing table yields zero rows (not an error)
-/// in both dialects.
+/// with [`is_json_decl_type`]). [`build_table_info`] describes each column
+/// in full (nullability, default, key position); this is the narrow read the
+/// executor's column checks need. A missing table yields zero rows (not an
+/// error) in both dialects.
 ///
 /// SQLite: `SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY
 /// cid` (the table-valued pragma function, available since SQLite 3.16, which —
@@ -364,41 +370,139 @@ pub fn build_id_policy(table: &str, backend: Backend) -> (String, Vec<serde_json
     }
 }
 
-/// Build query to get column information for a table.
+/// Build query to describe a table's columns, for a table named as the
+/// catalog spells it — a row of [`build_list_tables`], or a plain identifier.
 ///
-/// SQLite: `PRAGMA table_info("{table}")`
-/// Postgres: `column_name`, `data_type`, `is_nullable` (`YES`/`NO`) and
-/// `column_default` of each live column of the table the name resolves to
-/// (see the module docs), in `attnum` order.
+/// Returns `(sql, params)`. The result shape is identical across dialects:
+/// one row per column, in declaration order, with
 ///
-/// Note: column names in the result differ between backends. SQLite returns `name`, `type`, `notnull`, `dflt_value`, `pk`.
-/// Postgres returns `column_name`, `data_type`, `is_nullable`, `column_default`.
+/// - `name`: the column's name as the catalog spells it;
+/// - `decl_type`: its type as the schema declares it (SQLite's declared type
+///   text, which may be empty; Postgres's `format_type`, such as `integer` or
+///   `character varying(20)`);
+/// - `not_null`: `1` when the engine holds the column to `NOT NULL`, else
+///   `0` — on SQLite, when it was declared so; on Postgres, also for a
+///   primary-key column declared without it (the key implies it there);
+/// - `default_value`: the text of its default expression, or `NULL` — also
+///   `NULL` for a generated column, whose expression is not a default;
+/// - `pk`: its 1-based position in the primary key, `0` when it is not part
+///   of it.
 ///
-/// Returns [`SqlBuildError::InvalidIdentifier`] if `table` is not a plain
-/// identifier (lowercase ASCII letters, digits and `_`). The SQLite arm
-/// interpolates the name into the `PRAGMA` text, so this is a fail-closed
-/// guard; the Postgres arm binds the name but validates anyway so both
-/// dialects share one contract.
+/// Generated columns (`GENERATED ALWAYS AS (…)`) are listed on both
+/// dialects; a virtual table's hidden columns are not.
+///
+/// A table [`build_list_tables`] would not list yields zero rows (not an
+/// error) — a missing table, and on Postgres also an index, a sequence or a
+/// relation in a system schema, which `to_regclass` resolves too.
+/// [`build_catalog_table_exists`] tells a missing table from one with no
+/// columns.
+///
+/// SQLite: `pragma_table_xinfo(?1)`, the table-valued pragma function that
+/// takes the name as a bound parameter and, unlike `pragma_table_info`,
+/// includes generated columns (its `hidden` is 2 or 3 for them, 1 for a
+/// virtual table's hidden column). D1 serves it.
+/// Postgres: the live columns of the table the name resolves to (see the
+/// module docs), kept to the relation kinds and schemas the listing keeps,
+/// from `pg_catalog.pg_attribute`, in `attnum` order, the type
+/// `format_type` gives, the default `pg_get_expr` renders (none for a
+/// generated column), and the position in the key of the table's
+/// `indisprimary` index (its `INCLUDE` columns excluded), read as
+/// [`build_list_primary_key`] reads it.
+///
+/// The name is bound, never interpolated, so any name a catalog holds is
+/// accepted: `Foo`, `a-b` and `a"b` included. Returns
+/// [`SqlBuildError::InvalidIdentifier`] only for a name no catalog holds (an
+/// empty one, or one containing a NUL byte).
 pub fn build_table_info(
     table: &str,
     backend: Backend,
 ) -> Result<(String, Vec<serde_json::Value>), SqlBuildError> {
-    let safe = validate_ident(table)?;
+    let name = validate_catalog_name(table)?;
+    let params = vec![serde_json::Value::String(name.to_string())];
     Ok(match backend {
-        Backend::Sqlite => (format!("PRAGMA table_info(\"{safe}\")"), vec![]),
-        Backend::Postgres => (
-            "SELECT a.attname::text AS column_name, \
-             pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, \
-             CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable, \
-             pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default \
-             FROM pg_catalog.pg_attribute a \
-             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-             WHERE a.attrelid = to_regclass(quote_ident($1)) AND a.attnum > 0 \
-             AND NOT a.attisdropped ORDER BY a.attnum"
+        Backend::Sqlite => (
+            "SELECT name, type AS decl_type, \"notnull\" AS not_null, \
+             dflt_value AS default_value, pk FROM pragma_table_xinfo(?1) \
+             WHERE hidden <> 1 ORDER BY cid"
                 .to_string(),
-            vec![serde_json::Value::String(safe.to_string())],
+            params,
+        ),
+        Backend::Postgres => (
+            format!(
+                "SELECT a.attname::text AS name, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod) AS decl_type, \
+                 CASE WHEN a.attnotnull THEN 1::int8 ELSE 0::int8 END AS not_null, \
+                 CASE WHEN a.attgenerated = '' \
+                 THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END AS default_value, \
+                 COALESCE((SELECT k.ord FROM pg_catalog.pg_index i \
+                 CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+                 WHERE i.indrelid = a.attrelid AND i.indisprimary \
+                 AND k.ord <= i.indnkeyatts AND k.attnum = a.attnum), 0)::int8 AS pk \
+                 FROM pg_catalog.pg_attribute a \
+                 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                 WHERE a.attrelid = to_regclass(quote_ident($1)) \
+                 AND c.relkind IN {PG_TABLE_KINDS} AND {PG_NOT_SYSTEM_SCHEMA} \
+                 AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
+            ),
+            params,
         ),
     })
+}
+
+/// Build query to check whether [`build_list_tables`] would list a table,
+/// for a table named as the catalog spells it — the existence test behind
+/// [`build_table_info`]'s zero rows, which on Postgres can also mean a table
+/// declared with no columns (`CREATE TABLE t ()`).
+///
+/// Returns `(sql, params)`: one row, one integer column `present`, `1` or
+/// `0` on both dialects, so it reads as an `i64` scalar everywhere. Unlike [`build_table_exists`], which asks
+/// whether a statement's table resolves, this keeps to what the listing
+/// keeps: SQLite's tables outside the engines' reserved prefixes; Postgres's
+/// tables and views outside the system schemas.
+///
+/// Returns [`SqlBuildError::InvalidIdentifier`] only for a name no catalog
+/// holds (an empty one, or one containing a NUL byte).
+pub fn build_catalog_table_exists(
+    table: &str,
+    backend: Backend,
+) -> Result<(String, Vec<serde_json::Value>), SqlBuildError> {
+    let name = validate_catalog_name(table)?;
+    let params = vec![serde_json::Value::String(name.to_string())];
+    Ok(match backend {
+        Backend::Sqlite => (
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table'{} \
+                 AND name=?1) AS present",
+                sqlite_not_reserved()
+            ),
+            params,
+        ),
+        Backend::Postgres => (
+            format!(
+                "SELECT CASE WHEN EXISTS(SELECT 1 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE c.oid = to_regclass(quote_ident($1)) \
+                 AND c.relkind IN {PG_TABLE_KINDS} AND {PG_NOT_SYSTEM_SCHEMA}) \
+                 THEN 1::int8 ELSE 0::int8 END AS present"
+            ),
+            params,
+        ),
+    })
+}
+
+/// `table` when it is a name a catalog can hold: not empty and free of NUL
+/// bytes, which neither SQLite nor PostgreSQL accepts in an identifier.
+/// Anything else is a name a table could carry — a migration, a console or
+/// another tool can create `Foo`, `a-b` or `a"b` — so it is accepted as is.
+fn validate_catalog_name(table: &str) -> Result<&str, SqlBuildError> {
+    if table.is_empty() || table.contains('\0') {
+        return Err(SqlBuildError::InvalidIdentifier {
+            value: table.to_string(),
+        });
+    }
+    Ok(table)
 }
 
 /// Build query to count rows in a table the database layer can name.
@@ -432,12 +536,7 @@ pub fn build_catalog_table_row_count(
     table: &str,
     _backend: Backend,
 ) -> Result<String, SqlBuildError> {
-    if table.is_empty() || table.contains('\0') {
-        return Err(SqlBuildError::InvalidIdentifier {
-            value: table.to_string(),
-        });
-    }
-    let quoted = table.replace('"', "\"\"");
+    let quoted = validate_catalog_name(table)?.replace('"', "\"\"");
     Ok(format!("SELECT COUNT(*) AS cnt FROM \"{quoted}\""))
 }
 
@@ -535,29 +634,85 @@ mod tests {
     }
 
     #[test]
-    fn test_table_info_sqlite() {
-        let (sql, params) = build_table_info("users", Backend::Sqlite).expect("valid identifier");
-        assert!(sql.contains("PRAGMA table_info"));
-        assert!(params.is_empty());
-    }
-
-    #[test]
-    fn test_table_info_postgres() {
-        let (sql, params) = build_table_info("users", Backend::Postgres).expect("valid identifier");
-        assert!(sql.contains("to_regclass(quote_ident($1))"), "{sql}");
-        assert_eq!(params.len(), 1);
-    }
-
-    #[test]
-    fn test_table_info_rejects_non_identifier() {
-        // Fail-closed: the table name is interpolated into the PRAGMA text on
-        // SQLite, so anything but lowercase ASCII letters, digits and `_` is
-        // rejected, not stripped.
+    fn test_table_info_binds_the_name() {
         for backend in [Backend::Sqlite, Backend::Postgres] {
-            let err = build_table_info("users\"); DROP TABLE x;--", backend)
-                .expect_err("non-identifier table name must be rejected");
-            assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+            let (sql, params) = build_table_info("users", backend).expect("a catalog name");
+            assert_eq!(params, [serde_json::json!("users")], "{sql}");
+            assert!(
+                !sql.contains("users"),
+                "the name is bound, not in the text: {sql}"
+            );
         }
+    }
+
+    #[test]
+    fn test_table_info_refuses_only_names_no_catalog_holds() {
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            for bad in ["", "a\0b"] {
+                let err = build_table_info(bad, backend).expect_err("no catalog holds it");
+                assert!(matches!(err, SqlBuildError::InvalidIdentifier { .. }));
+            }
+            for odd in ["Foo", "a-b", "a\"b", "users\"); DROP TABLE x;--"] {
+                let (_, params) = build_table_info(odd, backend).expect("a catalog name");
+                assert_eq!(params, [serde_json::json!(odd)]);
+            }
+        }
+    }
+
+    /// `build_table_info` on a real SQLite engine: every column in
+    /// declaration order with its declared type, `NOT NULL`, default and key
+    /// position, for a table whose name is no plain identifier and whose key
+    /// spans two columns; and no rows for a missing table.
+    #[test]
+    fn test_table_info_executes_in_sqlite() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE "Odd-""Name" (b TEXT NOT NULL DEFAULT 'x', a INTEGER, note,
+               g INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL, PRIMARY KEY (a, b))"#,
+        )
+        .unwrap();
+        type Row = (String, String, i64, Option<String>, i64);
+        let info = |table: &str| -> Vec<Row> {
+            let (sql, params) = build_table_info(table, Backend::Sqlite).unwrap();
+            let mut stmt = conn.prepare(&sql).unwrap();
+            stmt.query_map([params[0].as_str().unwrap()], |r| {
+                Ok((
+                    r.get("name")?,
+                    r.get("decl_type")?,
+                    r.get("not_null")?,
+                    r.get("default_value")?,
+                    r.get("pk")?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+        };
+        assert_eq!(
+            info("Odd-\"Name"),
+            [
+                ("b".into(), "TEXT".into(), 1, Some("'x'".into()), 2),
+                ("a".into(), "INTEGER".into(), 0, None, 1),
+                ("note".into(), String::new(), 0, None, 0),
+                ("g".into(), "INTEGER".into(), 0, None, 0),
+            ]
+        );
+        assert!(info("no_such_table").is_empty());
+
+        let exists = |table: &str| -> i64 {
+            let (sql, params) = build_catalog_table_exists(table, Backend::Sqlite).unwrap();
+            conn.query_row(&sql, [params[0].as_str().unwrap()], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(exists("Odd-\"Name"), 1);
+        assert_eq!(exists("no_such_table"), 0);
+        conn.execute_batch("CREATE TABLE auto (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+            .unwrap();
+        assert_eq!(
+            exists("sqlite_sequence"),
+            0,
+            "an engine's own table is not one the listing lists"
+        );
     }
 
     #[test]

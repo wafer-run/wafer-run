@@ -29,9 +29,9 @@ use super::{
     codec::{self, encode_json_value, JsonColumns},
     schema_cache::{SchemaCache, TableColumns},
     service::{
-        AggregateSpec, CapGuard, DatabaseError, GuardedInsert, GuardedUpdate, RawStatement, Record,
-        RecordData, RecordList, StatementBudget, TransactionError, UpsertConflict, UpsertSpec,
-        WriteOp, WriteOutcome,
+        AggregateSpec, CapGuard, CatalogColumn, DatabaseError, GuardedInsert, GuardedUpdate,
+        RawStatement, Record, RecordData, RecordList, StatementBudget, TransactionError,
+        UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 
@@ -533,6 +533,56 @@ pub enum TxResult {
     Execute(i64),
     /// Rows returned by a [`TxOp::Returning`].
     Returning(Vec<Record>),
+}
+
+/// One row of [`introspect::build_table_info`] as a [`CatalogColumn`].
+///
+/// The builder answers the same columns on both dialects, as text and
+/// integers: `name`, `decl_type` (`NULL` read as no declared type),
+/// `not_null` (`0`/`1`), `default_value` (text or `NULL`) and `pk` (the 1-based
+/// key position, `0` off the key). A row that does not have that shape is a
+/// fault in the backend, never read as a default.
+fn catalog_column(row: &Record) -> Result<CatalogColumn, DatabaseError> {
+    let field = |name: &str| row.data.get(name).unwrap_or(&serde_json::Value::Null);
+    let malformed = |what: &str| {
+        DatabaseError::Internal(format!(
+            "the column description returned {what}: {:?}",
+            row.data
+        ))
+    };
+    let name = field("name")
+        .as_str()
+        .ok_or_else(|| malformed("no column name"))?
+        .to_string();
+    let decl_type = match field("decl_type") {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(t) => t.clone(),
+        _ => return Err(malformed("a non-text declared type")),
+    };
+    let not_null = match field("not_null").as_i64() {
+        Some(0) => false,
+        Some(1) => true,
+        _ => return Err(malformed("a `not_null` that is neither 0 nor 1")),
+    };
+    let default_value = match field("default_value") {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(d) => Some(d.clone()),
+        _ => return Err(malformed("a non-text default")),
+    };
+    let primary_key_position = match field("pk").as_i64() {
+        Some(0) => None,
+        Some(position) => {
+            Some(u32::try_from(position).map_err(|_| malformed("a key position out of range"))?)
+        }
+        None => return Err(malformed("no key position")),
+    };
+    Ok(CatalogColumn {
+        name,
+        decl_type,
+        not_null,
+        default_value,
+        primary_key_position,
+    })
 }
 
 /// Execution primitives + shared orchestration for SQL `DatabaseService` backends.
@@ -1737,6 +1787,60 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         self.dbx_table_exists(sql_name(name)?).await
     }
 
+    /// Shared `catalog_tables`: the rows of
+    /// [`introspect::build_list_tables`], each row's `name`.
+    ///
+    /// Runs through [`run_fetch`](Self::run_fetch), the read primitive every
+    /// typed read takes — never [`query_raw`](Self::query_raw), which a
+    /// backend may serve differently (D1 reads it through `raw()` to keep the
+    /// caller's column order, and so cannot account for the rows it read).
+    /// The same holds for [`catalog_columns`](Self::catalog_columns) and
+    /// [`catalog_row_count`](Self::catalog_row_count).
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        let sql = introspect::build_list_tables(Self::BACKEND);
+        self.run_fetch(&sql, &[], JsonColumns::NONE)
+            .await?
+            .into_iter()
+            .map(|row| match row.data.get("name") {
+                Some(serde_json::Value::String(name)) => Ok(name.clone()),
+                other => Err(DatabaseError::Internal(format!(
+                    "the table listing returned a row without a name: {other:?}"
+                ))),
+            })
+            .collect()
+    }
+
+    /// Shared `catalog_columns`: the rows of [`introspect::build_table_info`]
+    /// through [`run_fetch`](Self::run_fetch), each decoded by
+    /// [`catalog_column`].
+    ///
+    /// No rows means the listing would not list the table — it is missing,
+    /// or (Postgres) the name resolves to an index, a sequence or a system
+    /// catalog — except for a Postgres table declared with no columns. So an
+    /// empty answer is followed by one
+    /// [`introspect::build_catalog_table_exists`] probe through
+    /// [`run_scalar_i64`](Self::run_scalar_i64), which keeps to what the
+    /// listing keeps: a table it would not list is
+    /// [`DatabaseError::NotFound`], a listed one has no columns.
+    async fn catalog_columns(&self, table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        let (sql, params) = introspect::build_table_info(table, Self::BACKEND)?;
+        let rows = self.run_fetch(&sql, &params, JsonColumns::NONE).await?;
+        if rows.is_empty() {
+            let (sql, params) = introspect::build_catalog_table_exists(table, Self::BACKEND)?;
+            if self.run_scalar_i64(&sql, &params).await? == 0 {
+                return Err(DatabaseError::NotFound);
+            }
+        }
+        rows.iter().map(catalog_column).collect()
+    }
+
+    /// Shared `catalog_row_count`: [`introspect::build_catalog_table_row_count`]
+    /// through [`run_scalar_i64`](Self::run_scalar_i64).
+    async fn catalog_row_count(&self, table: &str) -> Result<i64, DatabaseError> {
+        let sql = introspect::build_catalog_table_row_count(table, Self::BACKEND)?;
+        self.run_scalar_i64(&sql, &[]).await
+    }
+
     /// Shared `ensure_schema_table`: [`require_stamped_columns`] →
     /// `CREATE TABLE IF NOT EXISTS` → add every declared column the table is
     /// missing → indexes → foreign-key indexes.
@@ -2501,6 +2605,159 @@ mod tests {
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
             Ok(true)
         }
+    }
+
+    /// Backend for the catalog reads: answers the listing and the column
+    /// description through [`DbExec::run_fetch`] and the count and the
+    /// existence probe through [`DbExec::run_scalar_i64`], records each, and
+    /// panics if anything reaches [`DbExec::query_raw`] — the path a backend
+    /// may serve without accounting for its cost (D1's `raw()`), which the
+    /// catalog reads exist to avoid.
+    struct CatalogMock {
+        calls: Mutex<Vec<&'static str>>,
+        /// Whether the column description answers no rows.
+        no_columns: bool,
+    }
+
+    #[wafer_async_trait]
+    impl DbExec for CatalogMock {
+        const BACKEND: Backend = Backend::Sqlite;
+
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(StatementBudget::Unbounded)
+        }
+
+        async fn query_raw(
+            &self,
+            query: &str,
+            _args: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            panic!("a catalog read went through query_raw: {query}")
+        }
+
+        async fn run_fetch(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+            _json: &JsonColumns,
+        ) -> Result<Vec<Record>, DatabaseError> {
+            let mut data = RecordData::new();
+            if sql.contains("pragma_table_xinfo") {
+                self.calls.lock().unwrap().push("fetch:columns");
+                if self.no_columns {
+                    return Ok(Vec::new());
+                }
+                data.insert("name".into(), serde_json::json!("a"));
+                data.insert("decl_type".into(), serde_json::json!("TEXT"));
+                data.insert("not_null".into(), serde_json::json!(1));
+                data.insert("default_value".into(), serde_json::Value::Null);
+                data.insert("pk".into(), serde_json::json!(1));
+            } else {
+                self.calls.lock().unwrap().push("fetch:tables");
+                data.insert("name".into(), serde_json::json!("Foo"));
+            }
+            Ok(vec![Record {
+                id: String::new(),
+                data,
+            }])
+        }
+
+        async fn run_fetch_one(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+            _json: &JsonColumns,
+        ) -> Result<Record, DatabaseError> {
+            panic!("unexpected run_fetch_one: {sql}")
+        }
+
+        async fn run_execute(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            panic!("unexpected run_execute: {sql}")
+        }
+
+        async fn run_execute_returning(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+            _json: &JsonColumns,
+        ) -> Result<Vec<Record>, DatabaseError> {
+            panic!("unexpected run_execute_returning: {sql}")
+        }
+
+        async fn run_scalar_i64(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            if sql.contains("EXISTS") {
+                self.calls.lock().unwrap().push("scalar:exists");
+                Ok(0)
+            } else {
+                self.calls.lock().unwrap().push("scalar:count");
+                Ok(3)
+            }
+        }
+
+        async fn run_scalar_f64(
+            &self,
+            sql: &str,
+            _params: &[serde_json::Value],
+        ) -> Result<f64, DatabaseError> {
+            panic!("unexpected run_scalar_f64: {sql}")
+        }
+
+        async fn run_transaction(
+            &self,
+            _ops: &[TxOp<'_>],
+        ) -> Result<Vec<TxResult>, TransactionError> {
+            panic!("unexpected run_transaction")
+        }
+
+        async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
+            panic!("unexpected dbx_table_exists: {table}")
+        }
+    }
+
+    /// The catalog reads run through the read primitives every typed read
+    /// takes — `run_fetch` and `run_scalar_i64` — and never through
+    /// `query_raw`, whatever a backend's `query_raw` does. This is the whole
+    /// reason the ops exist: D1 serves `query_raw` through `raw()`, which
+    /// reports no rows read, and its read primitives through `all()`, which
+    /// does.
+    #[tokio::test]
+    async fn catalog_reads_take_the_read_primitives_never_query_raw() {
+        let mock = CatalogMock {
+            calls: Mutex::new(Vec::new()),
+            no_columns: false,
+        };
+        assert_eq!(mock.catalog_tables().await.unwrap(), ["Foo"]);
+        let columns = mock.catalog_columns("Foo").await.unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].primary_key_position, Some(1));
+        assert_eq!(mock.catalog_row_count("Foo").await.unwrap(), 3);
+        assert_eq!(
+            *mock.calls.lock().unwrap(),
+            ["fetch:tables", "fetch:columns", "scalar:count"]
+        );
+
+        // A description with no rows is followed by the existence probe,
+        // through the scalar primitive too.
+        let mock = CatalogMock {
+            calls: Mutex::new(Vec::new()),
+            no_columns: true,
+        };
+        assert!(matches!(
+            mock.catalog_columns("Foo").await,
+            Err(DatabaseError::NotFound)
+        ));
+        assert_eq!(
+            *mock.calls.lock().unwrap(),
+            ["fetch:columns", "scalar:exists"]
+        );
     }
 
     #[tokio::test]

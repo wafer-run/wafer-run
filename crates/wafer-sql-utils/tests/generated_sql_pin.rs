@@ -699,6 +699,13 @@ fn render_introspect(out: &mut Out, backend: Backend, b: &str) {
     out.raw(I, "list_primary_key", b, &sql, &p);
     let (sql, p) = introspect::build_id_policy("users", backend);
     out.raw(I, "id_policy", b, &sql, &p);
+    match introspect::build_catalog_table_exists("users", backend) {
+        Ok((sql, p)) => out.raw(I, "catalog_table_exists", b, &sql, &p),
+        Err(e) => {
+            out.header(I, "catalog_table_exists", b);
+            writeln!(out.0, "error: {e:?}\n").unwrap();
+        }
+    }
     match introspect::build_table_info("users", backend) {
         Ok((sql, p)) => out.raw(I, "table_info", b, &sql, &p),
         Err(e) => {

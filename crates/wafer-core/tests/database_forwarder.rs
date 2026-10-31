@@ -20,9 +20,9 @@ use std::{
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    AggregateSpec, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate,
-    RawStatement, Record, RecordData, RecordList, StatementBudget, Table, TransactionError,
-    UpsertSpec, WriteOp, WriteOutcome,
+    AggregateSpec, CatalogColumn, Column, DatabaseError, DatabaseService, GuardedInsert,
+    GuardedUpdate, RawStatement, Record, RecordData, RecordList, StatementBudget, Table,
+    TransactionError, UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -289,6 +289,21 @@ impl DatabaseService for RecordingDb {
         self.note("schema_add_column");
         Ok(())
     }
+
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        self.note("catalog_tables");
+        Ok(vec!["Foo".into()])
+    }
+
+    async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        self.note("catalog_columns");
+        Ok(Vec::new())
+    }
+
+    async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+        self.note("catalog_row_count");
+        Ok(5)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +354,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
             statement_budget: forward,
         }
 
@@ -493,6 +511,9 @@ async fn the_rest_of_the_surface_forwards() {
     dec.schema_table_exists("t").await.expect("ste");
     dec.schema_columns("t").await.expect("sc");
     dec.schema_drop_table("t").await.expect("sdt");
+    assert_eq!(dec.catalog_tables().await.expect("ct"), ["Foo"]);
+    dec.catalog_columns("Foo").await.expect("cc");
+    assert_eq!(dec.catalog_row_count("Foo").await.expect("crc"), 5);
     assert_eq!(
         inner.calls(),
         vec![
@@ -512,6 +533,9 @@ async fn the_rest_of_the_surface_forwards() {
             "schema_table_exists".to_string(),
             "schema_columns".to_string(),
             "schema_drop_table".to_string(),
+            "catalog_tables".to_string(),
+            "catalog_columns".to_string(),
+            "catalog_row_count".to_string(),
         ]
     );
 }

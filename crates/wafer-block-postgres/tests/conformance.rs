@@ -91,13 +91,8 @@ async fn a_search_path_without_public_is_conformant() {
     use std::str::FromStr as _;
 
     use sqlx::postgres::{PgConnectOptions, PgPool};
-    use wafer_sql_utils::{
-        introspect::{
-            build_catalog_table_row_count, build_list_tables, build_list_tables_like,
-            build_table_info,
-        },
-        Backend,
-    };
+    use wafer_core::interfaces::database::service::{CatalogColumn, DatabaseService};
+    use wafer_sql_utils::{introspect::build_list_tables_like, Backend};
 
     const SCHEMA: &str = "conf_search_path";
     let Ok(url) = std::env::var(URL_ENV) else {
@@ -129,7 +124,7 @@ async fn a_search_path_without_public_is_conformant() {
     run_conformance(&svc).await;
     run_two_instance_conformance(&svc, &in_schema().await).await;
 
-    // The admin listings resolve names the same way.
+    // The catalog reads and the prefix listing resolve names the same way.
     let options = PgConnectOptions::from_str(&url)
         .expect("parse the conformance URL")
         .options([("search_path", SCHEMA)]);
@@ -138,11 +133,7 @@ async fn a_search_path_without_public_is_conformant() {
         .execute(&session)
         .await
         .expect("create the probe table");
-    let tables: Vec<String> =
-        sqlx::query_scalar(AssertSqlSafe(build_list_tables(Backend::Postgres)))
-            .fetch_all(&session)
-            .await
-            .expect("list tables");
+    let tables = svc.catalog_tables().await.expect("catalog_tables");
     assert!(tables.contains(&"conf_sp_probe".to_string()), "{tables:?}");
     let (sql, params) = build_list_tables_like("conf_sp_", Backend::Postgres);
     let like: Vec<String> = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
@@ -160,7 +151,8 @@ async fn a_search_path_without_public_is_conformant() {
         .expect("list tables like");
     assert!(like.is_empty(), "{like:?}");
     // A table created outside the database layer, under a name that is not a
-    // plain identifier, is listed and counted under exactly that name.
+    // plain identifier, is listed, described and counted under exactly that
+    // name.
     sqlx::query(r#"CREATE TABLE "Conf_Sp_Mixed""Case" (id TEXT PRIMARY KEY)"#)
         .execute(&session)
         .await
@@ -169,34 +161,30 @@ async fn a_search_path_without_public_is_conformant() {
         .execute(&session)
         .await
         .expect("insert rows");
-    let tables: Vec<String> =
-        sqlx::query_scalar(AssertSqlSafe(build_list_tables(Backend::Postgres)))
-            .fetch_all(&session)
-            .await
-            .expect("list tables");
     let mixed = "Conf_Sp_Mixed\"Case";
+    let tables = svc.catalog_tables().await.expect("catalog_tables");
     assert!(tables.iter().any(|t| t == mixed), "{tables:?}");
-    let sql = build_catalog_table_row_count(mixed, Backend::Postgres).expect("a catalog name");
-    let n: i64 = sqlx::query_scalar(AssertSqlSafe(sql.as_str()))
-        .fetch_one(&session)
-        .await
-        .expect("count the mixed-case table");
-    assert_eq!(n, 2);
-    let (sql, params) = build_table_info("conf_sp_probe", Backend::Postgres).expect("valid name");
-    let info: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(format!(
-        "SELECT column_name, data_type, is_nullable FROM ({sql}) AS info"
-    )))
-    .bind(params[0].as_str().expect("table name"))
-    .fetch_all(&session)
-    .await
-    .expect("table info");
+    assert_eq!(svc.catalog_row_count(mixed).await.expect("count"), 2);
+    let columns = svc.catalog_columns(mixed).await.expect("catalog_columns");
     assert_eq!(
-        info,
-        [
-            ("id".into(), "text".into(), "NO".into()),
-            ("n".into(), "integer".into(), "NO".into()),
-        ]
+        columns,
+        [CatalogColumn {
+            name: "id".into(),
+            decl_type: "text".into(),
+            not_null: true,
+            default_value: None,
+            primary_key_position: Some(1),
+        }]
     );
+    let columns = svc
+        .catalog_columns("conf_sp_probe")
+        .await
+        .expect("catalog_columns");
+    let described: Vec<(&str, &str, bool)> = columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.decl_type.as_str(), c.not_null))
+        .collect();
+    assert_eq!(described, [("id", "text", true), ("n", "integer", true)]);
     session.close().await;
 
     sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {SCHEMA} CASCADE")))
@@ -286,15 +274,90 @@ async fn a_select_only_role_still_breaks_ties_on_the_primary_key() {
     );
 }
 
+/// `catalog_columns` describes only what `catalog_tables` lists. On
+/// PostgreSQL `to_regclass` also resolves an index, a sequence and the system
+/// catalogs (`pg_catalog` is searched first by every `search_path`); each is
+/// `NotFound`, as a missing table is. A table declared with no columns is
+/// listed and described as having none. Skipped unless
+/// `WAFER_CONFORMANCE_POSTGRES_URL` is set.
+#[tokio::test]
+async fn catalog_columns_describes_only_what_the_listing_lists() {
+    use sqlx::postgres::PgPool;
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres catalog_columns relation-kind check: set {URL_ENV} to run");
+        return;
+    };
+    let admin = PgPool::connect(&url).await.expect("connect");
+    for stmt in [
+        "DROP TABLE IF EXISTS conf_cat_kinds",
+        "DROP TABLE IF EXISTS conf_cat_zero",
+        "DROP SEQUENCE IF EXISTS conf_cat_seq",
+        "CREATE TABLE conf_cat_kinds (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE INDEX conf_cat_kinds_email_idx ON conf_cat_kinds (email)",
+        "CREATE SEQUENCE conf_cat_seq",
+        "CREATE TABLE conf_cat_zero ()",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+    let svc = PostgresDatabaseService::from_pool(admin.clone()).expect("service");
+    for not_a_table in [
+        "conf_cat_kinds_pkey",
+        "conf_cat_kinds_email_idx",
+        "conf_cat_seq",
+        "pg_class",
+        "pg_authid",
+    ] {
+        assert!(
+            matches!(
+                svc.catalog_columns(not_a_table).await,
+                Err(DatabaseError::NotFound)
+            ),
+            "{not_a_table} is not a table the listing lists"
+        );
+    }
+    assert_eq!(
+        svc.catalog_columns("conf_cat_kinds")
+            .await
+            .expect("catalog_columns")
+            .len(),
+        2
+    );
+    let tables = svc.catalog_tables().await.expect("catalog_tables");
+    assert!(tables.iter().any(|t| t == "conf_cat_zero"), "{tables:?}");
+    assert_eq!(
+        svc.catalog_columns("conf_cat_zero")
+            .await
+            .expect("a listed table with no columns is described, not NotFound"),
+        []
+    );
+    for stmt in [
+        "DROP TABLE conf_cat_kinds",
+        "DROP TABLE conf_cat_zero",
+        "DROP SEQUENCE conf_cat_seq",
+    ] {
+        sqlx::query(stmt)
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("{stmt}: {e}"));
+    }
+}
+
 /// A `PRIMARY KEY (...) INCLUDE (...)` index lists its covering columns in
 /// `indkey` after its `indnkeyatts` key columns. They do not identify a row,
-/// so the key introspection must stop at the key. (A list cannot show the
+/// so the key introspection must stop at the key — the executor's, and the
+/// key positions `catalog_columns` reports. (A list cannot show the
 /// difference, since the key columns are already unique, so this reads the
 /// introspection itself.) Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` is
 /// set.
 #[tokio::test]
 async fn an_included_column_is_not_part_of_the_primary_key() {
     use sqlx::postgres::PgPool;
+    use wafer_core::interfaces::database::service::DatabaseService;
     use wafer_sql_utils::{introspect::build_list_primary_key, Backend};
 
     let Ok(url) = std::env::var(URL_ENV) else {
@@ -318,11 +381,28 @@ async fn an_included_column_is_not_part_of_the_primary_key() {
         .fetch_all(&admin)
         .await
         .expect("introspect the key");
+    let svc = PostgresDatabaseService::from_pool(admin.clone()).expect("service");
+    let positions: Vec<(String, Option<u32>)> = svc
+        .catalog_columns("conf_include_key")
+        .await
+        .expect("catalog_columns")
+        .into_iter()
+        .map(|c| (c.name, c.primary_key_position))
+        .collect();
     sqlx::query("DROP TABLE conf_include_key")
         .execute(&admin)
         .await
         .expect("drop");
     assert_eq!(key, ["a", "b"], "the INCLUDE column c is not a key column");
+    assert_eq!(
+        positions,
+        [
+            ("c".to_string(), None),
+            ("b".to_string(), Some(2)),
+            ("a".to_string(), Some(1)),
+        ],
+        "the INCLUDE column c has no key position"
+    );
 }
 
 /// Concurrent guarded writes cannot overshoot their cap on PostgreSQL.
