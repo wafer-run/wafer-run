@@ -234,8 +234,9 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// lands none) and `batch` (mixed ops across collections apply in order and
 /// report per-op outcomes; one failing op rolls every op back; a filtered
 /// delete and the creates that replace the rows it removed are one
-/// transaction); large writes (a `create_many` and a `batch` of 2,500 each
-/// run as one call, past D1's per-invocation limit);
+/// transaction); large writes (a `create_many`, a `batch` and an
+/// `exec_raw_transaction` of 2,500 each run whole: no layer caps a write's
+/// size);
 /// `insert_guarded`/`update_guarded` (count and sum caps, landing exactly on
 /// a sum cap, the refusing guard named, a replaced row excluded by a filter,
 /// no match told apart from a refusal, a taken key as `AlreadyExists`, and ten
@@ -2036,10 +2037,11 @@ async fn check_take_where(svc: &dyn DatabaseService) {
 // create_many (all-or-nothing multi-row insert)
 // ---------------------------------------------------------------------------
 
-/// A `create_many` and a `batch` are one call each, whatever their length:
-/// every backend runs both far past the 1,000 calls Cloudflare D1 allows one
-/// invocation (and the 1,000 statements an older, per-statement count would
-/// have refused), each as one transaction.
+/// A `create_many`, a `batch` and an `exec_raw_transaction` of 2,500 each run
+/// whole, each as one transaction, on the backend under test: no layer caps a
+/// write's size (an
+/// older per-statement count refused anything over 1,000 on D1). It shows
+/// the size is uncapped; it cannot observe how many calls a backend counts.
 async fn check_large_writes(svc: &dyn DatabaseService) {
     const LARGE: usize = 2500;
     let table = crud_table("conf_large_writes");
@@ -2067,6 +2069,24 @@ async fn check_large_writes(svc: &dyn DatabaseService) {
     assert_eq!(
         svc.count("conf_large_writes", &[]).await.expect("count"),
         2 * LARGE as i64
+    );
+
+    // A raw transaction (a migration file) of any length runs whole too.
+    let statements: Vec<RawStatement> = (0..LARGE)
+        .map(|i| {
+            raw(&format!(
+                "INSERT INTO conf_large_writes (id, name) VALUES ('raw{i}', 'r')"
+            ))
+        })
+        .collect();
+    let counts = svc
+        .exec_raw_transaction(&statements)
+        .await
+        .expect("an exec_raw_transaction of any size runs");
+    assert_eq!(counts, vec![1; LARGE]);
+    assert_eq!(
+        svc.count("conf_large_writes", &[]).await.expect("count"),
+        3 * LARGE as i64
     );
 }
 

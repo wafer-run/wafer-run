@@ -49,8 +49,8 @@ pub enum DatabaseError {
     /// The backend limits the database calls one invocation may make, and
     /// this invocation has none left, so the call was refused before it was
     /// sent; a fresh invocation may run it. Nothing was written. A backend
-    /// counts one call per primitive and one per transaction or batch,
-    /// whatever its length, and maps its platform's own refusal of the same
+    /// counts one call per round trip it sends (a lone statement, or a whole
+    /// transaction or native batch whatever its length), and maps its platform's own refusal of the same
     /// limit to this variant (see [`DbExec`](super::exec::DbExec)'s
     /// "Per-invocation call limits"). Answered with `ResourceExhausted` and
     /// detail code [`CALL_BUDGET_EXHAUSTED`].
@@ -109,10 +109,10 @@ impl DatabaseError {
 /// A failure normally means nothing committed, whichever statement failed:
 /// a statement that fails, a transaction that cannot be opened and a
 /// [`DatabaseError::CallBudgetExhausted`] refusal all leave every statement
-/// unapplied. A failure
-/// reported after the backend accepted the commit is different, and leaves
-/// the outcome unknown: a `COMMIT` whose answer was lost (the connection
-/// broke while PostgreSQL committed), or a check on the results that runs
+/// unapplied. A failure reported after the backend accepted the commit is
+/// different, and leaves the outcome unknown: a `COMMIT` whose answer was
+/// lost (the connection broke while PostgreSQL committed), or a check on the
+/// results that runs
 /// once the backend has committed (D1's `batch()` resolves only after its
 /// commit). Such a failure is [`Self::whole`]. A caller whose next step
 /// depends on whether the statements applied must re-read its own state
@@ -678,9 +678,10 @@ impl AggregateSpec {
 /// Service provides generic CRUD operations on collections.
 ///
 /// A backend whose platform limits the database calls one invocation may
-/// make counts one call per lone operation and one per transaction or batch
-/// (`create_many`, `batch`, `exec_raw_transaction`, a guarded write),
-/// whatever its length. It refuses a call past its limit before sending it
+/// make counts one call per round trip it sends: the transaction of a
+/// `create_many`, `batch`, `exec_raw_transaction` or guarded write is one,
+/// whatever its length, and each schema read an operation makes while
+/// planning (when not already cached) is one more. It refuses a call past its limit before sending it
 /// with [`DatabaseError::CallBudgetExhausted`], and maps its platform's own
 /// refusal of the same limit to that error; see
 /// [`DbExec`](super::exec::DbExec)'s "Per-invocation call limits".
@@ -704,9 +705,10 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// return the number inserted. Each row gets [`create`](Self::create)'s
     /// stamping; rows may carry different column sets. Either every row is
     /// stored or, when any insert fails, none is. No default: a backend that
-    /// cannot make the inserts atomic must say so with an error. The whole
-    /// insert is one database call, however many rows it carries: a backend
-    /// with a per-invocation call limit refuses it with
+    /// cannot make the inserts atomic must say so with an error. The insert
+    /// itself is one database call, however many rows it carries (reading
+    /// the table's schema, when not already cached, is a call of its own): a
+    /// backend with a per-invocation call limit refuses a call with
     /// [`DatabaseError::CallBudgetExhausted`] before it runs when the
     /// invocation has no call left.
     async fn create_many(
@@ -719,9 +721,10 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`WriteOutcome`] per op in the same order. Either every op is applied
     /// or, when any statement fails, none is. An `Update`/`Delete` whose id
     /// matches no row is an outcome, not a failure. No default, for the same
-    /// reason as [`create_many`](Self::create_many). The whole batch is one
-    /// database call, refused the same way when the invocation has no call
-    /// left.
+    /// reason as [`create_many`](Self::create_many). The transaction itself
+    /// is one database call, whatever its length (each schema read while
+    /// planning, when not already cached, is one more), refused the same way
+    /// when the invocation has no call left.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError>;
 
     /// Insert `data` into `collection` only while every guard in `guards`

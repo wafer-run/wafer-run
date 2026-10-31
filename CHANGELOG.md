@@ -32,23 +32,31 @@
     `…_exceeds_limit` drops that arm.
   - The contract, on `DbExec` and `DatabaseService`: a backend whose
     platform limits the database round trips one invocation may make counts
-    one call per primitive (`run_fetch`, `run_fetch_one`, `run_execute`,
-    `run_execute_returning`, `run_scalar_*`, `run_schema_execute`,
-    `dbx_table_exists`, `query_raw`) and one per `run_transaction`,
-    `run_schema_transaction` or `run_batch`, whatever its length; runs a
-    transaction in one call; refuses a call past its limit before sending
-    it with `CallBudgetExhausted`; and maps its platform's own refusal of
-    the same limit to that error. A backend with no such limit (native
-    SQLite, PostgreSQL) counts nothing. A `create_many` or `batch` of any
-    size is therefore one call on every backend; on D1 it is bounded by
-    D1's own per-batch limits (30 s, per-statement size), not by a count.
+    one call per round trip it actually sends, once, where it is sent: one
+    per lone statement (`run_fetch`, `run_fetch_one`, `run_execute`,
+    `run_execute_returning`, `run_scalar_*`, `dbx_table_exists`,
+    `query_raw`) and one per `run_transaction`, whatever its length. A
+    default that delegates is counted where it lands (`run_schema_execute`
+    → `run_execute`, `run_schema_transaction` → `run_transaction`).
+    `run_batch`'s default sends one call per op, so a call-limited backend
+    overrides it with its native batch (D1: one `db.batch()`). The backend
+    runs a transaction in one call, refuses a call past its limit before
+    sending it with `CallBudgetExhausted`, and maps its platform's own
+    refusal of the same limit to that error. A backend with no such limit
+    (native SQLite, PostgreSQL) counts nothing. The write of a `create_many`
+    or `batch` is therefore one call whatever its size (reading a table's
+    schema when not already cached, and an append-only collection's column
+    check, are calls of their own); on D1 it is bounded by D1's own
+    per-batch limits (30 s, per-statement size), not by a count.
   - `init_failure_is_transient` treats `CALL_BUDGET_EXHAUSTED` as transient
     whatever the code, as it treated the old code; every other
     `ResourceExhausted` stays permanent. There is no permanent budget
     refusal any more.
   - Conformance: `check_statement_budget` is `check_large_writes`, and runs
-    unconditionally: every backend takes a `create_many` and a `batch` of
-    2,500 each.
+    unconditionally: a `create_many`, a `batch` and an `exec_raw_transaction`
+    of 2,500 each run whole on
+    every backend `run_conformance` is run against (it shows that no layer
+    caps a write's size; it cannot observe calls).
   - Migrating: delete every `statement_budget` impl and ledger entry;
     rename `ResourceExhausted` arms on `DatabaseError` to
     `CallBudgetExhausted` and drop `StatementLimitExceeded` arms; a
@@ -107,9 +115,9 @@
   spent and a fresh invocation may run the statement — checked before the
   code-level rule that keeps every other `ResourceExhausted` (the runtime's
   own limits: call depth, wasm host memory, a flow's `max_steps`)
-  permanent. A statement no invocation can run (`StatementLimitExceeded`,
-  `InvalidArgument` with `STATEMENT_BUDGET_EXCEEDS_LIMIT`) stays permanent.
-  An Init that met a spent budget was cached dead for the runtime's life; it
+  permanent. A statement no invocation could run (`StatementLimitExceeded`,
+  `InvalidArgument` with `STATEMENT_BUDGET_EXCEEDS_LIMIT`) stayed permanent
+  until that variant was removed. An Init that met a spent budget was cached dead for the runtime's life; it
   is now retried. The rule is the new public
   `init_failure_is_transient(code, detail_code)`, which
   `from_lifecycle_error` applies; a `ConfigSource` whose backend errors

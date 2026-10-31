@@ -560,10 +560,12 @@ pub struct CreateManyRequest {
     /// Collection (table) name.
     pub collection: String,
     /// One column → value map per row; `id` and timestamps are stamped when
-    /// absent, as for `database.create`. One statement each; the whole call
-    /// is one database round trip, refused before it runs with
-    /// [`CALL_BUDGET_EXHAUSTED`] when a call-limited backend's invocation has
-    /// no call left.
+    /// absent, as for `database.create`. One statement each; the insert
+    /// itself is one database round trip, whatever its length. Reading the
+    /// table's schema, when not already cached, and an append-only
+    /// collection's column check are calls of their own. A call-limited
+    /// backend refuses a call with [`CALL_BUDGET_EXHAUSTED`] before it runs
+    /// when the invocation has no call left.
     pub rows: Vec<HashMap<String, serde_json::Value>>,
 }
 
@@ -573,10 +575,12 @@ pub struct CreateManyRequest {
 /// [`BatchWrite::access`] names, before anything runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchRequest {
-    /// The writes, applied in order. One statement each; the whole call is
-    /// one database round trip, refused before it runs with
-    /// [`CALL_BUDGET_EXHAUSTED`] when a call-limited backend's invocation has
-    /// no call left.
+    /// The writes, applied in order. One statement each; the transaction
+    /// itself is one database round trip, whatever its length. Reading a
+    /// table's schema, when not already cached, and an append-only
+    /// collection's column check are calls of their own. A call-limited
+    /// backend refuses a call with [`CALL_BUDGET_EXHAUSTED`] before it runs
+    /// when the invocation has no call left.
     pub ops: Vec<BatchWrite>,
 }
 

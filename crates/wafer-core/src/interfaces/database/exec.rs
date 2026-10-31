@@ -591,16 +591,27 @@ fn catalog_column(row: &Record) -> Result<CatalogColumn, DatabaseError> {
 ///
 /// A backend whose platform limits the database round trips one invocation
 /// may make (Cloudflare D1: 1,000 per Worker invocation, a `db.batch()`
-/// counting once) counts **calls**, not statements:
-/// - one per primitive: [`run_fetch`](Self::run_fetch),
+/// counting once) counts **calls**, not statements: one per round trip it
+/// actually sends, counted once, where the round trip is sent.
+/// - A lone statement is one call: [`run_fetch`](Self::run_fetch),
 ///   [`run_fetch_one`](Self::run_fetch_one), [`run_execute`](Self::run_execute),
 ///   [`run_execute_returning`](Self::run_execute_returning), the
-///   `run_scalar_*` pair, [`run_schema_execute`](Self::run_schema_execute),
-///   [`dbx_table_exists`](Self::dbx_table_exists), and
-///   [`DatabaseService::query_raw`](super::service::DatabaseService::query_raw);
-/// - one per [`run_transaction`](Self::run_transaction),
-///   [`run_schema_transaction`](Self::run_schema_transaction) or
-///   [`run_batch`](Self::run_batch), whatever its length.
+///   `run_scalar_*` pair, [`dbx_table_exists`](Self::dbx_table_exists), and
+///   [`DatabaseService::query_raw`](super::service::DatabaseService::query_raw).
+/// - A transaction is one call, whatever its length: the backend implements
+///   [`run_transaction`](Self::run_transaction) as one round trip (D1: one
+///   `db.batch()`).
+/// - A default that delegates is counted where it lands, never twice:
+///   [`run_schema_execute`](Self::run_schema_execute)'s default runs
+///   [`run_execute`](Self::run_execute), and
+///   [`run_schema_transaction`](Self::run_schema_transaction)'s runs
+///   [`run_transaction`](Self::run_transaction), so a backend that keeps
+///   either default counts only the primitive it delegates to.
+/// - [`run_batch`](Self::run_batch)'s default sends each op through the
+///   single-statement primitives, so it costs **one call per op**. A
+///   call-limited backend overrides it with its platform's native batch
+///   (D1: one `db.batch()`), which is then one call whatever its length;
+///   otherwise a `list`'s count + select costs two.
 ///
 /// It runs a transaction in one call. It refuses a call past its limit
 /// before sending it, with
@@ -1934,7 +1945,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// any row names must already exist — a failed insert, or a transaction
     /// the backend refuses for its call budget
     /// ([`DatabaseError::CallBudgetExhausted`]), leaves no row behind. The
-    /// whole insert is one call, however many rows it carries.
+    /// insert itself is one call, however many rows it carries; the planning
+    /// reads before it (`id_policy`, the JSON columns) are calls of their own
+    /// unless the [`schema_cache`](Self::schema_cache) already holds them.
     async fn create_many(
         &self,
         collection: &str,
