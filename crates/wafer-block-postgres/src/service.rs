@@ -291,6 +291,9 @@ forward_database_service! {
             // `DbExec` has no schema-mutation primitives.
             schema_drop_table: custom,
             schema_add_column: custom,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
             statement_budget: forward,
         }
 

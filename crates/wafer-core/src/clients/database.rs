@@ -7,21 +7,25 @@ use wafer_block::context::Context;
 use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
 // `Record` and `RecordList` are byte-identical to the wire types; collapse
 // the duplicate by re-exporting from the wire crate.
-pub use wafer_block::wire::database::{RawStatement, Record, RecordData, RecordList};
+pub use wafer_block::wire::database::{
+    CatalogColumn, RawStatement, Record, RecordData, RecordList,
+};
 use wafer_block::{
     common::{ErrorCode, ServiceOp},
     wire::database::{
         AddColumnRequest, AggregateRequest, BatchRequest, BatchResponse, BatchWrite,
-        BatchWriteResult, ColumnDef, CountRequest, CountResponse, CreateManyRequest,
-        CreateManyResponse, CreateRequest, DdlTransactionRequest, DdlTransactionResponse,
-        DeleteRequest, DeleteWhereCountRequest, DeleteWhereCountResponse, DeleteWhereRequest,
-        DropTableRequest, EnsureTableRequest, ExecRawRequest, ExecRawResponse,
-        FilterDef as WireFilterDef, FilterNode, GetRequest, IncrementFieldWhereRequest,
-        InsertGuardedRequest, InsertGuardedResponse, ListRequest, OnConflict, QueryRawRequest,
-        SchemaOpResponse, SortFieldDef as WireSortFieldDef, SumRequest, SumResponse, TableDef,
-        TableExistsRequest, TableExistsResponse, TakeWhereRequest, TakeWhereResponse,
-        UpdateGuardedRequest, UpdateGuardedResponse, UpdateRequest, UpdateWhereCountRequest,
-        UpdateWhereCountResponse, UpdateWhereRequest, UpsertRequest, UpsertResponse,
+        BatchWriteResult, CatalogColumnsRequest, CatalogColumnsResponse, CatalogRowCountRequest,
+        CatalogRowCountResponse, CatalogTablesRequest, CatalogTablesResponse, ColumnDef,
+        CountRequest, CountResponse, CreateManyRequest, CreateManyResponse, CreateRequest,
+        DdlTransactionRequest, DdlTransactionResponse, DeleteRequest, DeleteWhereCountRequest,
+        DeleteWhereCountResponse, DeleteWhereRequest, DropTableRequest, EnsureTableRequest,
+        ExecRawRequest, ExecRawResponse, FilterDef as WireFilterDef, FilterNode, GetRequest,
+        IncrementFieldWhereRequest, InsertGuardedRequest, InsertGuardedResponse, ListRequest,
+        OnConflict, QueryRawRequest, SchemaOpResponse, SortFieldDef as WireSortFieldDef,
+        SumRequest, SumResponse, TableDef, TableExistsRequest, TableExistsResponse,
+        TakeWhereRequest, TakeWhereResponse, UpdateGuardedRequest, UpdateGuardedResponse,
+        UpdateRequest, UpdateWhereCountRequest, UpdateWhereCountResponse, UpdateWhereRequest,
+        UpsertRequest, UpsertResponse,
     },
     wrap::{DDL_RESOURCE, RAW_SQL_RESOURCE},
     WaferError,
@@ -485,6 +489,47 @@ dual_api! {
         let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_TABLE_EXISTS, &req, Some(table), false, Some("db"))?;
         let resp: TableExistsResponse = decode(&data)?;
         Ok(resp.exists)
+    }
+
+    // --- Catalog reads (the admin database browser) ---
+    //
+    // Each names tables as the catalog spells them and together they reach
+    // every table, whatever its namespace, so all three are authorized on
+    // the `"__raw_sql__"` WRAP resource, as `query_raw` is: admin-only, with
+    // the `raw_sql` capability. Unlike `query_raw` they carry no SQL: the
+    // host builds each statement and runs it through the backend's ordinary
+    // read path, so a backend that accounts for the rows its reads cost
+    // (D1) accounts for these.
+
+    /// Every table the database holds, under the name its catalog spells it
+    /// (`Foo`, `a-b` and `a"b` included), in name order. The SQLite family
+    /// leaves out its engines' own tables (`sqlite_*`, D1's `_cf_*`).
+    pub fn catalog_tables(ctx,) -> Result<Vec<String>, WaferError> {
+        let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_CATALOG_TABLES, &CatalogTablesRequest {}, Some(RAW_SQL_RESOURCE), false, Some("db"))?;
+        let resp: CatalogTablesResponse = decode(&data)?;
+        Ok(resp.tables)
+    }
+
+    /// The columns of `table` (named as [`catalog_tables`] lists it), in
+    /// declaration order: name, declared type, `NOT NULL`, default and
+    /// primary-key position, the same shape on every backend. A table the
+    /// database does not hold is [`ErrorCode::NotFound`]; an empty name, or
+    /// one containing a NUL byte, is [`ErrorCode::InvalidArgument`].
+    pub fn catalog_columns(ctx, table: &str) -> Result<Vec<CatalogColumn>, WaferError> {
+        let req = CatalogColumnsRequest { table: table.to_string() };
+        let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_CATALOG_COLUMNS, &req, Some(RAW_SQL_RESOURCE), false, Some("db"))?;
+        let resp: CatalogColumnsResponse = decode(&data)?;
+        Ok(resp.columns)
+    }
+
+    /// How many rows `table` (named as [`catalog_tables`] lists it) holds — a
+    /// `COUNT(*)` over the whole table. An empty name, or one containing a
+    /// NUL byte, is [`ErrorCode::InvalidArgument`].
+    pub fn catalog_row_count(ctx, table: &str) -> Result<i64, WaferError> {
+        let req = CatalogRowCountRequest { table: table.to_string() };
+        let data = svc!(ctx, BLOCK, ServiceOp::DATABASE_CATALOG_ROW_COUNT, &req, Some(RAW_SQL_RESOURCE), false, Some("db"))?;
+        let resp: CatalogRowCountResponse = decode(&data)?;
+        Ok(resp.count)
     }
 
     // --- Higher-level helpers ---

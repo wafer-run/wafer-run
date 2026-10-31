@@ -686,6 +686,61 @@ fn database_action_spec(op: &str) -> ActionSpec {
                 "properties": { "table": { "type": "string" }, "exists": { "type": "boolean" } }
             })),
         },
+        ServiceOp::DATABASE_CATALOG_TABLES => ActionSpec {
+            description: "List every table the database holds, under its catalog name \
+                          (read; authorized like raw SQL: admin-only)."
+                .into(),
+            message_schema: Some(json!({ "type": "object", "properties": {} })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "tables": { "type": "array", "items": { "type": "string" } }
+                }
+            })),
+        },
+        ServiceOp::DATABASE_CATALOG_COLUMNS => ActionSpec {
+            description: "Describe a table's columns, the table named as the catalog spells \
+                          it (read; authorized like raw SQL: admin-only)."
+                .into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } },
+                "required": ["table"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "table": { "type": "string" },
+                    "columns": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "decl_type": { "type": "string" },
+                                "not_null": { "type": "boolean" },
+                                "default_value": { "type": ["string", "null"] },
+                                "primary_key_position": { "type": ["integer", "null"] }
+                            }
+                        }
+                    }
+                }
+            })),
+        },
+        ServiceOp::DATABASE_CATALOG_ROW_COUNT => ActionSpec {
+            description: "Count every row of a table, named as the catalog spells it (read; \
+                          authorized like raw SQL: admin-only)."
+                .into(),
+            message_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" } },
+                "required": ["table"]
+            })),
+            response_schema: Some(json!({
+                "type": "object",
+                "properties": { "table": { "type": "string" }, "count": { "type": "integer" } }
+            })),
+        },
         other => panic!(
             "BUG: no ActionSpec for database op '{other}' — update database_action_spec alongside ServiceOp::DATABASE_OPS"
         ),

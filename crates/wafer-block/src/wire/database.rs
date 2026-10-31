@@ -384,6 +384,82 @@ pub struct TableExistsResponse {
     pub exists: bool,
 }
 
+/// Request for `database.catalog_tables`. It carries nothing: the op lists
+/// the whole catalog, and is authorized on the raw-SQL sentinel
+/// ([`crate::wrap::RAW_SQL_RESOURCE`]), not on a table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalogTablesRequest {}
+
+/// Response for `database.catalog_tables`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogTablesResponse {
+    /// Every table the database holds, under the name its catalog spells it,
+    /// in name order. The SQLite family leaves out the tables its engines
+    /// reserve for themselves (`sqlite_*`, D1's `_cf_*`); PostgreSQL lists the
+    /// tables and views an unqualified name reaches through the session's
+    /// `search_path`.
+    pub tables: Vec<String>,
+}
+
+/// Request for `database.catalog_columns`, authorized on the raw-SQL
+/// sentinel ([`crate::wrap::RAW_SQL_RESOURCE`]), not on `table`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogColumnsRequest {
+    /// The table, named as the catalog spells it (a
+    /// [`CatalogTablesResponse::tables`] entry, or a plain identifier). Any
+    /// name a catalog can hold is accepted: only an empty name or one
+    /// containing a NUL byte is refused.
+    pub table: String,
+}
+
+/// One column of a [`CatalogColumnsResponse`], described the same way on
+/// every backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogColumn {
+    /// The column's name, as the catalog spells it.
+    pub name: String,
+    /// Its type as the schema declares it: SQLite's declared type text (empty
+    /// for a column declared without one), PostgreSQL's `format_type`
+    /// (`integer`, `character varying(20)`, `jsonb`, …).
+    pub decl_type: String,
+    /// Whether the column is declared `NOT NULL`.
+    pub not_null: bool,
+    /// The text of the column's default expression as the backend renders
+    /// it (`'x'`, `CURRENT_TIMESTAMP`, `nextval('t_id_seq'::regclass)`), or
+    /// `None` when it has none.
+    pub default_value: Option<String>,
+    /// The column's 1-based position in the table's primary key, or `None`
+    /// when it is not part of the key.
+    pub primary_key_position: Option<u32>,
+}
+
+/// Response for `database.catalog_columns`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogColumnsResponse {
+    /// The table described, as the request named it.
+    pub table: String,
+    /// Its columns, in declaration order.
+    pub columns: Vec<CatalogColumn>,
+}
+
+/// Request for `database.catalog_row_count`, authorized on the raw-SQL
+/// sentinel ([`crate::wrap::RAW_SQL_RESOURCE`]), not on `table`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogRowCountRequest {
+    /// The table, named as the catalog spells it (see
+    /// [`CatalogColumnsRequest::table`]).
+    pub table: String,
+}
+
+/// Response for `database.catalog_row_count`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogRowCountResponse {
+    /// The table counted, as the request named it.
+    pub table: String,
+    /// How many rows it holds.
+    pub count: i64,
+}
+
 /// Request for `database.delete_where`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteWhereRequest {
@@ -1352,6 +1428,50 @@ mod tests {
         let decoded: QueryRawRequest = codec::decode(&encoded).expect("decode");
         assert_eq!(decoded.query, original.query);
         assert_eq!(decoded.args.len(), 2);
+    }
+
+    #[test]
+    fn catalog_messages_round_trip() {
+        let encoded = codec::encode(&CatalogTablesRequest {}).expect("encode");
+        let _: CatalogTablesRequest = codec::decode(&encoded).expect("decode");
+
+        let tables = CatalogTablesResponse {
+            tables: vec!["Foo".into(), "a-b".into(), "a\"b".into()],
+        };
+        let decoded: CatalogTablesResponse =
+            codec::decode(&codec::encode(&tables).expect("encode")).expect("decode");
+        assert_eq!(decoded, tables);
+
+        let columns = CatalogColumnsResponse {
+            table: "a-b".into(),
+            columns: vec![
+                CatalogColumn {
+                    name: "id".into(),
+                    decl_type: "INTEGER".into(),
+                    not_null: true,
+                    default_value: None,
+                    primary_key_position: Some(1),
+                },
+                CatalogColumn {
+                    name: "note".into(),
+                    decl_type: String::new(),
+                    not_null: false,
+                    default_value: Some("'x'".into()),
+                    primary_key_position: None,
+                },
+            ],
+        };
+        let decoded: CatalogColumnsResponse =
+            codec::decode(&codec::encode(&columns).expect("encode")).expect("decode");
+        assert_eq!(decoded, columns);
+
+        let count = CatalogRowCountResponse {
+            table: "Foo".into(),
+            count: 3,
+        };
+        let decoded: CatalogRowCountResponse =
+            codec::decode(&codec::encode(&count).expect("encode")).expect("decode");
+        assert_eq!(decoded, count);
     }
 
     // -----------------------------------------------------------------------

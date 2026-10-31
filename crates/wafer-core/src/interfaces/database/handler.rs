@@ -1585,6 +1585,61 @@ pub async fn handle_message(
                 Err(e) => OutputStream::error(db_error_to_wafer(e)),
             }
         }
+        // The catalog reads name tables as the catalog spells them (`Foo`,
+        // `a-b`), which no per-table grant can name and `op_checks` would
+        // refuse, and together they reach every table whatever its
+        // namespace — a raw read's reach. So each is authorized on the
+        // raw-SQL sentinel, not on its table.
+        ServiceOp::DATABASE_CATALOG_TABLES => {
+            if let Err(out) = decode_and_authorize_op::<wire::CatalogTablesRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_CATALOG_TABLES,
+                |_r| RAW_SQL_RESOURCE,
+            ) {
+                return out;
+            }
+            match service.catalog_tables().await {
+                Ok(tables) => to_output(&wire::CatalogTablesResponse { tables }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_CATALOG_COLUMNS => {
+            let req = match decode_and_authorize_op::<wire::CatalogColumnsRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_CATALOG_COLUMNS,
+                |_r| RAW_SQL_RESOURCE,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.catalog_columns(&req.table).await {
+                Ok(columns) => to_output(&wire::CatalogColumnsResponse {
+                    table: req.table,
+                    columns,
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
+        ServiceOp::DATABASE_CATALOG_ROW_COUNT => {
+            let req = match decode_and_authorize_op::<wire::CatalogRowCountRequest>(
+                ctx,
+                body,
+                ServiceOp::DATABASE_CATALOG_ROW_COUNT,
+                |_r| RAW_SQL_RESOURCE,
+            ) {
+                Ok(r) => r,
+                Err(out) => return out,
+            };
+            match service.catalog_row_count(&req.table).await {
+                Ok(count) => to_output(&wire::CatalogRowCountResponse {
+                    table: req.table,
+                    count,
+                }),
+                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+            }
+        }
         other => OutputStream::error(WaferError::new(
             ErrorCode::Unimplemented,
             format!("unknown database operation: {other}"),
