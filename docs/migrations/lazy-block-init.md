@@ -50,9 +50,15 @@ wafer.seal().await?;
 
 // 4. (Optional, for /_health) verify configs without dispatching anything.
 let report = wafer.validate_all_block_configs().await;
-if !report.broken.is_empty() {
-    // log and decide
+if !report.broken.is_empty() || !report.unavailable.is_empty() {
+    // broken: required keys missing. unavailable: the source failed for
+    // that block (reason: Transient or SourceFault). Log and decide.
 }
+
+// Per-block init outcome, read without dispatching or waiting for an init
+// (Ready / Retrying / Failed / Initializing / NotInitialized). A block
+// reads the same view through ctx.block_init_states().
+let states = wafer.init_states();
 
 // 5. First dispatch triggers Init on the target block lazily.
 let out = wafer
@@ -83,6 +89,18 @@ impl wafer_run::ConfigSource for MyEnvConfigSource {
     }
 }
 ```
+
+A source failure is one of two errors, and the choice decides whether the
+block's init is retried:
+
+- `ConfigError::Transient` — the source is unreachable or answered with a
+  condition that clears (a network timeout, a backend down or over a quota
+  that resets, a spent per-invocation statement budget). The init failure is
+  transient: not cached, retried after the slot's backoff.
+- `ConfigError::SourceFault` — the source answered with an error retrying
+  cannot fix (its table missing, a read no invocation can run, an answer it
+  cannot interpret). The init failure is permanent, cached for the
+  runtime's life.
 
 The lookup owns what "absent" means for your storage. `Some(String::new())`
 is a *value*: it beats the declared default and satisfies a required key. A

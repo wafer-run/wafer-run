@@ -43,10 +43,12 @@ pub(crate) mod wasm_state;
 // Re-export the standalone function so external callers see it at the old path.
 pub use runner::run_block_with_recovery;
 // Re-export so consumers continue to write `wafer_run::ValidationReport` /
-// `wafer_run::BrokenBlock`. The canonical definitions now live in
-// `wafer-block` (alongside the `Context` trait whose
-// `validate_all_block_configs` method returns them).
-pub use wafer_block::{BrokenBlock, ValidationReport};
+// `wafer_run::BrokenBlock` / `wafer_run::BlockInitState`. The canonical
+// definitions live in `wafer-block`, alongside the `Context` trait whose
+// `validate_all_block_configs` and `block_init_states` methods return them.
+pub use wafer_block::{
+    BlockInitState, BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport,
+};
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
 /// Native-only: requires `Block::bind()` which is not available on wasm32.
@@ -186,16 +188,17 @@ pub enum InitWait {
     /// Run the block's init in the dispatch, or wait for the attempt
     /// already in flight, then dispatch. The default: lazy first-dispatch
     /// init, for hosts where a dispatch that stops part-way still releases
-    /// the slot's lock (native, browser).
+    /// the slot's attempt lock (native, browser).
     #[default]
     Await,
     /// Never run init in a dispatch. A block whose outcome is not settled —
     /// never initialized, an attempt in flight, or past a transient
     /// failure's backoff — answers `Unavailable` at once, without taking or
-    /// waiting for its slot's lock; only [`Wafer::init_block`] (and the
-    /// Inits it reaches) initializes. For hosts that may stop a request
+    /// waiting for its slot's attempt lock; only [`Wafer::init_block`] (and
+    /// the Inits it reaches) initializes. For hosts that may stop a request
     /// without running its destructors (Cloudflare Workers): an init begun
-    /// by such a request would hold the slot's lock for the runtime's life.
+    /// by such a request would hold the slot's attempt lock for the
+    /// runtime's life.
     /// The embedder initializes every block before publishing the runtime
     /// and retries a failed one by building a fresh runtime, so no
     /// dispatch's init failure names a `Retry-After` under `Refuse`, not
@@ -644,10 +647,25 @@ impl Wafer {
         run_init_pipeline(name, block, &slot, &template).await
     }
 
+    /// The init state of every registered block, keyed by registered name
+    /// (aliases are not listed): see [`BlockSlot::init_state`](crate::BlockSlot::init_state)
+    /// for how each is read.
+    ///
+    /// Reading it never runs, waits for or holds up an init, and never
+    /// dispatches, so it is safe on a published runtime under
+    /// [`InitWait::Refuse`]. A health endpoint inside a block reads the same
+    /// view through
+    /// [`Context::block_init_states`](wafer_block::context::Context::block_init_states).
+    pub fn init_states(&self) -> std::collections::BTreeMap<String, BlockInitState> {
+        crate::runtime::slot::init_states(&self.registration.slots)
+    }
+
     /// Walk every registered block's [`BlockInfo::config_keys`] and ask the
     /// [`ConfigSource`](crate::runtime::config_source::ConfigSource) to load
-    /// values. Reports which blocks have missing required keys or
-    /// unreachable sources.
+    /// values. Reports which blocks have missing required keys
+    /// ([`ValidationReport::broken`]) and which could not be checked because
+    /// the source failed ([`ValidationReport::unavailable`], with the class
+    /// of the failure: transient or a source fault).
     ///
     /// Does **not** invoke any block's `lifecycle` or `handle`. Intended for
     /// the `/_health` route in wafer-site (PR 3) to short-circuit boot when
@@ -739,10 +757,10 @@ pub(crate) fn retry_after_meta(
 /// `template` is the context of the frame that needs `name` initialized.
 /// When that frame runs on behalf of another block's Init (its
 /// `init_attempt`), reaching `name`'s init is a wait of that Init: the wait
-/// is recorded in the runtime-wide wait-for graph before the slot is locked,
-/// and refused with [`InitError::Cycle`] if it would close an init cycle —
-/// otherwise the slot lock would deadlock. The wait lasts until `name`'s
-/// init outcome is known.
+/// is recorded in the runtime-wide wait-for graph before the slot's attempt
+/// lock is taken, and refused with [`InitError::Cycle`] if it would close an
+/// init cycle — otherwise that lock would deadlock. The wait lasts until
+/// `name`'s init outcome is known.
 ///
 /// Init itself runs on [`RuntimeContext::for_init`], owned by a fresh
 /// attempt, with a panic caught (native) and reported as
@@ -796,7 +814,7 @@ pub(crate) async fn run_init_pipeline(
 
     slot.get_or_init(|| async move {
         // Owner of `name` for as long as its init runs, which is while the
-        // slot lock is held.
+        // slot's attempt lock is held.
         let _owner = init_waits.own(&attempt);
         // The attempt's deadline, counted from when it takes the slot: the
         // Init context reports it (`is_cancelled`, `call_block`).
@@ -810,14 +828,7 @@ pub(crate) async fn run_init_pipeline(
             let env_cfg = config_source
                 .load_for_block(name, &info.config_keys)
                 .await
-                .map_err(|e| match e {
-                    ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
-                        "block `{block}` missing required config key `{key}`"
-                    )),
-                    ConfigError::Transient { source, .. } => {
-                        InitError::Transient(format!("config fetch failed: {source}"))
-                    }
-                })?;
+                .map_err(ConfigError::into_init_error)?;
 
             // Build the lifecycle(Init).data payload: start from the JSON
             // config the caller registered via `Wafer::add_block_config` (if

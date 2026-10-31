@@ -83,21 +83,24 @@ where
     Fut: std::future::Future<Output = T>,
 {
     // PERF-03: once a block's init outcome is settled, skip constructing the
-    // dedicated init context per dispatch. `try_cached` returns `None` both
-    // for "init may run now" and "init in flight" (mutex held) — the slow
-    // path re-checks under the slot's lock, and the pipeline refuses a wait
-    // that would close an init cycle before taking that lock.
+    // dedicated init context per dispatch. `try_cached` reads the slot's
+    // state lock (held only for the read, never across an attempt) and
+    // returns `None` both for "init may run now" and "init in flight" — the
+    // slow path waits for the slot's attempt lock and re-checks, and the
+    // pipeline refuses a wait that would close an init cycle before taking
+    // that lock.
     match target.slot.try_cached() {
         Some(Ok(_)) => {}
         Some(Err(e)) => return Err(init_failure(&target, init.template, e)),
         // `InitWait::Refuse`: a dispatch outside every running Init never
-        // runs init and never takes the slot's lock. A dispatch made while
-        // an Init runs (its template carries that attempt — only
-        // `RuntimeContext::for_init` sets one — and the attempt still owns
-        // its block) is how one block's Init reaches another's during
-        // `Wafer::init_block`, so it still runs the callee's init inline. A
-        // context kept past its Init (`clone_arc` for deferred work) carries
-        // an attempt that has ended, and is refused like any request.
+        // runs init and never takes or waits for the slot's attempt lock. A
+        // dispatch made while an Init runs (its template carries that
+        // attempt — only `RuntimeContext::for_init` sets one — and the
+        // attempt still owns its block) is how one block's Init reaches
+        // another's during `Wafer::init_block`, so it still runs the callee's
+        // init inline. A context kept past its Init (`clone_arc` for deferred
+        // work) carries an attempt that has ended, and is refused like any
+        // request.
         None if init.template.init_wait == super::InitWait::Refuse
             && !inside_running_init(init.template) =>
         {

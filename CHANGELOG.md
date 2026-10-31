@@ -4,6 +4,41 @@
 
 ### Breaking changes
 
+- `ConfigError` has a new variant, `SourceFault { block, source }`: the
+  config source answered with an error retrying cannot fix (its table
+  missing, a read no invocation can run, an answer it cannot interpret). The
+  block's init fails **permanently** with it ("config source fault: …"),
+  cached for the runtime's life, where `ConfigError::Transient` ("the source
+  is unreachable, or answered with a condition that clears") stays a
+  transient, uncached failure. A `match` on `ConfigError` adds the arm; a
+  `ConfigSource` that reported every failure as `Transient` should now
+  report the ones a retry cannot fix as `SourceFault`.
+- `ValidationReport` has a new field, `unavailable: Vec<UnavailableBlock>`:
+  a block whose config could not be validated because the source failed,
+  with `reason: UnavailableReason` (`Transient` or `SourceFault`; `as_str()`
+  gives `"transient"` / `"source_fault"`). The source's error text is logged
+  by the validator, never put in the report. Such a block is no longer
+  reported in `broken` under the pseudo missing key
+  `"<transient: source unreachable>"`, which is gone: `broken` now lists
+  only missing required keys. A health check that answered 503 on a
+  non-empty `broken` checks `unavailable` too. A `ValidationReport { .. }`
+  struct literal adds the field (or uses `..Default::default()`).
+- `InitError::from_lifecycle_error` classifies a `lifecycle(Init)` failure
+  carrying the detail code `wire::database::STATEMENT_BUDGET_EXHAUSTED` as
+  **transient**, whatever its code — the invocation's statement budget is
+  spent and a fresh invocation may run the statement — checked before the
+  code-level rule that keeps every other `ResourceExhausted` (the runtime's
+  own limits: call depth, wasm host memory, a flow's `max_steps`)
+  permanent. A statement no invocation can run (`StatementLimitExceeded`,
+  `InvalidArgument` with `STATEMENT_BUDGET_EXCEEDS_LIMIT`) stays permanent.
+  An Init that met a spent budget was cached dead for the runtime's life; it
+  is now retried. The rule is the new public
+  `init_failure_is_transient(code, detail_code)`, which
+  `from_lifecycle_error` applies; a `ConfigSource` whose backend errors
+  carry codes (a database-backed one: `DatabaseError::code()` /
+  `detail_code()`) chooses `ConfigError::Transient` or `SourceFault` with the
+  same function, so both paths classify a refusal alike.
+
 - Strict schema is the only behaviour: the schema is what a block's
   migrations and explicit schema ops declared, on every backend. Removed:
   - the `WAFER_RUN__DATABASE__STRICT_SCHEMA` config var of
@@ -1962,6 +1997,24 @@
   runtime names its own delay. `BlockSlot::pending_retry_in` reads the
   backoff. The pending-failure message now reads "(retry backoff: N ms
   left)" instead of "(init is retried in N ms)".
+- `Wafer::init_states()` and `Context::block_init_states()` report every
+  registered block's init state, keyed by registered name (aliases are not
+  listed), as a `BlockInitState`: `Ready`, `Retrying { reason, retry_in }`
+  (the last transient failure and what is left of the slot's backoff, zero
+  once it has elapsed), `Failed { reason }`, `Initializing` (an attempt in
+  flight) or `NotInitialized`; `as_str()` gives a stable lowercase name.
+  Reading it never runs, waits for or holds up an init and never
+  dispatches, so a health endpoint can call it on a published `Refuse`
+  runtime. `BlockSlot::init_state` reads one slot. The `Context` default is
+  an empty map (test mocks, FFI shims); a Context that wraps another
+  forwards it. It is not capability-gated and each `reason` is another
+  block's failure text, so it assumes trusted, host-compiled native blocks
+  (a wasm guest cannot reach it); a health body reports the class, never
+  `reason`.
+- `init_failure_is_transient(code, detail_code)`: the one rule for whether
+  a failure is one a retry can clear, used by
+  `InitError::from_lifecycle_error` and by a `ConfigSource` choosing
+  between `ConfigError::Transient` and `SourceFault`.
 - `introspect::build_catalog_table_row_count` counts the rows of a table
   whose name was read from the catalog (a row of `build_list_tables[_like]`),
   quoting it as a delimited identifier (`"` doubled) instead of requiring a
@@ -3007,6 +3060,16 @@
 
 ### Refactored
 
+- `BlockSlot` keeps its settled outcome, transient backoff and an
+  "attempt in flight" flag under a synchronous state lock, separate from the
+  async attempt lock that serializes init attempts and is held across one.
+  `try_cached`, `pending_retry_in` and `init_state` read only the state lock
+  and never touch the attempt lock: a reader never waits on an attempt, a
+  settled slot is never reported unsettled, and an idle one never reported
+  `Initializing`, because another caller is looking. The flag is cleared in
+  the critical section that records the attempt's outcome (or when a
+  cancelled attempt is dropped), so a reader never sees an attempt's state
+  go backwards.
 - `wafer-block-crypto` is built on argon2 0.6 (was 0.5). argon2 0.5 pulled
   in blake2 0.10 and with it a second copy of `digest` (0.10) beside the
   0.11 line the rest of the crate's crypto uses, in every build that links
