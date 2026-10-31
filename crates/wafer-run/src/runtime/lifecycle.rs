@@ -251,7 +251,9 @@ impl Wafer {
     ///   them transitively, leaving fresh deploys in a broken state.
     ///
     /// Init failures are logged and tolerated — transient failures can be
-    /// retried by a later dispatch, and tolerating permanent ones keeps boot
+    /// retried by a later dispatch (under [`InitWait::Await`](crate::InitWait::Await);
+    /// under [`InitWait::Refuse`](crate::InitWait::Refuse) only a later
+    /// [`Wafer::init_block`] retries), and tolerating permanent ones keeps boot
     /// resilient when one misconfigured block would otherwise wedge the
     /// whole runtime. Callers that need ordering guarantees should call
     /// [`Wafer::init_block`] for the required-first blocks before invoking
@@ -288,7 +290,9 @@ impl Wafer {
     /// Lazy init semantics still apply to the dispatch paths
     /// ([`Wafer::run_block`], `call_block`) and to consumers that call
     /// [`Wafer::seal`] directly (e.g. Cloudflare Workers, which never call
-    /// `start()` / `bind()`).
+    /// `start()` / `bind()`), unless the runtime was built with
+    /// [`InitWait::Refuse`](crate::InitWait::Refuse), under which a dispatch
+    /// never initializes.
     ///
     /// Use [`Wafer::validate_all_block_configs`] before `start()` for
     /// proactive health checks; broken-config blocks otherwise surface as

@@ -110,6 +110,14 @@ impl InitWaits {
         }
     }
 
+    /// Whether `attempt` is running its block's init now: it owns the block
+    /// (between [`own`](Self::own) and its guard's drop). `false` once the
+    /// Init has returned, so a context kept past its Init — a `clone_arc`
+    /// handle used by deferred work — no longer counts as inside it.
+    pub(crate) fn is_running(&self, attempt: &InitAttempt) -> bool {
+        self.graph.lock().owners.get(&*attempt.block) == Some(&attempt.id)
+    }
+
     /// Record `attempt` as running its block's init, until the guard drops.
     /// Called with the block's slot lock held, so there is one owner per
     /// block at a time.

@@ -165,6 +165,43 @@ pub struct Wafer {
     /// copied into every [`RuntimeContext`] so each init path reads the same
     /// cap.
     pub(crate) init_timeout_cap: Option<std::time::Duration>,
+    /// What a dispatch does on reaching a block whose init outcome is not
+    /// settled. Set by [`WaferBuilder::init_wait`](crate::WaferBuilder::init_wait);
+    /// copied into every [`RuntimeContext`] so every dispatch path reads the
+    /// same mode.
+    pub(crate) init_wait: InitWait,
+}
+
+/// What a dispatch does on reaching a block whose init outcome is not
+/// settled: never initialized, or past the backoff of a transient failure.
+///
+/// The choice only matters outside an Init. A dispatch made while a block's
+/// `lifecycle(Init)` runs (a `call_block` on its Init context) runs the
+/// callee's init inline in either mode: that is how one block's Init
+/// reaches another's during [`Wafer::init_block`]. Only a call made
+/// *during* the Init counts: a context kept past it (a `clone_arc` handle
+/// for deferred work) dispatches like any request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InitWait {
+    /// Run the block's init in the dispatch, or wait for the attempt
+    /// already in flight, then dispatch. The default: lazy first-dispatch
+    /// init, for hosts where a dispatch that stops part-way still releases
+    /// the slot's lock (native, browser).
+    #[default]
+    Await,
+    /// Never run init in a dispatch. A block whose outcome is not settled —
+    /// never initialized, an attempt in flight, or past a transient
+    /// failure's backoff — answers `Unavailable` at once, without taking or
+    /// waiting for its slot's lock; only [`Wafer::init_block`] (and the
+    /// Inits it reaches) initializes. For hosts that may stop a request
+    /// without running its destructors (Cloudflare Workers): an init begun
+    /// by such a request would hold the slot's lock for the runtime's life.
+    /// The embedder initializes every block before publishing the runtime
+    /// and retries a failed one by building a fresh runtime, so no
+    /// dispatch's init failure names a `Retry-After` under `Refuse`, not
+    /// even inside the slot's backoff (nothing retries when it ends): the
+    /// embedder names its own retry delay.
+    Refuse,
 }
 
 /// The outcome of [`Wafer::seal`], which runs once per runtime.
@@ -230,7 +267,17 @@ impl Wafer {
             init_waits: Arc::default(),
             locked_blocks: Vec::new(),
             init_timeout_cap: None,
+            init_wait: InitWait::Await,
         }
+    }
+
+    /// What a dispatch does on reaching a block whose init outcome is not
+    /// settled, as set by
+    /// [`WaferBuilder::init_wait`](crate::WaferBuilder::init_wait). An
+    /// embedder that publishes a runtime with unsettled blocks checks this
+    /// is [`InitWait::Refuse`] first, so no request runs an init.
+    pub fn init_wait(&self) -> InitWait {
+        self.init_wait
     }
 
     /// Install an embedder-supplied env-style config snapshot. Replaces any
@@ -490,6 +537,7 @@ impl Wafer {
             init_waits: self.init_waits.clone(),
             init_attempt: None,
             init_timeout_cap: self.init_timeout_cap,
+            init_wait: self.init_wait,
             slots: self.registration.slots.clone(),
             config_source: self.config.source.clone(),
             hooks: self.hooks.clone(),
@@ -567,6 +615,10 @@ impl Wafer {
     /// [`InitError::Permanent`] are cached for the slot's lifetime;
     /// [`InitError::Transient`] is retried after a backoff and
     /// [`InitError::Cycle`] is not cached.
+    ///
+    /// Under [`InitWait::Refuse`] this is the only entry point that runs a
+    /// block's init (with the Inits it reaches through `call_block`); a
+    /// dispatch never does.
     pub async fn init_block(
         &self,
         name: &str,
@@ -624,10 +676,14 @@ impl Wafer {
 /// is `OutputStream::error(...)`.
 ///
 /// - `Permanent` / `Cycle` → `FAILED_PRECONDITION` (caller cannot recover by retrying).
-/// - `Transient` → `UNAVAILABLE` (caller may retry).
+/// - `Transient` → `UNAVAILABLE` (caller may retry). `retry_in`, when the
+///   caller passes one, is the delay before a retry will run; it becomes the
+///   error's `Retry-After` response header (see [`retry_after_meta`]).
+///   Ignored for the other variants.
 pub(crate) fn init_error_to_wafer_error(
     block: &str,
     e: crate::runtime::slot::InitError,
+    retry_in: Option<std::time::Duration>,
 ) -> wafer_block::core_types::WaferError {
     use wafer_block::core_types::{ErrorCode, WaferError};
 
@@ -637,14 +693,42 @@ pub(crate) fn init_error_to_wafer_error(
             ErrorCode::FailedPrecondition,
             format!("block `{block}` init failed permanently: {s}"),
         ),
-        InitError::Transient(s) => WaferError::new(
-            ErrorCode::Unavailable,
-            format!("block `{block}` init transient failure: {s}"),
-        ),
+        InitError::Transient(s) => {
+            let mut err = WaferError::new(
+                ErrorCode::Unavailable,
+                format!("block `{block}` init transient failure: {s}"),
+            );
+            err.meta.extend(retry_in.map(retry_after_meta));
+            err
+        }
         InitError::Cycle { path } => WaferError::new(
             ErrorCode::FailedPrecondition,
             format!("block `{block}` init cycle detected: {}", path.join(" -> ")),
         ),
+    }
+}
+
+/// The error an [`InitWait::Refuse`] dispatch answers for a block whose init
+/// outcome is not settled: `UNAVAILABLE`, and no `Retry-After` — the slot has
+/// no pending backoff to name, and the embedder that rebuilds the runtime
+/// owns the retry delay.
+pub(crate) fn not_initialized_error(block: &str) -> wafer_block::core_types::WaferError {
+    wafer_block::core_types::WaferError::new(
+        wafer_block::core_types::ErrorCode::Unavailable,
+        format!("block `{block}` is not initialized in this runtime"),
+    )
+}
+
+/// The `resp.header.Retry-After` meta entry for a retry `retry_in` from now:
+/// whole seconds, rounded up (any fraction of a second counts), at least 1 (`Retry-After: 0` would invite an
+/// immediate retry that the backoff still refuses).
+pub(crate) fn retry_after_meta(
+    retry_in: std::time::Duration,
+) -> wafer_block::core_types::MetaEntry {
+    let secs = retry_in.as_nanos().div_ceil(1_000_000_000).max(1);
+    wafer_block::core_types::MetaEntry {
+        key: format!("{}Retry-After", wafer_block::meta::META_RESP_HEADER_PREFIX),
+        value: secs.to_string(),
     }
 }
 
@@ -1060,6 +1144,51 @@ mod tests {
     use wafer_block_macro::wafer_async_trait;
 
     use super::*;
+
+    /// `Retry-After` is whole seconds, rounded up, never 0.
+    #[test]
+    fn retry_after_is_whole_seconds_rounded_up_at_least_one() {
+        use std::time::Duration;
+        for (retry_in, secs) in [
+            (Duration::ZERO, "1"),
+            (Duration::from_millis(1), "1"),
+            (Duration::from_millis(100), "1"),
+            (Duration::from_millis(1000), "1"),
+            (Duration::from_millis(1001), "2"),
+            (Duration::from_nanos(1_000_000_001), "2"),
+            (Duration::from_secs(30), "30"),
+        ] {
+            let meta = retry_after_meta(retry_in);
+            assert_eq!(meta.key, "resp.header.Retry-After");
+            assert_eq!(meta.value, secs, "{retry_in:?}");
+        }
+    }
+
+    /// Only a transient failure carries a `Retry-After`.
+    #[test]
+    fn init_error_retry_after_only_on_transient() {
+        use std::time::Duration;
+
+        use crate::runtime::slot::InitError;
+        let wait = Some(Duration::from_secs(3));
+        let has = |e: &WaferError| e.meta.iter().any(|m| m.key == "resp.header.Retry-After");
+
+        let transient = init_error_to_wafer_error("b", InitError::Transient("x".into()), wait);
+        assert_eq!(transient.code, ErrorCode::Unavailable);
+        assert!(has(&transient));
+        let none = init_error_to_wafer_error("b", InitError::Transient("x".into()), None);
+        assert!(!has(&none));
+        for e in [
+            InitError::Permanent("x".into()),
+            InitError::Cycle {
+                path: vec!["a".into(), "b".into()],
+            },
+        ] {
+            let mapped = init_error_to_wafer_error("b", e, wait);
+            assert_eq!(mapped.code, ErrorCode::FailedPrecondition);
+            assert!(!has(&mapped));
+        }
+    }
 
     /// `requires` is looked up by registration name. A block whose `info()`
     /// later reports another block's name (here `a/victim`, which is not

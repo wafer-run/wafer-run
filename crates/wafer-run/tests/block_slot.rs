@@ -135,3 +135,38 @@ async fn transient_init_error_is_not_cached() {
         "successful init must be cached after retry"
     );
 }
+
+#[tokio::test]
+async fn pending_retry_in_names_the_backoff_only_while_it_lasts() {
+    let slot = BlockSlot::new();
+    assert_eq!(
+        slot.pending_retry_in(),
+        None,
+        "an empty slot has no backoff"
+    );
+
+    let result = slot
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::Transient("down".into())) })
+        .await;
+    assert!(matches!(result, Err(InitError::Transient(_))));
+    let pending = slot
+        .pending_retry_in()
+        .expect("a transient failure starts a backoff");
+    assert!(
+        pending > std::time::Duration::ZERO && pending <= TRANSIENT_RETRY_BASE,
+        "the first backoff is at most the base: {pending:?}"
+    );
+
+    tokio::time::sleep(TRANSIENT_RETRY_BASE + TRANSIENT_RETRY_BASE / 2).await;
+    assert_eq!(
+        slot.pending_retry_in(),
+        None,
+        "an elapsed backoff names no delay"
+    );
+
+    let result = slot
+        .get_or_init(|| async { Ok::<_, InitError>(InitializedState::new()) })
+        .await;
+    assert!(result.is_ok());
+    assert_eq!(slot.pending_retry_in(), None, "a settled Ok has no backoff");
+}

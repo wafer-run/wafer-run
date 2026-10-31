@@ -100,6 +100,12 @@ pub struct RuntimeContext {
     /// [`Wafer`](crate::Wafer) that produced this context. Read by the init
     /// pipeline whichever dispatch path reaches a block's init first.
     pub(crate) init_timeout_cap: Option<std::time::Duration>,
+    /// What a dispatch from this context does on reaching a block whose init
+    /// outcome is not settled, from the [`Wafer`](crate::Wafer) that produced
+    /// this context. Read by every dispatch path's scaffold; a context with
+    /// an [`init_attempt`](Self::init_attempt) runs the callee's init inline
+    /// whatever the mode.
+    pub(crate) init_wait: crate::runtime::InitWait,
     /// Snapshot of the runtime's per-block init slots. Shared via `Arc` with
     /// [`Wafer::slots`]; consulted by [`RuntimeContext::dispatch_call`] to
     /// drive lazy init on `call_block` callees. Empty (default) when the

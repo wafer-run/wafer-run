@@ -58,9 +58,12 @@ impl Wafer {
     /// second pass would recompute capabilities without it. The outcome is
     /// kept in [`seal_state`](Self::seal_state).
     ///
-    /// Block `Init` lifecycle events are **not** dispatched here. Each block
-    /// is initialized on first dispatch via [`Wafer::init_block`] (lazy
-    /// once-success). Required-config presence is **not** validated here —
+    /// Block `Init` lifecycle events are **not** dispatched here. Under
+    /// [`InitWait::Await`](crate::InitWait::Await) (the default) each block is
+    /// initialized by its first dispatch (lazy once-success), or earlier by
+    /// [`Wafer::init_block`]; under [`InitWait::Refuse`](crate::InitWait::Refuse)
+    /// only [`Wafer::init_block`] initializes, and a dispatch to an
+    /// uninitialized block answers `Unavailable`. Required-config presence is **not** validated here —
     /// broken paths surface as 5xx on first invocation. Use
     /// [`Wafer::validate_all_block_configs`] for proactive health checks.
     pub async fn seal(&mut self) -> Result<(), RuntimeError> {
