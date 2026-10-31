@@ -5002,7 +5002,7 @@ async fn check_names_longer_than_postgres_keeps_are_refused(svc: &dyn DatabaseSe
 /// assert it reads "absent" only from a definite answer. Panics on the first
 /// divergence.
 ///
-/// [`DbExec::dbx_table_exists`] (and with it `schema_table_exists`) and the
+/// [`table_exists`] (and with it `schema_table_exists`) and the
 /// probe behind [`DbExec::catalog_columns`]'s missing table decode whatever
 /// rows the backend's [`run_fetch`](DbExec::run_fetch) returns. A caller may
 /// read `Ok(false)` as proof there is nothing to load (impresspress's grant
@@ -5012,9 +5012,10 @@ async fn check_names_longer_than_postgres_keeps_are_refused(svc: &dyn DatabaseSe
 /// The real builder's answers come first: a table `exec` created is
 /// present, a missing one absent. Then [`ProbeAnswer`] puts a malformed
 /// answer in the probe's place — a statement `exec` itself runs, so the row
-/// is the one its driver decodes, and the decode under test is the shared
-/// default every backend takes. A backend adapter (D1, sql.js) calls this
-/// from its own tests, as the native backends do.
+/// is the one its driver decodes. The decode is [`table_exists`]'s, which
+/// no backend can replace, so these answers are the ones every backend's
+/// probe gets. A backend adapter (D1, sql.js) calls this from its own tests,
+/// as the native backends do.
 pub async fn run_existence_probe_conformance<E>(exec: &E)
 where
     E: DbExec + DatabaseService,

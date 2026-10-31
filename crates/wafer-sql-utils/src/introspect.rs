@@ -110,7 +110,7 @@ pub fn build_list_tables_like(prefix: &str, backend: Backend) -> (String, Vec<se
 ///
 /// Returns `(sql, params)`. The result is a single row with one integer
 /// column `present`, `1` or `0` on both dialects, so it decodes the same way
-/// everywhere — the shared executor's `dbx_table_exists` refuses any other
+/// everywhere — the shared executor's `table_exists` refuses any other
 /// answer (no row, `NULL`, a non-integer, any other number) rather than read
 /// it as "absent".
 ///

@@ -11,15 +11,17 @@
   `Ok(false)` — "absent" — for a probe that succeeded without a decodable
   row. A caller that reads "nothing to load" from that answer after a failed
   read (impresspress's grant loader) failed open.
-  - `DbExec::dbx_table_exists` is now a provided default, the same for every
-    backend: `introspect::build_table_exists` through `run_fetch`, decoded by
-    the new `codec::table_presence`. Only exactly one row whose integer
-    `present` is `0` or `1` is an answer; no row, more than one, a row
-    without `present`, `NULL`, text, a fraction or any other number is
-    `DatabaseError::Internal`. The native SQLite and PostgreSQL overrides
-    are gone (SQLite's read `-1` as absent and `2` as present; PostgreSQL's
-    decoded a boolean). It sends one `run_fetch`, so a call-limited backend
-    counts it there.
+  - Removed: `DbExec::dbx_table_exists`. The probe is the free function
+    `exec::table_exists(exec, table)`, the same for every backend:
+    `introspect::build_table_exists` through `run_fetch`, decoded by the new
+    `codec::table_presence`. Only exactly one row whose integer `present`
+    is `0` or `1` is an answer; no row, more than one, a row without
+    `present`, `NULL`, text, a fraction or any other number is
+    `DatabaseError::Internal`. It is not a trait method so that no backend
+    can put its own decode in its place: the native SQLite override read
+    `-1` as absent and `2` as present, and every adapter's override
+    inherited `scalar_i64`'s `0`. It sends one `run_fetch`, so a
+    call-limited backend counts it there.
   - `introspect::build_table_exists` answers an integer `present` (`1`/`0`)
     on PostgreSQL too, as it already did on SQLite and as
     `build_catalog_table_exists` does; it was a boolean.
@@ -37,10 +39,12 @@
     the probe's place — statements the backend itself runs, so its own
     driver decodes them — and requires `Internal` from `schema_table_exists`
     and `catalog_columns`. Run for native SQLite and PostgreSQL.
-  - Migrating: a backend adapter deletes its `dbx_table_exists` override
-    (keeping one keeps its own decode), propagates the `Result` of
-    `scalar_i64`/`scalar_f64` with `?` in `run_scalar_*` and its batch
-    decode, and calls `run_existence_probe_conformance` from its tests.
+  - Migrating: a backend adapter deletes its `dbx_table_exists` impl (it no
+    longer compiles), propagates the `Result` of `scalar_i64`/`scalar_f64`
+    with `?` in `run_scalar_*` and its batch decode, and calls
+    `run_existence_probe_conformance` from its tests. A caller of
+    `dbx_table_exists` calls `table_exists(exec, table)` or
+    `schema_table_exists`.
 
 - **Per-invocation database limits are counted in calls, not statements,
   and the shared admission layer is gone.** Cloudflare D1 counts a
@@ -72,8 +76,8 @@
     platform limits the database round trips one invocation may make counts
     one call per round trip it actually sends, once, where it is sent: one
     per lone statement (`run_fetch`, `run_fetch_one`, `run_execute`,
-    `run_execute_returning`, `run_scalar_*`, `query_raw`; `dbx_table_exists`
-    is the one `run_fetch` it sends) and one per `run_transaction`, whatever
+    `run_execute_returning`, `run_scalar_*`, `query_raw`; the existence
+    probe is the one `run_fetch` it sends) and one per `run_transaction`, whatever
     its length. A
     default that delegates is counted where it lands (`run_schema_execute`
     → `run_execute`, `run_schema_transaction` → `run_transaction`).
