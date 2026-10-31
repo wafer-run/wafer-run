@@ -265,10 +265,10 @@ pub fn table_presence(rows: &[Record]) -> Result<bool, DatabaseError> {
     match row.data.get(PRESENT).map(exact_i64) {
         Some(Some(1)) => Ok(true),
         Some(Some(0)) => Ok(false),
-        Some(_) => Err(malformed_scalar(
-            "`present` 0 or 1",
-            row.data.get(PRESENT).unwrap_or(&serde_json::Value::Null),
-        )),
+        Some(_) => Err(DatabaseError::Internal(format!(
+            "table-existence probe answered `present` {}; expected 0 or 1",
+            row.data.get(PRESENT).unwrap_or(&serde_json::Value::Null)
+        ))),
         None => Err(DatabaseError::Internal(
             "table-existence probe answered a row without `present`".to_string(),
         )),
