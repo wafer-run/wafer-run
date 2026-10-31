@@ -170,3 +170,70 @@ async fn pending_retry_in_names_the_backoff_only_while_it_lasts() {
     assert!(result.is_ok());
     assert_eq!(slot.pending_retry_in(), None, "a settled Ok has no backoff");
 }
+
+/// `init_state` reads each state without running or waiting for init: an
+/// attempt in flight is `Initializing`, and the read returns while it runs.
+#[tokio::test]
+async fn init_state_reports_each_state_without_waiting_for_an_attempt() {
+    use wafer_run::BlockInitState;
+
+    let slot = Arc::new(BlockSlot::new());
+    assert_eq!(slot.init_state(), BlockInitState::NotInitialized);
+
+    // A transient failure: retrying, with the backoff left.
+    let _ = slot
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::Transient("down".into())) })
+        .await;
+    match slot.init_state() {
+        BlockInitState::Retrying { reason, retry_in } => {
+            assert_eq!(reason, "down");
+            assert!(retry_in > std::time::Duration::ZERO && retry_in <= TRANSIENT_RETRY_BASE);
+        }
+        other => panic!("expected Retrying, got {other:?}"),
+    }
+    tokio::time::sleep(TRANSIENT_RETRY_BASE + TRANSIENT_RETRY_BASE / 2).await;
+    assert_eq!(
+        slot.init_state(),
+        BlockInitState::Retrying {
+            reason: "down".into(),
+            retry_in: std::time::Duration::ZERO,
+        },
+        "past the backoff the last failure is still reported, due now"
+    );
+
+    // An attempt in flight.
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let attempt = {
+        let (slot, entered, release) = (slot.clone(), entered.clone(), release.clone());
+        tokio::spawn(async move {
+            slot.get_or_init(|| async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok::<_, InitError>(InitializedState::new())
+            })
+            .await
+        })
+    };
+    entered.notified().await;
+    assert_eq!(slot.init_state(), BlockInitState::Initializing);
+    assert!(
+        slot.try_cached().is_none(),
+        "an attempt in flight is not settled"
+    );
+    release.notify_one();
+    attempt.await.expect("join").expect("init succeeds");
+    assert_eq!(slot.init_state(), BlockInitState::Ready);
+
+    // A permanent failure on a fresh slot.
+    let failed = BlockSlot::new();
+    let _ = failed
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::Permanent("bad".into())) })
+        .await;
+    assert_eq!(
+        failed.init_state(),
+        BlockInitState::Failed {
+            reason: "bad".into()
+        }
+    );
+}

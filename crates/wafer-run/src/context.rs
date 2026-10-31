@@ -540,6 +540,13 @@ impl Context for RuntimeContext {
             .collect();
         crate::runtime::config_source::validate_block_configs(canonical, &self.config_source).await
     }
+
+    fn block_init_states(&self) -> std::collections::BTreeMap<String, wafer_block::BlockInitState> {
+        // `slots` is keyed by registered name only (aliases share the
+        // target's slot and are not listed), the same view as
+        // `Wafer::init_states`.
+        crate::runtime::slot::init_states(&self.slots)
+    }
 }
 
 impl RuntimeContext {

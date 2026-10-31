@@ -2,7 +2,8 @@
 //!
 //! Returned by [`Context::validate_all_block_configs`] (and the
 //! corresponding `Wafer::validate_all_block_configs` re-export) to surface
-//! which registered blocks are missing required config keys. Used by
+//! which registered blocks are missing required config keys, and which
+//! could not be checked because the config source failed. Used by
 //! deploy-time gates such as wafer-site's `/_health` route.
 //!
 //! [`Context::validate_all_block_configs`]: crate::context::Context::validate_all_block_configs
@@ -16,9 +17,51 @@ pub struct ValidationReport {
     /// Block names whose declared config keys all resolved successfully.
     /// Sorted lexicographically for deterministic output.
     pub ok: Vec<String>,
-    /// Blocks with missing required keys or an unreachable config source.
-    /// Sorted by `block` for deterministic output.
+    /// Blocks with missing required keys. Sorted by `block` for
+    /// deterministic output.
     pub broken: Vec<BrokenBlock>,
+    /// Blocks whose config could not be checked because the config source
+    /// failed, with the class of the failure. Sorted by `block` for
+    /// deterministic output.
+    pub unavailable: Vec<UnavailableBlock>,
+}
+
+/// A block whose declared config could not be validated because the config
+/// source failed to answer for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableBlock {
+    /// Name of the block (e.g. `my-org/auth`).
+    pub block: String,
+    /// The class of the source's failure. The failure's own text (which
+    /// may quote a backend's error) is logged by the validator and never
+    /// carried here, so a report can be served as-is.
+    pub reason: UnavailableReason,
+}
+
+/// Why a block's config could not be validated: the class of the config
+/// source's failure, mirroring the runtime's `ConfigError` variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnavailableReason {
+    /// The source is unreachable or answered with a condition that clears
+    /// on its own (`ConfigError::Transient`): checking again later may
+    /// succeed, and the block's init would be retried.
+    Transient,
+    /// The source answered with an error retrying cannot fix
+    /// (`ConfigError::SourceFault`): the block's init would fail
+    /// permanently.
+    SourceFault,
+}
+
+impl UnavailableReason {
+    /// A stable lowercase name for the class (`"transient"`,
+    /// `"source_fault"`), for reports and health bodies.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::SourceFault => "source_fault",
+        }
+    }
 }
 
 /// A single block that failed declared-key validation.

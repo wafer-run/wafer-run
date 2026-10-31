@@ -2,23 +2,30 @@
 //!
 //! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §3, §4
 //!
-//! ## Concurrency model — pattern (a): `Mutex<SlotState>`
+//! ## Concurrency model
 //!
-//! The mutex is held across the entire init call. This means concurrent
-//! first-callers for the same block serialize: the second caller waits for
-//! the first to finish rather than both running init simultaneously.
+//! A slot has two locks with separate jobs:
 //!
-//! This is intentional: init is typically I/O (config fetch, DB migration),
-//! and running it twice concurrently would either fail or do redundant work.
-//! Pattern (b) (`OnceCell`) would let concurrent callers each attempt init
-//! independently, which is better for CPU-bound init but wrong for idempotent
-//! I/O — running two migrations concurrently on the same table is a bug, not
-//! an optimisation.
+//! - **The attempt lock** (`tokio::sync::Mutex<()>`) is held across the
+//!   entire init call. Concurrent first-callers for the same block
+//!   serialize: the second caller waits for the first to finish rather than
+//!   both running init simultaneously. This is intentional: init is
+//!   typically I/O (config fetch, DB migration), and running it twice
+//!   concurrently would either fail or do redundant work — running two
+//!   migrations concurrently on the same table is a bug, not an
+//!   optimisation.
+//! - **The state lock** (a synchronous `parking_lot::Mutex`) guards the
+//!   settled outcome and the transient backoff. It is taken only for a read
+//!   or a write of that state, never across an `.await`, so a reader —
+//!   [`BlockSlot::try_cached`] on every dispatch,
+//!   [`BlockSlot::init_state`] for a health report — never waits on an init
+//!   attempt and never sees "in flight" merely because another reader is
+//!   looking.
 //!
-//! Holding the lock across init is what makes an init cycle between two
-//! blocks a potential deadlock; the dispatch path refuses the wait that
-//! would close one before it takes this lock (see the crate-private
-//! `runtime::init_waits` module).
+//! Holding the attempt lock across init is what makes an init cycle
+//! between two blocks a potential deadlock; the dispatch path refuses the
+//! wait that would close one before it takes this lock (see the
+//! crate-private `runtime::init_waits` module).
 //!
 //! ## Semantics
 //! - First `Ok(_)` result is cached for the slot's lifetime.
@@ -32,11 +39,14 @@
 //!   cyclic wait before invoking `get_or_init`; if one somehow reaches the
 //!   slot, it is returned but not stored.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, time::Duration};
 
 use thiserror::Error;
-use tokio::sync::Mutex;
-use wafer_block::core_types::{ErrorCode, WaferError};
+use wafer_block::{
+    core_types::{ErrorCode, WaferError},
+    wire::database::STATEMENT_BUDGET_EXHAUSTED,
+    BlockInitState,
+};
 
 use crate::platform::Instant;
 
@@ -81,13 +91,29 @@ impl InitError {
     /// busy, a deadline or cancellation, a conflict), so they are
     /// [`Transient`](Self::Transient). Every other code describes the block
     /// or its configuration, which a retry does not change, so it is
-    /// [`Permanent`](Self::Permanent) — including `ResourceExhausted`, which
-    /// the runtime's own limits raise (call depth, the wasm host-memory
-    /// budget, a flow's `max_steps`): an Init that exceeds one does so again
-    /// on every run. An Init that meets a limit which does clear (a rate
-    /// limit) reports it as `Unavailable`.
+    /// [`Permanent`](Self::Permanent).
+    ///
+    /// # The `ResourceExhausted` rule
+    ///
+    /// The detail code [`STATEMENT_BUDGET_EXHAUSTED`] is checked first, and
+    /// is **transient** whatever the code: the database refused a statement
+    /// because *this invocation* has spent its per-invocation statement
+    /// budget, and a fresh invocation (a rebuild in a new request) may run
+    /// it. The config path classifies the same refusal the same way (a
+    /// [`ConfigError::Transient`](crate::ConfigError::Transient)).
+    ///
+    /// Every other `ResourceExhausted` stays **permanent**: the runtime's
+    /// own limits raise it (call depth, the wasm host-memory budget, a
+    /// flow's `max_steps`), and an Init that exceeds one does so again on
+    /// every run. So does a statement no invocation can run at all — the
+    /// database's `StatementLimitExceeded`, answered as `InvalidArgument`
+    /// with `STATEMENT_BUDGET_EXCEEDS_LIMIT`. An Init that meets another
+    /// limit which does clear (a rate limit) reports it as `Unavailable`.
     pub fn from_lifecycle_error(e: &WaferError) -> Self {
         let msg = format!("lifecycle init failed: {e}");
+        if e.detail_code() == Some(STATEMENT_BUDGET_EXHAUSTED) {
+            return Self::Transient(msg);
+        }
         match e.code {
             ErrorCode::Unavailable
             | ErrorCode::DeadlineExceeded
@@ -156,7 +182,7 @@ impl TransientBackoff {
     }
 }
 
-/// Everything the slot's mutex guards.
+/// Everything the slot's state lock guards.
 #[derive(Debug, Default)]
 struct SlotState {
     /// The cached `Ok` / `Permanent` outcome, once there is one.
@@ -181,14 +207,20 @@ impl SlotState {
 
 /// Per-block init slot.
 ///
-/// Wraps a `tokio::sync::Mutex` over the slot's state. The mutex serializes
-/// init attempts across concurrent first-callers: the second caller waits for
-/// the first to finish rather than racing. Once an `Ok` or `Permanent`
-/// outcome is stored — or while a transient failure's backoff lasts —
-/// callers return immediately without re-running init.
+/// The attempt lock (a `tokio::sync::Mutex`) serializes init attempts
+/// across concurrent first-callers: the second caller waits for the first to
+/// finish rather than racing. The outcome and backoff live under a separate
+/// synchronous state lock, so once an `Ok` or `Permanent` outcome is stored
+/// — or while a transient failure's backoff lasts — callers return
+/// immediately without re-running init, and readers never wait on an
+/// attempt (see the module doc).
 #[derive(Debug, Default)]
 pub struct BlockSlot {
-    state: Arc<Mutex<SlotState>>,
+    /// Held across one init attempt.
+    attempt: tokio::sync::Mutex<()>,
+    /// The settled outcome and the transient backoff. Never held across an
+    /// `.await`.
+    state: parking_lot::Mutex<SlotState>,
 }
 
 impl BlockSlot {
@@ -197,41 +229,88 @@ impl BlockSlot {
         Self::default()
     }
 
-    /// Lock-free-ish fast path: return the settled outcome — the cached one,
-    /// or the pending transient failure inside its backoff — if the mutex is
-    /// uncontended; `None` means "unknown — take the
-    /// [`get_or_init`](Self::get_or_init) slow path".
+    /// Non-blocking fast path: return the settled outcome — the cached one,
+    /// or the pending transient failure inside its backoff — or `None`
+    /// meaning "not settled: take the [`get_or_init`](Self::get_or_init)
+    /// slow path".
     ///
-    /// A held mutex means an init attempt is in flight, and an unsettled
-    /// slot means init may run now — both correctly route the caller to
-    /// `get_or_init`, which re-checks under the lock. This lets dispatch
-    /// paths skip building the init context entirely once a block's init
-    /// outcome is settled (PERF-03).
+    /// `None` covers a slot init may run on now (never initialized, or past
+    /// a transient failure's backoff) and one whose attempt is in flight;
+    /// `get_or_init` waits for that attempt and re-checks. This lets
+    /// dispatch paths skip building the init context entirely once a block's
+    /// init outcome is settled (PERF-03). It never waits on an attempt.
     pub fn try_cached(&self) -> Option<Result<InitializedState, InitError>> {
-        let guard = self.state.try_lock().ok()?;
-        guard.settled(Instant::now())
+        self.state.lock().settled(Instant::now())
     }
 
     /// How long until a transient failure's backoff lets init run again:
     /// `Some` while one is pending, `None` when none is (no transient
-    /// failure, a cached outcome, or the backoff has elapsed) — and, like
-    /// [`try_cached`](Self::try_cached), `None` while the mutex is held by
-    /// an attempt in flight.
+    /// failure, a cached outcome, or the backoff has elapsed).
     ///
     /// Under [`InitWait::Await`](crate::InitWait::Await) the dispatch paths
     /// name this delay as the `Retry-After` of the `Unavailable` a transient
     /// failure answers.
     pub fn pending_retry_in(&self) -> Option<Duration> {
-        let guard = self.state.try_lock().ok()?;
-        if guard.outcome.is_some() {
+        let state = self.state.lock();
+        if state.outcome.is_some() {
             return None;
         }
         let now = Instant::now();
-        guard
+        state
             .backoff
             .as_ref()
             .filter(|b| now < b.retry_at)
             .map(|b| b.retry_at.saturating_duration_since(now))
+    }
+
+    /// Where this slot's init stands, read without running, waiting for or
+    /// holding up an init attempt:
+    ///
+    /// - a cached success → [`Ready`](BlockInitState::Ready);
+    /// - a cached permanent failure → [`Failed`](BlockInitState::Failed);
+    /// - a transient failure inside its backoff →
+    ///   [`Retrying`](BlockInitState::Retrying) with the backoff left;
+    /// - otherwise an attempt in flight →
+    ///   [`Initializing`](BlockInitState::Initializing);
+    /// - otherwise a transient failure whose backoff has elapsed →
+    ///   `Retrying` with a zero `retry_in` (init may run again now);
+    /// - otherwise [`NotInitialized`](BlockInitState::NotInitialized).
+    pub fn init_state(&self) -> BlockInitState {
+        let now = Instant::now();
+        let last_transient = {
+            let state = self.state.lock();
+            match &state.outcome {
+                Some(CachedOutcome::Ok(_)) => return BlockInitState::Ready,
+                Some(CachedOutcome::Permanent(reason)) => {
+                    return BlockInitState::Failed {
+                        reason: reason.clone(),
+                    };
+                }
+                None => {}
+            }
+            match &state.backoff {
+                Some(b) if now < b.retry_at => {
+                    return BlockInitState::Retrying {
+                        reason: b.message.clone(),
+                        retry_in: b.retry_at.saturating_duration_since(now),
+                    };
+                }
+                Some(b) => Some(b.message.clone()),
+                None => None,
+            }
+        };
+        // `try_lock` never waits, and a guard it gets is dropped here,
+        // before this returns: a reader cannot strand the attempt lock.
+        if self.attempt.try_lock().is_err() {
+            return BlockInitState::Initializing;
+        }
+        match last_transient {
+            Some(reason) => BlockInitState::Retrying {
+                reason,
+                retry_in: Duration::ZERO,
+            },
+            None => BlockInitState::NotInitialized,
+        }
     }
 
     /// Run `init` unless the outcome is settled, otherwise return it.
@@ -244,36 +323,40 @@ impl BlockSlot {
     /// - `Err(Cycle { .. })` → not cached, no backoff; returned as-is.
     #[expect(
         clippy::significant_drop_tightening,
-        reason = "async Mutex intentionally held across init().await to serialize concurrent first-time init; see module doc"
+        reason = "async attempt lock intentionally held across init().await to serialize concurrent first-time init; see module doc"
     )]
     pub async fn get_or_init<F, Fut>(&self, init: F) -> Result<InitializedState, InitError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<InitializedState, InitError>>,
     {
-        let mut guard = self.state.lock().await;
+        let _attempt = self.attempt.lock().await;
 
-        // Fast path: outcome cached, or a transient failure still backing off.
-        if let Some(settled) = guard.settled(Instant::now()) {
+        // Fast path: outcome cached, or a transient failure still backing
+        // off — including one an attempt this caller waited for just stored.
+        if let Some(settled) = self.try_cached() {
             return settled;
         }
 
-        // Slow path: run init while holding the mutex so concurrent callers
-        // serialize (see module-level doc for rationale).
-        match init().await {
-            Ok(state) => {
-                guard.outcome = Some(CachedOutcome::Ok(state.clone()));
-                guard.backoff = None;
-                Ok(state)
+        // Slow path: run init while holding the attempt lock so concurrent
+        // callers serialize (see module-level doc for rationale). The state
+        // lock is taken only to record the outcome.
+        let outcome = init().await;
+        let mut state = self.state.lock();
+        match outcome {
+            Ok(init_state) => {
+                state.outcome = Some(CachedOutcome::Ok(init_state.clone()));
+                state.backoff = None;
+                Ok(init_state)
             }
             Err(InitError::Permanent(msg)) => {
-                guard.outcome = Some(CachedOutcome::Permanent(msg.clone()));
-                guard.backoff = None;
+                state.outcome = Some(CachedOutcome::Permanent(msg.clone()));
+                state.backoff = None;
                 Err(InitError::Permanent(msg))
             }
             Err(InitError::Transient(msg)) => {
-                let failures = guard.backoff.as_ref().map_or(0, |b| b.failures) + 1;
-                guard.backoff = Some(TransientBackoff {
+                let failures = state.backoff.as_ref().map_or(0, |b| b.failures) + 1;
+                state.backoff = Some(TransientBackoff {
                     failures,
                     retry_at: Instant::now() + TransientBackoff::delay(failures),
                     message: msg.clone(),
@@ -287,6 +370,18 @@ impl BlockSlot {
             }
         }
     }
+}
+
+/// The [`BlockSlot::init_state`] of every slot in `slots` (the runtime's
+/// registered-name → slot map), keyed by registered name. Backs
+/// `Wafer::init_states` and `Context::block_init_states`.
+pub(crate) fn init_states(
+    slots: &std::collections::HashMap<String, std::sync::Arc<BlockSlot>>,
+) -> std::collections::BTreeMap<String, BlockInitState> {
+    slots
+        .iter()
+        .map(|(name, slot)| (name.clone(), slot.init_state()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -325,5 +420,33 @@ mod tests {
             let e = InitError::from_lifecycle_error(&WaferError::new(code, "x"));
             assert!(matches!(e, InitError::Permanent(_)), "{code:?} → {e:?}");
         }
+    }
+
+    /// The `ResourceExhausted` rule: a spent per-invocation statement
+    /// budget is transient (checked before the code), a statement no
+    /// invocation can run and the runtime's own limits stay permanent.
+    #[test]
+    fn a_spent_statement_budget_is_transient_other_limits_are_permanent() {
+        use wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT;
+
+        let spent = WaferError::new(ErrorCode::ResourceExhausted, "budget spent")
+            .with_detail_code(STATEMENT_BUDGET_EXHAUSTED);
+        assert!(matches!(
+            InitError::from_lifecycle_error(&spent),
+            InitError::Transient(_)
+        ));
+
+        let over_limit = WaferError::new(ErrorCode::InvalidArgument, "over the limit")
+            .with_detail_code(STATEMENT_BUDGET_EXCEEDS_LIMIT);
+        assert!(matches!(
+            InitError::from_lifecycle_error(&over_limit),
+            InitError::Permanent(_)
+        ));
+
+        let runtime_limit = WaferError::new(ErrorCode::ResourceExhausted, "call depth");
+        assert!(matches!(
+            InitError::from_lifecycle_error(&runtime_limit),
+            InitError::Permanent(_)
+        ));
     }
 }

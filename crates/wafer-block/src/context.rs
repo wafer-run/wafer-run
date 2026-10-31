@@ -156,14 +156,31 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
     /// active config source — same semantics as
     /// `Wafer::validate_all_block_configs`, but callable from inside a
     /// block. Used by deploy-time health endpoints (e.g. wafer-site's
-    /// `/_health` route) to surface missing required config keys after
-    /// lazy init.
+    /// `/_health` route) to surface missing required config keys
+    /// ([`ValidationReport::broken`](crate::validation::ValidationReport::broken))
+    /// and blocks whose config source failed
+    /// ([`ValidationReport::unavailable`](crate::validation::ValidationReport::unavailable)).
     ///
     /// Default impl returns an empty report. Context impls that don't
     /// run inside the WAFER runtime (test mocks, FFI shims) have no
     /// blocks or config source to walk; they leave this as-is.
     async fn validate_all_block_configs(&self) -> crate::validation::ValidationReport {
         crate::validation::ValidationReport::default()
+    }
+
+    /// The init state of every registered block, keyed by registered name
+    /// (aliases are not listed) — same semantics as `Wafer::init_states`,
+    /// but callable from inside a block. Reading it never runs or waits for
+    /// an init, and never dispatches; health endpoints use it to report
+    /// which blocks serve.
+    ///
+    /// Default impl returns an empty map. Context impls that don't run
+    /// inside the WAFER runtime (test mocks, FFI shims) have no blocks to
+    /// report; a Context that wraps another forwards this to it.
+    fn block_init_states(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::init_state::BlockInitState> {
+        std::collections::BTreeMap::new()
     }
 
     /// Authorize the CALLER (host-trusted identity) to `access` `resource` of

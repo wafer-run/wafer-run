@@ -43,10 +43,12 @@ pub(crate) mod wasm_state;
 // Re-export the standalone function so external callers see it at the old path.
 pub use runner::run_block_with_recovery;
 // Re-export so consumers continue to write `wafer_run::ValidationReport` /
-// `wafer_run::BrokenBlock`. The canonical definitions now live in
-// `wafer-block` (alongside the `Context` trait whose
-// `validate_all_block_configs` method returns them).
-pub use wafer_block::{BrokenBlock, ValidationReport};
+// `wafer_run::BrokenBlock` / `wafer_run::BlockInitState`. The canonical
+// definitions live in `wafer-block`, alongside the `Context` trait whose
+// `validate_all_block_configs` and `block_init_states` methods return them.
+pub use wafer_block::{
+    BlockInitState, BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport,
+};
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
 /// Native-only: requires `Block::bind()` which is not available on wasm32.
@@ -644,10 +646,25 @@ impl Wafer {
         run_init_pipeline(name, block, &slot, &template).await
     }
 
+    /// The init state of every registered block, keyed by registered name
+    /// (aliases are not listed): see [`BlockSlot::init_state`](crate::BlockSlot::init_state)
+    /// for how each is read.
+    ///
+    /// Reading it never runs, waits for or holds up an init, and never
+    /// dispatches, so it is safe on a published runtime under
+    /// [`InitWait::Refuse`]. A health endpoint inside a block reads the same
+    /// view through
+    /// [`Context::block_init_states`](wafer_block::context::Context::block_init_states).
+    pub fn init_states(&self) -> std::collections::BTreeMap<String, BlockInitState> {
+        crate::runtime::slot::init_states(&self.registration.slots)
+    }
+
     /// Walk every registered block's [`BlockInfo::config_keys`] and ask the
     /// [`ConfigSource`](crate::runtime::config_source::ConfigSource) to load
-    /// values. Reports which blocks have missing required keys or
-    /// unreachable sources.
+    /// values. Reports which blocks have missing required keys
+    /// ([`ValidationReport::broken`]) and which could not be checked because
+    /// the source failed ([`ValidationReport::unavailable`], with the class
+    /// of the failure: transient or a source fault).
     ///
     /// Does **not** invoke any block's `lifecycle` or `handle`. Intended for
     /// the `/_health` route in wafer-site (PR 3) to short-circuit boot when
@@ -810,14 +827,7 @@ pub(crate) async fn run_init_pipeline(
             let env_cfg = config_source
                 .load_for_block(name, &info.config_keys)
                 .await
-                .map_err(|e| match e {
-                    ConfigError::MissingRequired { block, key } => InitError::Permanent(format!(
-                        "block `{block}` missing required config key `{key}`"
-                    )),
-                    ConfigError::Transient { source, .. } => {
-                        InitError::Transient(format!("config fetch failed: {source}"))
-                    }
-                })?;
+                .map_err(ConfigError::into_init_error)?;
 
             // Build the lifecycle(Init).data payload: start from the JSON
             // config the caller registered via `Wafer::add_block_config` (if

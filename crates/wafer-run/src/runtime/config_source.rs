@@ -59,8 +59,13 @@ pub enum ConfigError {
         key: String,
     },
 
-    /// A transient I/O error (network timeout, D1 failure). The caller may
-    /// retry; the error is not cached in the block slot.
+    /// The source is unreachable, or answered with a condition that clears
+    /// on its own: a backend down, overloaded or over a quota that resets,
+    /// a network timeout, or a per-invocation statement budget this
+    /// invocation has spent (`STATEMENT_BUDGET_EXHAUSTED`: a fresh invocation
+    /// may run the read). Retrying can succeed, so the block's init fails
+    /// with [`InitError::Transient`](crate::runtime::slot::InitError::Transient):
+    /// not cached in the block slot.
     #[error("transient error fetching config for `{block}`: {source}")]
     Transient {
         /// Block name whose config load failed.
@@ -69,6 +74,41 @@ pub enum ConfigError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// The source answered with an error retrying cannot fix: its table is
+    /// missing or malformed, a read it can never complete (one that needs
+    /// more statements than any invocation may run), a result it cannot
+    /// interpret. The block's init fails with
+    /// [`InitError::Permanent`](crate::runtime::slot::InitError::Permanent),
+    /// cached for the slot's lifetime.
+    #[error("config source fault for `{block}`: {source}")]
+    SourceFault {
+        /// Block name whose config load failed.
+        block: String,
+        /// The source's error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+impl ConfigError {
+    /// The block's init failure for this config error: a missing required
+    /// key and a source fault are permanent (retrying reads the same
+    /// answer), a transient source error is transient.
+    pub(crate) fn into_init_error(self) -> crate::runtime::slot::InitError {
+        use crate::runtime::slot::InitError;
+        match self {
+            Self::MissingRequired { block, key } => InitError::Permanent(format!(
+                "block `{block}` missing required config key `{key}`"
+            )),
+            Self::Transient { source, .. } => {
+                InitError::Transient(format!("config fetch failed: {source}"))
+            }
+            Self::SourceFault { source, .. } => {
+                InitError::Permanent(format!("config source fault: {source}"))
+            }
+        }
+    }
 }
 
 /// Source of per-block env-var configuration, consulted on first block init.
@@ -87,7 +127,12 @@ pub trait ConfigSource: MaybeSend + MaybeSync + 'static {
     ///   when the default is non-empty.
     /// - Return [`ConfigError::MissingRequired`] for keys where `optional ==
     ///   false`, no value is present in the source, and the default is empty.
-    /// - Return [`ConfigError::Transient`] for I/O failures (network, D1 timeout).
+    /// - Return [`ConfigError::Transient`] when the source is unreachable or
+    ///   answers with a condition that clears (network, a backend down or
+    ///   over a resetting quota, a spent per-invocation statement budget).
+    /// - Return [`ConfigError::SourceFault`] when the source answers with an
+    ///   error retrying cannot fix (a missing table, a read no invocation
+    ///   can run, an answer it cannot interpret).
     /// - Ignore source keys that are not in `declared_keys`.
     async fn load_for_block(
         &self,
@@ -190,7 +235,11 @@ pub fn resolve_declared(
 
 /// Walk the given blocks' [`BlockInfo::config_keys`](wafer_block::BlockInfo)
 /// declarations and ask `source` to load values, reporting which blocks have
-/// missing required keys or unreachable sources.
+/// missing required keys ([`ValidationReport::broken`](wafer_block::ValidationReport))
+/// and which could not be checked because the source failed
+/// ([`ValidationReport::unavailable`](wafer_block::ValidationReport), with
+/// the failure's class; the source's error itself is logged, never put in
+/// the report).
 ///
 /// Shared by `Wafer::validate_all_block_configs` and the
 /// [`Context::validate_all_block_configs`](wafer_block::context::Context)
@@ -204,30 +253,38 @@ pub(crate) async fn validate_block_configs<'a>(
     blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn wafer_block::Block>)>,
     source: &Arc<dyn ConfigSource>,
 ) -> wafer_block::ValidationReport {
-    let mut report = wafer_block::ValidationReport {
-        ok: Vec::new(),
-        broken: Vec::new(),
-    };
+    use wafer_block::{BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport};
+
+    let mut report = ValidationReport::default();
     for (name, block) in blocks {
         let info = block.info();
         match source.load_for_block(name, &info.config_keys).await {
             Ok(_) => report.ok.push(name.clone()),
             Err(ConfigError::MissingRequired { block, key }) => {
-                report.broken.push(wafer_block::BrokenBlock {
+                report.broken.push(BrokenBlock {
                     block,
                     missing_keys: vec![key],
                 });
             }
-            Err(ConfigError::Transient { block, .. }) => {
-                report.broken.push(wafer_block::BrokenBlock {
+            Err(ConfigError::Transient { block, source }) => {
+                tracing::warn!(%block, error = %source, "config validation: source unreachable");
+                report.unavailable.push(UnavailableBlock {
                     block,
-                    missing_keys: vec!["<transient: source unreachable>".to_string()],
+                    reason: UnavailableReason::Transient,
+                });
+            }
+            Err(ConfigError::SourceFault { block, source }) => {
+                tracing::error!(%block, error = %source, "config validation: source fault");
+                report.unavailable.push(UnavailableBlock {
+                    block,
+                    reason: UnavailableReason::SourceFault,
                 });
             }
         }
     }
     report.ok.sort();
     report.broken.sort_by(|a, b| a.block.cmp(&b.block));
+    report.unavailable.sort_by(|a, b| a.block.cmp(&b.block));
     report
 }
 

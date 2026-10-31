@@ -46,6 +46,7 @@ pub mod context;
 pub mod db;
 pub mod executor;
 pub mod hash;
+pub mod init_state;
 pub mod interfaces;
 pub mod introspection;
 pub mod lockfile;
@@ -70,6 +71,7 @@ pub use executor::{extract_path_vars, match_path, matches_pattern, route_shape};
 #[cfg(not(target_arch = "wasm32"))]
 pub use hash::expand_env_vars;
 pub use hash::{hex_encode, sha256, sha256_hex};
+pub use init_state::BlockInitState;
 pub use introspection::FlowIntrospection;
 // Re-export linkme so `register_static_block!` expansions in consumer crates
 // can refer to `$crate::linkme` without adding linkme to their own Cargo.toml.
@@ -92,7 +94,9 @@ pub use streams::{
         BufferedResponse, OutputSink, OutputStream, SinkClosed, SinkSendError, TerminalNotResponse,
     },
 };
-pub use validation::{unknown_flow_config_keys, BrokenBlock, ValidationReport};
+pub use validation::{
+    unknown_flow_config_keys, BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport,
+};
 
 /// Register a block at link time via `linkme`.
 ///
