@@ -122,7 +122,7 @@ mod db_fakes {
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
         AggregateSpec, CatalogColumn, DatabaseError, DatabaseService, RawStatement, Record,
-        RecordData, RecordList, StatementBudget, TransactionError, UpsertSpec,
+        RecordData, RecordList, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -130,10 +130,6 @@ mod db_fakes {
 
     #[async_trait]
     impl DatabaseService for AggDb {
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
-
         async fn aggregate(
             &self,
             _collection: &str,

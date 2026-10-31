@@ -15,7 +15,7 @@ use wafer_core::{
         codec::{self, JsonColumns},
         exec::{DbExec, TxOp, TxResult},
         schema_cache::SchemaCache,
-        service::{Column, DatabaseError, Record, RecordData, StatementBudget, TransactionError},
+        service::{Column, DatabaseError, Record, RecordData, TransactionError},
     },
 };
 #[cfg(test)]
@@ -135,12 +135,6 @@ impl DbExec for PostgresDatabaseService {
 
     fn schema_cache(&self) -> Option<&SchemaCache> {
         Some(&self.schema_cache)
-    }
-
-    /// PostgreSQL has no per-invocation statement limit. A write's cost is
-    /// bounded by what its caller sends, as for any single statement.
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Unbounded)
     }
 
     async fn run_fetch(
@@ -294,7 +288,6 @@ forward_database_service! {
             catalog_tables: forward,
             catalog_columns: forward,
             catalog_row_count: forward,
-            statement_budget: forward,
         }
 
         async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {

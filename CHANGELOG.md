@@ -4,6 +4,57 @@
 
 ### Breaking changes
 
+- **Per-invocation database limits are counted in calls, not statements,
+  and the shared admission layer is gone.** Cloudflare D1 counts a
+  `db.batch()` as one query of its 1,000 per Worker invocation, whatever its
+  length, so admitting a whole write by its statement count was the wrong
+  unit, and it repeated the backend's own per-call refusal.
+  - Removed: `StatementBudget` and `StatementBudget::admit`;
+    `DatabaseService::statement_budget` and `DbExec::statement_budget`; the
+    `statement_budget:` entry of a `forward_database_service!` ledger (drop
+    it; the ledger now ends at `catalog_row_count`); the database handler's
+    admission of a `create_many` by row count and a `batch` by op count;
+    the executor's admission of every `create_many`, `batch`, guarded write
+    and `exec_raw_transaction`; `DatabaseError::StatementLimitExceeded` and
+    `wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT`
+    (`database.statement_budget_exceeds_limit`), which no call can reach
+    now: a write is one call.
+  - Renamed: `DatabaseError::ResourceExhausted` →
+    `DatabaseError::CallBudgetExhausted` (still `ErrorCode::ResourceExhausted`,
+    HTTP 429; its message prefix is now `call budget exhausted: `), and
+    `wire::database::STATEMENT_BUDGET_EXHAUSTED`
+    (`database.statement_budget_exhausted`) →
+    `wire::database::CALL_BUDGET_EXHAUSTED` (`database.call_budget_exhausted`),
+    which `DatabaseError::detail_code()` returns for that variant alone. No
+    alias keeps the old names or the old detail-code strings: a caller
+    keying on `database.statement_budget_exhausted` keys on
+    `database.call_budget_exhausted`, and one keying on
+    `…_exceeds_limit` drops that arm.
+  - The contract, on `DbExec` and `DatabaseService`: a backend whose
+    platform limits the database round trips one invocation may make counts
+    one call per primitive (`run_fetch`, `run_fetch_one`, `run_execute`,
+    `run_execute_returning`, `run_scalar_*`, `run_schema_execute`,
+    `dbx_table_exists`, `query_raw`) and one per `run_transaction`,
+    `run_schema_transaction` or `run_batch`, whatever its length; runs a
+    transaction in one call; refuses a call past its limit before sending
+    it with `CallBudgetExhausted`; and maps its platform's own refusal of
+    the same limit to that error. A backend with no such limit (native
+    SQLite, PostgreSQL) counts nothing. A `create_many` or `batch` of any
+    size is therefore one call on every backend; on D1 it is bounded by
+    D1's own per-batch limits (30 s, per-statement size), not by a count.
+  - `init_failure_is_transient` treats `CALL_BUDGET_EXHAUSTED` as transient
+    whatever the code, as it treated the old code; every other
+    `ResourceExhausted` stays permanent. There is no permanent budget
+    refusal any more.
+  - Conformance: `check_statement_budget` is `check_large_writes`, and runs
+    unconditionally: every backend takes a `create_many` and a `batch` of
+    2,500 each.
+  - Migrating: delete every `statement_budget` impl and ledger entry;
+    rename `ResourceExhausted` arms on `DatabaseError` to
+    `CallBudgetExhausted` and drop `StatementLimitExceeded` arms; a
+    call-limited backend (the impresspress D1 adapter) counts one per
+    `db.batch()` and refuses with `CallBudgetExhausted`.
+
 - `DatabaseService` has three new required methods, the catalog reads:
   `catalog_tables()`, `catalog_columns(table)` and
   `catalog_row_count(table)` (see Added). A `forward_database_service!`
@@ -49,7 +100,9 @@
   non-empty `broken` checks `unavailable` too. A `ValidationReport { .. }`
   struct literal adds the field (or uses `..Default::default()`).
 - `InitError::from_lifecycle_error` classifies a `lifecycle(Init)` failure
-  carrying the detail code `wire::database::STATEMENT_BUDGET_EXHAUSTED` as
+  carrying the detail code `wire::database::STATEMENT_BUDGET_EXHAUSTED` (now
+  `CALL_BUDGET_EXHAUSTED`; see the call-budget entry at the top of this
+  section, which also removes the permanent `StatementLimitExceeded`) as
   **transient**, whatever its code — the invocation's statement budget is
   spent and a fresh invocation may run the statement — checked before the
   code-level rule that keeps every other `ResourceExhausted` (the runtime's
@@ -488,7 +541,9 @@
   executor refuses the bad step and keeps the middleware's headers — was
   answered with no CSP, no `X-Frame-Options` and no `nosniff`. An adapter
   that calls `unsendable_response` itself passes the meta it classified.
-- The fixed cap on `database.create_many` rows and `database.batch` ops is
+- (Superseded by the call-budget entry at the top of this section, which
+  removes `StatementBudget` and both admissions.) The fixed cap on
+  `database.create_many` rows and `database.batch` ops is
   gone: `wire::database::MAX_BATCH_WRITES` (1000) is removed, and each
   backend now reports its own budget. `DatabaseService` and `DbExec` gain a
   required `fn statement_budget(&self) -> Result<StatementBudget,
@@ -513,7 +568,9 @@
   `statement_budget: forward` (or `custom`) after `set_strict_schema`, and an
   exhaustive `match` on `DatabaseError` needs the new arm. The
   `database.create_many`/`database.batch` action schemas drop `maxItems`.
-- A statement-budget refusal carries a detail code
+- (Superseded by the call-budget entry at the top of this section: the
+  codes are now one, `database.call_budget_exhausted`.) A statement-budget
+  refusal carries a detail code
   (`WaferError::detail_code`), so a caller can tell it from the other
   errors sharing its coarse code — any malformed request's
   `InvalidArgument`, or the `ResourceExhausted` of a rate limit or the

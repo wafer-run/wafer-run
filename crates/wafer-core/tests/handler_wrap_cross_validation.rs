@@ -413,7 +413,7 @@ mod db_fakes {
     use wafer_block::db::{Filter, ListOptions};
     use wafer_core::interfaces::database::service::{
         AggregateSpec, CatalogColumn, DatabaseError, DatabaseService, RawStatement, Record,
-        RecordList, StatementBudget, TransactionError, UpsertSpec,
+        RecordList, TransactionError, UpsertSpec,
     };
     use wafer_schema::{Column, Table};
 
@@ -421,10 +421,6 @@ mod db_fakes {
 
     #[async_trait]
     impl DatabaseService for OkDb {
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
-
         async fn get(&self, _collection: &str, id: &str) -> Result<Record, DatabaseError> {
             Ok(Record {
                 id: id.to_string(),

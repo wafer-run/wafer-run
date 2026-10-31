@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
+use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
 pub use wafer_block::wire::database::{CatalogColumn, RawStatement, RecordData};
-use wafer_block::wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_schema::{
@@ -38,12 +38,6 @@ pub enum DatabaseError {
     /// for a page it cannot render (a zero limit, an offset with no limit).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
-    /// The work would take more statements than the backend's
-    /// [`StatementBudget`] allows in one invocation, so no invocation can
-    /// run it: the caller must send less. Nothing was written. Answered with
-    /// detail code [`STATEMENT_BUDGET_EXCEEDS_LIMIT`].
-    #[error("statement limit exceeded: {0}")]
-    StatementLimitExceeded(String),
     /// A fault in reaching or using the database that says nothing about the
     /// request and may clear on its own — a busy or locked SQLite file, a
     /// refused or broken connection, a pool with no connection free, a
@@ -52,13 +46,16 @@ pub enum DatabaseError {
     /// errors into this variant; see its error mapping for the exact set.
     #[error("database unavailable: {0}")]
     Unavailable(String),
-    /// The work would take more statements than the backend's
-    /// [`StatementBudget`] has left in the current invocation, though no more
-    /// than its per-invocation limit, so a fresh invocation may run it.
-    /// Nothing was written. Answered with detail code
-    /// [`STATEMENT_BUDGET_EXHAUSTED`].
-    #[error("statement budget exhausted: {0}")]
-    ResourceExhausted(String),
+    /// The backend limits the database calls one invocation may make, and
+    /// this invocation has none left, so the call was refused before it was
+    /// sent; a fresh invocation may run it. Nothing was written. A backend
+    /// counts one call per primitive and one per transaction or batch,
+    /// whatever its length, and maps its platform's own refusal of the same
+    /// limit to this variant (see [`DbExec`](super::exec::DbExec)'s
+    /// "Per-invocation call limits"). Answered with `ResourceExhausted` and
+    /// detail code [`CALL_BUDGET_EXHAUSTED`].
+    #[error("call budget exhausted: {0}")]
+    CallBudgetExhausted(String),
     /// Backend-internal failure.
     #[error("database error: {0}")]
     Internal(String),
@@ -69,35 +66,31 @@ pub enum DatabaseError {
 
 impl DatabaseError {
     /// The wire [`ErrorCode`](wafer_block::ErrorCode) this error answers with:
-    /// `NotFound`, `AlreadyExists`, `InvalidArgument` and `ResourceExhausted`
-    /// for their variants, `InvalidArgument` for `StatementLimitExceeded`,
-    /// `Unavailable` for a transient fault (so a caller, and the runtime for
-    /// a failed block Init, may retry), `Internal` otherwise.
+    /// `NotFound`, `AlreadyExists` and `InvalidArgument` for their variants,
+    /// `ResourceExhausted` for `CallBudgetExhausted`, `Unavailable` for a
+    /// transient fault (so a caller, and the runtime for a failed block
+    /// Init, may retry), `Internal` otherwise.
     #[must_use]
     pub const fn code(&self) -> wafer_block::ErrorCode {
         use wafer_block::ErrorCode;
         match self {
             Self::NotFound => ErrorCode::NotFound,
             Self::AlreadyExists(_) => ErrorCode::AlreadyExists,
-            Self::InvalidArgument(_) | Self::StatementLimitExceeded(_) => {
-                ErrorCode::InvalidArgument
-            }
+            Self::InvalidArgument(_) => ErrorCode::InvalidArgument,
             Self::Unavailable(_) => ErrorCode::Unavailable,
-            Self::ResourceExhausted(_) => ErrorCode::ResourceExhausted,
+            Self::CallBudgetExhausted(_) => ErrorCode::ResourceExhausted,
             Self::Internal(_) | Self::Other(_) => ErrorCode::Internal,
         }
     }
 
     /// The detail code ([`wafer_block::WaferError::detail_code`]) this error
-    /// answers with, telling a statement-budget refusal apart from every
-    /// other error sharing its [`code`](Self::code):
-    /// [`STATEMENT_BUDGET_EXCEEDS_LIMIT`] for `StatementLimitExceeded`,
-    /// [`STATEMENT_BUDGET_EXHAUSTED`] for `ResourceExhausted`, none otherwise.
+    /// answers with, telling a call-budget refusal apart from every other
+    /// error sharing its [`code`](Self::code): [`CALL_BUDGET_EXHAUSTED`] for
+    /// `CallBudgetExhausted`, none otherwise.
     #[must_use]
     pub const fn detail_code(&self) -> Option<&'static str> {
         match self {
-            Self::StatementLimitExceeded(_) => Some(STATEMENT_BUDGET_EXCEEDS_LIMIT),
-            Self::ResourceExhausted(_) => Some(STATEMENT_BUDGET_EXHAUSTED),
+            Self::CallBudgetExhausted(_) => Some(CALL_BUDGET_EXHAUSTED),
             Self::NotFound
             | Self::AlreadyExists(_)
             | Self::InvalidArgument(_)
@@ -115,7 +108,8 @@ impl DatabaseError {
 ///
 /// A failure normally means nothing committed, whichever statement failed:
 /// a statement that fails, a transaction that cannot be opened and a
-/// [`StatementBudget`] refusal all leave every statement unapplied. A failure
+/// [`DatabaseError::CallBudgetExhausted`] refusal all leave every statement
+/// unapplied. A failure
 /// reported after the backend accepted the commit is different, and leaves
 /// the outcome unknown: a `COMMIT` whose answer was lost (the connection
 /// broke while PostgreSQL committed), or a check on the results that runs
@@ -133,8 +127,9 @@ pub struct TransactionError {
     /// `None`.
     ///
     /// `None` is therefore not "no statement failed". It is also the answer
-    /// when the [`StatementBudget`] refused the transaction before anything
-    /// was sent, or when opening or committing it failed; [`Self::error`]
+    /// when a call-limited backend refused the transaction before anything
+    /// was sent ([`DatabaseError::CallBudgetExhausted`]), or when opening or
+    /// committing it failed; [`Self::error`]
     /// says which.
     pub statement: Option<usize>,
     /// The failure, classified as every other operation classifies it: a
@@ -680,59 +675,15 @@ impl AggregateSpec {
     }
 }
 
-/// How many SQL statements a [`DatabaseService`] may still run in the current
-/// invocation, as [`DatabaseService::statement_budget`] reports it.
-///
-/// A multi-statement write ([`create_many`](DatabaseService::create_many),
-/// [`batch`](DatabaseService::batch)) is checked against it with
-/// [`admit`](Self::admit) before it runs, so a write the backend could not
-/// finish is refused whole instead of failing part-way through a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatementBudget {
-    /// The backend has no per-invocation statement limit (native SQLite,
-    /// PostgreSQL): a write of any size is admitted.
-    Unbounded,
-    /// The backend runs at most `limit` statements per invocation, and has
-    /// counted `used` of them in this one. A Cloudflare D1 adapter reports
-    /// D1's per-Worker-invocation query limit and counts every statement it
-    /// sends, each one inside a `db.batch()` included.
-    Limited {
-        /// Statements one invocation may run.
-        limit: u64,
-        /// Statements this invocation has already run.
-        used: u64,
-    },
-}
-
-impl StatementBudget {
-    /// Admit `what`, which runs `needed` statements, or refuse it:
-    /// [`DatabaseError::StatementLimitExceeded`] when `needed` exceeds the
-    /// per-invocation limit (no invocation can run it, so the caller must
-    /// send less), [`DatabaseError::ResourceExhausted`] when it fits the
-    /// limit but not what this invocation has left.
-    pub fn admit(self, needed: usize, what: &str) -> Result<(), DatabaseError> {
-        let Self::Limited { limit, used } = self else {
-            return Ok(());
-        };
-        let needed = u64::try_from(needed).unwrap_or(u64::MAX);
-        let remaining = limit.saturating_sub(used);
-        if needed > limit {
-            return Err(DatabaseError::StatementLimitExceeded(format!(
-                "{what} runs {needed} statements; this database runs at most {limit} per \
-                 invocation"
-            )));
-        }
-        if needed > remaining {
-            return Err(DatabaseError::ResourceExhausted(format!(
-                "{what} runs {needed} statements; this invocation has {remaining} of its \
-                 {limit} left ({used} already ran)"
-            )));
-        }
-        Ok(())
-    }
-}
-
 /// Service provides generic CRUD operations on collections.
+///
+/// A backend whose platform limits the database calls one invocation may
+/// make counts one call per lone operation and one per transaction or batch
+/// (`create_many`, `batch`, `exec_raw_transaction`, a guarded write),
+/// whatever its length. It refuses a call past its limit before sending it
+/// with [`DatabaseError::CallBudgetExhausted`], and maps its platform's own
+/// refusal of the same limit to that error; see
+/// [`DbExec`](super::exec::DbExec)'s "Per-invocation call limits".
 #[wafer_async_trait]
 pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Get retrieves a single record by ID from a collection.
@@ -753,10 +704,11 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// return the number inserted. Each row gets [`create`](Self::create)'s
     /// stamping; rows may carry different column sets. Either every row is
     /// stored or, when any insert fails, none is. No default: a backend that
-    /// cannot make the inserts atomic must say so with an error. The database
-    /// handler refuses a call carrying more rows than the
-    /// [`statement_budget`](Self::statement_budget) admits before it reaches
-    /// this method.
+    /// cannot make the inserts atomic must say so with an error. The whole
+    /// insert is one database call, however many rows it carries: a backend
+    /// with a per-invocation call limit refuses it with
+    /// [`DatabaseError::CallBudgetExhausted`] before it runs when the
+    /// invocation has no call left.
     async fn create_many(
         &self,
         collection: &str,
@@ -767,8 +719,9 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// [`WriteOutcome`] per op in the same order. Either every op is applied
     /// or, when any statement fails, none is. An `Update`/`Delete` whose id
     /// matches no row is an outcome, not a failure. No default, for the same
-    /// reason as [`create_many`](Self::create_many); the handler checks `ops`
-    /// against the [`statement_budget`](Self::statement_budget) the same way.
+    /// reason as [`create_many`](Self::create_many). The whole batch is one
+    /// database call, refused the same way when the invocation has no call
+    /// left.
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError>;
 
     /// Insert `data` into `collection` only while every guard in `guards`
@@ -869,11 +822,10 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// PostgreSQL's `CREATE INDEX CONCURRENTLY`, a `BEGIN` or `COMMIT` of the
     /// caller's own) has no place here.
     ///
-    /// The whole call is admitted against the
-    /// [`statement_budget`](Self::statement_budget), one statement each,
-    /// before the first is sent: a call the backend could not finish in this
-    /// invocation is refused with [`DatabaseError::ResourceExhausted`] or
-    /// [`DatabaseError::StatementLimitExceeded`] and nothing is sent. A
+    /// The whole transaction is one database call: a backend with a
+    /// per-invocation call limit refuses it with
+    /// [`DatabaseError::CallBudgetExhausted`] before anything is sent when
+    /// the invocation has no call left. A
     /// failure carries its classified error and, when the backend can
     /// attribute it, the failing statement's position
     /// ([`TransactionError::statement`]; D1 cannot). A failure normally
@@ -1106,19 +1058,6 @@ pub trait DatabaseService: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// statement, with no existence probe before it: the admin table list
     /// counts every table it lists.
     async fn catalog_row_count(&self, table: &str) -> Result<i64, DatabaseError>;
-
-    /// The statements this service may still run in the current invocation.
-    /// The database handler admits a `create_many` or `batch` against it
-    /// before calling the service, one statement per row or op. An error is
-    /// returned as the handler's answer to the call, which then never reaches
-    /// the service (a service that resolves its backend per request fails
-    /// here as it would on any op).
-    ///
-    /// No default: a decorator that forgot it would report `Unbounded` for a
-    /// backend that has a limit, and every call past that limit would fail
-    /// inside the backend instead of being refused up front. A SQL backend
-    /// forwards to [`DbExec::statement_budget`](super::exec::DbExec::statement_budget).
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError>;
 }
 
 /// Record represents a single database record.

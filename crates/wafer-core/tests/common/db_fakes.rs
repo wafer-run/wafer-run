@@ -24,7 +24,7 @@ use wafer_block::{
 };
 use wafer_core::interfaces::database::service::{
     AggregateSpec, CatalogColumn, DatabaseError, DatabaseService, RawStatement, Record, RecordList,
-    StatementBudget, TransactionError, UpsertSpec,
+    TransactionError, UpsertSpec,
 };
 use wafer_schema::{Column, Table};
 
@@ -52,10 +52,6 @@ impl RecordingDb {
 
 #[async_trait]
 impl DatabaseService for RecordingDb {
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Unbounded)
-    }
-
     async fn get(&self, _collection: &str, id: &str) -> Result<Record, DatabaseError> {
         self.record("get");
         Ok(Record {

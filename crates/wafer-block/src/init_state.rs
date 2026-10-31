@@ -17,8 +17,8 @@ pub enum BlockInitState {
     /// Init succeeded; the block serves.
     Ready,
     /// The last init attempt failed transiently (the config source
-    /// unreachable, a backend down, a spent statement budget). The failure
-    /// is not cached: init can run again.
+    /// unreachable, a backend down, a spent per-invocation call budget). The
+    /// failure is not cached: init can run again.
     Retrying {
         /// The last transient failure's message. It may quote a backend's
         /// error; a public health body reports the class, not this text.

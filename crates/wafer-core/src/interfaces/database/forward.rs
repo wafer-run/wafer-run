@@ -118,7 +118,6 @@
 //!             catalog_tables: forward,
 //!             catalog_columns: forward,
 //!             catalog_row_count: forward,
-//!             statement_budget: forward,
 //!         }
 //!
 //!         async fn create(
@@ -242,7 +241,6 @@
 //!             catalog_tables: forward,
 //!             catalog_columns: forward,
 //!             catalog_row_count: forward,
-//!             statement_budget: forward,
 //!         }
 //!     }
 //! }
@@ -336,8 +334,7 @@ macro_rules! __forward_database_ledger {
             schema_add_column: $m_schema_add_column:ident,
             catalog_tables: $m_catalog_tables:ident,
             catalog_columns: $m_catalog_columns:ident,
-            catalog_row_count: $m_catalog_row_count:ident,
-            statement_budget: $m_statement_budget:ident $(,)?
+            catalog_row_count: $m_catalog_row_count:ident $(,)?
         }
         $($custom:tt)*
     ) => {
@@ -375,7 +372,6 @@ macro_rules! __forward_database_ledger {
                 (catalog_tables, $m_catalog_tables)
                 (catalog_columns, $m_catalog_columns)
                 (catalog_row_count, $m_catalog_row_count)
-                (statement_budget, $m_statement_budget)
             ],
             []
         );
@@ -393,7 +389,7 @@ macro_rules! __forward_database_ledger {
              \x20   insert_guarded, update_guarded, ensure_schema_table, ensure_schema_tables, schema_table_exists,\n\
              \x20   schema_columns,\n\
              \x20   schema_drop_table, schema_add_column, catalog_tables, catalog_columns,\n\
-             \x20   catalog_row_count, statement_budget\n\
+             \x20   catalog_row_count\n\
              The listing is the point: an operation left out of a decorator \
              silently inherits a non-pass-through trait default."
         );
@@ -1091,25 +1087,6 @@ macro_rules! __forward_database_step {
                     $crate::interfaces::database::service::DatabaseError,
                 > {
                     <_ as $target>::catalog_row_count($recv(self), table).await
-                }
-            ]
-        );
-    };
-    (
-        $ty:ty, $target:path, $recv:path, $custom:tt,
-        [ (statement_budget, forward) $($todo:tt)* ], [ $($acc:tt)* ]
-    ) => {
-        $crate::__forward_database_step!(
-            $ty, $target, $recv, $custom, [ $($todo)* ],
-            [
-                $($acc)*
-                fn statement_budget(
-                    &self,
-                ) -> ::core::result::Result<
-                    $crate::interfaces::database::service::StatementBudget,
-                    $crate::interfaces::database::service::DatabaseError,
-                > {
-                    <_ as $target>::statement_budget($recv(self))
                 }
             ]
         );

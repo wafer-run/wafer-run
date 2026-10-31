@@ -44,7 +44,7 @@ use std::{future::Future, time::Duration};
 use thiserror::Error;
 use wafer_block::{
     core_types::{ErrorCode, WaferError},
-    wire::database::STATEMENT_BUDGET_EXHAUSTED,
+    wire::database::CALL_BUDGET_EXHAUSTED,
     BlockInitState,
 };
 
@@ -116,21 +116,21 @@ impl InitError {
 ///
 /// # The `ResourceExhausted` rule
 ///
-/// The detail code [`STATEMENT_BUDGET_EXHAUSTED`] is checked first, and is
-/// **transient** whatever the code: the database refused a statement
-/// because *this invocation* has spent its per-invocation statement budget,
-/// and a fresh invocation (a rebuild in a new request) may run it.
+/// The detail code [`CALL_BUDGET_EXHAUSTED`] is checked first, and is
+/// **transient** whatever the code: the database refused a call because
+/// *this invocation* has spent its per-invocation call budget, and a fresh
+/// invocation (a rebuild in a new request) may run it. A call is one round
+/// trip however many statements it carries, so no single call exceeds a
+/// fresh invocation's limit, and there is no permanent counterpart.
 ///
 /// Every other `ResourceExhausted` stays **permanent**: the runtime's own
 /// limits raise it (call depth, the wasm host-memory budget, a flow's
 /// `max_steps`), and an Init that exceeds one does so again on every run.
-/// So does a statement no invocation can run at all — the database's
-/// `StatementLimitExceeded`, answered as `InvalidArgument` with
-/// `STATEMENT_BUDGET_EXCEEDS_LIMIT`. An Init that meets another limit which
-/// does clear (a rate limit) reports it as `Unavailable`.
+/// An Init that meets another limit which does clear (a rate limit) reports
+/// it as `Unavailable`.
 #[must_use]
 pub fn init_failure_is_transient(code: ErrorCode, detail: Option<&str>) -> bool {
-    if detail == Some(STATEMENT_BUDGET_EXHAUSTED) {
+    if detail == Some(CALL_BUDGET_EXHAUSTED) {
         return true;
     }
     matches!(
@@ -467,25 +467,16 @@ mod tests {
         }
     }
 
-    /// The `ResourceExhausted` rule: a spent per-invocation statement
-    /// budget is transient (checked before the code), a statement no
-    /// invocation can run and the runtime's own limits stay permanent.
+    /// The `ResourceExhausted` rule: a spent per-invocation call budget is
+    /// transient (checked before the code); the runtime's own limits stay
+    /// permanent.
     #[test]
-    fn a_spent_statement_budget_is_transient_other_limits_are_permanent() {
-        use wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT;
-
+    fn a_spent_call_budget_is_transient_other_limits_are_permanent() {
         let spent = WaferError::new(ErrorCode::ResourceExhausted, "budget spent")
-            .with_detail_code(STATEMENT_BUDGET_EXHAUSTED);
+            .with_detail_code(CALL_BUDGET_EXHAUSTED);
         assert!(matches!(
             InitError::from_lifecycle_error(&spent),
             InitError::Transient(_)
-        ));
-
-        let over_limit = WaferError::new(ErrorCode::InvalidArgument, "over the limit")
-            .with_detail_code(STATEMENT_BUDGET_EXCEEDS_LIMIT);
-        assert!(matches!(
-            InitError::from_lifecycle_error(&over_limit),
-            InitError::Permanent(_)
         ));
 
         let runtime_limit = WaferError::new(ErrorCode::ResourceExhausted, "call depth");
@@ -499,21 +490,14 @@ mod tests {
     /// the one `from_lifecycle_error` applies.
     #[test]
     fn init_failure_is_transient_is_the_lifecycle_rule() {
-        use wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT;
-
         let cases = [
             (ErrorCode::Unavailable, None, true),
             (
                 ErrorCode::ResourceExhausted,
-                Some(STATEMENT_BUDGET_EXHAUSTED),
+                Some(CALL_BUDGET_EXHAUSTED),
                 true,
             ),
             (ErrorCode::ResourceExhausted, None, false),
-            (
-                ErrorCode::InvalidArgument,
-                Some(STATEMENT_BUDGET_EXCEEDS_LIMIT),
-                false,
-            ),
             (ErrorCode::Internal, None, false),
         ];
         for (code, detail, transient) in cases {

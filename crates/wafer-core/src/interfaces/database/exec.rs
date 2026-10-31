@@ -30,8 +30,8 @@ use super::{
     schema_cache::{SchemaCache, TableColumns},
     service::{
         AggregateSpec, CapGuard, CatalogColumn, DatabaseError, GuardedInsert, GuardedUpdate,
-        RawStatement, Record, RecordData, RecordList, StatementBudget, TransactionError,
-        UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+        RawStatement, Record, RecordData, RecordList, TransactionError, UpsertConflict, UpsertSpec,
+        WriteOp, WriteOutcome,
     },
 };
 
@@ -586,6 +586,29 @@ fn catalog_column(row: &Record) -> Result<CatalogColumn, DatabaseError> {
 }
 
 /// Execution primitives + shared orchestration for SQL `DatabaseService` backends.
+///
+/// # Per-invocation call limits
+///
+/// A backend whose platform limits the database round trips one invocation
+/// may make (Cloudflare D1: 1,000 per Worker invocation, a `db.batch()`
+/// counting once) counts **calls**, not statements:
+/// - one per primitive: [`run_fetch`](Self::run_fetch),
+///   [`run_fetch_one`](Self::run_fetch_one), [`run_execute`](Self::run_execute),
+///   [`run_execute_returning`](Self::run_execute_returning), the
+///   `run_scalar_*` pair, [`run_schema_execute`](Self::run_schema_execute),
+///   [`dbx_table_exists`](Self::dbx_table_exists), and
+///   [`DatabaseService::query_raw`](super::service::DatabaseService::query_raw);
+/// - one per [`run_transaction`](Self::run_transaction),
+///   [`run_schema_transaction`](Self::run_schema_transaction) or
+///   [`run_batch`](Self::run_batch), whatever its length.
+///
+/// It runs a transaction in one call. It refuses a call past its limit
+/// before sending it, with
+/// [`DatabaseError::CallBudgetExhausted`], and maps its platform's own
+/// refusal of the same limit to that error. The shared orchestration never
+/// admits a write ahead of the backend: a refused transaction sends nothing,
+/// and a planned write's introspection was its own calls. A backend with no
+/// such limit (native SQLite, PostgreSQL) counts nothing.
 #[wafer_async_trait]
 pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// SQL dialect this backend builds for (placeholder style, introspection).
@@ -602,23 +625,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     fn schema_cache(&self) -> Option<&SchemaCache> {
         None
     }
-
-    /// The statements this backend may still run in the current invocation
-    /// (see [`StatementBudget`]).
-    ///
-    /// The shared orchestration admits every
-    /// [`run_transaction`](Self::run_transaction) against it after planning,
-    /// so the schema introspection a write ran while planning is already
-    /// counted and a transaction the backend could not finish is refused
-    /// before its first statement. A backend with a per-invocation limit (D1)
-    /// counts the statements it issues and reports `Limited`; one without
-    /// (native SQLite, PostgreSQL) reports `Unbounded`.
-    ///
-    /// No default, for the reason
-    /// [`DatabaseService::statement_budget`](super::service::DatabaseService::statement_budget)
-    /// has none: a backend with a limit that inherited `Unbounded` would
-    /// fail its writes part-way through a request.
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError>;
 
     // ---- Primitives: the only backend-specific execution code ----
     // `params` is the JSON form produced by `sea_values_to_json(stmt.values)`;
@@ -1715,15 +1721,15 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         Ok(affected)
     }
 
-    /// Shared `exec_raw_transaction`: admit every statement against the
-    /// [`statement_budget`](Self::statement_budget) at once, then run them as
-    /// ONE [`run_schema_transaction`](Self::run_schema_transaction) of
-    /// [`TxOp::Execute`]s.
+    /// Shared `exec_raw_transaction`: run the statements as ONE
+    /// [`run_schema_transaction`](Self::run_schema_transaction) of
+    /// [`TxOp::Execute`]s, one call however many there are.
     ///
-    /// A budget refusal sends nothing and names no statement. Once the
-    /// transaction was sent, the whole [`schema_cache`](Self::schema_cache)
-    /// is cleared, as [`exec_raw`](Self::exec_raw) clears it, on success and
-    /// on failure alike (and `run_schema_transaction` drops the backend's
+    /// A backend's [`DatabaseError::CallBudgetExhausted`] refusal sends
+    /// nothing and names no statement. Once the transaction returns, the
+    /// whole [`schema_cache`](Self::schema_cache) is cleared, as
+    /// [`exec_raw`](Self::exec_raw) clears it, on success and on failure
+    /// alike (and `run_schema_transaction` drops the backend's
     /// statement cache on the transaction's connection on both outcomes): the
     /// statements' targets cannot be recovered from their text, and a failed
     /// commit (a connection lost during `COMMIT`) does not say whether the
@@ -1739,9 +1745,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
         if statements.is_empty() {
             return Ok(Vec::new());
         }
-        self.statement_budget()
-            .and_then(|budget| budget.admit(statements.len(), "exec_raw_transaction"))
-            .map_err(TransactionError::whole)?;
         let ops: Vec<TxOp<'_>> = statements
             .iter()
             .map(|statement| TxOp::Execute {
@@ -1929,8 +1932,9 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
     /// Returns the number of rows the backend reports as inserted. Rows may
     /// carry different column sets: each gets its own INSERT, and every column
     /// any row names must already exist — a failed insert, or a transaction
-    /// the [`statement_budget`](Self::statement_budget) refuses, leaves no
-    /// row behind.
+    /// the backend refuses for its call budget
+    /// ([`DatabaseError::CallBudgetExhausted`]), leaves no row behind. The
+    /// whole insert is one call, however many rows it carries.
     async fn create_many(
         &self,
         collection: &str,
@@ -1965,7 +1969,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
             .iter()
             .map(|(sql, params)| TxOp::Execute { sql, params })
             .collect();
-        self.statement_budget()?.admit(ops.len(), "create_many")?;
         let mut inserted = 0;
         // The failing statement's position names one of the inserts planned
         // here, nothing the caller can act on: the classified error is the
@@ -2106,7 +2109,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 _ => TxOp::Execute { sql, params },
             })
             .collect();
-        self.statement_budget()?.admit(tx_ops.len(), "batch")?;
         // The failing statement's position names a statement planned here,
         // not an op: the classified error is the answer.
         let results = self
@@ -2216,8 +2218,6 @@ pub trait DbExec: wafer_block::MaybeSend + wafer_block::MaybeSync {
                 },
             })
             .collect();
-        self.statement_budget()?
-            .admit(ops.len(), "a guarded write")?;
         // The failing statement's position names one of the probes or the
         // write planned here: the classified error is the answer.
         let results = self
@@ -2373,10 +2373,6 @@ mod tests {
     impl DbExec for BarrierExec {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
-
         fn schema_cache(&self) -> Option<&SchemaCache> {
             Some(&self.cache)
         }
@@ -2529,10 +2525,6 @@ mod tests {
     impl DbExec for SeqMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
-
         async fn run_fetch(
             &self,
             sql: &str,
@@ -2622,10 +2614,6 @@ mod tests {
     #[wafer_async_trait]
     impl DbExec for CatalogMock {
         const BACKEND: Backend = Backend::Sqlite;
-
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
 
         async fn query_raw(
             &self,
@@ -2895,7 +2883,7 @@ mod tests {
     /// `upsert` is ONE statement — the `INSERT … ON CONFLICT … RETURNING *`
     /// — dispatched through [`DbExec::run_execute_returning`] (the write
     /// path), with no read-back: the row it answers is the one the statement
-    /// returned. A backend with a per-invocation statement budget (D1)
+    /// returned. A backend with a per-invocation call limit (D1)
     /// counts it as one. The column introspection before it is what every
     /// write runs, once per table on a backend with a schema cache.
     #[tokio::test]
@@ -3014,12 +3002,16 @@ mod tests {
         /// `(sql, json)` of every row-returning statement except the column
         /// introspection, whichever primitive carried it.
         row_json: Mutex<Vec<(String, JsonColumns)>>,
-        /// The per-invocation statement limit this mock reports, as D1 does,
-        /// or `None` for `Unbounded`.
-        limit: Option<u64>,
-        /// Every statement any primitive ran, each one inside a
-        /// `run_transaction` or `run_batch` included, as D1 counts them.
-        issued: Mutex<u64>,
+        /// Every call the mock received, as a call-limited backend (D1)
+        /// counts them: one per primitive, one per `run_transaction` or
+        /// `run_batch` whatever its length.
+        calls: Mutex<u64>,
+        /// When set, `run_transaction` records the transaction it is handed
+        /// and refuses it with [`DatabaseError::CallBudgetExhausted`], as a
+        /// call-limited backend with no call left does.
+        refuse_transactions: bool,
+        /// The schema cache this mock reports, when it keeps one.
+        cache: Option<SchemaCache>,
     }
 
     impl BatchMock {
@@ -3030,23 +3022,31 @@ mod tests {
                 tx_calls: Mutex::new(Vec::new()),
                 fetch_calls: Mutex::new(Vec::new()),
                 row_json: Mutex::new(Vec::new()),
-                limit: None,
-                issued: Mutex::new(0),
+                calls: Mutex::new(0),
+                refuse_transactions: false,
+                cache: None,
             }
         }
-        /// A mock that runs at most `limit` statements, counting the ones it
-        /// issues against it.
-        fn limited(limit: u64) -> Self {
+        /// A mock whose invocation has no call left by the time a write
+        /// reaches its transaction.
+        fn refusing_transactions() -> Self {
             Self {
-                limit: Some(limit),
+                refuse_transactions: true,
                 ..Self::new(0)
             }
         }
-        fn issue(&self, statements: usize) {
-            *self.issued.lock().unwrap() += statements as u64;
+        /// A mock that keeps a schema cache, as every SQL backend does.
+        fn cached() -> Self {
+            Self {
+                cache: Some(SchemaCache::new()),
+                ..Self::new(0)
+            }
         }
-        fn issued(&self) -> u64 {
-            *self.issued.lock().unwrap()
+        fn call(&self) {
+            *self.calls.lock().unwrap() += 1;
+        }
+        fn calls(&self) -> u64 {
+            *self.calls.lock().unwrap()
         }
         /// The column introspection's answer: `widgets` has one column
         /// declared JSON, spelled in mixed case as a schema may spell it.
@@ -3089,14 +3089,8 @@ mod tests {
     impl DbExec for BatchMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(match self.limit {
-                Some(limit) => StatementBudget::Limited {
-                    limit,
-                    used: self.issued(),
-                },
-                None => StatementBudget::Unbounded,
-            })
+        fn schema_cache(&self) -> Option<&SchemaCache> {
+            self.cache.as_ref()
         }
 
         async fn run_fetch(
@@ -3105,7 +3099,7 @@ mod tests {
             _params: &[serde_json::Value],
             json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
-            self.issue(1);
+            self.call();
             if sql.contains("decl_type") {
                 return Ok(Self::declared_columns());
             }
@@ -3123,7 +3117,7 @@ mod tests {
             _params: &[serde_json::Value],
             json: &JsonColumns,
         ) -> Result<Record, DatabaseError> {
-            self.issue(1);
+            self.call();
             self.row_json
                 .lock()
                 .unwrap()
@@ -3136,7 +3130,7 @@ mod tests {
             _sql: &str,
             _params: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
-            self.issue(1);
+            self.call();
             Ok(0)
         }
 
@@ -3146,7 +3140,7 @@ mod tests {
             _params: &[serde_json::Value],
             json: &JsonColumns,
         ) -> Result<Vec<Record>, DatabaseError> {
-            self.issue(1);
+            self.call();
             self.row_json
                 .lock()
                 .unwrap()
@@ -3159,7 +3153,7 @@ mod tests {
             _sql: &str,
             _params: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
-            self.issue(1);
+            self.call();
             Ok(0)
         }
 
@@ -3168,12 +3162,12 @@ mod tests {
             _sql: &str,
             _params: &[serde_json::Value],
         ) -> Result<f64, DatabaseError> {
-            self.issue(1);
+            self.call();
             Ok(0.0)
         }
 
         async fn dbx_table_exists(&self, _table: &str) -> Result<bool, DatabaseError> {
-            self.issue(1);
+            self.call();
             Ok(true)
         }
 
@@ -3181,7 +3175,7 @@ mod tests {
             &self,
             ops: &[TxOp<'_>],
         ) -> Result<Vec<TxResult>, TransactionError> {
-            self.issue(ops.len());
+            self.call();
             let recorded: Vec<(String, String)> = ops
                 .iter()
                 .map(|op| {
@@ -3193,6 +3187,11 @@ mod tests {
                 })
                 .collect();
             self.tx_calls.lock().unwrap().push(recorded);
+            if self.refuse_transactions {
+                return Err(TransactionError::whole(DatabaseError::CallBudgetExhausted(
+                    "this invocation has no call left".into(),
+                )));
+            }
             for op in ops {
                 if let TxOp::Returning { sql, json, .. } = op {
                     self.row_json
@@ -3221,7 +3220,7 @@ mod tests {
         }
 
         async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
-            self.issue(ops.len());
+            self.call();
             // Record each op as (variant-name, sql) for the assertion.
             let recorded: Vec<(String, String)> = ops
                 .iter()
@@ -3370,10 +3369,6 @@ mod tests {
     #[wafer_async_trait]
     impl DbExec for KeyedMock {
         const BACKEND: Backend = Backend::Sqlite;
-
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
 
         fn schema_cache(&self) -> Option<&SchemaCache> {
             Some(&self.cache)
@@ -3671,10 +3666,6 @@ mod tests {
     impl DbExec for DdlMock {
         const BACKEND: Backend = Backend::Sqlite;
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
-
         fn schema_cache(&self) -> Option<&SchemaCache> {
             Some(&self.cache)
         }
@@ -3940,82 +3931,100 @@ mod tests {
             .collect()
     }
 
-    /// The statements a `write` issues on an unlimited mock: its planning
-    /// introspection plus its transaction.
-    async fn statements_issued<F, Fut>(write: F) -> u64
-    where
-        F: FnOnce(BatchMock) -> Fut,
-        Fut: std::future::Future<Output = BatchMock>,
-    {
-        write(BatchMock::new(0)).await.issued()
+    /// The guards a guarded write in these tests carries.
+    const ONE_GUARD: &[CapGuard] = &[CapGuard::CountBelow {
+        filters: Vec::new(),
+        cap: 3,
+    }];
+
+    fn one_row() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("name".to_string(), serde_json::json!("a"))])
     }
 
-    /// A backend that counts the statements it runs (as D1 does) refuses a
-    /// `create_many` whose transaction would overflow what the invocation has
-    /// left, AFTER counting the introspection the write ran while planning,
-    /// and BEFORE the transaction's first statement. Given exactly enough, the
-    /// same write runs.
+    /// Every multi-statement write hands the backend its whole transaction
+    /// as ONE `run_transaction`, so a call-limited backend whose invocation
+    /// has no call left refuses it there: the write surfaces the backend's
+    /// own [`DatabaseError::CallBudgetExhausted`], with its detail code, and
+    /// the shared orchestration admits nothing ahead of it. A regression
+    /// test: the per-statement admission this replaced is deleted, so there
+    /// is no revert to run.
     #[tokio::test]
-    async fn create_many_is_refused_when_its_transaction_overflows_the_remaining_budget() {
-        let needed = statements_issued(|mock| async move {
-            DbExec::create_many(&mock, "widgets", two_rows())
-                .await
-                .expect("create_many succeeds unlimited");
-            mock
-        })
-        .await;
-        assert!(
-            needed > 2,
-            "planning introspects before the two INSERTs, so it must be counted too: {needed}"
-        );
+    async fn every_write_surfaces_the_backends_call_budget_refusal_from_one_transaction() {
+        use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
 
-        let short = BatchMock::limited(needed - 1);
-        let err = DbExec::create_many(&short, "widgets", two_rows())
-            .await
-            .expect_err("one statement short of the budget");
-        assert!(
-            matches!(err, DatabaseError::ResourceExhausted(_)),
-            "fits the limit, not what is left: {err:?}"
-        );
-        assert!(
-            short.tx_calls.lock().unwrap().is_empty(),
-            "refused before the transaction ran"
-        );
+        fn refused(what: &str, mock: &BatchMock, err: &DatabaseError, statements: usize) {
+            assert!(
+                matches!(err, DatabaseError::CallBudgetExhausted(_)),
+                "{what}: the backend's refusal: {err:?}"
+            );
+            assert_eq!(err.detail_code(), Some(CALL_BUDGET_EXHAUSTED), "{what}");
+            let tx = mock.tx_calls.lock().unwrap().clone();
+            assert_eq!(tx.len(), 1, "{what}: one transaction: {tx:?}");
+            assert_eq!(tx[0].len(), statements, "{what}: all of it: {tx:?}");
+        }
 
-        let exact = BatchMock::limited(needed);
-        DbExec::create_many(&exact, "widgets", two_rows())
+        let mock = BatchMock::refusing_transactions();
+        let rows = vec![one_row(), one_row(), one_row()];
+        let err = DbExec::create_many(&mock, "widgets", rows)
             .await
-            .expect("exactly enough budget");
-        assert_eq!(exact.issued(), needed);
+            .expect_err("create_many");
+        refused("create_many", &mock, &err, 3);
+
+        let mock = BatchMock::refusing_transactions();
+        let mut ops = two_creates();
+        ops.push(WriteOp::Delete {
+            collection: "widgets".into(),
+            id: "r1".into(),
+        });
+        let err = DbExec::batch(&mock, ops).await.expect_err("batch");
+        refused("batch", &mock, &err, 3);
+
+        // Probe, write, probe (SQLite has no lock preamble).
+        let mock = BatchMock::refusing_transactions();
+        let err = DbExec::insert_guarded(&mock, "widgets", one_row(), ONE_GUARD)
+            .await
+            .expect_err("insert_guarded");
+        refused("insert_guarded", &mock, &err, 3);
+
+        let mock = BatchMock::refusing_transactions();
+        let err = DbExec::update_guarded(&mock, "widgets", &[], one_row(), ONE_GUARD)
+            .await
+            .expect_err("update_guarded");
+        refused("update_guarded", &mock, &err, 3);
+
+        let mock = BatchMock::refusing_transactions();
+        let err = DbExec::exec_raw_transaction(&mock, &three_raw_statements())
+            .await
+            .expect_err("exec_raw_transaction");
+        assert_eq!(err.statement, None, "a call refusal names no statement");
+        refused("exec_raw_transaction", &mock, &err.error, 3);
     }
 
-    /// As for `create_many`: `batch` is admitted against what is left once
-    /// its planning has run, and refused before its transaction.
+    /// Once its planning is cached, a write is exactly one call: a 3-row
+    /// `create_many` and a 3-statement `exec_raw_transaction` reach the
+    /// backend as one `run_transaction` and no other primitive. A regression
+    /// test with no revert: it pins the unit a call-limited backend counts.
     #[tokio::test]
-    async fn batch_is_refused_when_its_transaction_overflows_the_remaining_budget() {
-        let needed = statements_issued(|mock| async move {
-            DbExec::batch(&mock, two_creates())
-                .await
-                .expect("batch succeeds unlimited");
-            mock
-        })
-        .await;
-        assert!(needed > 2, "planning is counted: {needed}");
-
-        let short = BatchMock::limited(needed - 1);
-        let err = DbExec::batch(&short, two_creates())
+    async fn a_multi_statement_write_is_one_call_once_planning_is_cached() {
+        let mock = BatchMock::cached();
+        let rows = || vec![one_row(), one_row(), one_row()];
+        DbExec::create_many(&mock, "widgets", rows())
             .await
-            .expect_err("one statement short of the budget");
-        assert!(
-            matches!(err, DatabaseError::ResourceExhausted(_)),
-            "{err:?}"
-        );
-        assert!(short.tx_calls.lock().unwrap().is_empty());
-
-        let exact = BatchMock::limited(needed);
-        DbExec::batch(&exact, two_creates())
+            .expect("the first create_many plans and caches");
+        let before = mock.calls();
+        DbExec::create_many(&mock, "widgets", rows())
             .await
-            .expect("exactly enough budget");
+            .expect("create_many");
+        assert_eq!(mock.calls() - before, 1, "create_many is one call");
+        let tx = mock.tx_calls.lock().unwrap().clone();
+        assert_eq!(tx.last().map(Vec::len), Some(3), "{tx:?}");
+
+        let mock = BatchMock::cached();
+        DbExec::exec_raw_transaction(&mock, &three_raw_statements())
+            .await
+            .expect("exec_raw_transaction");
+        assert_eq!(mock.calls(), 1, "exec_raw_transaction is one call");
+        assert_eq!(mock.tx_calls.lock().unwrap()[0].len(), 3);
     }
 
     fn raw(query: &str) -> RawStatement {
@@ -4049,94 +4058,18 @@ mod tests {
                 .map(|statement| ("Execute".to_string(), statement.query))
                 .collect::<Vec<_>>()]
         );
-        assert_eq!(mock.issued(), 3, "nothing else was sent");
-    }
-
-    /// The whole call is admitted before anything is sent: one that fits the
-    /// limit but not what this invocation has left is `ResourceExhausted`,
-    /// names no statement, and sends nothing. Given exactly what is left, the
-    /// same call runs.
-    #[tokio::test]
-    async fn exec_raw_transaction_over_what_is_left_is_exhausted_and_sends_nothing() {
-        let short = BatchMock::limited(5);
-        short.issue(3);
-        let err = DbExec::exec_raw_transaction(&short, &three_raw_statements())
-            .await
-            .expect_err("three statements with two left");
-        assert!(
-            matches!(err.error, DatabaseError::ResourceExhausted(_)),
-            "fits the limit, not what is left: {err:?}"
-        );
-        assert_eq!(err.statement, None, "a refusal names no statement");
-        assert!(
-            short.tx_calls.lock().unwrap().is_empty(),
-            "nothing was sent"
-        );
-        assert_eq!(short.issued(), 3, "nothing was sent");
-
-        let exact = BatchMock::limited(6);
-        exact.issue(3);
-        DbExec::exec_raw_transaction(&exact, &three_raw_statements())
-            .await
-            .expect("exactly what is left");
-        assert_eq!(exact.issued(), 6);
-    }
-
-    /// A call of more statements than the backend's whole limit can never
-    /// run: `StatementLimitExceeded`, no statement named, nothing sent.
-    #[tokio::test]
-    async fn exec_raw_transaction_over_the_limit_is_refused_and_sends_nothing() {
-        let mock = BatchMock::limited(2);
-        let err = DbExec::exec_raw_transaction(&mock, &three_raw_statements())
-            .await
-            .expect_err("three statements, a limit of two");
-        assert!(
-            matches!(err.error, DatabaseError::StatementLimitExceeded(_)),
-            "{err:?}"
-        );
-        assert_eq!(err.statement, None, "a refusal names no statement");
-        assert!(mock.tx_calls.lock().unwrap().is_empty(), "nothing was sent");
-        assert_eq!(mock.issued(), 0, "nothing was sent");
+        assert_eq!(mock.calls(), 1, "one call, nothing else was sent");
     }
 
     /// No statements, no transaction.
     #[tokio::test]
     async fn exec_raw_transaction_of_nothing_sends_nothing() {
-        let mock = BatchMock::limited(0);
+        let mock = BatchMock::refusing_transactions();
         let counts = DbExec::exec_raw_transaction(&mock, &[])
             .await
             .expect("an empty call runs nothing");
         assert!(counts.is_empty());
         assert!(mock.tx_calls.lock().unwrap().is_empty());
-    }
-
-    /// A write that needs more statements than the backend's whole
-    /// per-invocation limit can never run, so it is the caller's mistake
-    /// (`StatementLimitExceeded`, answered as `InvalidArgument`), not a spent
-    /// invocation (`ResourceExhausted`).
-    #[test]
-    fn a_write_over_the_whole_limit_is_invalid_and_one_over_the_rest_is_exhausted() {
-        let fresh = StatementBudget::Limited { limit: 50, used: 0 };
-        assert!(fresh.admit(50, "batch").is_ok());
-        assert!(matches!(
-            fresh.admit(51, "batch"),
-            Err(DatabaseError::StatementLimitExceeded(_))
-        ));
-        let spent = StatementBudget::Limited {
-            limit: 50,
-            used: 10,
-        };
-        assert!(spent.admit(40, "batch").is_ok());
-        let Err(DatabaseError::ResourceExhausted(msg)) = spent.admit(41, "batch") else {
-            panic!("41 of the 40 left must be ResourceExhausted");
-        };
-        assert!(
-            msg.contains("41") && msg.contains("40") && msg.contains("50"),
-            "the refusal names what was asked, what is left and the limit: {msg}"
-        );
-        assert!(StatementBudget::Unbounded
-            .admit(usize::MAX, "batch")
-            .is_ok());
     }
 
     #[tokio::test]
@@ -4315,52 +4248,6 @@ mod tests {
         assert!(probes.iter().all(JsonColumns::is_empty), "{probes:?}");
     }
 
-    /// A guarded write is one transaction too (lock preamble, probe, write,
-    /// probe), admitted against what the invocation has left after its
-    /// planning ran: one statement short, `insert_guarded` and
-    /// `update_guarded` are `ResourceExhausted` and send no transaction;
-    /// given exactly enough, each runs.
-    #[tokio::test]
-    async fn guarded_writes_are_refused_when_their_transaction_overflows_the_remaining_budget() {
-        let guards: &[CapGuard] = &[CapGuard::CountBelow {
-            filters: Vec::new(),
-            cap: 3,
-        }];
-        let row = || HashMap::from([("name".to_string(), serde_json::json!("a"))]);
-        let insert = |mock: BatchMock| async move {
-            let outcome = DbExec::insert_guarded(&mock, "widgets", row(), guards).await;
-            (mock, outcome.map(|_| ()))
-        };
-        let update = |mock: BatchMock| async move {
-            let outcome = DbExec::update_guarded(&mock, "widgets", &[], row(), guards).await;
-            (mock, outcome.map(|_| ()))
-        };
-
-        let (mock, outcome) = insert(BatchMock::new(0)).await;
-        outcome.expect("insert_guarded succeeds unlimited");
-        let needed = mock.issued();
-        let (short, outcome) = insert(BatchMock::limited(needed - 1)).await;
-        assert!(
-            matches!(outcome, Err(DatabaseError::ResourceExhausted(_))),
-            "insert_guarded one short: {outcome:?}"
-        );
-        assert!(short.tx_calls.lock().unwrap().is_empty());
-        let (_, outcome) = insert(BatchMock::limited(needed)).await;
-        outcome.expect("insert_guarded with exactly enough");
-
-        let (mock, outcome) = update(BatchMock::new(0)).await;
-        outcome.expect("update_guarded succeeds unlimited");
-        let needed = mock.issued();
-        let (short, outcome) = update(BatchMock::limited(needed - 1)).await;
-        assert!(
-            matches!(outcome, Err(DatabaseError::ResourceExhausted(_))),
-            "update_guarded one short: {outcome:?}"
-        );
-        assert!(short.tx_calls.lock().unwrap().is_empty());
-        let (_, outcome) = update(BatchMock::limited(needed)).await;
-        outcome.expect("update_guarded with exactly enough");
-    }
-
     /// Every read of stored rows is decoded with the JSON columns the table
     /// declares; raw SQL and aggregate rows, which have no single source
     /// table, are decoded with none. A read that dropped the table's JSON
@@ -4421,10 +4308,6 @@ mod tests {
     #[wafer_async_trait]
     impl DbExec for RacedGuardMock {
         const BACKEND: Backend = Backend::Sqlite;
-
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(StatementBudget::Unbounded)
-        }
 
         async fn run_fetch(
             &self,

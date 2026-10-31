@@ -638,10 +638,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         // The executor's message names only what the caller sent (a table, a
         // column, a limit or offset), so it goes back to the caller as is.
         DatabaseError::InvalidArgument(msg) => WaferError::new(code, msg),
-        // Names only statement counts and the backend's limit.
-        DatabaseError::StatementLimitExceeded(msg) | DatabaseError::ResourceExhausted(msg) => {
-            WaferError::new(code, msg)
-        }
+        // Names only the backend's call limit and what the invocation spent
+        // (or the platform's own refusal of that limit), never the schema.
+        DatabaseError::CallBudgetExhausted(msg) => WaferError::new(code, msg),
         // Transient: the caller may retry (and the runtime retries a block
         // Init that failed this way instead of caching the failure). The
         // driver's message can name hosts and files, so it is logged, not
@@ -671,9 +670,8 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         }
     };
     // The detail code tells a caller what the coarse code cannot: a
-    // statement-budget refusal shares its code with other refusals (any
-    // `InvalidArgument`; a rate limit's or the call-depth limit's
-    // `ResourceExhausted`).
+    // call-budget refusal shares `ResourceExhausted` with other refusals (a
+    // rate limit's, the call-depth limit's).
     match detail {
         Some(detail) => err.with_detail_code(detail),
         None => err,
@@ -681,7 +679,7 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 }
 
 /// The answer to a `database.ddl_transaction` that did not commit: the
-/// classified [`DatabaseError`]'s code (and its statement-budget detail code,
+/// classified [`DatabaseError`]'s code (and its call-budget detail code,
 /// as [`db_error_to_wafer`] sets it), the backend's own message, and, when the
 /// backend attributed the failure to one statement, its position under
 /// [`wire::META_FAILED_STATEMENT_INDEX`].
@@ -703,8 +701,7 @@ fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
         DatabaseError::NotFound => "record not found".to_string(),
         DatabaseError::AlreadyExists(msg)
         | DatabaseError::InvalidArgument(msg)
-        | DatabaseError::StatementLimitExceeded(msg)
-        | DatabaseError::ResourceExhausted(msg)
+        | DatabaseError::CallBudgetExhausted(msg)
         | DatabaseError::Internal(msg) => msg,
         DatabaseError::Unavailable(msg) => {
             tracing::warn!(error = %msg, "database temporarily unavailable");
@@ -950,14 +947,6 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            // One INSERT per row: refused before anything runs when the
-            // backend cannot run that many in this invocation.
-            if let Err(e) = service
-                .statement_budget()
-                .and_then(|budget| budget.admit(req.rows.len(), "create_many"))
-            {
-                return OutputStream::error(db_error_to_wafer(e));
-            }
             if let Err(e) = req.rows.iter().try_for_each(check_data_names) {
                 return OutputStream::error(e);
             }
@@ -1003,16 +992,6 @@ pub async fn handle_message(
                 Ok(r) => r,
                 Err(out) => return out,
             };
-            // At most one statement per op (a `DeleteWhere` is one however
-            // many rows it matches), so this refuses, before the append-only
-            // probes or the service run, a batch the backend cannot run in
-            // this invocation.
-            if let Err(e) = service
-                .statement_budget()
-                .and_then(|budget| budget.admit(req.ops.len(), "batch"))
-            {
-                return OutputStream::error(db_error_to_wafer(e));
-            }
             // A `Create` into a collection the caller may only append to
             // follows the append-only insert rules.
             let mut append_only: Vec<&str> = Vec::new();
@@ -1724,23 +1703,16 @@ mod tests {
         assert_eq!(w.message, "record not found");
     }
 
-    /// Only a statement-budget refusal carries a detail code, so a caller
-    /// can tell it from the other errors sharing its coarse code. The
-    /// message is the budget's own, not the `DatabaseError` display.
+    /// Only a call-budget refusal carries a detail code, so a caller can
+    /// tell it from the other errors sharing its coarse code. The message is
+    /// the backend's own, not the `DatabaseError` display.
     #[test]
-    fn only_statement_budget_refusals_carry_a_detail_code() {
-        use wafer_block::wire::database::{
-            STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED,
-        };
+    fn only_call_budget_refusals_carry_a_detail_code() {
+        use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
 
-        let w = db_error_to_wafer(DatabaseError::StatementLimitExceeded("over".into()));
-        assert_eq!(w.code, ErrorCode::InvalidArgument);
-        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXCEEDS_LIMIT));
-        assert_eq!(w.message, "over");
-
-        let w = db_error_to_wafer(DatabaseError::ResourceExhausted("spent".into()));
+        let w = db_error_to_wafer(DatabaseError::CallBudgetExhausted("spent".into()));
         assert_eq!(w.code, ErrorCode::ResourceExhausted);
-        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXHAUSTED));
+        assert_eq!(w.detail_code(), Some(CALL_BUDGET_EXHAUSTED));
         assert_eq!(w.message, "spent");
 
         for other in [
@@ -1749,6 +1721,7 @@ mod tests {
             DatabaseError::InvalidArgument("bad column".into()),
             DatabaseError::Unavailable("busy".into()),
             DatabaseError::Internal("boom".into()),
+            DatabaseError::Other("driver".into()),
         ] {
             let w = db_error_to_wafer(other);
             assert_eq!(w.detail_code(), None, "{w:?}");
@@ -1757,13 +1730,11 @@ mod tests {
 
     /// A transaction's statement failure answers with its classified code,
     /// the backend's message unscrubbed (a transient fault's excepted), and
-    /// the statement's position; a budget refusal with its detail code and
-    /// no position.
+    /// the statement's position; a call-budget refusal with its detail code
+    /// and no position.
     #[test]
     fn a_transaction_error_keeps_its_code_message_and_statement() {
-        use wafer_block::wire::database::{
-            failed_statement_index, STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED,
-        };
+        use wafer_block::wire::database::{failed_statement_index, CALL_BUDGET_EXHAUSTED};
 
         let w = transaction_error_to_wafer(TransactionError::at(
             0,
@@ -1783,18 +1754,11 @@ mod tests {
         assert_eq!(failed_statement_index(&w), Some(3));
 
         let w = transaction_error_to_wafer(TransactionError::whole(
-            DatabaseError::ResourceExhausted("spent".into()),
+            DatabaseError::CallBudgetExhausted("spent".into()),
         ));
         assert_eq!(w.code, ErrorCode::ResourceExhausted);
-        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXHAUSTED));
+        assert_eq!(w.detail_code(), Some(CALL_BUDGET_EXHAUSTED));
         assert_eq!(w.message, "spent");
-        assert_eq!(failed_statement_index(&w), None);
-
-        let w = transaction_error_to_wafer(TransactionError::whole(
-            DatabaseError::StatementLimitExceeded("over".into()),
-        ));
-        assert_eq!(w.code, ErrorCode::InvalidArgument);
-        assert_eq!(w.detail_code(), Some(STATEMENT_BUDGET_EXCEEDS_LIMIT));
         assert_eq!(failed_statement_index(&w), None);
 
         // A transient fault's text is the driver's, not the caller's

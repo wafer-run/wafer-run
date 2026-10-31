@@ -16,16 +16,14 @@ use serde::{Deserialize, Serialize};
 // --- Error detail codes ---
 
 /// Detail code ([`crate::WaferError::detail_code`]) of the
-/// `InvalidArgument` refusing a write that needs more statements than the
-/// backend runs in one invocation. No invocation can run it: send less.
-pub const STATEMENT_BUDGET_EXCEEDS_LIMIT: &str = "database.statement_budget_exceeds_limit";
-
-/// Detail code ([`crate::WaferError::detail_code`]) of the
-/// `ResourceExhausted` refusing a write that fits the backend's
-/// per-invocation statement limit but not what the current invocation has
-/// left. Nothing was written. Retrying in the same invocation fails the same
-/// way; a fresh invocation (a new request) may run it.
-pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhausted";
+/// `ResourceExhausted` refusing a database call because the backend limits
+/// the calls one invocation may make (Cloudflare D1: 1,000 per Worker
+/// invocation, a `db.batch()` counting once) and the current invocation has
+/// none left. A call is one round trip: a lone operation, or a whole
+/// transaction or batch whatever its length. Nothing was written. Retrying in
+/// the same invocation fails the same way; a fresh invocation (a new
+/// request) may run it.
+pub const CALL_BUDGET_EXHAUSTED: &str = "database.call_budget_exhausted";
 
 /// Meta key ([`crate::WaferError::meta`]) of the error answering a
 /// `database.ddl_transaction` that failed: the failing statement's zero-based
@@ -35,7 +33,7 @@ pub const STATEMENT_BUDGET_EXHAUSTED: &str = "database.statement_budget_exhauste
 /// whole sequence, so a D1 error never carries it.
 ///
 /// Its absence is not "no statement failed": it is also absent for a
-/// statement-budget refusal (nothing was sent) and for a failure to open or
+/// call-budget refusal (nothing was sent) and for a failure to open or
 /// commit the transaction. Read it with [`failed_statement_index`].
 pub const META_FAILED_STATEMENT_INDEX: &str = "database.failed_statement_index";
 
@@ -562,8 +560,10 @@ pub struct CreateManyRequest {
     /// Collection (table) name.
     pub collection: String,
     /// One column → value map per row; `id` and timestamps are stamped when
-    /// absent, as for `database.create`. One statement each, admitted against
-    /// the backend's per-invocation statement budget before any runs.
+    /// absent, as for `database.create`. One statement each; the whole call
+    /// is one database round trip, refused before it runs with
+    /// [`CALL_BUDGET_EXHAUSTED`] when a call-limited backend's invocation has
+    /// no call left.
     pub rows: Vec<HashMap<String, serde_json::Value>>,
 }
 
@@ -573,8 +573,10 @@ pub struct CreateManyRequest {
 /// [`BatchWrite::access`] names, before anything runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchRequest {
-    /// The writes, applied in order. One statement each, admitted against the
-    /// backend's per-invocation statement budget before any runs.
+    /// The writes, applied in order. One statement each; the whole call is
+    /// one database round trip, refused before it runs with
+    /// [`CALL_BUDGET_EXHAUSTED`] when a call-limited backend's invocation has
+    /// no call left.
     pub ops: Vec<BatchWrite>,
 }
 

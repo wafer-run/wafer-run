@@ -113,8 +113,8 @@ use super::{
     handler::handle_message,
     service::{
         pk, pk_int, AggregateColumnSpec, AggregateSpec, CapGuard, Column, DataType, DatabaseError,
-        DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, RawStatement, Record,
-        StatementBudget, Table, UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
+        DatabaseService, GroupBySpec, GuardedInsert, GuardedUpdate, RawStatement, Record, Table,
+        UpsertConflict, UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 
@@ -234,8 +234,8 @@ async fn reset(svc: &dyn DatabaseService, table: &Table) {
 /// lands none) and `batch` (mixed ops across collections apply in order and
 /// report per-op outcomes; one failing op rolls every op back; a filtered
 /// delete and the creates that replace the rows it removed are one
-/// transaction); `statement_budget` (an unbounded backend runs writes past
-/// D1's per-invocation limit, a limited one refuses one over its limit);
+/// transaction); large writes (a `create_many` and a `batch` of 2,500 each
+/// run as one call, past D1's per-invocation limit);
 /// `insert_guarded`/`update_guarded` (count and sum caps, landing exactly on
 /// a sum cap, the refusing guard named, a replaced row excluded by a filter,
 /// no match told apart from a refusal, a taken key as `AlreadyExists`, and ten
@@ -270,7 +270,7 @@ pub async fn run_conformance(svc: &dyn DatabaseService) {
     check_create_many(svc).await;
     check_batch(svc).await;
     check_batch_delete_where(svc).await;
-    check_statement_budget(svc).await;
+    check_large_writes(svc).await;
     check_guarded_writes(svc).await;
     check_increment(svc).await;
     check_upsert_set_columns(svc).await;
@@ -2036,12 +2036,13 @@ async fn check_take_where(svc: &dyn DatabaseService) {
 // create_many (all-or-nothing multi-row insert)
 // ---------------------------------------------------------------------------
 
-/// A write is admitted by the budget the service reports. An `Unbounded`
-/// backend runs a `create_many` and a `batch` far past the 1000 statements
-/// Cloudflare D1 allows one invocation; a `Limited` one refuses a
-/// `create_many` of more statements than its whole limit, writing nothing.
-async fn check_statement_budget(svc: &dyn DatabaseService) {
-    let table = crud_table("conf_statement_budget");
+/// A `create_many` and a `batch` are one call each, whatever their length:
+/// every backend runs both far past the 1,000 calls Cloudflare D1 allows one
+/// invocation (and the 1,000 statements an older, per-statement count would
+/// have refused), each as one transaction.
+async fn check_large_writes(svc: &dyn DatabaseService) {
+    const LARGE: usize = 2500;
+    let table = crud_table("conf_large_writes");
     reset(svc, &table).await;
     let rows = |n: usize| -> Vec<HashMap<String, serde_json::Value>> {
         (0..n)
@@ -2049,52 +2050,24 @@ async fn check_statement_budget(svc: &dyn DatabaseService) {
             .collect()
     };
 
-    match svc.statement_budget().expect("statement_budget") {
-        StatementBudget::Unbounded => {
-            const LARGE: usize = 2500;
-            let inserted = svc
-                .create_many("conf_statement_budget", rows(LARGE))
-                .await
-                .expect("an unbounded backend runs a create_many of any size");
-            assert_eq!(inserted, LARGE as i64);
-            let ops = rows(LARGE)
-                .into_iter()
-                .map(|data| WriteOp::Create {
-                    collection: "conf_statement_budget".into(),
-                    data,
-                })
-                .collect();
-            let outcomes = svc
-                .batch(ops)
-                .await
-                .expect("an unbounded backend runs a batch of any size");
-            assert_eq!(outcomes.len(), LARGE);
-            assert_eq!(
-                svc.count("conf_statement_budget", &[])
-                    .await
-                    .expect("count"),
-                2 * LARGE as i64
-            );
-        }
-        StatementBudget::Limited { limit, .. } => {
-            let over = usize::try_from(limit).expect("a limit that fits in memory") + 1;
-            let err = svc
-                .create_many("conf_statement_budget", rows(over))
-                .await
-                .expect_err("a create_many over the whole limit is refused");
-            assert!(
-                matches!(err, DatabaseError::StatementLimitExceeded(_)),
-                "over the whole limit is the caller's mistake: {err:?}"
-            );
-            assert_eq!(
-                svc.count("conf_statement_budget", &[])
-                    .await
-                    .expect("count"),
-                0,
-                "nothing was written"
-            );
-        }
-    }
+    let inserted = svc
+        .create_many("conf_large_writes", rows(LARGE))
+        .await
+        .expect("a create_many of any size runs");
+    assert_eq!(inserted, LARGE as i64);
+    let ops = rows(LARGE)
+        .into_iter()
+        .map(|data| WriteOp::Create {
+            collection: "conf_large_writes".into(),
+            data,
+        })
+        .collect();
+    let outcomes = svc.batch(ops).await.expect("a batch of any size runs");
+    assert_eq!(outcomes.len(), LARGE);
+    assert_eq!(
+        svc.count("conf_large_writes", &[]).await.expect("count"),
+        2 * LARGE as i64
+    );
 }
 
 async fn check_create_many(svc: &dyn DatabaseService) {

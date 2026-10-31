@@ -427,11 +427,10 @@ dual_api! {
     /// the `ddl` capability), returning each statement's affected-row count
     /// in the same order. Every statement commits or none does.
     ///
-    /// The whole call is admitted against the database's statement budget
-    /// before anything is sent. A refusal is `ResourceExhausted` or
-    /// `InvalidArgument` with the statement-budget detail code
-    /// (`wire::database::STATEMENT_BUDGET_EXHAUSTED` /
-    /// `STATEMENT_BUDGET_EXCEEDS_LIMIT`), and nothing ran.
+    /// The whole transaction is one database round trip: a backend with a
+    /// per-invocation call limit refuses it before it runs when the
+    /// invocation has no call left, with `ResourceExhausted` and detail code
+    /// `wire::database::CALL_BUDGET_EXHAUSTED`, and nothing ran.
     ///
     /// When the transaction fails, the error's `code` is the backend's
     /// classification of the failure (a duplicate key is `AlreadyExists` on
