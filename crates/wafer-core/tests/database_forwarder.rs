@@ -21,8 +21,8 @@ use std::{
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
     AggregateSpec, CatalogColumn, Column, DatabaseError, DatabaseService, GuardedInsert,
-    GuardedUpdate, RawStatement, Record, RecordData, RecordList, StatementBudget, Table,
-    TransactionError, UpsertSpec, WriteOp, WriteOutcome,
+    GuardedUpdate, RawStatement, Record, RecordData, RecordList, Table, TransactionError,
+    UpsertSpec, WriteOp, WriteOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,12 +54,6 @@ fn row(id: &str) -> Record {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl DatabaseService for RecordingDb {
-    /// A limited, partly spent budget, so a decorator that reported its own
-    /// (or the `Unbounded` a backend without a limit reports) would show.
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Limited { limit: 7, used: 3 })
-    }
-
     async fn get(&self, _collection: &str, id: &str) -> Result<Record, DatabaseError> {
         self.note("get");
         Ok(row(id))
@@ -357,7 +351,6 @@ wafer_core::forward_database_service! {
             catalog_tables: forward,
             catalog_columns: forward,
             catalog_row_count: forward,
-            statement_budget: forward,
         }
 
         /// Answered here rather than forwarded, to prove `custom` suppresses
@@ -446,17 +439,6 @@ async fn increment_field_where_reaches_the_inner_service() {
         1
     );
     assert_eq!(inner.calls(), vec!["increment_field_where".to_string()]);
-}
-
-/// The budget is the wrapped backend's: a decorator is not a second database
-/// with a limit of its own.
-#[test]
-fn statement_budget_is_the_inner_services() {
-    let (dec, _inner) = decorated();
-    assert_eq!(
-        dec.statement_budget().expect("statement_budget"),
-        StatementBudget::Limited { limit: 7, used: 3 }
-    );
 }
 
 /// Every remaining op forwards too.

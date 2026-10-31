@@ -61,9 +61,9 @@ pub enum ConfigError {
 
     /// The source is unreachable, or answered with a condition that clears
     /// on its own: a backend down, overloaded or over a quota that resets,
-    /// a network timeout, or a per-invocation statement budget this
-    /// invocation has spent (`STATEMENT_BUDGET_EXHAUSTED`: a fresh invocation
-    /// may run the read). A source with a coded backend error chooses
+    /// a network timeout, or a per-invocation database call budget this
+    /// invocation has spent (`CALL_BUDGET_EXHAUSTED`: a fresh invocation may
+    /// run the read). A source with a coded backend error chooses
     /// between this and [`SourceFault`](Self::SourceFault) with
     /// [`init_failure_is_transient`](crate::init_failure_is_transient), the
     /// rule `lifecycle(Init)` failures are classified by. Retrying can
@@ -80,9 +80,8 @@ pub enum ConfigError {
     },
 
     /// The source answered with an error retrying cannot fix: its table is
-    /// missing or malformed, a read it can never complete (one that needs
-    /// more statements than any invocation may run), a result it cannot
-    /// interpret. The block's init fails with
+    /// missing or malformed, a result it cannot interpret. The block's init
+    /// fails with
     /// [`InitError::Permanent`](crate::runtime::slot::InitError::Permanent),
     /// cached for the slot's lifetime.
     #[error("config source fault for `{block}`: {source}")]
@@ -133,10 +132,10 @@ pub trait ConfigSource: MaybeSend + MaybeSync + 'static {
     ///   false`, no value is present in the source, and the default is empty.
     /// - Return [`ConfigError::Transient`] when the source is unreachable or
     ///   answers with a condition that clears (network, a backend down or
-    ///   over a resetting quota, a spent per-invocation statement budget).
+    ///   over a resetting quota, a spent per-invocation call budget).
     /// - Return [`ConfigError::SourceFault`] when the source answers with an
-    ///   error retrying cannot fix (a missing table, a read no invocation
-    ///   can run, an answer it cannot interpret).
+    ///   error retrying cannot fix (a missing table, an answer it cannot
+    ///   interpret).
     /// - For a backend error that carries an error code (and detail code),
     ///   choose between the two with
     ///   [`init_failure_is_transient`](crate::init_failure_is_transient), so

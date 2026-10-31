@@ -3,10 +3,12 @@
 //! - `ConfigError::SourceFault` is a permanent init failure, cached; a
 //!   `ConfigError::Transient` is not.
 //! - The `ResourceExhausted` rule: a `lifecycle(Init)` refused by the REAL
-//!   `wafer-run/database` block because the invocation's statement budget
-//!   is spent (`STATEMENT_BUDGET_EXHAUSTED`) is transient; one refused
-//!   because no invocation can run it (`StatementLimitExceeded`) and a bare
-//!   `ResourceExhausted` (the runtime's own limits) are permanent.
+//!   `wafer-run/database` block because the invocation has no database call
+//!   left (`CALL_BUDGET_EXHAUSTED`) is transient, and a fresh invocation
+//!   runs it; a bare `ResourceExhausted` (the runtime's own limits) is
+//!   permanent. A call budget has no permanent counterpart: a call is one
+//!   round trip however many statements it carries, so no single call can
+//!   exceed a fresh invocation's limit.
 //! - `ValidationReport::unavailable` carries a source failure as a typed
 //!   entry, never as a pseudo missing key.
 //! - `Wafer::init_states` and `Context::block_init_states` report each
@@ -19,7 +21,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -33,7 +35,9 @@ use wafer_block::{
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::{
-    interfaces::database::service::{DatabaseError, DatabaseService, StatementBudget},
+    interfaces::database::service::{
+        pk, Column, DataType, DatabaseError, DatabaseService, Table, WriteOp, WriteOutcome,
+    },
     service_blocks::database::register_with_tables,
 };
 use wafer_run::{
@@ -221,17 +225,28 @@ fn bare_wafer(source: Arc<dyn ConfigSource>) -> Wafer {
         .expect("Wafer::build")
 }
 
-/// The REAL SQLite service behind a statement budget it does not have:
-/// every op is forwarded except `statement_budget`, which reports `budget`
-/// (as a Cloudflare D1 adapter reports its per-invocation limit).
+/// The REAL SQLite service behind a per-invocation call limit, as a
+/// Cloudflare D1 adapter enforces one: while `spent` is set the invocation
+/// has no call left, so `create_many` and `batch` (one call each, whatever
+/// their length) refuse with `CallBudgetExhausted` before reaching SQLite.
+/// Every other op forwards.
 struct Budgeted {
     inner: SQLiteDatabaseService,
-    budget: StatementBudget,
+    spent: AtomicBool,
 }
 
 impl Budgeted {
     fn inner_service(&self) -> &dyn DatabaseService {
         &self.inner
+    }
+
+    fn spend_call(&self, what: &str) -> Result<(), DatabaseError> {
+        if self.spent.load(Ordering::SeqCst) {
+            return Err(DatabaseError::CallBudgetExhausted(format!(
+                "{what}: this invocation has no database call left"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -243,7 +258,7 @@ wafer_core::forward_database_service! {
             get: forward,
             list: forward,
             create: forward,
-            create_many: forward,
+            create_many: custom,
             update: forward,
             delete: forward,
             count: forward,
@@ -259,7 +274,7 @@ wafer_core::forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
-            batch: forward,
+            batch: custom,
             insert_guarded: forward,
             update_guarded: forward,
             ensure_schema_table: forward,
@@ -271,31 +286,56 @@ wafer_core::forward_database_service! {
             catalog_tables: forward,
             catalog_columns: forward,
             catalog_row_count: forward,
-            statement_budget: custom,
         }
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(self.budget)
+        async fn create_many(
+            &self,
+            collection: &str,
+            rows: Vec<HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, DatabaseError> {
+            self.spend_call("create_many")?;
+            self.inner.create_many(collection, rows).await
+        }
+
+        async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+            self.spend_call("batch")?;
+            self.inner.batch(ops).await
         }
     }
 }
 
-/// A runtime with the REAL `wafer-run/database` block over a service that
-/// runs at most `limit` statements per invocation and has run `used`, and
+/// A runtime with the REAL `wafer-run/database` block over a [`Budgeted`]
+/// SQLite service, which holds `test/budget-init`'s collection, and
 /// `test/budget-init`, whose Init writes `rows` rows through it.
-async fn budget_wafer(limit: u64, used: u64, rows: usize) -> (Wafer, Arc<AtomicUsize>) {
+async fn budget_wafer(rows: usize) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
     let mut wafer = bare_wafer(Arc::new(ScriptedSource::default()));
-    let svc = Budgeted {
-        inner: SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite"),
-        budget: StatementBudget::Limited { limit, used },
-    };
-    register_with_tables(&mut wafer, Arc::new(svc), vec![]).expect("register wafer-run/database");
+    let inner = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
+    inner
+        .ensure_schema_table(&Table {
+            name: OWN_COLLECTION.to_string(),
+            columns: vec![
+                pk("id"),
+                Column::new("name", DataType::Int).null(),
+                Column::new("created_at", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        })
+        .await
+        .expect("create the probe's collection");
+    let svc = Arc::new(Budgeted {
+        inner,
+        spent: AtomicBool::new(false),
+    });
+    register_with_tables(&mut wafer, svc.clone(), vec![]).expect("register wafer-run/database");
     let (probe, inits) = Probe::new("test/budget-init", InitBehaviour::WriteRows(rows));
     wafer
         .register_block("test/budget-init", probe)
         .expect("register probe");
     wafer.seal().await.expect("seal");
-    (wafer, inits)
+    (wafer, inits, svc)
 }
 
 async fn dispatch_error(wafer: &Wafer, block: &str) -> WaferError {
@@ -408,16 +448,19 @@ async fn a_transient_config_error_is_not_cached() {
 // The ResourceExhausted rule, through the real database block
 // ---------------------------------------------------------------------------
 
-/// Two statements with one of the invocation's two left: the database
-/// answers `ResourceExhausted` + `STATEMENT_BUDGET_EXHAUSTED`, and the Init
-/// that met it fails transiently — a fresh invocation may run it.
+/// An Init whose write meets an invocation with no database call left: the
+/// database answers `ResourceExhausted` + `CALL_BUDGET_EXHAUSTED`, and the
+/// Init fails transiently, nothing written, `Retrying`. Once a fresh
+/// invocation has calls again, the re-run past the backoff writes every row
+/// in its one call and the block is `Ready`.
 #[tokio::test]
-async fn an_init_that_meets_a_spent_statement_budget_fails_transiently() {
-    let (wafer, inits) = budget_wafer(2, 1, 2).await;
+async fn an_init_that_meets_a_spent_call_budget_fails_transiently_and_reruns() {
+    let (wafer, inits, svc) = budget_wafer(3).await;
+    svc.spent.store(true, Ordering::SeqCst);
     let err = wafer
         .init_block("test/budget-init")
         .await
-        .expect_err("the budget refuses the write");
+        .expect_err("the call budget refuses the write");
     match err {
         InitError::Transient(msg) => {
             assert!(
@@ -432,37 +475,31 @@ async fn an_init_that_meets_a_spent_statement_budget_fails_transiently() {
         wafer.init_states().get("test/budget-init"),
         Some(BlockInitState::Retrying { .. })
     ));
-}
-
-/// Two statements against a limit of one: no invocation can run it
-/// (`StatementLimitExceeded`), so the Init fails permanently.
-#[tokio::test]
-async fn an_init_whose_write_exceeds_the_whole_statement_limit_fails_permanently() {
-    let (wafer, inits) = budget_wafer(1, 0, 2).await;
-    let err = wafer
-        .init_block("test/budget-init")
-        .await
-        .expect_err("the limit refuses the write");
-    assert!(
-        matches!(&err, InitError::Permanent(msg) if msg.contains("InvalidArgument")),
-        "the database's own StatementLimitExceeded refusal: {err:?}"
+    assert_eq!(
+        svc.inner.count(OWN_COLLECTION, &[]).await.expect("count"),
+        0,
+        "the refused call wrote nothing"
     );
+
+    // A fresh invocation: calls again.
+    svc.spent.store(false, Ordering::SeqCst);
+    tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
     wafer
         .init_block("test/budget-init")
         .await
-        .expect_err("cached");
+        .expect("the re-run writes its rows");
+    assert_eq!(inits.load(Ordering::SeqCst), 2, "Init ran again");
     assert_eq!(
-        inits.load(Ordering::SeqCst),
-        1,
-        "a permanent failure is cached"
-    );
-    assert!(matches!(
         wafer.init_states().get("test/budget-init"),
-        Some(BlockInitState::Failed { .. })
-    ));
+        Some(&BlockInitState::Ready)
+    );
+    assert_eq!(
+        svc.inner.count(OWN_COLLECTION, &[]).await.expect("count"),
+        3
+    );
 }
 
-/// A `ResourceExhausted` without the budget detail code is one of the
+/// A `ResourceExhausted` without the call-budget detail code is one of the
 /// runtime's own limits: permanent.
 #[tokio::test]
 async fn a_bare_resource_exhausted_init_failure_is_permanent() {

@@ -95,12 +95,11 @@ block's init is retried:
 
 - `ConfigError::Transient` — the source is unreachable or answered with a
   condition that clears (a network timeout, a backend down or over a quota
-  that resets, a spent per-invocation statement budget). The init failure is
-  transient: not cached, retried after the slot's backoff.
+  that resets, a spent per-invocation database call budget). The init
+  failure is transient: not cached, retried after the slot's backoff.
 - `ConfigError::SourceFault` — the source answered with an error retrying
-  cannot fix (its table missing, a read no invocation can run, an answer it
-  cannot interpret). The init failure is permanent, cached for the
-  runtime's life.
+  cannot fix (its table missing, an answer it cannot interpret). The init
+  failure is permanent, cached for the runtime's life.
 
 The lookup owns what "absent" means for your storage. `Some(String::new())`
 is a *value*: it beats the declared default and satisfies a required key. A

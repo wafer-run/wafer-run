@@ -4,24 +4,28 @@
 //! handler → the real SQLite service → the response decoded as plain JSON, so
 //! the encoding of the per-op results is pinned too.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use wafer_block::{
     codec,
     common::ServiceOp,
     context::Context,
+    http_codec::error_to_http_response,
     streams::{
         input::InputStream,
         output::{OutputStream, TerminalNotResponse},
     },
     types::{ResourceAccess, ResourceType},
-    wire::database::{STATEMENT_BUDGET_EXCEEDS_LIMIT, STATEMENT_BUDGET_EXHAUSTED},
+    wire::database::CALL_BUDGET_EXHAUSTED,
     ErrorCode, Message, WaferError,
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::interfaces::database::{
     handler::handle_message,
-    service::{pk, Column, DataType, DatabaseError, DatabaseService, StatementBudget, Table},
+    service::{pk, Column, DataType, DatabaseError, DatabaseService, Table, WriteOp, WriteOutcome},
 };
 
 /// A `Context` that grants every resource, so the requests reach the service.
@@ -259,31 +263,48 @@ async fn a_failing_statement_rolls_the_whole_batch_back() {
     );
 }
 
-/// The real SQLite service behind a budget it does not have: every op is
-/// forwarded except `statement_budget`, which reports `budget`, as a backend
-/// with a per-invocation limit (D1) would — or, when `budget` is `None`,
-/// fails as a service that resolves its backend per request does outside
-/// one.
-struct Budgeted {
+/// The real SQLite service behind a per-invocation call limit, as a
+/// Cloudflare D1 adapter enforces one: `create_many` and `batch` are one
+/// call each, whatever their length, refused with `CallBudgetExhausted`
+/// before reaching SQLite once the invocation has made `limit` calls. Every
+/// other op forwards uncounted.
+struct CallLimited {
     inner: SQLiteDatabaseService,
-    budget: Option<StatementBudget>,
+    limit: u64,
+    calls: AtomicU64,
 }
 
-impl Budgeted {
+impl CallLimited {
     fn inner_service(&self) -> &dyn DatabaseService {
         &self.inner
+    }
+
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn spend_call(&self, what: &str) -> Result<(), DatabaseError> {
+        let calls = self.calls();
+        if calls >= self.limit {
+            return Err(DatabaseError::CallBudgetExhausted(format!(
+                "{what}: this invocation has made {calls} of its {} database calls",
+                self.limit
+            )));
+        }
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
 wafer_core::forward_database_service! {
-    impl DatabaseService for Budgeted {
+    impl DatabaseService for CallLimited {
         forward_to inner_service();
 
         ops {
             get: forward,
             list: forward,
             create: forward,
-            create_many: forward,
+            create_many: custom,
             update: forward,
             delete: forward,
             count: forward,
@@ -299,7 +320,7 @@ wafer_core::forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
-            batch: forward,
+            batch: custom,
             insert_guarded: forward,
             update_guarded: forward,
             ensure_schema_table: forward,
@@ -311,21 +332,31 @@ wafer_core::forward_database_service! {
             catalog_tables: forward,
             catalog_columns: forward,
             catalog_row_count: forward,
-            statement_budget: custom,
         }
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            self.budget.ok_or_else(|| {
-                DatabaseError::Unavailable("no request in scope".into())
-            })
+        async fn create_many(
+            &self,
+            collection: &str,
+            rows: Vec<HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, DatabaseError> {
+            self.spend_call("create_many")?;
+            self.inner.create_many(collection, rows).await
+        }
+
+        async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+            self.spend_call("batch")?;
+            self.inner.batch(ops).await
         }
     }
 }
 
-async fn budgeted(limit: u64, used: u64) -> Budgeted {
-    Budgeted {
+/// A [`CallLimited`] service over the seeded table that has made `used` of
+/// its `limit` calls.
+async fn call_limited(limit: u64, used: u64) -> CallLimited {
+    CallLimited {
         inner: seeded().await,
-        budget: Some(StatementBudget::Limited { limit, used }),
+        limit,
+        calls: AtomicU64::new(used),
     }
 }
 
@@ -345,107 +376,40 @@ fn creates(n: usize) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// A backend that runs at most N statements per invocation: a call of N + 1
-/// rows or ops can never run there, so the handler refuses it as
-/// `InvalidArgument` before any write; a call of exactly N runs.
+/// A `create_many` and a `batch` far past the 1,000 calls D1 allows one
+/// invocation reach a call-limited service whole and run: each is ONE call,
+/// so nothing ahead of the service (the handler) refuses them by their row
+/// or op count.
 #[tokio::test]
-async fn a_call_over_the_backends_limit_is_refused_and_the_limit_itself_runs() {
-    const LIMIT: usize = 20;
-    for (op, over, at) in [
-        (
-            ServiceOp::DATABASE_CREATE_MANY,
-            serde_json::json!({ "collection": TABLE, "rows": rows(LIMIT + 1) }),
-            serde_json::json!({ "collection": TABLE, "rows": rows(LIMIT) }),
-        ),
-        (
-            ServiceOp::DATABASE_BATCH,
-            serde_json::json!({ "ops": creates(LIMIT + 1) }),
-            serde_json::json!({ "ops": creates(LIMIT) }),
-        ),
-    ] {
-        let svc = budgeted(LIMIT as u64, 0).await;
-        let err = dispatch(&svc, op, &over)
-            .await
-            .expect_err("one over the limit is refused");
-        assert_eq!(
-            err.code,
-            ErrorCode::InvalidArgument,
-            "{op}: {}",
-            err.message
-        );
-        assert_eq!(
-            err.detail_code(),
-            Some(STATEMENT_BUDGET_EXCEEDS_LIMIT),
-            "{op}: the refusal says it is the statement budget: {err:?}"
-        );
-        assert!(
-            err.message.contains(&format!("at most {LIMIT}")),
-            "{op}: the refusal names the limit: {}",
-            err.message
-        );
-        assert_eq!(count(&svc).await, 3, "{op}: nothing was written");
-
-        dispatch(&svc, op, &at)
-            .await
-            .expect("a call of exactly the limit runs");
-        assert_eq!(count(&svc).await, 3 + LIMIT as i64, "{op}");
-    }
+async fn a_write_of_any_size_is_one_call_to_a_call_limited_backend() {
+    const LARGE: usize = 1500;
+    let svc = call_limited(1000, 0).await;
+    let resp = dispatch(
+        &svc,
+        ServiceOp::DATABASE_CREATE_MANY,
+        &serde_json::json!({ "collection": TABLE, "rows": rows(LARGE) }),
+    )
+    .await
+    .expect("a 1,500-row create_many is one call");
+    assert_eq!(resp["rows_affected"], LARGE);
+    let resp = dispatch(
+        &svc,
+        ServiceOp::DATABASE_BATCH,
+        &serde_json::json!({ "ops": creates(LARGE) }),
+    )
+    .await
+    .expect("a 1,500-op batch is one call");
+    assert_eq!(resp["results"].as_array().map(Vec::len), Some(LARGE));
+    assert_eq!(svc.calls(), 2, "one call each");
+    assert_eq!(count(&svc).await, 3 + 2 * LARGE as i64);
 }
 
-/// A backend that has already run statements in this invocation (as D1
-/// counts them) refuses a call that fits its limit but not what is left, as
-/// `ResourceExhausted`, before any write; a call that fits what is left runs.
+/// A call-limited service whose invocation has no call left refuses a
+/// `create_many` or `batch` of any size: the handler answers
+/// `ResourceExhausted` (HTTP 429) with the call-budget detail code and the
+/// backend's message, and nothing is written.
 #[tokio::test]
-async fn a_call_over_what_the_invocation_has_left_is_exhausted() {
-    for (op, over, fits) in [
-        (
-            ServiceOp::DATABASE_CREATE_MANY,
-            serde_json::json!({ "collection": TABLE, "rows": rows(6) }),
-            serde_json::json!({ "collection": TABLE, "rows": rows(5) }),
-        ),
-        (
-            ServiceOp::DATABASE_BATCH,
-            serde_json::json!({ "ops": creates(6) }),
-            serde_json::json!({ "ops": creates(5) }),
-        ),
-    ] {
-        let svc = budgeted(20, 15).await;
-        let err = dispatch(&svc, op, &over)
-            .await
-            .expect_err("six statements with five left is refused");
-        assert_eq!(
-            err.code,
-            ErrorCode::ResourceExhausted,
-            "{op}: {}",
-            err.message
-        );
-        assert_eq!(
-            err.detail_code(),
-            Some(STATEMENT_BUDGET_EXHAUSTED),
-            "{op}: the refusal says it is the statement budget: {err:?}"
-        );
-        assert!(
-            err.message.contains("5 of its 20 left"),
-            "{op}: the refusal names what is left and the limit: {}",
-            err.message
-        );
-        assert_eq!(count(&svc).await, 3, "{op}: nothing was written");
-
-        dispatch(&svc, op, &fits)
-            .await
-            .expect("a call that fits what is left runs");
-        assert_eq!(count(&svc).await, 8, "{op}");
-    }
-}
-
-/// A service that cannot report its budget answers the call with that
-/// error, and the call never reaches it.
-#[tokio::test]
-async fn a_budget_that_cannot_be_read_refuses_the_call() {
-    let svc = Budgeted {
-        inner: seeded().await,
-        budget: None,
-    };
+async fn a_spent_call_budget_answers_429_with_its_code_and_writes_nothing() {
     for (op, request) in [
         (
             ServiceOp::DATABASE_CREATE_MANY,
@@ -456,24 +420,37 @@ async fn a_budget_that_cannot_be_read_refuses_the_call() {
             serde_json::json!({ "ops": creates(1) }),
         ),
     ] {
+        let svc = call_limited(20, 20).await;
         let err = dispatch(&svc, op, &request)
             .await
-            .expect_err("no budget, no write");
-        assert_eq!(err.code, ErrorCode::Unavailable, "{op}: {}", err.message);
+            .expect_err("no call left");
+        assert_eq!(
+            err.code,
+            ErrorCode::ResourceExhausted,
+            "{op}: {}",
+            err.message
+        );
+        assert_eq!(
+            err.detail_code(),
+            Some(CALL_BUDGET_EXHAUSTED),
+            "{op}: the refusal says it is the call budget: {err:?}"
+        );
+        assert!(
+            err.message.contains("20 of its 20"),
+            "{op}: the backend's own message: {}",
+            err.message
+        );
+        assert_eq!(error_to_http_response(&err).status, 429, "{op}");
         assert_eq!(count(&svc).await, 3, "{op}: nothing was written");
     }
 }
 
-/// Native SQLite has no per-invocation statement limit, so a call far past
-/// the 1000 statements D1 allows one invocation runs whole.
+/// Native SQLite has no per-invocation call limit, so a call far past the
+/// 1000 calls D1 allows one invocation runs whole.
 #[tokio::test]
 async fn sqlite_runs_a_call_of_any_size() {
     const LARGE: usize = 5000;
     let svc = seeded().await;
-    assert_eq!(
-        svc.statement_budget().expect("statement_budget"),
-        StatementBudget::Unbounded
-    );
     let resp = dispatch(
         &svc,
         ServiceOp::DATABASE_CREATE_MANY,
@@ -547,47 +524,4 @@ async fn a_failed_replacement_leaves_the_original_rows() {
     for id in ["i1", "i2", "i3"] {
         svc.get(TABLE, id).await.expect("original row survives");
     }
-}
-
-/// A `DeleteWhere` is one statement, so it counts as one against the
-/// statement budget however many rows it matches: with `LIMIT - 1` creates it
-/// runs, with `LIMIT` creates the call is refused before anything is deleted.
-#[tokio::test]
-async fn a_delete_where_counts_as_one_statement_against_the_budget() {
-    const LIMIT: usize = 20;
-    let svc = budgeted(LIMIT as u64, 0).await;
-    let ops = |creates: usize| -> Vec<serde_json::Value> {
-        std::iter::once(serde_json::json!({ "DeleteWhere": {
-            "collection": TABLE, "filters": [],
-        } }))
-        .chain((0..creates).map(|i| {
-            serde_json::json!({ "Create": {
-                "collection": TABLE, "data": { "name": format!("b{i}") },
-            } })
-        }))
-        .collect()
-    };
-
-    let err = dispatch(
-        &svc,
-        ServiceOp::DATABASE_BATCH,
-        &serde_json::json!({ "ops": ops(LIMIT) }),
-    )
-    .await
-    .expect_err("one over the limit is refused");
-    assert_eq!(err.code, ErrorCode::InvalidArgument, "{}", err.message);
-    assert_eq!(count(&svc).await, 3, "nothing was deleted");
-
-    let resp = dispatch(
-        &svc,
-        ServiceOp::DATABASE_BATCH,
-        &serde_json::json!({ "ops": ops(LIMIT - 1) }),
-    )
-    .await
-    .expect("exactly the limit");
-    assert_eq!(
-        resp["results"][0],
-        serde_json::json!({ "DeletedWhere": { "rows_affected": 3 } })
-    );
-    assert_eq!(count(&svc).await, LIMIT as i64 - 1);
 }
