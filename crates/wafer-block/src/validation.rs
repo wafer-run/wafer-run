@@ -33,8 +33,9 @@ pub struct UnavailableBlock {
     /// Name of the block (e.g. `my-org/auth`).
     pub block: String,
     /// The class of the source's failure. The failure's own text (which
-    /// may quote a backend's error) is logged by the validator and never
-    /// carried here, so a report can be served as-is.
+    /// may quote a backend's error) is logged by the validator, in one
+    /// summary line per validation call, and never carried here, so a
+    /// report can be served as-is.
     pub reason: UnavailableReason,
 }
 

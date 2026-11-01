@@ -249,6 +249,18 @@ pub fn resolve_declared(
 /// the failure's class; the source's error itself is logged, never put in
 /// the report).
 ///
+/// # One log line per call
+///
+/// Source failures are logged once per call, after the walk, as a single
+/// summary line (see [`log_unavailable_summary`]): `ERROR` when any block
+/// met a [`SourceFault`](ConfigError::SourceFault), otherwise `WARN`. A
+/// source that is down fails every config-declaring block with the same
+/// error, and a health endpoint calls this on every hit, so a line per
+/// block would repeat one error text once per block per request. The
+/// summary names every affected block with its class and carries each
+/// distinct error text once. The per-block detail callers act on stays in
+/// the report.
+///
 /// Shared by `Wafer::validate_all_block_configs` and the
 /// [`Context::validate_all_block_configs`](wafer_block::context::Context)
 /// impl on [`RuntimeContext`](crate::context::RuntimeContext) so the two
@@ -264,6 +276,7 @@ pub(crate) async fn validate_block_configs<'a>(
     use wafer_block::{BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport};
 
     let mut report = ValidationReport::default();
+    let mut failures: Vec<SourceFailure> = Vec::new();
     for (name, block) in blocks {
         let info = block.info();
         match source.load_for_block(name, &info.config_keys).await {
@@ -274,26 +287,125 @@ pub(crate) async fn validate_block_configs<'a>(
                     missing_keys: vec![key],
                 });
             }
-            Err(ConfigError::Transient { block, source }) => {
-                tracing::warn!(%block, error = %source, "config validation: source unreachable");
-                report.unavailable.push(UnavailableBlock {
-                    block,
-                    reason: UnavailableReason::Transient,
-                });
-            }
-            Err(ConfigError::SourceFault { block, source }) => {
-                tracing::error!(%block, error = %source, "config validation: source fault");
-                report.unavailable.push(UnavailableBlock {
-                    block,
-                    reason: UnavailableReason::SourceFault,
-                });
-            }
+            Err(ConfigError::Transient { block, source }) => failures.push(SourceFailure {
+                block,
+                reason: UnavailableReason::Transient,
+                error: source.to_string(),
+            }),
+            Err(ConfigError::SourceFault { block, source }) => failures.push(SourceFailure {
+                block,
+                reason: UnavailableReason::SourceFault,
+                error: source.to_string(),
+            }),
         }
     }
+    failures.sort_by(|a, b| a.block.cmp(&b.block));
+    report.unavailable = failures
+        .iter()
+        .map(|f| UnavailableBlock {
+            block: f.block.clone(),
+            reason: f.reason,
+        })
+        .collect();
+    log_unavailable_summary(failures);
     report.ok.sort();
     report.broken.sort_by(|a, b| a.block.cmp(&b.block));
-    report.unavailable.sort_by(|a, b| a.block.cmp(&b.block));
     report
+}
+
+/// One block the config source failed for, with the source's error text.
+/// [`validate_block_configs`] builds the report's `unavailable` entries and
+/// its summary log line from these.
+struct SourceFailure {
+    block: String,
+    reason: wafer_block::UnavailableReason,
+    error: String,
+}
+
+/// Render the summary of a validation call's source failures, or `None`
+/// when there were none.
+///
+/// Failures that share a class and an error text form one group, so each
+/// distinct text appears once, followed by the blocks it hit:
+///
+/// ```text
+/// source_fault (org/c): no such table: variables; transient (org/a, org/b): D1_ERROR: network connection lost
+/// ```
+///
+/// Groups are ordered by class (`source_fault` before `transient`), then by
+/// error text; the blocks in a group are sorted. The order is fixed so the
+/// same outage writes the same line on every call. The error text comes
+/// last in its group because it is the source's own text and may contain
+/// any punctuation.
+///
+/// `failures` arrives sorted by block, as [`validate_block_configs`] sorts
+/// it for the report.
+fn summarize_unavailable(failures: Vec<SourceFailure>) -> Option<UnavailableSummary> {
+    use std::collections::BTreeMap;
+
+    if failures.is_empty() {
+        return None;
+    }
+    let blocks = failures.len();
+    let source_faults = failures
+        .iter()
+        .filter(|f| f.reason == wafer_block::UnavailableReason::SourceFault)
+        .count();
+    let mut groups: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
+    for f in failures {
+        groups
+            .entry((f.reason.as_str(), f.error))
+            .or_default()
+            .push(f.block);
+    }
+    let failures = groups
+        .into_iter()
+        .map(|((reason, error), blocks)| format!("{reason} ({}): {error}", blocks.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(UnavailableSummary {
+        blocks,
+        source_faults,
+        failures,
+    })
+}
+
+/// A validation call's source failures, rendered for one log line.
+struct UnavailableSummary {
+    /// How many blocks the source failed for.
+    blocks: usize,
+    /// How many of them met a source fault (the rest were transient).
+    source_faults: usize,
+    /// The grouped failures; see [`summarize_unavailable`].
+    failures: String,
+}
+
+/// Write one log line for a validation call's source failures, if it had
+/// any: `ERROR` when any block met a source fault, otherwise `WARN`. The
+/// levels are the ones the per-block lines had.
+fn log_unavailable_summary(failures: Vec<SourceFailure>) {
+    let Some(summary) = summarize_unavailable(failures) else {
+        return;
+    };
+    let UnavailableSummary {
+        blocks,
+        source_faults,
+        failures,
+    } = summary;
+    if source_faults > 0 {
+        tracing::error!(
+            blocks,
+            source_faults,
+            %failures,
+            "config validation: config source failed"
+        );
+    } else {
+        tracing::warn!(
+            blocks,
+            %failures,
+            "config validation: config source unreachable"
+        );
+    }
 }
 
 /// The runtime's config state: the lazy per-block [`ConfigSource`] consulted
@@ -475,5 +587,227 @@ mod resolve_declared_tests {
         assert_eq!(from_source.get("EMPTY").map(String::as_str), Some(""));
         assert_eq!(from_source.get("C").map(String::as_str), Some("c-default"));
         assert_eq!(from_source.get("D"), None);
+    }
+}
+
+#[cfg(test)]
+mod validate_block_configs_tests {
+    use wafer_block::{
+        context::Context, types::BlockInfo, InputStream, LifecycleEvent, Message, OutputStream,
+        UnavailableBlock, UnavailableReason, WaferError,
+    };
+
+    use super::*;
+
+    /// A block whose only job is to declare one required config key.
+    struct Declares(&'static str);
+
+    #[wafer_async_trait]
+    impl wafer_block::Block for Declares {
+        fn info(&self) -> BlockInfo {
+            let mut info = BlockInfo::new(self.0, "0.0.1", "test/iface@v1", "declares a key");
+            info.config_keys = vec![ConfigVar::new("TEST__KEY", "a key", "")];
+            info
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::respond(vec![])
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Answers each block with its scripted outcome; unscripted blocks resolve.
+    #[derive(Default)]
+    struct Scripted(HashMap<&'static str, (UnavailableReason, &'static str)>);
+
+    #[wafer_async_trait]
+    impl ConfigSource for Scripted {
+        async fn load_for_block(
+            &self,
+            block: &str,
+            _declared_keys: &[ConfigVar],
+        ) -> Result<EnvBlockConfig, ConfigError> {
+            match self.0.get(block) {
+                None => Ok(EnvBlockConfig::default()),
+                Some((UnavailableReason::Transient, text)) => Err(ConfigError::Transient {
+                    block: block.to_string(),
+                    source: (*text).into(),
+                }),
+                Some((UnavailableReason::SourceFault, text)) => Err(ConfigError::SourceFault {
+                    block: block.to_string(),
+                    source: (*text).into(),
+                }),
+            }
+        }
+    }
+
+    async fn validate(names: &[&'static str], script: Scripted) -> wafer_block::ValidationReport {
+        let blocks: Vec<(String, Arc<dyn wafer_block::Block>)> = names
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    Arc::new(Declares(n)) as Arc<dyn wafer_block::Block>,
+                )
+            })
+            .collect();
+        let source: Arc<dyn ConfigSource> = Arc::new(script);
+        validate_block_configs(blocks.iter().map(|(n, b)| (n, b)), &source).await
+    }
+
+    const OUTAGE: &str = "D1_ERROR: Network connection lost.";
+    const OVERLOAD: &str = "D1_ERROR: D1 DB is overloaded.";
+    const NO_TABLE: &str = "no such table: variables";
+
+    /// The validator's lines. A level is matched with its surrounding
+    /// spaces (`" ERROR "`) because the D1 texts contain `D1_ERROR`.
+    fn summary_lines<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+        lines
+            .iter()
+            .copied()
+            .filter(|l| l.contains("config validation"))
+            .collect()
+    }
+
+    /// N failing blocks write ONE line, at `ERROR` because one of them met a
+    /// source fault. The line names every failing block with its class and
+    /// carries each distinct error text exactly once. The report keeps the
+    /// per-block entries.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_call_with_many_failing_blocks_logs_one_line_with_every_block_and_text() {
+        let names = [
+            "test/a-down",
+            "test/b-down",
+            "test/c-down",
+            "test/d-overloaded",
+            "test/e-fault",
+            "test/f-healthy",
+        ];
+        let script = Scripted(
+            [
+                ("test/a-down", (UnavailableReason::Transient, OUTAGE)),
+                ("test/b-down", (UnavailableReason::Transient, OUTAGE)),
+                ("test/c-down", (UnavailableReason::Transient, OUTAGE)),
+                (
+                    "test/d-overloaded",
+                    (UnavailableReason::Transient, OVERLOAD),
+                ),
+                ("test/e-fault", (UnavailableReason::SourceFault, NO_TABLE)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let report = validate(&names, script).await;
+
+        let unavailable = |block: &str, reason| UnavailableBlock {
+            block: block.to_string(),
+            reason,
+        };
+        assert_eq!(
+            report.unavailable,
+            vec![
+                unavailable("test/a-down", UnavailableReason::Transient),
+                unavailable("test/b-down", UnavailableReason::Transient),
+                unavailable("test/c-down", UnavailableReason::Transient),
+                unavailable("test/d-overloaded", UnavailableReason::Transient),
+                unavailable("test/e-fault", UnavailableReason::SourceFault),
+            ]
+        );
+        assert_eq!(report.ok, vec!["test/f-healthy".to_string()]);
+
+        logs_assert(|lines: &[&str]| {
+            let summary = summary_lines(lines);
+            let [line] = summary.as_slice() else {
+                return Err(format!(
+                    "expected one line, got {}: {summary:#?}",
+                    summary.len()
+                ));
+            };
+            if !line.contains(" ERROR ") {
+                return Err(format!("a source fault logs at ERROR: {line}"));
+            }
+            for text in [OUTAGE, OVERLOAD, NO_TABLE] {
+                let n = line.matches(text).count();
+                if n != 1 {
+                    return Err(format!("`{text}` appears {n} times, expected once: {line}"));
+                }
+            }
+            for group in [
+                format!("source_fault (test/e-fault): {NO_TABLE}"),
+                format!("transient (test/a-down, test/b-down, test/c-down): {OUTAGE}"),
+                format!("transient (test/d-overloaded): {OVERLOAD}"),
+            ] {
+                if !line.contains(&group) {
+                    return Err(format!("missing `{group}`: {line}"));
+                }
+            }
+            if line.contains("test/f-healthy") {
+                return Err(format!("a healthy block is not a failure: {line}"));
+            }
+            if !line.contains("blocks=5") || !line.contains("source_faults=1") {
+                return Err(format!("expected the counts: {line}"));
+            }
+            Ok(())
+        });
+    }
+
+    /// Only transient failures: one `WARN` line, no `ERROR`.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn transient_failures_alone_log_one_warn_line() {
+        let script = Scripted(
+            [
+                ("test/a", (UnavailableReason::Transient, OUTAGE)),
+                ("test/b", (UnavailableReason::Transient, OUTAGE)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        validate(&["test/a", "test/b"], script).await;
+
+        logs_assert(|lines: &[&str]| {
+            let summary = summary_lines(lines);
+            let [line] = summary.as_slice() else {
+                return Err(format!(
+                    "expected one line, got {}: {summary:#?}",
+                    summary.len()
+                ));
+            };
+            if !line.contains(" WARN ") || line.contains(" ERROR ") {
+                return Err(format!("transient-only failures log at WARN: {line}"));
+            }
+            if !line.contains(&format!("transient (test/a, test/b): {OUTAGE}")) {
+                return Err(format!("missing the group: {line}"));
+            }
+            Ok(())
+        });
+    }
+
+    /// A call the source answers for every block writes nothing.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_call_without_source_failures_logs_nothing() {
+        let report = validate(&["test/a", "test/b"], Scripted::default()).await;
+        assert!(report.unavailable.is_empty());
+        logs_assert(|lines: &[&str]| {
+            let summary = summary_lines(lines);
+            if summary.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("expected no lines: {summary:#?}"))
+            }
+        });
     }
 }
