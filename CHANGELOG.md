@@ -2808,6 +2808,23 @@
 
 ### Fixed
 
+- **`validate_all_block_configs` logs one line per call, not one per
+  block.** When the config source failed, the validator wrote a line per
+  config-declaring block, each with the source's error text. A source that
+  is down fails every block with the same text, and a health endpoint calls
+  the validator on every hit, so one outage wrote the same D1 error once per
+  block per request. The call now writes at most one summary line after the
+  walk: `ERROR` "config validation: config source failed" when any block
+  met a `SourceFault`, otherwise `WARN` "config validation: config source
+  unreachable" (the levels the per-block lines had). Its fields are
+  `blocks` (how many failed), `source_faults` (on the `ERROR` line) and
+  `failures`, which groups the blocks by class and error text so each
+  distinct text appears once, e.g. `source_fault (org/c): no such table:
+  variables; transient (org/a, org/b): D1_ERROR: Network connection lost.`
+  The old messages "config validation: source unreachable" and "config
+  validation: source fault" and their per-line `block` and `error` fields
+  are gone. `ValidationReport` is unchanged: `unavailable` still lists
+  every block with its class.
 - `introspect::build_list_tables_like` matches its prefix literally: the
   prefix is LIKE-escaped under `ESCAPE '\'` (`E'\\'` on Postgres), so
   `app_` no longer also matches `appx…`. A caller that relied on `_` or `%`
