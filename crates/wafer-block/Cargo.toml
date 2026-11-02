@@ -13,7 +13,7 @@ json-schema = ["schemars"]
 
 [dependencies]
 chrono = { workspace = true }
-# Random correlation IDs for `response::err_internal`. Diagnostic-grade only;
+# Random correlation IDs for `response::correlation_id`. Diagnostic-grade only;
 # falls back to a timestamp when the OS source is unavailable.
 getrandom = "0.2"
 serde = { workspace = true }

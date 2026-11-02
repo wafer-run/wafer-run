@@ -200,12 +200,25 @@ fn retry_after(e: &WaferError) -> Option<&str> {
         .map(|m| m.value.as_str())
 }
 
+/// The reference a refusal names, after checking its message is exactly
+/// `block `x` <what> (ref: <16 hex>)` — fixed text, never the `Init`'s cause.
+fn refusal_reference(e: &WaferError, block: &str, what: &str) -> String {
+    let reference = e
+        .message
+        .strip_prefix(&format!("block `{block}` {what} (ref: "))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("not a sanitized refusal of `{block}`: {e:?}"));
+    assert_eq!(reference.len(), 16, "{e:?}");
+    assert!(reference.chars().all(|c| c.is_ascii_hexdigit()), "{e:?}");
+    for cause in ["backend down", "bad config"] {
+        assert!(!e.message.contains(cause), "the Init's cause leaked: {e:?}");
+    }
+    reference.to_string()
+}
+
 fn assert_not_initialized(e: &WaferError, block: &str) {
     assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
-    assert_eq!(
-        e.message,
-        format!("block `{block}` is not initialized in this runtime")
-    );
+    refusal_reference(e, block, "is temporarily unavailable");
     assert_eq!(
         retry_after(e),
         None,
@@ -343,11 +356,8 @@ async fn refuse_transient_slot_answers_unavailable_without_retry_after_then_afte
     ] {
         let e = error_of(out).await;
         assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
-        assert!(
-            e.message.contains("init transient failure")
-                || e.message.contains("is not initialized in this runtime"),
-            "{e:?}"
-        );
+        // Inside the backoff and past it answer the same sanitized text.
+        refusal_reference(&e, "test/probe", "is temporarily unavailable");
         assert_eq!(
             retry_after(&e),
             None,

@@ -104,7 +104,17 @@ where
         None if init.template.init_wait == super::InitWait::Refuse
             && !inside_running_init(init.template) =>
         {
-            return Err(super::not_initialized_error(target.resolved));
+            // The slot's last transient failure, if it had one, is what the
+            // log names beside the refusal's reference.
+            let last_failure = match target.slot.init_state() {
+                super::BlockInitState::Retrying { reason, .. }
+                | super::BlockInitState::Failed { reason } => Some(reason),
+                _ => None,
+            };
+            return Err(super::not_initialized_error(
+                target.resolved,
+                last_failure.as_deref(),
+            ));
         }
         None => {
             if let Err(e) =

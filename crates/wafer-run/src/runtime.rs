@@ -698,6 +698,16 @@ impl Wafer {
 ///   caller passes one, is the delay before a retry will run; it becomes the
 ///   error's `Retry-After` response header (see [`retry_after_meta`]).
 ///   Ignored for the other variants.
+///
+/// **The message never carries the cause.** This error is a dispatch's
+/// terminal, and every HTTP adapter renders a terminal's message verbatim
+/// into the response body (`wafer_block::http_codec::error_to_http_response`),
+/// while an `Init`'s error is the block's own text — a database error that
+/// names its tables, a backend's quota message. So the cause is logged under
+/// a fresh [`correlation_id`](wafer_block::response::correlation_id) and the
+/// message is fixed text naming the block and that reference
+/// ([`unavailable_message`], [`failed_message`]), as
+/// [`err_internal`](wafer_block::response::err_internal) does for a handler.
 pub(crate) fn init_error_to_wafer_error(
     block: &str,
     e: crate::runtime::slot::InitError,
@@ -706,23 +716,46 @@ pub(crate) fn init_error_to_wafer_error(
     use wafer_block::core_types::{ErrorCode, WaferError};
 
     use crate::runtime::slot::InitError;
+    let reference = wafer_block::response::correlation_id();
     match e {
-        InitError::Permanent(s) => WaferError::new(
-            ErrorCode::FailedPrecondition,
-            format!("block `{block}` init failed permanently: {s}"),
-        ),
-        InitError::Transient(s) => {
+        InitError::Permanent(cause) => {
+            tracing::error!(
+                correlation_id = %reference,
+                block = %block,
+                error = %cause,
+                "dispatch refused: the block's Init failed permanently",
+            );
+            WaferError::new(
+                ErrorCode::FailedPrecondition,
+                failed_message(block, &reference),
+            )
+        }
+        InitError::Transient(cause) => {
+            tracing::warn!(
+                correlation_id = %reference,
+                block = %block,
+                error = %cause,
+                "dispatch refused: the block's Init failed transiently",
+            );
             let mut err = WaferError::new(
                 ErrorCode::Unavailable,
-                format!("block `{block}` init transient failure: {s}"),
+                unavailable_message(block, &reference),
             );
             err.meta.extend(retry_in.map(retry_after_meta));
             err
         }
-        InitError::Cycle { path } => WaferError::new(
-            ErrorCode::FailedPrecondition,
-            format!("block `{block}` init cycle detected: {}", path.join(" -> ")),
-        ),
+        InitError::Cycle { path } => {
+            tracing::error!(
+                correlation_id = %reference,
+                block = %block,
+                cycle = %path.join(" -> "),
+                "dispatch refused: the block's Init is part of an init cycle",
+            );
+            WaferError::new(
+                ErrorCode::FailedPrecondition,
+                failed_message(block, &reference),
+            )
+        }
     }
 }
 
@@ -730,11 +763,37 @@ pub(crate) fn init_error_to_wafer_error(
 /// outcome is not settled: `UNAVAILABLE`, and no `Retry-After` — the slot has
 /// no pending backoff to name, and the embedder that rebuilds the runtime
 /// owns the retry delay.
-pub(crate) fn not_initialized_error(block: &str) -> wafer_block::core_types::WaferError {
+///
+/// Sanitized like [`init_error_to_wafer_error`]: `last_failure` — the slot's
+/// last transient `Init` error, when it has one — is logged under the
+/// reference and never put in the message.
+pub(crate) fn not_initialized_error(
+    block: &str,
+    last_failure: Option<&str>,
+) -> wafer_block::core_types::WaferError {
+    let reference = wafer_block::response::correlation_id();
+    tracing::warn!(
+        correlation_id = %reference,
+        block = %block,
+        last_failure = last_failure.unwrap_or("none"),
+        "dispatch refused: the block is not initialized in this runtime",
+    );
     wafer_block::core_types::WaferError::new(
         wafer_block::core_types::ErrorCode::Unavailable,
-        format!("block `{block}` is not initialized in this runtime"),
+        unavailable_message(block, &reference),
     )
+}
+
+/// The message of a refused dispatch to `block` that a retry may cure: its
+/// `Init` failed transiently, or has not run in this runtime.
+pub(crate) fn unavailable_message(block: &str, reference: &str) -> String {
+    format!("block `{block}` is temporarily unavailable (ref: {reference})")
+}
+
+/// The message of a refused dispatch to `block` that no retry cures: its
+/// `Init` failed permanently, or is part of an init cycle.
+pub(crate) fn failed_message(block: &str, reference: &str) -> String {
+    format!("block `{block}` failed to initialize (ref: {reference})")
 }
 
 /// The `resp.header.Retry-After` meta entry for a retry `retry_in` from now:
@@ -1199,6 +1258,99 @@ mod tests {
             assert_eq!(mapped.code, ErrorCode::FailedPrecondition);
             assert!(!has(&mapped));
         }
+    }
+
+    /// A cause no refusal may carry: shaped like a D1 error naming a table.
+    const CAUSE: &str = "D1_ERROR: no such table: secret__schema__users";
+
+    /// The reference in a refusal's message, after checking the message is
+    /// exactly `expected(reference)`: fixed text, the block, the reference.
+    fn reference_of(message: &str, expected: impl Fn(&str) -> String) -> String {
+        let reference = message
+            .rsplit_once("(ref: ")
+            .and_then(|(_, rest)| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("no reference in {message:?}"))
+            .to_string();
+        assert_eq!(reference.len(), 16, "{message:?}");
+        assert!(
+            reference.chars().all(|c| c.is_ascii_hexdigit()),
+            "{message:?}"
+        );
+        assert_eq!(message, expected(&reference));
+        reference
+    }
+
+    /// The refusal as a client receives it — the body every HTTP adapter
+    /// renders — holds no cause text.
+    fn assert_body_has_no_cause(e: &WaferError, cause: &str) {
+        assert!(!e.message.contains(cause), "{e:?}");
+        let body = wafer_block::http_codec::error_to_http_response(e).body;
+        let body = String::from_utf8(body).expect("utf-8 body");
+        assert!(!body.contains(cause), "{body}");
+    }
+
+    /// Every refusal of a dispatch to a block whose `Init` failed answers
+    /// fixed text with a reference, and logs the cause under that reference.
+    #[test]
+    #[tracing_test::traced_test]
+    fn an_init_failure_refusal_logs_its_cause_and_never_answers_it() {
+        use crate::runtime::slot::InitError;
+
+        let transient = init_error_to_wafer_error("a/b", InitError::Transient(CAUSE.into()), None);
+        assert_eq!(transient.code, ErrorCode::Unavailable);
+        let reference = reference_of(&transient.message, |r| unavailable_message("a/b", r));
+        assert_eq!(
+            transient.message,
+            format!("block `a/b` is temporarily unavailable (ref: {reference})")
+        );
+        assert_body_has_no_cause(&transient, CAUSE);
+        assert!(logs_contain(&reference) && logs_contain(CAUSE));
+
+        let permanent = init_error_to_wafer_error("a/b", InitError::Permanent(CAUSE.into()), None);
+        assert_eq!(permanent.code, ErrorCode::FailedPrecondition);
+        let reference = reference_of(&permanent.message, |r| failed_message("a/b", r));
+        assert_eq!(
+            permanent.message,
+            format!("block `a/b` failed to initialize (ref: {reference})")
+        );
+        assert_body_has_no_cause(&permanent, CAUSE);
+        assert!(logs_contain(&reference));
+
+        let cycle = init_error_to_wafer_error(
+            "a/b",
+            InitError::Cycle {
+                path: vec!["a/b".into(), "secret/peer".into(), "a/b".into()],
+            },
+            None,
+        );
+        assert_eq!(cycle.code, ErrorCode::FailedPrecondition);
+        let reference = reference_of(&cycle.message, |r| failed_message("a/b", r));
+        assert_body_has_no_cause(&cycle, "secret/peer");
+        assert!(logs_contain(&reference) && logs_contain("a/b -> secret/peer -> a/b"));
+    }
+
+    /// The `Refuse` mode's refusal of an unsettled slot is sanitized the same
+    /// way: the slot's last failure is logged, never answered.
+    #[test]
+    #[tracing_test::traced_test]
+    fn a_not_initialized_refusal_logs_the_last_failure_and_never_answers_it() {
+        let e = not_initialized_error("a/b", Some(CAUSE));
+        assert_eq!(e.code, ErrorCode::Unavailable);
+        assert!(
+            !e.meta.iter().any(|m| m.key == "resp.header.Retry-After"),
+            "{e:?}"
+        );
+        let reference = reference_of(&e.message, |r| unavailable_message("a/b", r));
+        assert_body_has_no_cause(&e, CAUSE);
+        assert!(logs_contain(&reference) && logs_contain(CAUSE));
+    }
+
+    /// Two refusals never share a reference: each names its own log line.
+    #[test]
+    fn each_refusal_has_its_own_reference() {
+        let a = not_initialized_error("a/b", None).message;
+        let b = not_initialized_error("a/b", None).message;
+        assert_ne!(a, b);
     }
 
     /// `requires` is looked up by registration name. A block whose `info()`
