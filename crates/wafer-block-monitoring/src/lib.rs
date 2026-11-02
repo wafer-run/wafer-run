@@ -491,9 +491,20 @@ mod tests {
             let wafer = wafer(Some(json!({ "stats_access": "anyone" }))).await;
             match request(&wafer, "/_stats", &[("auth.user_roles", "admin")]).await {
                 Err(TerminalNotResponse::Error(e)) => {
-                    assert!(e.message.contains("stats_access"), "{e:?}");
+                    assert!(
+                        e.message
+                            .starts_with("block `wafer-run/monitoring` failed to initialize"),
+                        "{e:?}"
+                    );
                 }
                 other => panic!("an unknown stats_access must fail Init, got {other:?}"),
+            }
+            // The refusal answers no cause; the slot keeps it.
+            match &wafer.init_states()["wafer-run/monitoring"] {
+                wafer_run::BlockInitState::Failed { reason } => {
+                    assert!(reason.contains("stats_access"), "{reason}")
+                }
+                other => panic!("expected a failed Init, got {other:?}"),
             }
         }
 

@@ -427,9 +427,20 @@ mod tests {
             .await
         {
             Err(TerminalNotResponse::Error(e)) => {
-                assert!(e.message.contains("routes[0]"), "{e:?}");
+                assert!(
+                    e.message
+                        .starts_with("block `wafer-run/router` failed to initialize"),
+                    "{e:?}"
+                );
             }
             other => panic!("a route without `block` must fail Init, got {other:?}"),
+        }
+        // The refusal answers no cause; the slot keeps it.
+        match &wafer.init_states()["wafer-run/router"] {
+            wafer_run::BlockInitState::Failed { reason } => {
+                assert!(reason.contains("routes[0]"), "{reason}")
+            }
+            other => panic!("expected a failed Init, got {other:?}"),
         }
     }
 }
