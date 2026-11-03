@@ -9,10 +9,12 @@
   call, and the runtime called it about ten times per block per build:
   every `seal()` pass (unmet `requires`, capabilities, pooling, both
   uniqueness checks, the startup snapshot), the grant rescan, the dispatch
-  table, `block_infos()`, and twice per `Init`. On impresspress's 30-block
+  table, `block_infos()`, and three times per `Init` (the budget, the Init
+  context's allowlist, the declared config keys). On impresspress's 30-block
   Cloudflare runtime, whose largest declaration is 605 KB of JSON, that was
-  about 60 % of a cold build (native release: `seal()` 53.6 ms). The
-  `Block` trait is unchanged.
+  most of a cold build. Native release, mean of 7 prepared builds:
+  `seal()` 52.8 → 1.8 ms, every block's `Init` 33.5 → 6.5 ms,
+  `block_infos()` 7.8 → 0.0 ms. The `Block` trait is unchanged.
   - Registration keeps the `BlockInfo` it validated, with the
     `call_allowlist` derived from it, beside the block. Every runtime pass
     reads that copy: `seal()`, `set_admin_block`'s grant rescan,
