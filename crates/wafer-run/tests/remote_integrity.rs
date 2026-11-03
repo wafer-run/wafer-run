@@ -414,11 +414,13 @@ async fn an_operator_alias_is_never_shadowed() {
     let mut w = build_with_lock(home.path(), &[entry]).expect("build");
     w.add_alias(WIDGET, "x/elsewhere").expect("operator alias");
 
-    let err = error_of(w.seal().await);
-    assert!(
-        matches!(&err, RuntimeError::Config(m) if m.contains("already an alias")),
-        "expected the alias conflict, got {err}"
-    );
+    match error_of(w.seal().await) {
+        RuntimeError::NameIsAlias { name, target } => {
+            assert_eq!(name, WIDGET);
+            assert_eq!(target, "x/elsewhere");
+        }
+        other => panic!("expected the alias conflict, got {other}"),
+    }
     assert_eq!(w.canonicalize(WIDGET), "x/elsewhere");
     assert_eq!(requests(&server).await, 0, "the registry is not contacted");
 }
