@@ -946,15 +946,19 @@ async fn run_invocation(
             slot: &target.slot,
         },
         crate::runtime::runner::DispatchInit {
-            block: &target.block,
+            block: &target.registered,
             template: &ctx,
         },
         state.msg.clone(),
         step_input,
         |msg, input| async {
-            let output =
-                crate::runtime::run_block_with_recovery(target.block.as_ref(), &ctx, msg, input)
-                    .await;
+            let output = crate::runtime::run_block_with_recovery(
+                target.registered.block.as_ref(),
+                &ctx,
+                msg,
+                input,
+            )
+            .await;
             match mode {
                 ResponseMode::Collect => StepOutput::Collected(output.collect_buffered().await),
                 ResponseMode::ForwardStream => open_terminal_output(output).await,

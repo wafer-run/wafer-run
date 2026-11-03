@@ -17,7 +17,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use wafer_block::{config::parse_config_map, Block};
+use wafer_block::config::parse_config_map;
 use wafer_flow::{CompiledCondition, CompiledPath, CompiledTemplate, OnError, Step, WaferFlow};
 
 use crate::runtime::{slot::BlockSlot, Wafer};
@@ -69,8 +69,9 @@ pub(crate) struct StepTarget {
     /// Canonical (alias-resolved) block name — the context `node_id` (WRAP
     /// attribution) and init identity.
     pub(crate) name: String,
-    /// The resolved block instance.
-    pub(crate) block: Arc<dyn Block>,
+    /// The resolved block instance, with the `BlockInfo` its registration
+    /// read.
+    pub(crate) registered: crate::runtime::registration::RegisteredBlock,
     /// The block's once-success init slot (was a per-invocation map lookup).
     pub(crate) slot: Arc<BlockSlot>,
 }
@@ -153,22 +154,25 @@ pub(crate) fn compile_flow(wafer: &Wafer, flow: &WaferFlow) -> CompiledFlow {
 }
 
 fn compile_step(wafer: &Wafer, step: &Step, index: &HashMap<&str, usize>) -> CompiledStep {
-    let target = wafer.lookup_block(&step.block).map(|(resolved, block)| {
-        // Every registered block has a paired slot (`register_block_inner`);
-        // a missing entry is a runtime invariant violation, matching the
-        // dispatch-time expectation this replaces.
-        let slot = wafer
-            .registration
-            .slots
-            .get(resolved)
-            .cloned()
-            .expect("slot must exist for any registered block");
-        StepTarget {
-            name: resolved.to_string(),
-            block,
-            slot,
-        }
-    });
+    let target = wafer
+        .registration
+        .lookup_with_alias(&step.block)
+        .map(|(resolved, registered)| {
+            // Every registered block has a paired slot (`register_block_inner`);
+            // a missing entry is a runtime invariant violation, matching the
+            // dispatch-time expectation this replaces.
+            let slot = wafer
+                .registration
+                .slots
+                .get(resolved)
+                .cloned()
+                .expect("slot must exist for any registered block");
+            StepTarget {
+                name: resolved.to_string(),
+                registered: registered.clone(),
+                slot,
+            }
+        });
 
     let next = step.next.as_ref().map(|entries| {
         entries

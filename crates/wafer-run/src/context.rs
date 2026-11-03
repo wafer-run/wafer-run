@@ -51,8 +51,12 @@ pub struct RuntimeContext {
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     /// Optional wall-clock deadline after which the runtime will signal cancellation.
     pub deadline: Option<Instant>,
-    /// All registered blocks.
-    pub all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
+    /// All registered blocks and aliases, each with the `BlockInfo` its
+    /// registration read
+    /// ([`RegisteredBlock`](crate::runtime::registration::RegisteredBlock)).
+    /// `pub(crate)`: [`CallFrame::lookup`](crate::runtime::call_gates::CallFrame::lookup)
+    /// and [`Context::registered_blocks`] are the access paths.
+    pub(crate) all_blocks: Arc<HashMap<String, crate::runtime::registration::RegisteredBlock>>,
     /// This frame's recursion depth. COR-01: a per-frame value copied
     /// `depth + 1` into each child context — NOT a counter shared across the
     /// call tree. Sibling calls at the same logical depth therefore all see
@@ -70,8 +74,9 @@ pub struct RuntimeContext {
     pub aliases: Arc<HashMap<String, String>>,
     /// Block names the caller is allowed to call via `call_block()`.
     /// `None` means unrestricted. `Some(list)` enforces the allowlist.
-    /// `Arc` so per-dispatch context construction shares the seal-time list
-    /// instead of cloning it (PERF-03).
+    /// `Arc` so per-dispatch context construction shares the list
+    /// registration derived from the block's `BlockInfo` instead of cloning
+    /// it (PERF-03).
     pub caller_requires: Option<Arc<Vec<String>>>,
     /// The block name of the caller that invoked this block via `call_block()`.
     /// `None` for top-level calls (e.g. from the router).
@@ -120,10 +125,10 @@ pub struct RuntimeContext {
     /// calls fire the same `block_start`/`block_end` hooks as the top-level
     /// dispatch paths.
     pub(crate) hooks: Arc<crate::observability::ObservabilityBus>,
-    /// What `dispatch_call` needs about a callee — its interface and
-    /// `requires` allowlist, and the interface specs — compiled at seal and
-    /// `Arc`-shared with the [`Wafer`](crate::Wafer). Empty before seal;
-    /// a callee missing from it is read from its `BlockInfo`.
+    /// The interface specs `dispatch_call` checks a callee's action
+    /// against, compiled at seal and `Arc`-shared with the
+    /// [`Wafer`](crate::Wafer). Empty before seal. What it needs about the
+    /// callee itself is in [`Self::all_blocks`].
     pub(crate) dispatch: Arc<crate::runtime::exec_plan::DispatchTable>,
 }
 
@@ -146,10 +151,9 @@ impl RuntimeContext {
     pub(crate) fn for_init(
         &self,
         block_name: &str,
-        block: &dyn Block,
+        registered: &crate::runtime::registration::RegisteredBlock,
         attempt: crate::runtime::init_waits::InitAttempt,
     ) -> Self {
-        let allowlist = block.info().call_allowlist();
         Self {
             // Init is the block's own operation, not a step of any flow.
             flow_id: String::new(),
@@ -158,7 +162,7 @@ impl RuntimeContext {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             deadline: None,
             call_depth: 0,
-            caller_requires: allowlist.map(Arc::new),
+            caller_requires: registered.call_allowlist.clone(),
             caller_id: None,
             current_attachments: Arc::default(),
             init_attempt: Some(attempt),
@@ -266,8 +270,12 @@ impl RuntimeContext {
             .get(resolved_block_name)
             .cloned()
             .expect("slot must exist for any registered block");
-        // `invoke` below takes `block` by move; init borrows its own handle.
-        let init_block = block.clone();
+        // The callee's registration — the block with the `BlockInfo` it
+        // declared — for its init; `invoke` below takes `block` by move.
+        let init_block = self
+            .all_blocks
+            .get(resolved_block_name)
+            .expect("a block with an init slot is registered");
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in
@@ -290,7 +298,7 @@ impl RuntimeContext {
                 slot: &slot,
             },
             crate::runtime::runner::DispatchInit {
-                block: &init_block,
+                block: init_block,
                 template: self,
             },
             msg,
@@ -348,26 +356,36 @@ impl crate::runtime::call_gates::CallFrame for RuntimeContext {
     fn caller_capabilities(&self) -> Option<wafer_block::BlockCapabilities> {
         self.all_blocks
             .get(&self.node_id)
-            .and_then(|block| block.block_capabilities())
+            .and_then(|registered| registered.block.block_capabilities())
     }
 
     /// `all_blocks` carries every registration name and every alias.
     fn lookup(&self, name: &str) -> Option<Arc<dyn Block>> {
-        self.all_blocks.get(name).cloned()
+        self.all_blocks
+            .get(name)
+            .map(|registered| registered.block.clone())
     }
 
-    /// From the table compiled at seal; a callee the table misses (a context
-    /// built before seal, or a block registered after it) is read from its
-    /// `BlockInfo`.
+    /// What the callee's registration read: its `BlockInfo`'s interface and
+    /// the `call_block` allowlist derived from it, never a fresh
+    /// [`Block::info`] call.
+    ///
+    /// `admit_call` hands over the block it found under `resolved` — or,
+    /// failing that, under the name as written. The miss arm is that second
+    /// case: a name that is both a registered block and an alias of an
+    /// unregistered block (`add_alias` does not refuse it, and
+    /// `rebuild_all_blocks` then leaves the registered block under the
+    /// name). It answers as the trait's default does; `dispatch_call` finds
+    /// no init slot under `resolved` for such a callee either.
     fn callee_facts(
         &self,
         resolved: &str,
         block: &dyn Block,
     ) -> crate::runtime::call_gates::CalleeFacts<'_> {
-        match self.dispatch.blocks.get(resolved) {
-            Some(facts) => crate::runtime::call_gates::CalleeFacts::new(
-                facts.interface.as_str(),
-                facts.requires.clone(),
+        match self.all_blocks.get(resolved) {
+            Some(registered) => crate::runtime::call_gates::CalleeFacts::new(
+                registered.info.interface.as_str(),
+                registered.call_allowlist.clone(),
             ),
             None => crate::runtime::call_gates::CalleeFacts::declared(block),
         }
@@ -533,10 +551,11 @@ impl Context for RuntimeContext {
         // be validated and reported twice (once per name). Collected up front
         // because a borrowed `filter` closure does not generalize across the
         // validator's async boundary.
-        let canonical: Vec<(&String, &Arc<dyn Block>)> = self
+        let canonical: Vec<(&String, &wafer_block::BlockInfo)> = self
             .all_blocks
             .iter()
             .filter(|(name, _)| !self.aliases.contains_key(*name))
+            .map(|(name, registered)| (name, &*registered.info))
             .collect();
         crate::runtime::config_source::validate_block_configs(canonical, &self.config_source).await
     }
@@ -578,7 +597,7 @@ impl RuntimeContext {
         // 2) Resource capability check — on the CALLER's declared
         // capabilities (the block that invoked us).
         if let Some(cb) = caller.and_then(|c| self.all_blocks.get(c)) {
-            if let Some(caps) = cb.block_capabilities() {
+            if let Some(caps) = cb.block.block_capabilities() {
                 let allowed = match resource_type {
                     ResourceType::Db => {
                         if resource == wafer_block::wrap::RAW_SQL_RESOURCE {

@@ -7,9 +7,70 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use wafer_block::{error::RuntimeError, Block};
+use wafer_block::{error::RuntimeError, Block, BlockInfo};
 
 use crate::platform::{ConfigExpanderFn, RegistrarFn};
+
+/// A registered block with the declaration it made when it was registered.
+///
+/// [`Block::info`] builds a `BlockInfo` from scratch on every call, and a
+/// large one is expensive (hundreds of endpoint schemas). Registration calls
+/// it **exactly once** per block, validates the result, and keeps it here;
+/// every later reader in the runtime — grant collection, every `seal()`
+/// pass, the dispatch facts `call_block` and context construction need, the
+/// Init pipeline's budget and declared config keys, config validation, and
+/// [`Wafer::block_infos`](crate::Wafer::block_infos) — reads this copy and
+/// never calls `info()` again. One exception remains: a `call_block` that
+/// `admit_call` admits under the name as written rather than the resolved
+/// one (a registered name that is also an alias of an unregistered block;
+/// see [`lookup_with_alias`](RegistrationCore::lookup_with_alias)) reads
+/// the callee's facts from a fresh `info()`.
+///
+/// # Invariant: a block's declaration is fixed for its registration
+///
+/// The runtime treats what a block declared at registration as what it is
+/// for as long as it stays registered. That is sound because a
+/// registration is never replaced: a [`Wafer`](crate::Wafer) refuses a
+/// second block under a taken name (`DuplicateBlock`) and has no way to
+/// remove one. A block whose declaration does change — a rebuilt WASM
+/// guest, a dynamically generated block, a module reloaded by `wafer dev`
+/// (which restarts the process) or an embedder's rebuilt runtime — is a new
+/// instance in a new runtime, and its registration reads `info()` afresh.
+///
+/// This is a change for a block whose `info()` is not pure. Before the
+/// cache, `set_admin_block`'s grant rescan, `seal()`'s capability
+/// computation and `requires` checks, the dispatch table, and each Init's
+/// budget, allowlist and config keys re-read `info()`, so a grant or
+/// capability a block began declaring after `register_block` took effect
+/// in those passes (while the passes that ran at registration did not see
+/// it). Now every pass uses the registration read: a declaration that
+/// changes after `register_block` is not seen at all, and the block must be
+/// registered in a new runtime. (A `WasmiBlock` already memoizes its guest's `__wafer_info` the first time
+/// it succeeds, and registration refuses a guest whose read failed.)
+#[derive(Clone)]
+pub(crate) struct RegisteredBlock {
+    /// The block instance.
+    pub(crate) block: Arc<dyn Block>,
+    /// The `BlockInfo` registration read from the block and validated.
+    pub(crate) info: Arc<BlockInfo>,
+    /// The block's [`call_allowlist`](BlockInfo::call_allowlist) (`requires`
+    /// plus `optional_requires`), derived from `info` once: the
+    /// `caller_requires` of every frame the block runs on. `None` when it
+    /// declared neither (unrestricted `call_block`).
+    pub(crate) call_allowlist: Option<Arc<Vec<String>>>,
+}
+
+impl RegisteredBlock {
+    /// Pair `block` with the `info` registration read from it.
+    fn new(block: Arc<dyn Block>, info: BlockInfo) -> Self {
+        let call_allowlist = info.call_allowlist().map(Arc::new);
+        Self {
+            block,
+            info: Arc::new(info),
+            call_allowlist,
+        }
+    }
+}
 
 /// WRAP (resource-access) state, nested inside [`RegistrationCore`] because it
 /// is collected and rebuilt during block registration.
@@ -63,10 +124,11 @@ impl WrapState {
 /// Block-registration state grouped out of the `Wafer` god-struct: the
 /// registry maps + the nested [`WrapState`].
 pub(crate) struct RegistrationCore {
-    /// Registered blocks (name → instance). Grows during registration.
-    pub(crate) blocks: HashMap<String, Arc<dyn Block>>,
+    /// Registered blocks (name → instance and its registration-time
+    /// `BlockInfo`). Grows during registration.
+    pub(crate) blocks: HashMap<String, RegisteredBlock>,
     /// All registered blocks + aliases, shared with contexts.
-    pub(crate) all_blocks: Arc<HashMap<String, Arc<dyn Block>>>,
+    pub(crate) all_blocks: Arc<HashMap<String, RegisteredBlock>>,
     /// Alias mappings (e.g. `wafer-run/database` → `wafer-run/sqlite`).
     pub(crate) aliases: Arc<HashMap<String, String>>,
     /// Per-block init slots for lazy-once-success caching.
@@ -133,23 +195,25 @@ impl RegistrationCore {
     }
 
     /// Resolve a dispatch target through the alias map, returning the
-    /// canonical name and the block.
+    /// canonical name and the registered block.
     ///
-    /// Tries the alias-resolved name first, then the original. Under the
-    /// current invariant these always agree: `rebuild_all_blocks` is the sole
-    /// writer of `all_blocks` and inserts an alias key only alongside its
-    /// registered target, so a hit on the original name implies a hit on the
-    /// resolved one. The `or_else` is therefore a cheap defensive fallback
-    /// (and preserves the pre-refactor lookup) rather than a reachable path.
+    /// Tries the alias-resolved name first, then the original. They differ
+    /// in one case: a name that is both a registered block and an alias of
+    /// an unregistered block. `add_alias` does not refuse that, and
+    /// `rebuild_all_blocks` (the sole writer of `all_blocks`, which inserts
+    /// an alias key only beside its registered target) then leaves the
+    /// registered block under the name, so the resolved name misses and the
+    /// `or_else` finds the block under the original. Otherwise a hit on the
+    /// original name implies a hit on the resolved one.
     pub(crate) fn lookup_with_alias<'a>(
         &'a self,
         name: &'a str,
-    ) -> Option<(&'a str, Arc<dyn Block>)> {
+    ) -> Option<(&'a str, &'a RegisteredBlock)> {
         let resolved = self.canonicalize(name);
         self.all_blocks
             .get(resolved)
             .or_else(|| self.all_blocks.get(name))
-            .map(|b| (resolved, b.clone()))
+            .map(|b| (resolved, b))
     }
 
     /// Rebuild the `all_blocks` map from registered blocks + aliases. Call
@@ -159,7 +223,8 @@ impl RegistrationCore {
         for (name, block) in &self.blocks {
             map.insert(name.clone(), block.clone());
         }
-        // Alias names point to the same Arc<dyn Block> as their target.
+        // Alias names point to the same block (and `BlockInfo`) as their
+        // target.
         for (alias, target) in self.aliases.as_ref() {
             if let Some(block) = self.blocks.get(target) {
                 map.insert(alias.clone(), block.clone());
@@ -178,9 +243,9 @@ impl RegistrationCore {
     }
 
     /// Rebuild `self.wrap.grants` from scratch: walk every registered block's
-    /// declared grants (filtered through the per-block validator) and append
-    /// the externally-supplied grants. Called by
-    /// [`set_admin_block`](Self::set_admin_block).
+    /// declared grants — as registration read them — (filtered through the
+    /// per-block validator) and append the externally-supplied grants. Called
+    /// by [`set_admin_block`](Self::set_admin_block).
     fn rebuild_wrap_grants(&mut self) {
         self.wrap.validation_errors.clear(); // full re-walk; old errors are stale
         let admin_block: String = (*self.wrap.admin_block).clone();
@@ -189,10 +254,9 @@ impl RegistrationCore {
         let mut names: Vec<&String> = self.blocks.keys().collect();
         names.sort();
         for name in names {
-            let block = &self.blocks[name];
             let outcome = crate::runtime::lifecycle::validate_and_collect_grants_for_block(
                 name,
-                &block.info().grants,
+                &self.blocks[name].info.grants,
                 &admin_block,
             );
             merged.extend(outcome.accepted);
@@ -239,7 +303,8 @@ impl RegistrationCore {
     /// as its own name, and its declarations pass
     /// [`BlockInfo::validate`](wafer_block::BlockInfo::validate) — reserved
     /// and foreign config keys, agent-tool names. Returns the `BlockInfo` it
-    /// checked.
+    /// checked, which is the block's one `info()` call: the registration
+    /// keeps it ([`RegisteredBlock`]).
     ///
     /// A block's identity is its registration name: `check_access` attributes
     /// calls to it, and grant ownership, the admin-block match, `requires` and
@@ -272,14 +337,10 @@ impl RegistrationCore {
     /// [`register_block_inner`](Self::register_block_inner): validate the
     /// block's WRAP grant declarations against its registration `name`
     /// (accepted grants are appended, rejected ones accumulate for `seal()` to
-    /// surface as `GrantsRejected`), insert the block, and pair it with a
-    /// fresh init slot.
-    fn insert_block_with_grants(
-        &mut self,
-        name: &str,
-        block: Arc<dyn Block>,
-        info: &wafer_block::BlockInfo,
-    ) {
+    /// surface as `GrantsRejected`), insert the block with the `info`
+    /// [`admit`](Self::admit) read from it, and pair it with a fresh init
+    /// slot.
+    fn insert_block_with_grants(&mut self, name: &str, block: Arc<dyn Block>, info: BlockInfo) {
         // Validate this block's WRAP grants and append the accepted ones.
         // Typed grants declared before `set_admin_block` are deferred — that
         // rescan re-collects them, so registration order doesn't matter.
@@ -292,7 +353,8 @@ impl RegistrationCore {
         self.wrap.append_grants(outcome.accepted);
         self.wrap.validation_errors.extend(outcome.rejected);
 
-        self.blocks.insert(name.to_string(), block);
+        self.blocks
+            .insert(name.to_string(), RegisteredBlock::new(block, info));
         // Pair every registration with a fresh init slot so `Wafer::init_block`
         // can lazily run lifecycle(Init) once per block. Mutate through
         // `Arc::make_mut` so live `RuntimeContext` clones sharing the previous
@@ -328,7 +390,7 @@ impl RegistrationCore {
             wasmi_block.set_asset_loader(asset_loader.clone());
         }
 
-        self.insert_block_with_grants(name, block, &info);
+        self.insert_block_with_grants(name, block, info);
         Ok(())
     }
 

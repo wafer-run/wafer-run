@@ -4,6 +4,53 @@
 
 ### Breaking changes
 
+- **A block's `BlockInfo` is read once, at registration, and shared from
+  then on.** `Block::info()` builds its declaration from scratch on every
+  call, and the runtime called it about ten times per block per build:
+  every `seal()` pass (unmet `requires`, capabilities, pooling, both
+  uniqueness checks, the startup snapshot), the grant rescan, the dispatch
+  table, `block_infos()`, and three times per `Init` (the budget, the Init
+  context's allowlist, the declared config keys). On impresspress's 30-block
+  Cloudflare runtime, whose largest declaration is 605 KB of JSON, that was
+  most of a cold build. Native release, mean of 7 prepared builds:
+  `seal()` 52.8 → 1.8 ms, every block's `Init` 33.5 → 6.5 ms,
+  `block_infos()` 7.8 → 0.0 ms. The `Block` trait is unchanged.
+  - Registration keeps the `BlockInfo` it validated, with the
+    `call_allowlist` derived from it, beside the block. Every runtime pass
+    reads that copy: `seal()`, `set_admin_block`'s grant rescan,
+    `call_block`'s callee facts and allowlist, context construction, the
+    `Init` pipeline's budget and declared config keys,
+    `validate_all_block_configs` (on the `Wafer` and from a context), and
+    `block_infos()`. `info()` runs exactly once per registration, except
+    for a `call_block` admitted under a registered name that is also an
+    alias of an unregistered block, whose callee facts are still read
+    from `info()`.
+  - The invariant: a block's declaration is fixed for its registration. A
+    `Wafer` never replaces or removes a registered block (`DuplicateBlock`),
+    so nothing can make the copy stale; a block whose declaration changes —
+    a rebuilt WASM guest, a dynamically generated block, a reloaded module —
+    is a new instance registered in a new runtime, and that registration
+    reads `info()` afresh.
+  - **Behaviour change for a block whose `info()` is not pure:** a grant or
+    capability it adds after `register_block` now silently stops applying.
+    Before, `set_admin_block`'s grant rescan, `seal()`'s capability
+    computation and `requires` checks, the dispatch table, and each
+    `Init`'s budget, allowlist and config keys re-read `info()` and saw the
+    later declaration; now they all use the registration read, with no
+    error. A block whose declaration changes after `register_block` must
+    be registered in a new runtime.
+  - Changed: `Wafer::block_infos()` returns `Vec<Arc<BlockInfo>>` (was
+    `Vec<BlockInfo>`, rebuilt on every call). It costs one `Arc` clone per
+    block. Migrating: borrow through the `Arc` (`&info.external_assets`,
+    `info.name.clone()`); a consumer that needs `&[BlockInfo]` collects
+    `infos.iter().map(|i| BlockInfo::clone(i))` once.
+  - Changed: `RuntimeContext::all_blocks` is `pub(crate)`. Reach blocks
+    through `CallFrame::lookup` and declarations through
+    `Context::registered_blocks`.
+  - `Context::registered_blocks()` still lends `&[BlockInfo]`: the startup
+    snapshot holds one clone of each registration-time declaration, made
+    once per `seal()`, never a rebuild.
+
 - **A dispatch refused because its block's `Init` failed no longer answers
   the `Init`'s error.** The refusal is the dispatch's terminal, and every
   HTTP adapter renders its message verbatim into the response body

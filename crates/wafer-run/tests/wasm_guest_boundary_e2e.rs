@@ -148,7 +148,10 @@ async fn the_readable_declaration_is_visible_to_operators() {
         .into_iter()
         .find(|b| b.name == GUEST)
         .expect("guest is registered");
-    let declared = info.capabilities.expect("guest declares capabilities");
+    let declared = info
+        .capabilities
+        .as_ref()
+        .expect("guest declares capabilities");
     assert_eq!(declared.headers.readable, vec!["authorization".to_string()]);
     let effective = wafer
         .effective_capabilities(GUEST)

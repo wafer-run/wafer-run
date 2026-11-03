@@ -270,15 +270,14 @@ pub fn resolve_declared(
 ///
 /// Does **not** invoke any block's `lifecycle` or `handle`.
 pub(crate) async fn validate_block_configs<'a>(
-    blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn wafer_block::Block>)>,
+    blocks: impl IntoIterator<Item = (&'a String, &'a wafer_block::BlockInfo)>,
     source: &Arc<dyn ConfigSource>,
 ) -> wafer_block::ValidationReport {
     use wafer_block::{BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport};
 
     let mut report = ValidationReport::default();
     let mut failures: Vec<SourceFailure> = Vec::new();
-    for (name, block) in blocks {
-        let info = block.info();
+    for (name, info) in blocks {
         match source.load_for_block(name, &info.config_keys).await {
             Ok(_) => report.ok.push(name.clone()),
             Err(ConfigError::MissingRequired { block, key }) => {
@@ -652,17 +651,15 @@ mod validate_block_configs_tests {
     }
 
     async fn validate(names: &[&'static str], script: Scripted) -> wafer_block::ValidationReport {
-        let blocks: Vec<(String, Arc<dyn wafer_block::Block>)> = names
+        let blocks: Vec<(String, BlockInfo)> = names
             .iter()
             .map(|n| {
-                (
-                    n.to_string(),
-                    Arc::new(Declares(n)) as Arc<dyn wafer_block::Block>,
-                )
+                use wafer_block::Block as _;
+                (n.to_string(), Declares(n).info())
             })
             .collect();
         let source: Arc<dyn ConfigSource> = Arc::new(script);
-        validate_block_configs(blocks.iter().map(|(n, b)| (n, b)), &source).await
+        validate_block_configs(blocks.iter().map(|(n, info)| (n, info)), &source).await
     }
 
     const OUTAGE: &str = "D1_ERROR: Network connection lost.";
