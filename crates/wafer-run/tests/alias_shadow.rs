@@ -156,3 +156,98 @@ async fn an_alias_of_a_registered_block_dispatches_to_it() {
     assert_eq!(body(called).await, b"a/y");
     assert_eq!(handles.load(Ordering::SeqCst), 2);
 }
+
+/// An alias is bound once: re-pointing it before `seal()` is refused, and
+/// the first binding stands.
+#[tokio::test]
+async fn an_alias_is_not_rebound() {
+    let mut wafer = empty_wafer();
+    wafer.add_alias("db", "a/y").expect("alias db to a/y");
+    match wafer.add_alias("db", "a/z") {
+        Err(AliasError::AlreadyAliased { alias, target }) => {
+            assert_eq!(alias, "db");
+            assert_eq!(target, "a/y");
+        }
+        other => panic!("expected AlreadyAliased, got {other:?}"),
+    }
+    assert_eq!(wafer.canonicalize("db"), "a/y");
+}
+
+/// After `seal()` the runtime takes no alias: dispatch resolves against the
+/// snapshot `seal()` took, so a re-pointed or new alias would disagree with
+/// it. Re-pointing `a/x` at an unregistered block after seal used to make a
+/// `call_block("a/x")` admit the stale snapshot entry and panic.
+#[tokio::test]
+async fn an_alias_added_after_seal_is_refused() {
+    let block = Arc::new(Named::new("a/y"));
+    let handles = block.handle_calls.clone();
+    let mut wafer = empty_wafer();
+    wafer.register_block("a/y", block).expect("register a/y");
+    wafer
+        .register_block("test/caller", Arc::new(Caller("a/x")))
+        .expect("register the caller");
+    wafer.add_alias("a/x", "a/y").expect("alias a/x to a/y");
+    wafer.seal().await.expect("seal");
+
+    for (alias, target) in [("a/x", "a/missing"), ("db", "a/y")] {
+        match wafer.add_alias(alias, target) {
+            Err(AliasError::AfterSeal { alias: refused }) => assert_eq!(refused, alias),
+            other => panic!("expected AfterSeal for {alias}, got {other:?}"),
+        }
+    }
+    assert_eq!(wafer.canonicalize("a/x"), "a/y");
+    assert_eq!(wafer.canonicalize("db"), "db");
+
+    let called = wafer
+        .run_block("test/caller", Message::new("run"), InputStream::empty())
+        .await;
+    assert_eq!(body(called).await, b"a/y");
+    assert_eq!(handles.load(Ordering::SeqCst), 1);
+}
+
+/// After `seal()` — whether it succeeded or failed — the runtime takes no
+/// block, and refuses before reading its declaration. A block registered
+/// after seal was never reachable: dispatch resolves against the snapshot.
+#[tokio::test]
+async fn a_block_registered_after_seal_is_refused() {
+    let mut sealed = empty_wafer();
+    sealed.seal().await.expect("seal");
+
+    // A seal that fails (an unmet `requires`) closes the registry too.
+    let mut failed = empty_wafer();
+    failed
+        .register_block(
+            "test/caller",
+            Arc::new(Requires(Named::new("test/caller"), "a/absent")),
+        )
+        .expect("register the caller");
+    failed
+        .seal()
+        .await
+        .expect_err("an unmet requires fails seal");
+
+    for wafer in [&mut sealed, &mut failed] {
+        let block = Arc::new(Named::new("a/late"));
+        let info_calls = block.info_calls.clone();
+        match wafer.register_block("a/late", block) {
+            Err(RuntimeError::RegisteredAfterSeal { name }) => assert_eq!(name, "a/late"),
+            other => panic!("expected RegisteredAfterSeal, got {other:?}"),
+        }
+        assert_eq!(info_calls.load(Ordering::SeqCst), 0, "refused unread");
+        assert!(!wafer.has_block("a/late"));
+    }
+}
+
+/// `Named`, declaring that it requires one block.
+struct Requires(Named, &'static str);
+
+#[async_trait]
+impl Block for Requires {
+    fn info(&self) -> BlockInfo {
+        self.0.info().requires(vec![self.1.to_string()])
+    }
+
+    async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
+        self.0.handle(ctx, msg, input).await
+    }
+}

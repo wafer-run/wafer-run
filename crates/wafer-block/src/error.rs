@@ -7,8 +7,8 @@
 ///
 /// The variants fall into three domains, marked by the section comments below:
 ///
-/// - **Registration** (`DuplicateBlock`, `NameIsAlias`, `InvalidBlockName`,
-///   `BlockNameMismatch`, `InvalidBlockInfo`, `Inventory`): raised while blocks are being added to a [`crate`]-level
+/// - **Registration** (`DuplicateBlock`, `NameIsAlias`, `RegisteredAfterSeal`,
+///   `InvalidBlockName`, `BlockNameMismatch`, `InvalidBlockInfo`, `Inventory`): raised while blocks are being added to a [`crate`]-level
 ///   registry — by the embedder, or by `seal()` for a block it downloads. They
 ///   name the offending block so the misconfiguration can be fixed at its
 ///   source.
@@ -36,16 +36,27 @@ pub enum RuntimeError {
     },
 
     /// The name is already an alias. Registering a block under it would let
-    /// one name mean two blocks: dispatch resolves the alias to its target,
-    /// so the block registered under the name could never be reached by it,
-    /// and when the target is not registered the lookup falls back to a
-    /// block whose init slot and identity are the target's.
+    /// one name mean two blocks: dispatch resolves the name to the alias's
+    /// target, so the block registered under it could never be reached by
+    /// that name.
     #[error("cannot register block '{name}': '{name}' is an alias of '{target}'")]
     NameIsAlias {
         /// The name the block was being registered under.
         name: String,
         /// The block the alias points at.
         target: String,
+    },
+
+    /// `seal()` has run on this runtime (successfully or not), so it takes
+    /// no more blocks. Sealing snapshots the registered blocks and aliases
+    /// that every dispatch resolves against; a block added afterwards would
+    /// be unreachable, or reachable under a name the snapshot resolves
+    /// differently. Register every block before sealing, or build a new
+    /// runtime.
+    #[error("cannot register block '{name}': seal() already ran on this runtime; register every block before sealing")]
+    RegisteredAfterSeal {
+        /// The name the block was being registered under.
+        name: String,
     },
 
     /// Block name does not follow the `{org}/{block}` naming convention.
@@ -259,6 +270,23 @@ pub enum AliasError {
     #[error("alias `{alias}` cannot be registered because a block is registered under that name")]
     ShadowsBlock {
         /// The alias name, which is a registered block's name.
+        alias: String,
+    },
+    /// `alias` is already an alias. An alias is bound once: re-pointing it
+    /// would change what a name means after code has resolved it.
+    #[error("alias `{alias}` is already an alias of `{target}`")]
+    AlreadyAliased {
+        /// The alias name.
+        alias: String,
+        /// The block it already points at.
+        target: String,
+    },
+    /// `seal()` has run on this runtime, so it takes no more aliases. Sealing
+    /// snapshots the blocks and aliases dispatch resolves against; an alias
+    /// added afterwards would disagree with that snapshot.
+    #[error("alias `{alias}` cannot be registered: seal() already ran on this runtime")]
+    AfterSeal {
+        /// The alias name whose registration was refused.
         alias: String,
     },
 }
@@ -582,6 +610,29 @@ mod tests {
             alias: "y".to_string(),
         };
 
+        assert_eq!(
+            super::AliasError::AlreadyAliased {
+                alias: "db".to_string(),
+                target: "a/y".to_string(),
+            }
+            .to_string(),
+            "alias `db` is already an alias of `a/y`",
+        );
+        assert_eq!(
+            super::AliasError::AfterSeal {
+                alias: "db".to_string(),
+            }
+            .to_string(),
+            "alias `db` cannot be registered: seal() already ran on this runtime",
+        );
+        assert_eq!(
+            RuntimeError::RegisteredAfterSeal {
+                name: "a/x".to_string(),
+            }
+            .to_string(),
+            "cannot register block 'a/x': seal() already ran on this runtime; register every \
+             block before sealing",
+        );
         let shadows_block = super::AliasError::ShadowsBlock {
             alias: "a/x".to_string(),
         };

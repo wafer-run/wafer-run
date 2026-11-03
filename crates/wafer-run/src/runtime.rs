@@ -313,10 +313,12 @@ impl Wafer {
     /// Resolve a dispatch target through the alias map, returning the
     /// canonical name and a handle to the block.
     ///
-    /// Tries the alias-resolved name first, then the raw name (the same
-    /// canonicalize-then-fallback the flow runner and `RuntimeContext`
-    /// dispatch use). This is the single accessor for block lookup so callers
-    /// don't reach into `registration.all_blocks` directly.
+    /// Looks up the alias-resolved name only, as the flow runner and
+    /// `RuntimeContext` dispatch do: a name is never both a block and an
+    /// alias, so a block is never found under the name as written but not
+    /// under the resolved one. Finds blocks once [`seal`](Self::seal) has
+    /// run; before it, nothing. This is the single accessor for block lookup
+    /// so callers don't reach into `registration.all_blocks` directly.
     pub fn lookup_block<'a>(&'a self, name: &'a str) -> Option<(&'a str, Arc<dyn Block>)> {
         self.registration
             .lookup_with_alias(name)
@@ -329,8 +331,9 @@ impl Wafer {
     /// The alias map is constrained to a forest of depth 1 — chained
     /// aliases are rejected at registration time so lookup is always
     /// O(1) and the canonical-name resolution rule is the same at
-    /// `seal()` and at runtime. See [`wafer_block::error::AliasError`] for
-    /// rejection reasons.
+    /// `seal()` and at runtime. An alias is bound once, may not name a
+    /// registered block, and must be added before [`seal`](Self::seal). See
+    /// [`wafer_block::error::AliasError`] for rejection reasons.
     pub fn add_alias(
         &mut self,
         alias: impl Into<String>,

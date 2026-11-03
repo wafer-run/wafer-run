@@ -261,10 +261,8 @@ impl RuntimeContext {
         //
         // The callee's registration — the block with the `BlockInfo` it
         // declared — for its init; `invoke` below takes `block` by move.
-        // `admit_call` found the callee in `all_blocks` under
-        // `resolved_block_name` (see `callee_facts`: for this frame the
-        // name-as-written fallback never finds anything the resolved lookup
-        // missed), so it is here.
+        // `admit_call` found the callee by looking up `resolved_block_name`
+        // in this same `all_blocks`, so it is here.
         let init_block = self
             .all_blocks
             .get(resolved_block_name)
@@ -374,14 +372,10 @@ impl crate::runtime::call_gates::CallFrame for RuntimeContext {
     /// the `call_block` allowlist derived from it, never a fresh
     /// [`Block::info`] call.
     ///
-    /// `admit_call` hands over the block it found under `resolved` — or,
-    /// failing that, under the name as written. For this frame the second
-    /// lookup never finds what the first missed: a name is never both a
-    /// block and an alias (`add_alias` and registration each refuse the
-    /// other), and `all_blocks` holds an alias key only beside its
-    /// registered target. So `resolved` is always here; the miss arm exists
-    /// because the trait must answer for any block, and answers as its
-    /// default does.
+    /// `admit_call` hands over the block its `lookup(resolved)` found in
+    /// this same `all_blocks`, so `resolved` is always here; the miss arm
+    /// exists because the trait must answer for any block, is never taken,
+    /// and answers as the trait's default does.
     fn callee_facts(
         &self,
         resolved: &str,
