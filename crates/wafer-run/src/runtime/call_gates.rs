@@ -74,7 +74,8 @@ pub trait CallFrame {
 
     /// The callee's declared interface and `call_block` allowlist. The
     /// default reads them from `block`'s `BlockInfo`; the runtime answers
-    /// from the table it compiles at seal.
+    /// from the `BlockInfo` registration read and the allowlist derived
+    /// from it, kept with the block.
     fn callee_facts(&self, resolved: &str, block: &dyn Block) -> CalleeFacts<'_> {
         let _ = resolved;
         CalleeFacts::declared(block)

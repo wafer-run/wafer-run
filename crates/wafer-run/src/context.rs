@@ -54,7 +54,7 @@ pub struct RuntimeContext {
     /// All registered blocks and aliases, each with the `BlockInfo` its
     /// registration read
     /// ([`RegisteredBlock`](crate::runtime::registration::RegisteredBlock)).
-    /// `pub(crate)`: [`Context::lookup`](crate::runtime::call_gates::CallFrame::lookup)
+    /// `pub(crate)`: [`CallFrame::lookup`](crate::runtime::call_gates::CallFrame::lookup)
     /// and [`Context::registered_blocks`] are the access paths.
     pub(crate) all_blocks: Arc<HashMap<String, crate::runtime::registration::RegisteredBlock>>,
     /// This frame's recursion depth. COR-01: a per-frame value copied

@@ -20,7 +20,11 @@ use crate::platform::{ConfigExpanderFn, RegistrarFn};
 /// pass, the dispatch facts `call_block` and context construction need, the
 /// Init pipeline's budget and declared config keys, config validation, and
 /// [`Wafer::block_infos`](crate::Wafer::block_infos) — reads this copy and
-/// never calls `info()` again.
+/// never calls `info()` again. One exception remains: a `call_block` that
+/// `admit_call` admits under the name as written rather than the resolved
+/// one (a registered name that is also an alias of an unregistered block;
+/// see [`lookup_with_alias`](RegistrationCore::lookup_with_alias)) reads
+/// the callee's facts from a fresh `info()`.
 ///
 /// # Invariant: a block's declaration is fixed for its registration
 ///
@@ -32,11 +36,16 @@ use crate::platform::{ConfigExpanderFn, RegistrarFn};
 /// guest, a dynamically generated block, a module reloaded by `wafer dev`
 /// (which restarts the process) or an embedder's rebuilt runtime — is a new
 /// instance in a new runtime, and its registration reads `info()` afresh.
-/// It also matches what the runtime enforced before the cache: grants were
-/// collected, names checked and capabilities computed from the
-/// registration-time read, so an `info()` that later reported something
-/// else could only make the runtime's passes disagree with each other.
-/// (A `WasmiBlock` already memoizes its guest's `__wafer_info` the first time
+///
+/// This is a change for a block whose `info()` is not pure. Before the
+/// cache, `set_admin_block`'s grant rescan, `seal()`'s capability
+/// computation and `requires` checks, the dispatch table, and each Init's
+/// budget, allowlist and config keys re-read `info()`, so a grant or
+/// capability a block began declaring after `register_block` took effect
+/// in those passes (while the passes that ran at registration did not see
+/// it). Now every pass uses the registration read: a declaration that
+/// changes after `register_block` is not seen at all, and the block must be
+/// registered in a new runtime. (A `WasmiBlock` already memoizes its guest's `__wafer_info` the first time
 /// it succeeds, and registration refuses a guest whose read failed.)
 #[derive(Clone)]
 pub(crate) struct RegisteredBlock {
@@ -188,12 +197,14 @@ impl RegistrationCore {
     /// Resolve a dispatch target through the alias map, returning the
     /// canonical name and the registered block.
     ///
-    /// Tries the alias-resolved name first, then the original. Under the
-    /// current invariant these always agree: `rebuild_all_blocks` is the sole
-    /// writer of `all_blocks` and inserts an alias key only alongside its
-    /// registered target, so a hit on the original name implies a hit on the
-    /// resolved one. The `or_else` is therefore a cheap defensive fallback
-    /// (and preserves the pre-refactor lookup) rather than a reachable path.
+    /// Tries the alias-resolved name first, then the original. They differ
+    /// in one case: a name that is both a registered block and an alias of
+    /// an unregistered block. `add_alias` does not refuse that, and
+    /// `rebuild_all_blocks` (the sole writer of `all_blocks`, which inserts
+    /// an alias key only beside its registered target) then leaves the
+    /// registered block under the name, so the resolved name misses and the
+    /// `or_else` finds the block under the original. Otherwise a hit on the
+    /// original name implies a hit on the resolved one.
     pub(crate) fn lookup_with_alias<'a>(
         &'a self,
         name: &'a str,
