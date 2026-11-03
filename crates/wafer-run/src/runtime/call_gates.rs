@@ -68,8 +68,9 @@ pub trait CallFrame {
     /// which blocks it may call.
     fn caller_capabilities(&self) -> Option<BlockCapabilities>;
 
-    /// The block registered under `name` — a registration name or an alias —
-    /// or `None`.
+    /// The block registered under `name`, or `None`. [`admit_call`] asks
+    /// with the name [`Self::canonicalize`] resolved, so a frame's lookup
+    /// and its alias map must agree on which names are blocks.
     fn lookup(&self, name: &str) -> Option<Arc<dyn Block>>;
 
     /// The callee's declared interface and `call_block` allowlist. The
@@ -152,7 +153,7 @@ fn refuse(code: ErrorCode, message: impl Into<String>) -> WaferError {
 ///    written and the name it resolves to — [`ErrorCode::PermissionDenied`];
 /// 5. the caller's `call_block` capability, on the resolved name —
 ///    [`ErrorCode::PermissionDenied`];
-/// 6. registration: the resolved name, else the name as written —
+/// 6. registration: [`CallFrame::lookup`] of the resolved name —
 ///    [`ErrorCode::Unimplemented`];
 /// 7. the message's action (the `req.action` meta, else the message kind)
 ///    against the callee's declared interface, skipped for an interface with
@@ -222,11 +223,12 @@ pub fn admit_call<'a>(
         }
     }
 
-    // The resolved name first, then the name as written — the same
-    // canonicalize-then-fallback the flow runner and `Wafer::lookup_block`
-    // use. `NotFound` is reserved for a service saying the thing a request
+    // The resolved name alone, as the flow runner and `Wafer::lookup_block`
+    // look it up: a name is never both a block and an alias, so a block is
+    // never registered under the name as written but not under the resolved
+    // one. `NotFound` is reserved for a service saying the thing a request
     // names does not exist; nothing to dispatch to is `Unimplemented`.
-    let Some(block) = frame.lookup(resolved).or_else(|| frame.lookup(name)) else {
+    let Some(block) = frame.lookup(resolved) else {
         return Err(refuse(
             ErrorCode::Unimplemented,
             format!("block '{name}' is not registered"),
@@ -502,15 +504,22 @@ mod tests {
         );
     }
 
+    /// A frame whose alias map sends a block's name to an unregistered block
+    /// (the runtime refuses that shape) does not admit the block written
+    /// under the name: it would run under the missing target's identity.
     #[test]
-    fn a_name_whose_alias_target_is_missing_falls_back_to_the_name_written() {
+    fn a_name_whose_alias_target_is_missing_is_not_admitted() {
         let mut frame = Frame::new();
         frame
             .aliases
             .insert("acme/free".to_string(), "acme/gone".to_string());
-        let admitted = admit_call(&frame, "acme/free", &get()).expect("found as written");
-        assert_eq!(admitted.block.info().name, "acme/free");
-        assert_eq!(admitted.resolved, "acme/gone");
+        assert_eq!(
+            refusal(&frame, "acme/free", &get()),
+            (
+                ErrorCode::Unimplemented,
+                "block 'acme/free' is not registered".to_string()
+            )
+        );
     }
 
     #[test]

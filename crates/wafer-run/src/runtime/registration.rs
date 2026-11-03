@@ -20,19 +20,16 @@ use crate::platform::{ConfigExpanderFn, RegistrarFn};
 /// pass, the dispatch facts `call_block` and context construction need, the
 /// Init pipeline's budget and declared config keys, config validation, and
 /// [`Wafer::block_infos`](crate::Wafer::block_infos) — reads this copy and
-/// never calls `info()` again. One exception remains: a `call_block` that
-/// `admit_call` admits under the name as written rather than the resolved
-/// one (a registered name that is also an alias of an unregistered block;
-/// see [`lookup_with_alias`](RegistrationCore::lookup_with_alias)) reads
-/// the callee's facts from a fresh `info()`.
+/// never calls `info()` again.
 ///
 /// # Invariant: a block's declaration is fixed for its registration
 ///
 /// The runtime treats what a block declared at registration as what it is
 /// for as long as it stays registered. That is sound because a
 /// registration is never replaced: a [`Wafer`](crate::Wafer) refuses a
-/// second block under a taken name (`DuplicateBlock`) and has no way to
-/// remove one. A block whose declaration does change — a rebuilt WASM
+/// second block under a taken name (`DuplicateBlock`), has no way to
+/// remove one, and takes no registration at all once `seal()` has run
+/// (`RegisteredAfterSeal`). A block whose declaration does change — a rebuilt WASM
 /// guest, a dynamically generated block, a module reloaded by `wafer dev`
 /// (which restarts the process) or an embedder's rebuilt runtime — is a new
 /// instance in a new runtime, and its registration reads `info()` afresh.
@@ -45,8 +42,9 @@ use crate::platform::{ConfigExpanderFn, RegistrarFn};
 /// in those passes (while the passes that ran at registration did not see
 /// it). Now every pass uses the registration read: a declaration that
 /// changes after `register_block` is not seen at all, and the block must be
-/// registered in a new runtime. (A `WasmiBlock` already memoizes its guest's `__wafer_info` the first time
-/// it succeeds, and registration refuses a guest whose read failed.)
+/// registered in a new runtime. (A `WasmiBlock` already memoizes its
+/// guest's `__wafer_info` the first time it succeeds, and registration
+/// refuses a guest whose read failed.)
 #[derive(Clone)]
 pub(crate) struct RegisteredBlock {
     /// The block instance.
@@ -143,6 +141,14 @@ pub(crate) struct RegistrationCore {
     pub(crate) block_configs: HashMap<String, serde_json::Value>,
     /// WRAP grant/capability state.
     pub(crate) wrap: WrapState,
+    /// Set by [`Wafer::seal`](crate::Wafer::seal) once it has run, whatever
+    /// its outcome. From then on the registry takes no block
+    /// (`RegisteredAfterSeal`) and no alias (`AliasError::AfterSeal`):
+    /// `all_blocks`, which every dispatch resolves against, is the snapshot
+    /// `seal()` took, and `blocks` and `aliases` must not drift from it.
+    /// `seal()` registers the lockfile blocks it downloads before this is
+    /// set.
+    pub(crate) sealed: bool,
 }
 
 impl RegistrationCore {
@@ -162,6 +168,7 @@ impl RegistrationCore {
                 .collect(),
             block_configs: HashMap::new(),
             wrap: WrapState::new(),
+            sealed: false,
         }
     }
 }
@@ -175,14 +182,31 @@ impl RegistrationCore {
         alias: String,
         target: String,
     ) -> Result<(), wafer_block::error::AliasError> {
+        if self.sealed {
+            return Err(wafer_block::error::AliasError::AfterSeal { alias });
+        }
         if alias == target {
             return Err(wafer_block::error::AliasError::Cycle { alias });
+        }
+        // An alias is bound once: re-pointing it would change what a name
+        // means after code (a compiled flow, a context's alias map) resolved
+        // it.
+        if let Some(existing) = self.aliases.get(&alias) {
+            return Err(wafer_block::error::AliasError::AlreadyAliased {
+                alias,
+                target: existing.clone(),
+            });
         }
         if self.aliases.contains_key(&target) {
             return Err(wafer_block::error::AliasError::TargetIsAlias { alias, target });
         }
         if self.aliases.values().any(|t| t == &alias) {
             return Err(wafer_block::error::AliasError::AliasIsExistingTarget { alias });
+        }
+        // A name is a block or an alias, never both: `admit` refuses the
+        // other order.
+        if self.blocks.contains_key(&alias) {
+            return Err(wafer_block::error::AliasError::ShadowsBlock { alias });
         }
         Arc::make_mut(&mut self.aliases).insert(alias, target);
         Ok(())
@@ -197,23 +221,20 @@ impl RegistrationCore {
     /// Resolve a dispatch target through the alias map, returning the
     /// canonical name and the registered block.
     ///
-    /// Tries the alias-resolved name first, then the original. They differ
-    /// in one case: a name that is both a registered block and an alias of
-    /// an unregistered block. `add_alias` does not refuse that, and
-    /// `rebuild_all_blocks` (the sole writer of `all_blocks`, which inserts
-    /// an alias key only beside its registered target) then leaves the
-    /// registered block under the name, so the resolved name misses and the
-    /// `or_else` finds the block under the original. Otherwise a hit on the
-    /// original name implies a hit on the resolved one.
+    /// The resolved name is the only lookup, and it agrees with the name as
+    /// written: a name is never both a block and an alias (`add_alias`
+    /// refuses a registered name, `admit` an alias, and an alias is bound
+    /// once); `rebuild_all_blocks` — the sole writer of `all_blocks`, run
+    /// by `seal()` — inserts an alias key only beside its registered target;
+    /// and once `seal()` has run neither `blocks` nor `aliases` changes, so
+    /// they cannot drift from that snapshot. Before `seal()`, `all_blocks`
+    /// is empty and nothing is found.
     pub(crate) fn lookup_with_alias<'a>(
         &'a self,
         name: &'a str,
     ) -> Option<(&'a str, &'a RegisteredBlock)> {
         let resolved = self.canonicalize(name);
-        self.all_blocks
-            .get(resolved)
-            .or_else(|| self.all_blocks.get(name))
-            .map(|b| (resolved, b))
+        self.all_blocks.get(resolved).map(|b| (resolved, b))
     }
 
     /// Rebuild the `all_blocks` map from registered blocks + aliases. Call
@@ -299,7 +320,8 @@ impl RegistrationCore {
     }
 
     /// The checks every registration path runs before a block is inserted
-    /// under `name`: the name is free and well-formed, the block reports it
+    /// under `name`: `seal()` has not run, the name is free (no block and no
+    /// alias holds it) and well-formed, the block reports it
     /// as its own name, and its declarations pass
     /// [`BlockInfo::validate`](wafer_block::BlockInfo::validate) — reserved
     /// and foreign config keys, agent-tool names. Returns the `BlockInfo` it
@@ -316,9 +338,22 @@ impl RegistrationCore {
         name: &str,
         block: &Arc<dyn Block>,
     ) -> Result<wafer_block::BlockInfo, RuntimeError> {
+        if self.sealed {
+            return Err(RuntimeError::RegisteredAfterSeal {
+                name: name.to_string(),
+            });
+        }
         if self.blocks.contains_key(name) {
             return Err(RuntimeError::DuplicateBlock {
                 name: name.to_string(),
+            });
+        }
+        // A name is a block or an alias, never both: `add_alias` refuses the
+        // other order.
+        if let Some(target) = self.aliases.get(name) {
+            return Err(RuntimeError::NameIsAlias {
+                name: name.to_string(),
+                target: target.clone(),
             });
         }
         crate::runtime::validate_block_name(name)?;
@@ -401,7 +436,8 @@ impl RegistrationCore {
     /// - `name` is already registered — a block the embedder linked in
     ///   (`DuplicateBlock`): the lockfile pins a registry artifact under a
     ///   name something else already holds.
-    /// - `name` is an operator alias: registering would shadow it.
+    /// - `name` is an operator alias (`NameIsAlias`), which registration
+    ///   refuses for the same reason.
     ///
     /// The admin block is refused for every lockfile entry, cached or not,
     /// by `seal()` itself.
@@ -413,9 +449,10 @@ impl RegistrationCore {
             });
         }
         if let Some(target) = self.aliases.get(name) {
-            return Err(RuntimeError::Config(format!(
-                "wafer.lock entry {name} is already an alias of {target}"
-            )));
+            return Err(RuntimeError::NameIsAlias {
+                name: name.to_string(),
+                target: target.clone(),
+            });
         }
         Ok(())
     }

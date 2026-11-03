@@ -57,6 +57,10 @@ impl Wafer {
     ///
     /// A runtime is sealed once: a second call returns
     /// [`RuntimeError::AlreadySealed`], whether the first succeeded or not.
+    /// From then on it takes no more blocks
+    /// ([`RuntimeError::RegisteredAfterSeal`]) and no more aliases
+    /// ([`AliasError::AfterSeal`](wafer_block::error::AliasError::AfterSeal)):
+    /// dispatch resolves against the snapshot taken here.
     /// Step 5 consumes each block config's `capabilities` narrowing, so a
     /// second pass would recompute capabilities without it. The outcome is
     /// kept in [`seal_state`](Self::seal_state).
@@ -74,6 +78,9 @@ impl Wafer {
             return Err(RuntimeError::AlreadySealed);
         }
         let result = self.seal_once().await;
+        // Close the registry, whatever the outcome: dispatch resolves against
+        // the snapshot `seal_once` took, so blocks and aliases stop here.
+        self.registration.sealed = true;
         self.seal_state = match &result {
             Ok(()) => super::SealState::Sealed,
             Err(e) => super::SealState::Failed(e.to_string()),

@@ -4,6 +4,41 @@
 
 ### Breaking changes
 
+- **A name is a block or an alias, never both, and both are fixed at
+  `seal()`.** `seal()` snapshots the registered blocks and aliases that
+  every dispatch resolves against, but the registry stayed open: an alias
+  could name a registered block (or a block an alias), an alias could be
+  re-pointed, and both could be added after `seal()`. The snapshot and the
+  live alias map then disagreed — for example a registered name aliased to
+  an unregistered block, or an alias re-pointed after seal — and
+  `run_block` / `call_block` on the name admitted a block the runtime could
+  not run and panicked ("slot must exist for any registered block"), on
+  Workers poisoning the isolate.
+  - Added: `AliasError::ShadowsBlock { alias }`. `add_alias` refuses an
+    alias whose name is a registered block.
+  - Added: `RuntimeError::NameIsAlias { name, target }`. Registration
+    (`register_block`, inventory, a `seal()` download) refuses a block
+    under a name that is an alias. The `wafer.lock` pre-download check
+    answers it too, where it answered `RuntimeError::Config("wafer.lock
+    entry … is already an alias of …")`.
+  - Added: `AliasError::AlreadyAliased { alias, target }`. An alias is
+    bound once; `add_alias` no longer re-points an existing alias (it
+    silently overwrote it).
+  - Added: `AliasError::AfterSeal { alias }` and
+    `RuntimeError::RegisteredAfterSeal { name }`. Once `seal()` has run,
+    successfully or not, `add_alias` and every registration path refuse.
+    A block registered after `seal()` was already unreachable (dispatch
+    never saw it); now the call says so. `seal()` still registers the
+    lockfile blocks it downloads.
+  - Lookups resolve the alias and look up the resolved name alone:
+    `Wafer::lookup_block`, `run_block`, flow steps, and
+    `call_gates::admit_call`, which no longer falls back to the name as
+    written. An embedder's `CallFrame` must find every block under the name
+    its `canonicalize` returns.
+  - Migrating: register every block and alias before `seal()`; drop an
+    alias that names a registered block or re-points an existing alias. An
+    exhaustive `match` on `AliasError` or `RuntimeError` needs the new arms.
+
 - **A block's `BlockInfo` is read once, at registration, and shared from
   then on.** `Block::info()` builds its declaration from scratch on every
   call, and the runtime called it about ten times per block per build:
@@ -21,10 +56,7 @@
     `call_block`'s callee facts and allowlist, context construction, the
     `Init` pipeline's budget and declared config keys,
     `validate_all_block_configs` (on the `Wafer` and from a context), and
-    `block_infos()`. `info()` runs exactly once per registration, except
-    for a `call_block` admitted under a registered name that is also an
-    alias of an unregistered block, whose callee facts are still read
-    from `info()`.
+    `block_infos()`. `info()` runs exactly once per registration.
   - The invariant: a block's declaration is fixed for its registration. A
     `Wafer` never replaces or removes a registered block (`DuplicateBlock`),
     so nothing can make the copy stale; a block whose declaration changes —

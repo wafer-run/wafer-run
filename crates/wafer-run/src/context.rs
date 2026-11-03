@@ -259,23 +259,25 @@ impl RuntimeContext {
         // B.init -> ... -> A, in this dispatch or a concurrent one) is
         // refused instead of deadlocking.
         //
-        // Every registered block has a paired slot (`register_block_inner`).
-        // A missing entry here means
-        // `resolved_block_name` was found in `self.blocks` but not
-        // `self.slots` — a runtime invariant violation, so panic loudly
-        // rather than silently constructing a fresh slot (which would let
-        // concurrent callers each run `lifecycle(Init)` independently).
+        // The callee's registration — the block with the `BlockInfo` it
+        // declared — for its init; `invoke` below takes `block` by move.
+        // `admit_call` found the callee by looking up `resolved_block_name`
+        // in this same `all_blocks`, so it is here.
+        let init_block = self
+            .all_blocks
+            .get(resolved_block_name)
+            .expect("admit_call found the callee under its resolved name");
+        // Every block in `all_blocks` was registered — before `seal()`
+        // rebuilt the map — with a paired slot (`register_block_inner`), and
+        // `slots` only grows. A missing entry is a runtime invariant
+        // violation, so panic loudly rather than silently constructing a
+        // fresh slot (which would let concurrent callers each run
+        // `lifecycle(Init)` independently).
         let slot = self
             .slots
             .get(resolved_block_name)
             .cloned()
-            .expect("slot must exist for any registered block");
-        // The callee's registration — the block with the `BlockInfo` it
-        // declared — for its init; `invoke` below takes `block` by move.
-        let init_block = self
-            .all_blocks
-            .get(resolved_block_name)
-            .expect("a block with an init slot is registered");
+            .expect("every block in all_blocks was registered with an init slot");
 
         // Dispatch. For wasmi callees with attachments, route through
         // `WasmiBlock::handle_with_attachments` so the per-call slot in
@@ -370,13 +372,10 @@ impl crate::runtime::call_gates::CallFrame for RuntimeContext {
     /// the `call_block` allowlist derived from it, never a fresh
     /// [`Block::info`] call.
     ///
-    /// `admit_call` hands over the block it found under `resolved` — or,
-    /// failing that, under the name as written. The miss arm is that second
-    /// case: a name that is both a registered block and an alias of an
-    /// unregistered block (`add_alias` does not refuse it, and
-    /// `rebuild_all_blocks` then leaves the registered block under the
-    /// name). It answers as the trait's default does; `dispatch_call` finds
-    /// no init slot under `resolved` for such a callee either.
+    /// `admit_call` hands over the block its `lookup(resolved)` found in
+    /// this same `all_blocks`, so `resolved` is always here; the miss arm
+    /// exists because the trait must answer for any block, is never taken,
+    /// and answers as the trait's default does.
     fn callee_facts(
         &self,
         resolved: &str,

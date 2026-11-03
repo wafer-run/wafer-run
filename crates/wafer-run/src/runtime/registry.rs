@@ -149,6 +149,12 @@ impl Wafer {
     /// The instance is also pre-resolved so it is available via `call_block()`
     /// even when it is not referenced as a flow node.
     ///
+    /// Blocks are registered before [`seal`](super::Wafer::seal): once it has
+    /// run, registration is refused with
+    /// [`RuntimeError::RegisteredAfterSeal`](wafer_block::error::RuntimeError::RegisteredAfterSeal).
+    /// The name may not be an alias
+    /// ([`RuntimeError::NameIsAlias`](wafer_block::error::RuntimeError::NameIsAlias)).
+    ///
     /// The block's `lifecycle(Init)` will be called during `start()` with
     /// config data from `add_block_config()` (if any) or empty data.
     ///
