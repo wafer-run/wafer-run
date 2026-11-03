@@ -43,8 +43,9 @@ pub(crate) struct DispatchTarget<'a> {
 /// its init is built from. Borrowed, so the steady state (init outcome
 /// settled) pays nothing for them.
 pub(crate) struct DispatchInit<'a> {
-    /// The resolved target block.
-    pub(crate) block: &'a Arc<dyn Block>,
+    /// The resolved target block, with the `BlockInfo` its registration read
+    /// (the init budget, declared config keys and `requires`).
+    pub(crate) block: &'a super::registration::RegisteredBlock,
     /// The dispatching frame's context: the template
     /// [`RuntimeContext::for_init`] builds the Init context from, and, through
     /// its `init_attempt`, the Init (if any) this dispatch waits on behalf of.
@@ -326,7 +327,7 @@ impl Wafer {
             return refused;
         }
         // Resolve alias + look up the target block in one step.
-        let Some((resolved, block)) = self.registration.lookup_with_alias(block_name) else {
+        let Some((resolved, registered)) = self.registration.lookup_with_alias(block_name) else {
             return OutputStream::error(WaferError::new(
                 ErrorCode::Unimplemented,
                 format!("block is not registered: {block_name}"),
@@ -366,12 +367,12 @@ impl Wafer {
                 slot: &slot,
             },
             DispatchInit {
-                block: &block,
+                block: registered,
                 template: &ctx,
             },
             msg,
             input,
-            |msg, input| block.handle(&ctx, msg, input),
+            |msg, input| registered.block.handle(&ctx, msg, input),
         )
         .await
         .unwrap_or_else(OutputStream::error)

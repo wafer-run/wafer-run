@@ -144,9 +144,9 @@ fn a_wasm_guest_reporting_another_name_is_refused() {
 
 /// Reports its registration name until `flip` is set, then `a/victim` — the
 /// shape a block whose `info()` is not stable would take. Grant validation
-/// re-reads `info()` when the admin block is set; it must still judge the
-/// grants against the registration name, not whatever name `info()` now
-/// reports.
+/// runs again when the admin block is set, over the declaration registration
+/// read; it must still judge the grants against the registration name, not
+/// whatever name `info()` would now report.
 struct Flips {
     flip: Arc<AtomicBool>,
 }
@@ -182,7 +182,7 @@ async fn grant_rescan_judges_grants_by_registration_name() {
     w.register_block("x/attacker", Arc::new(Flips { flip: flip.clone() }))
         .expect("the reported name matches at registration");
     flip.store(true, Ordering::SeqCst);
-    // Re-collects every registered block's grants from a fresh `info()`.
+    // Re-collects every registered block's grants from its registration.
     w.set_admin_block("acme/admin");
 
     match w.seal().await {

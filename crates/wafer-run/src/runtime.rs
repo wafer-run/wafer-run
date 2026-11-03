@@ -14,8 +14,8 @@ pub mod call_gates;
 /// declarative flow configs, `uses` contributions).
 pub(crate) mod config_expand;
 pub mod config_source;
-/// Seal-time compiled dispatch data: parsed block configs, `requires`
-/// allowlists, compiled flows (PERF-03).
+/// Seal-time compiled dispatch data: parsed block configs, interface specs,
+/// compiled flows (PERF-03).
 pub(crate) mod exec_plan;
 /// Runtime-wide wait-for graph of in-flight inits, used to refuse the wait
 /// that would close a cycle when blocks' `Init`s call each other.
@@ -144,9 +144,8 @@ pub struct Wafer {
     /// [`RuntimeContext`] [`make_context`](Self::make_context) produces.
     /// See [`ConfigState`](crate::runtime::config_source::ConfigState).
     pub(crate) config: crate::runtime::config_source::ConfigState,
-    /// Seal-time compiled dispatch data: parsed per-block configs, each
-    /// block's `requires` allowlist and interface, compiled flows. Empty
-    /// until [`Wafer::seal`];
+    /// Seal-time compiled dispatch data: parsed per-block configs, the
+    /// interface specs, compiled flows. Empty until [`Wafer::seal`];
     /// every consumer falls back to the uncompiled path on a miss.
     /// See [`SealedPlan`](crate::runtime::exec_plan::SealedPlan).
     pub(crate) plan: crate::runtime::exec_plan::SealedPlan,
@@ -307,7 +306,7 @@ impl Wafer {
     }
 
     /// Returns all resolved blocks as an Arc for use in contexts.
-    fn all_blocks_arc(&self) -> Arc<HashMap<String, Arc<dyn Block>>> {
+    fn all_blocks_arc(&self) -> Arc<HashMap<String, registration::RegisteredBlock>> {
         self.registration.all_blocks.clone()
     }
 
@@ -319,7 +318,9 @@ impl Wafer {
     /// dispatch use). This is the single accessor for block lookup so callers
     /// don't reach into `registration.all_blocks` directly.
     pub fn lookup_block<'a>(&'a self, name: &'a str) -> Option<(&'a str, Arc<dyn Block>)> {
-        self.registration.lookup_with_alias(name)
+        self.registration
+            .lookup_with_alias(name)
+            .map(|(resolved, registered)| (resolved, registered.block.clone()))
     }
 
     /// Register an alias mapping. When `call_block(alias)` is called,
@@ -417,8 +418,9 @@ impl Wafer {
         self.wasm.asset_loader = loader.clone();
         // Forward to all WasmiBlock instances currently registered.
         #[cfg(feature = "wasmi")]
-        for block in self.registration.blocks.values() {
-            if let Some(wasmi_block) = block
+        for registered in self.registration.blocks.values() {
+            if let Some(wasmi_block) = registered
+                .block
                 .as_any()
                 .and_then(|any| any.downcast_ref::<crate::wasm::WasmiBlock>())
             {
@@ -431,6 +433,12 @@ impl Wafer {
     /// generate discovery documents (e.g., OpenAPI, A2A agent.json) without
     /// having to maintain a duplicate registry.
     ///
+    /// Each entry is the `BlockInfo` registration read from the block — its
+    /// one [`Block::info`] call — shared, not rebuilt or deep-copied: the
+    /// call costs one `Arc` clone per block. See
+    /// [`RegisteredBlock`](registration::RegisteredBlock) for why a block's
+    /// declaration is fixed for its registration.
+    ///
     /// Sorted by registration name for deterministic order across processes
     /// (independent of HashMap's SipHash randomisation). Each entry's `name`
     /// is the block's registration name: registration refuses a block whose
@@ -438,8 +446,8 @@ impl Wafer {
     /// a block loaded from `wafer.lock`, which is registered under the
     /// entry's `{org}/{block}`. The returned list is a snapshot —
     /// later registrations are not reflected.
-    pub fn block_infos(&self) -> Vec<wafer_block::BlockInfo> {
-        lifecycle::sorted_snapshot(&self.registration.blocks)
+    pub fn block_infos(&self) -> Vec<Arc<wafer_block::BlockInfo>> {
+        lifecycle::sorted_infos(&self.registration.blocks)
     }
 
     /// Return the registration key of every registered block, sorted for
@@ -572,37 +580,22 @@ impl Wafer {
         ctx
     }
 
-    /// Read a block's declared `requires` allowlist for context construction.
-    /// Served from the seal-time [`SealedPlan`](crate::runtime::exec_plan::SealedPlan)
-    /// (one map lookup + `Arc` clone per dispatch); falls back to the
-    /// uncompiled resolution for a block registered after `seal()` (or any
-    /// pre-seal context construction).
-    fn resolve_block_requires(&self, resolved_block_name: &str) -> Option<Arc<Vec<String>>> {
-        match self.plan.dispatch.blocks.get(resolved_block_name) {
-            Some(cached) => cached.requires.clone(),
-            None => self.resolve_block_requires_uncached(resolved_block_name),
-        }
-    }
-
-    /// Uncompiled `requires` resolution: the
+    /// The declared `requires` allowlist for context construction: the
     /// [`call_allowlist`](wafer_block::BlockInfo::call_allowlist) (`requires`
     /// plus `optional_requires`) of the block registered under
     /// `resolved_block_name`, looked up by registration name and never by any
-    /// block's reported name. Both lists empty, or no such block, yields
+    /// block's reported name, as registration derived it (one map lookup +
+    /// `Arc` clone per dispatch). Both lists empty, or no such block, yields
     /// `None` — the block's `call_block` set is unrestricted, matching
     /// [`RuntimeContext::caller_requires`] semantics.
-    /// Used only when the seal-time plan has no entry for the block (a context
-    /// built before seal, or a block registered after it); the plan itself is
-    /// compiled from each block's `BlockInfo` in `compile_plan`.
-    pub(crate) fn resolve_block_requires_uncached(
+    pub(crate) fn resolve_block_requires(
         &self,
         resolved_block_name: &str,
     ) -> Option<Arc<Vec<String>>> {
         self.registration
             .blocks
             .get(resolved_block_name)
-            .and_then(|b| b.info().call_allowlist())
-            .map(Arc::new)
+            .and_then(|registered| registered.call_allowlist.clone())
     }
 
     /// Lazily initialize the named block. Returns the cached `InitializedState`
@@ -628,7 +621,7 @@ impl Wafer {
     ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
         use crate::runtime::slot::InitError;
 
-        let block = self
+        let registered = self
             .registration
             .blocks
             .get(name)
@@ -644,7 +637,7 @@ impl Wafer {
             Arc::new(AtomicBool::new(false)),
             None,
         );
-        run_init_pipeline(name, block, &slot, &template).await
+        run_init_pipeline(name, registered, &slot, &template).await
     }
 
     /// The init state of every registered block, keyed by registered name
@@ -682,7 +675,10 @@ impl Wafer {
     /// change.
     pub async fn validate_all_block_configs(&self) -> ValidationReport {
         crate::runtime::config_source::validate_block_configs(
-            self.registration.blocks.iter(),
+            self.registration
+                .blocks
+                .iter()
+                .map(|(name, registered)| (name, &*registered.info)),
             &self.config.source,
         )
         .await
@@ -848,7 +844,7 @@ pub(crate) fn retry_after_meta(
 /// next caller runs it again.
 pub(crate) async fn run_init_pipeline(
     name: &str,
-    block: &Arc<dyn Block>,
+    registered: &registration::RegisteredBlock,
     slot: &crate::runtime::slot::BlockSlot,
     template: &RuntimeContext,
 ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
@@ -862,7 +858,7 @@ pub(crate) async fn run_init_pipeline(
         .map_err(|path| InitError::Cycle { path })?;
 
     let attempt = template.init_waits.attempt(name);
-    let init_ctx = template.for_init(name, block.as_ref(), attempt.clone());
+    let init_ctx = template.for_init(name, registered, attempt.clone());
     let init_waits = template.init_waits.clone();
     let config_source = template.config_source.clone();
     // Snapshot of caller-registered JSON config (via `Wafer::add_block_config`),
@@ -873,7 +869,9 @@ pub(crate) async fn run_init_pipeline(
     // `init_merges_block_config`.
     let block_configs_snapshot = template.snapshot.block_configs.clone();
 
-    let budget = InitBudget::of(&block.info(), template.init_timeout_cap);
+    let budget = InitBudget::of(&registered.info, template.init_timeout_cap);
+    let block = &registered.block;
+    let config_keys = &registered.info.config_keys;
 
     slot.get_or_init(|| async move {
         // Owner of `name` for as long as its init runs, which is while the
@@ -887,9 +885,8 @@ pub(crate) async fn run_init_pipeline(
         // Started now, with the deadline, before the attempt is first polled.
         let timer = budget.map(|b| crate::platform::sleep(b.limit));
         let attempt = async {
-            let info = block.info();
             let env_cfg = config_source
-                .load_for_block(name, &info.config_keys)
+                .load_for_block(name, config_keys)
                 .await
                 .map_err(ConfigError::into_init_error)?;
 
@@ -1377,10 +1374,10 @@ mod tests {
     }
 
     /// `requires` is looked up by registration name. A block whose `info()`
-    /// later reports another block's name (here `a/victim`, which is not
+    /// would later report another block's name (here `a/victim`, which is not
     /// registered at all) must not stand in for that block: a lookup of
     /// `a/victim` finds nothing, and the block's own `requires` stays under
-    /// `x/attacker`.
+    /// `x/attacker`, as registration read it.
     #[tokio::test]
     async fn requires_resolve_by_registration_name() {
         struct Flips(Arc<std::sync::atomic::AtomicBool>);
@@ -1439,9 +1436,9 @@ mod tests {
         flip.store(true, std::sync::atomic::Ordering::SeqCst);
         wafer.seal().await.expect("seal");
 
-        assert_eq!(wafer.resolve_block_requires_uncached("a/victim"), None);
+        assert_eq!(wafer.resolve_block_requires("a/victim"), None);
         assert_eq!(
-            wafer.resolve_block_requires_uncached("x/attacker"),
+            wafer.resolve_block_requires("x/attacker"),
             Some(Arc::new(vec!["x/helper".to_string()]))
         );
     }

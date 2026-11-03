@@ -5,15 +5,19 @@
 //!
 //! - per-block flattened config maps (`parse_config_map` of the startup
 //!   snapshot's `block_configs`, previously re-parsed on every `run_block`),
-//! - per-block declared `requires` allowlists and interfaces, plus the
-//!   interface specs keyed by name — what `call_block` needs about a callee
-//!   ([`DispatchTable`], shared with every context), so a call neither
-//!   builds the callee's `BlockInfo` nor scans a spec list,
+//! - the interface specs keyed by name ([`DispatchTable`], shared with every
+//!   context), so a `call_block` action check does not scan a spec list,
 //! - compiled flows (see [`crate::waferflow::plan`]).
 //!
+//! What dispatch needs about a callee itself — its declared interface and
+//! `requires` allowlist — is not compiled here: registration reads each
+//! block's `BlockInfo` once and keeps it with the block
+//! ([`RegisteredBlock`](crate::runtime::registration::RegisteredBlock)), so
+//! the block map every context shares already carries it.
+//!
 //! Lookups fall back to the pre-plan code paths for anything not present —
-//! blocks registered or flows added after `seal()` — so behavior is
-//! unchanged; only the recomputation is gone.
+//! flows added after `seal()` — so behavior is unchanged; only the
+//! recomputation is gone.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -22,24 +26,10 @@ use wafer_block::{config::parse_config_map, InterfaceSpec};
 use super::Wafer;
 use crate::waferflow::plan::{compile_flow, CompiledFlow};
 
-/// What dispatch needs about one registered block, read from its
-/// `BlockInfo` once at `seal()`.
-pub(crate) struct BlockDispatch {
-    /// The block's declared interface (`BlockInfo::interface`), which
-    /// `call_block` checks the requested action against.
-    pub(crate) interface: String,
-    /// The block's [`call_allowlist`](wafer_block::BlockInfo::call_allowlist)
-    /// (`requires` plus `optional_requires`); `None` when it declared
-    /// neither (unrestricted `call_block`).
-    pub(crate) requires: Option<Arc<Vec<String>>>,
-}
-
-/// The per-call facts about callees, compiled at `seal()` and `Arc`-shared
-/// with every [`RuntimeContext`](crate::context::RuntimeContext).
+/// What `call_block`'s action check reads, compiled at `seal()` and
+/// `Arc`-shared with every [`RuntimeContext`](crate::context::RuntimeContext).
 #[derive(Default)]
 pub(crate) struct DispatchTable {
-    /// Keyed by registration name.
-    pub(crate) blocks: HashMap<String, BlockDispatch>,
     /// Every registered interface spec, keyed by interface name.
     pub(crate) interface_specs: HashMap<String, InterfaceSpec>,
 }
@@ -51,7 +41,7 @@ pub(crate) struct SealedPlan {
     /// is: by the registered block's name, since `seal()` moves config
     /// registered under an alias to the alias's target.
     pub(crate) block_configs: HashMap<String, Arc<HashMap<String, String>>>,
-    /// What dispatch needs about each registered block.
+    /// The interface specs `call_block` checks actions against.
     pub(crate) dispatch: Arc<DispatchTable>,
     /// Compiled flows keyed by flow id.
     pub(crate) flows: HashMap<String, Arc<CompiledFlow>>,
@@ -95,19 +85,6 @@ impl Wafer {
                 .map(|(name, cfg)| (name.clone(), Arc::new(parse_config_map(cfg))))
                 .collect(),
             dispatch: Arc::new(DispatchTable {
-                blocks: self
-                    .registration
-                    .blocks
-                    .iter()
-                    .map(|(name, block)| {
-                        let info = block.info();
-                        let dispatch = BlockDispatch {
-                            requires: info.call_allowlist().map(Arc::new),
-                            interface: info.interface,
-                        };
-                        (name.clone(), dispatch)
-                    })
-                    .collect(),
                 interface_specs: self.registration.interface_specs.clone(),
             }),
             flows: self

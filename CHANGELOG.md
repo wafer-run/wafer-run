@@ -4,6 +4,41 @@
 
 ### Breaking changes
 
+- **A block's `BlockInfo` is read once, at registration, and shared from
+  then on.** `Block::info()` builds its declaration from scratch on every
+  call, and the runtime called it about ten times per block per build:
+  every `seal()` pass (unmet `requires`, capabilities, pooling, both
+  uniqueness checks, the startup snapshot), the grant rescan, the dispatch
+  table, `block_infos()`, and twice per `Init`. On impresspress's 30-block
+  Cloudflare runtime, whose largest declaration is 605 KB of JSON, that was
+  about 60 % of a cold build (native release: `seal()` 53.6 ms). The
+  `Block` trait is unchanged.
+  - Registration keeps the `BlockInfo` it validated, with the
+    `call_allowlist` derived from it, beside the block. Every runtime pass
+    reads that copy: `seal()`, `set_admin_block`'s grant rescan,
+    `call_block`'s callee facts and allowlist, context construction, the
+    `Init` pipeline's budget and declared config keys,
+    `validate_all_block_configs` (on the `Wafer` and from a context), and
+    `block_infos()`. `info()` runs exactly once per registration.
+  - The invariant: a block's declaration is fixed for its registration. A
+    `Wafer` never replaces or removes a registered block (`DuplicateBlock`),
+    so nothing can make the copy stale; a block whose declaration changes —
+    a rebuilt WASM guest, a dynamically generated block, a reloaded module —
+    is a new instance registered in a new runtime, and that registration
+    reads `info()` afresh. Grants, the name check and capabilities were
+    already judged on the registration-time read.
+  - Changed: `Wafer::block_infos()` returns `Vec<Arc<BlockInfo>>` (was
+    `Vec<BlockInfo>`, rebuilt on every call). It costs one `Arc` clone per
+    block. Migrating: borrow through the `Arc` (`&info.external_assets`,
+    `info.name.clone()`); a consumer that needs `&[BlockInfo]` collects
+    `infos.iter().map(|i| BlockInfo::clone(i))` once.
+  - Changed: `RuntimeContext::all_blocks` is `pub(crate)`. Reach blocks
+    through `CallFrame::lookup` and declarations through
+    `Context::registered_blocks`.
+  - `Context::registered_blocks()` still lends `&[BlockInfo]`: the startup
+    snapshot holds one clone of each registration-time declaration, made
+    once per `seal()`, never a rebuild.
+
 - **A dispatch refused because its block's `Init` failed no longer answers
   the `Init`'s error.** The refusal is the dispatch's terminal, and every
   HTTP adapter renders its message verbatim into the response body

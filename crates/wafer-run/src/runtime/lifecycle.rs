@@ -1,21 +1,24 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
-use wafer_block::{core_types::*, error::RuntimeError, types::*, Block};
+use wafer_block::{core_types::*, error::RuntimeError, types::*};
 
 use super::Wafer;
 
-/// Collect the `BlockInfo` of every registered block into a Vec sorted by
-/// registration name, so consumers (admin pages, snapshot consumers) see
-/// deterministic order regardless of the underlying HashMap's SipHash
-/// randomisation. Registration — of a code-registered block or one `seal()`
-/// downloads — refuses any block whose `info().name` differs from its
-/// registration name, so each entry's `name` is that key.
-pub(crate) fn sorted_snapshot<'a>(
-    blocks: impl IntoIterator<Item = (&'a String, &'a Arc<dyn Block>)>,
-) -> Vec<BlockInfo> {
+/// Collect the `BlockInfo` of every registered block — the one registration
+/// read, shared — into a Vec sorted by registration name, so consumers
+/// (admin pages, snapshot consumers) see deterministic order regardless of
+/// the underlying HashMap's SipHash randomisation. Registration — of a
+/// code-registered block or one `seal()` downloads — refuses any block whose
+/// `info().name` differs from its registration name, so each entry's `name`
+/// is that key.
+pub(crate) fn sorted_infos<'a>(
+    blocks: impl IntoIterator<Item = (&'a String, &'a super::registration::RegisteredBlock)>,
+) -> Vec<Arc<BlockInfo>> {
     let mut v: Vec<_> = blocks.into_iter().collect();
     v.sort_by(|a, b| a.0.cmp(b.0));
-    v.into_iter().map(|(_, block)| block.info()).collect()
+    v.into_iter()
+        .map(|(_, registered)| registered.info.clone())
+        .collect()
 }
 
 /// Return value of [`validate_and_collect_grants_for_block`].
@@ -367,7 +370,7 @@ impl Wafer {
     /// `init_all_blocks`. Call before [`Wafer::bind_all`].
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn run_start_lifecycle(&self) {
-        for (name, block) in &self.registration.blocks {
+        for (name, registered) in &self.registration.blocks {
             // Each block gets its own context so WRAP sees the correct caller_id
             // when the block accesses its own resources during startup.
             // SEC-04: `make_block_context` installs the block's `requires` so
@@ -379,7 +382,8 @@ impl Wafer {
                 Arc::new(AtomicBool::new(false)),
                 None,
             );
-            if let Err(e) = block
+            if let Err(e) = registered
+                .block
                 .lifecycle(
                     &ctx,
                     LifecycleEvent {
@@ -409,8 +413,8 @@ impl Wafer {
             inner: arc_self.clone(),
         };
         let trait_handle: Arc<dyn wafer_block::Runtime> = Arc::new(handle);
-        for block in arc_self.registration.blocks.values() {
-            block.bind(Box::new(trait_handle.clone()));
+        for registered in arc_self.registration.blocks.values() {
+            registered.block.bind(Box::new(trait_handle.clone()));
         }
 
         arc_self
@@ -423,7 +427,7 @@ impl Wafer {
     /// `lifecycle(Stop)` — a single shared sentinel context would attribute
     /// every access to a literal name no grants match and falsely deny.
     pub async fn shutdown(&self) {
-        for (name, block) in &self.registration.blocks {
+        for (name, registered) in &self.registration.blocks {
             // SEC-04: `make_block_context` installs the block's `requires` so
             // any `call_block` during Stop is gated by the same allowlist.
             let ctx = self.make_block_context(
@@ -433,7 +437,8 @@ impl Wafer {
                 Arc::new(AtomicBool::new(false)),
                 None,
             );
-            if let Err(e) = block
+            if let Err(e) = registered
+                .block
                 .lifecycle(
                     &ctx,
                     LifecycleEvent {
@@ -450,10 +455,10 @@ impl Wafer {
 }
 
 #[cfg(test)]
-mod sorted_snapshot_tests {
+mod sorted_infos_tests {
     use wafer_block::{
         streams::{input::InputStream, output::OutputStream},
-        Context,
+        Block, Context,
     };
 
     use super::*;
@@ -463,7 +468,7 @@ mod sorted_snapshot_tests {
     #[wafer_block::wafer_async_trait]
     impl Block for Named {
         fn info(&self) -> BlockInfo {
-            BlockInfo::new(self.0, "0.1.0", "test@v1", self.0)
+            BlockInfo::new(format!("test/{}", self.0), "0.1.0", "test@v1", self.0)
         }
         async fn handle(
             &self,
@@ -476,13 +481,17 @@ mod sorted_snapshot_tests {
     }
 
     #[test]
-    fn sorted_snapshot_orders_by_registration_name() {
-        let blocks: Vec<(String, Arc<dyn Block>)> = ["zeta", "alpha", "mu"]
-            .into_iter()
-            .map(|n| (n.to_string(), Arc::new(Named(n)) as Arc<dyn Block>))
-            .collect();
-        let out = sorted_snapshot(blocks.iter().map(|(n, b)| (n, b)));
+    fn sorted_infos_orders_by_registration_name() {
+        let mut registration = super::super::registration::RegistrationCore::new();
+        let loader: Arc<dyn crate::asset_loader::LoadAssetCallback> =
+            Arc::new(crate::asset_loader::NoopAssetLoader);
+        for n in ["zeta", "alpha", "mu"] {
+            registration
+                .register_block_inner(&format!("test/{n}"), Arc::new(Named(n)), &loader)
+                .expect("register");
+        }
+        let out = sorted_infos(&registration.blocks);
         let names: Vec<&str> = out.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+        assert_eq!(names, vec!["test/alpha", "test/mu", "test/zeta"]);
     }
 }

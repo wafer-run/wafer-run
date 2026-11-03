@@ -6,9 +6,12 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use wafer_block::error::{
-    AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateEndpointRouteError,
-    DuplicateToolNameError, RouteClaimant, RuntimeError,
+use wafer_block::{
+    error::{
+        AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateEndpointRouteError,
+        DuplicateToolNameError, RouteClaimant, RuntimeError,
+    },
+    BlockInfo,
 };
 
 use super::Wafer;
@@ -153,8 +156,8 @@ impl Wafer {
         // BTreeMap so the aggregated message is name-sorted and stable
         // across boots; `registration.blocks` is a HashMap.
         let mut claimants: BTreeMap<String, Vec<AgentToolClaimant>> = BTreeMap::new();
-        for block in self.registration.blocks.values() {
-            let info = block.info();
+        for registered in self.registration.blocks.values() {
+            let info = &registered.info;
             for ep in &info.endpoints {
                 let Some(tool) = ep.agent_tool.as_ref() else {
                     continue;
@@ -222,8 +225,8 @@ impl Wafer {
             (String, String),
             (wafer_block::HttpMethod, Vec<RouteClaimant>),
         > = BTreeMap::new();
-        for block in self.registration.blocks.values() {
-            let info = block.info();
+        for registered in self.registration.blocks.values() {
+            let info = &registered.info;
             for ep in &info.endpoints {
                 let route = wafer_block::route_shape(&ep.path).into_owned();
                 claimants
@@ -312,10 +315,10 @@ impl Wafer {
     fn compute_effective_capabilities(&mut self) -> Result<(), RuntimeError> {
         let mut eff: std::collections::HashMap<String, wafer_block::BlockCapabilities> =
             std::collections::HashMap::new();
-        for (name, block) in &self.registration.blocks {
-            let info = block.info();
-            let declared = match info.capabilities {
-                Some(caps) => caps,
+        for (name, registered) in &self.registration.blocks {
+            let (block, info) = (&registered.block, &registered.info);
+            let declared = match &info.capabilities {
+                Some(caps) => caps.clone(),
                 // SEC-02: an omitted capability declaration must default by
                 // runtime type, not unconditionally to `unrestricted()`. A
                 // WASM guest is untrusted — fail closed to `none()` so a
@@ -386,8 +389,8 @@ impl Wafer {
     /// tests can drive both branches without mutating process-global env.
     #[cfg(feature = "wasmi")]
     fn log_pooling_decisions(&self, pooling_enabled: bool) {
-        for (name, block) in &self.registration.blocks {
-            let info = block.info();
+        for (name, registered) in &self.registration.blocks {
+            let info = &registered.info;
             if info.runtime == wafer_block::BlockRuntime::Wasm
                 && matches!(
                     info.instance_mode,
@@ -437,12 +440,12 @@ impl Wafer {
         // composite/middleware blocks) emit anything.
         for (block_name, config) in &self.registration.block_configs {
             let canonical_block = self.canonicalize(block_name).to_string();
-            let Some(block) = self.registration.blocks.get(&canonical_block) else {
+            let Some(registered) = self.registration.blocks.get(&canonical_block) else {
                 // Config for a block that isn't registered: there is no
                 // block to ask what references its config holds.
                 continue;
             };
-            for r in block.collect_block_refs(config) {
+            for r in registered.block.collect_block_refs(config) {
                 let canonical = self.canonicalize(&r.target).to_string();
                 references
                     .entry(canonical)
@@ -472,12 +475,12 @@ impl Wafer {
     /// Without this, an absent dependency surfaces only when a call to it
     /// fails at request time.
     fn collect_unmet_requires(&self, missing: &mut Vec<BlockReferenceError>) {
-        let mut requiring: Vec<(&String, &Arc<dyn wafer_block::Block>)> =
+        let mut requiring: Vec<(&String, &super::registration::RegisteredBlock)> =
             self.registration.blocks.iter().collect();
         requiring.sort_by(|a, b| a.0.cmp(b.0));
-        for (from_block, block) in requiring {
-            for required in block.info().requires {
-                let canonical = self.canonicalize(&required).to_string();
+        for (from_block, registered) in requiring {
+            for required in &registered.info.requires {
+                let canonical = self.canonicalize(required).to_string();
                 if self.registration.blocks.contains_key(&canonical) {
                     continue;
                 }
@@ -503,12 +506,18 @@ impl Wafer {
     /// `ConfigSource` resolves for its declared keys laid over it.
     ///
     /// Also compiles the [`SealedPlan`](crate::runtime::exec_plan::SealedPlan)
-    /// from the snapshot (PERF-03): parsed block configs, `requires`
-    /// allowlists, and compiled flows for the dispatch hot paths.
+    /// from the snapshot (PERF-03): parsed block configs, the interface
+    /// specs, and compiled flows for the dispatch hot paths.
     fn finalize_snapshot(&mut self) {
         self.registration.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
-            blocks: super::lifecycle::sorted_snapshot(&self.registration.blocks),
+            // The context API lends `&[BlockInfo]`, so the snapshot holds its
+            // own copy: one clone of each registration-time `BlockInfo` per
+            // seal, never a rebuild.
+            blocks: super::lifecycle::sorted_infos(&self.registration.blocks)
+                .into_iter()
+                .map(|info| BlockInfo::clone(&info))
+                .collect(),
             flow_infos: self.flows_info(),
             flow_defs: self.flow_defs(),
             block_configs: self.registration.block_configs.clone(),
