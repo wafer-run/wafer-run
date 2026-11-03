@@ -464,14 +464,18 @@ async fn transitive_init_cycle_surfaces_failed_precondition() {
                 "cycle must surface as FAILED_PRECONDITION, got {:?}",
                 e.code
             );
+            // The refusal names the block it refused and a reference; the
+            // cycle's path (test/b) is logged under that reference, never
+            // answered.
             assert!(
-                e.message.contains("test/a"),
-                "cycle error must name test/a; got: {}",
+                e.message
+                    .starts_with("block `test/a` failed to initialize (ref: "),
+                "cycle error must be the sanitized refusal of test/a; got: {}",
                 e.message
             );
             assert!(
-                e.message.contains("test/b"),
-                "cycle error must name test/b; got: {}",
+                !e.message.contains("test/b"),
+                "cycle error must not answer the cycle's path; got: {}",
                 e.message
             );
         }

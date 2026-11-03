@@ -491,9 +491,27 @@ mod tests {
             let wafer = wafer(Some(json!({ "stats_access": "anyone" }))).await;
             match request(&wafer, "/_stats", &[("auth.user_roles", "admin")]).await {
                 Err(TerminalNotResponse::Error(e)) => {
-                    assert!(e.message.contains("stats_access"), "{e:?}");
+                    // Exactly the sanitized refusal: fixed text and a reference,
+                    // nothing of the cause after it.
+                    let reference = e
+                        .message
+                        .strip_prefix("block `wafer-run/monitoring` failed to initialize (ref: ")
+                        .and_then(|rest| rest.strip_suffix(')'))
+                        .unwrap_or_else(|| panic!("not the sanitized refusal: {e:?}"));
+                    assert!(
+                        reference.len() == 16 && reference.chars().all(|c| c.is_ascii_hexdigit()),
+                        "{e:?}"
+                    );
+                    assert!(!e.message.contains("stats_access"), "{e:?}");
                 }
                 other => panic!("an unknown stats_access must fail Init, got {other:?}"),
+            }
+            // The refusal answers no cause; the slot keeps it.
+            match &wafer.init_states()["wafer-run/monitoring"] {
+                wafer_run::BlockInitState::Failed { reason } => {
+                    assert!(reason.contains("stats_access"), "{reason}")
+                }
+                other => panic!("expected a failed Init, got {other:?}"),
             }
         }
 

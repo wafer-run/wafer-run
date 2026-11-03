@@ -96,10 +96,21 @@ async fn a_hung_init_does_not_hang_boot() {
     {
         Err(TerminalNotResponse::Error(e)) => {
             assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
-            assert!(e.message.contains("test/hangs"), "{e:?}");
-            assert!(e.message.contains("init budget of 50ms"), "{e:?}");
+            assert!(
+                e.message
+                    .starts_with("block `test/hangs` is temporarily unavailable (ref: "),
+                "{e:?}"
+            );
+            // The budget is the cause: kept in the slot, not answered.
+            assert!(!e.message.contains("init budget"), "{e:?}");
         }
         other => panic!("expected an init error, got {other:?}"),
+    }
+    match &wafer.init_states()["test/hangs"] {
+        wafer_run::BlockInitState::Retrying { reason, .. } => {
+            assert!(reason.contains("init budget of 50ms"), "{reason}")
+        }
+        other => panic!("expected a retrying slot, got {other:?}"),
     }
 }
 

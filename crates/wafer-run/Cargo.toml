@@ -98,7 +98,10 @@ workspace = true
 criterion = { version = "0.8", features = ["async_tokio"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 tempfile = { workspace = true }
-tracing-test = "0.2"
+# `no-env-filter`: an integration test (its own crate) captures the
+# runtime's events too, not only its own crate's — `init_wait_refuse` asserts
+# what a refused dispatch logs.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 wat = "1"
 # Local registry for the seal-time download e2es (tests/registry_ssrf.rs,
 # tests/remote_integrity.rs).

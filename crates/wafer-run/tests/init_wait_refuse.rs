@@ -200,17 +200,62 @@ fn retry_after(e: &WaferError) -> Option<&str> {
         .map(|m| m.value.as_str())
 }
 
+/// The reference a refusal names, after checking its message is exactly
+/// `block `x` <what> (ref: <16 hex>)` — fixed text, never the `Init`'s cause.
+fn refusal_reference(e: &WaferError, block: &str, what: &str) -> String {
+    let reference = e
+        .message
+        .strip_prefix(&format!("block `{block}` {what} (ref: "))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("not a sanitized refusal of `{block}`: {e:?}"));
+    assert_eq!(reference.len(), 16, "{e:?}");
+    assert!(reference.chars().all(|c| c.is_ascii_hexdigit()), "{e:?}");
+    for cause in ["backend down", "bad config"] {
+        assert!(!e.message.contains(cause), "the Init's cause leaked: {e:?}");
+    }
+    reference.to_string()
+}
+
 fn assert_not_initialized(e: &WaferError, block: &str) {
     assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
-    assert_eq!(
-        e.message,
-        format!("block `{block}` is not initialized in this runtime")
-    );
+    refusal_reference(e, block, "is temporarily unavailable");
     assert_eq!(
         retry_after(e),
         None,
         "an unsettled slot has no backoff to name: {e:?}"
     );
+}
+
+/// **Past the backoff, the refusal's log line carries the slot's last
+/// failure beside the reference the body names** — the `Refuse` path an
+/// embedder that rebuilds its runtime (impresspress on Cloudflare, during a
+/// D1 outage) serves every request from. The dispatch reaches no cause of
+/// its own there (`try_cached` is `None`), so the runner reads the slot's;
+/// without it the line would say `none` and the reference would lead
+/// nowhere.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn refuse_past_the_backoff_logs_the_last_failure_under_the_reference() {
+    let probe = Probe::failing("test/probe");
+    let w = runtime(InitWait::Refuse, &[&probe]).await;
+    assert!(w.init_block("test/probe").await.is_err(), "Init fails");
+    tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
+
+    let e = error_of(run_block(&w, "test/probe").await).await;
+    let reference = refusal_reference(&e, "test/probe", "is temporarily unavailable");
+    logs_assert(|lines: &[&str]| {
+        lines
+            .iter()
+            .any(|line| {
+                line.contains(&reference)
+                    && line.contains("not initialized in this runtime")
+                    && line.contains("backend down")
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                format!("no refusal line names both `{reference}` and the cause: {lines:#?}")
+            })
+    });
 }
 
 // --- the mode and its accessor --------------------------------------------
@@ -343,11 +388,8 @@ async fn refuse_transient_slot_answers_unavailable_without_retry_after_then_afte
     ] {
         let e = error_of(out).await;
         assert_eq!(e.code, ErrorCode::Unavailable, "{e:?}");
-        assert!(
-            e.message.contains("init transient failure")
-                || e.message.contains("is not initialized in this runtime"),
-            "{e:?}"
-        );
+        // Inside the backoff and past it answer the same sanitized text.
+        refusal_reference(&e, "test/probe", "is temporarily unavailable");
         assert_eq!(
             retry_after(&e),
             None,

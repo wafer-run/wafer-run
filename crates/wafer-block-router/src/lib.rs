@@ -427,9 +427,27 @@ mod tests {
             .await
         {
             Err(TerminalNotResponse::Error(e)) => {
-                assert!(e.message.contains("routes[0]"), "{e:?}");
+                // Exactly the sanitized refusal: fixed text and a reference,
+                // nothing of the cause after it.
+                let reference = e
+                    .message
+                    .strip_prefix("block `wafer-run/router` failed to initialize (ref: ")
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .unwrap_or_else(|| panic!("not the sanitized refusal: {e:?}"));
+                assert!(
+                    reference.len() == 16 && reference.chars().all(|c| c.is_ascii_hexdigit()),
+                    "{e:?}"
+                );
+                assert!(!e.message.contains("routes[0]"), "{e:?}");
             }
             other => panic!("a route without `block` must fail Init, got {other:?}"),
+        }
+        // The refusal answers no cause; the slot keeps it.
+        match &wafer.init_states()["wafer-run/router"] {
+            wafer_run::BlockInitState::Failed { reason } => {
+                assert!(reason.contains("routes[0]"), "{reason}")
+            }
+            other => panic!("expected a failed Init, got {other:?}"),
         }
     }
 }

@@ -107,7 +107,12 @@ pub fn err_internal_no_cause(context: &str) -> OutputStream {
 
 /// 8-byte hex correlation ID — short enough to be quotable in support tickets,
 /// random enough to grep logs without collisions.
-fn correlation_id() -> String {
+///
+/// The reference a sanitized error hands the client in place of its cause:
+/// the producer logs the cause under this id and puts only `(ref: <id>)` in
+/// the message. [`err_internal`] does so here, and the runtime's refusal of a
+/// dispatch to a block whose `Init` failed (`wafer-run`) does the same.
+pub fn correlation_id() -> String {
     let mut buf = [0u8; 8];
     if getrandom::getrandom(&mut buf).is_err() {
         // Fall back to timestamp-derived ID; correlation IDs are diagnostic

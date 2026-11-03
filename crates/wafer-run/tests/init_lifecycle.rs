@@ -315,7 +315,14 @@ async fn init_that_exceeds_the_call_depth_limit_fails_permanently() {
 
     let first = run(&wafer, "t/deep").await.expect_err("Init exceeds depth");
     assert_eq!(first.code, ErrorCode::FailedPrecondition, "{first:?}");
-    assert!(first.message.contains("ResourceExhausted"), "{first:?}");
+    // The depth refusal is the cause: kept in the slot, not answered.
+    assert!(!first.message.contains("ResourceExhausted"), "{first:?}");
+    match &wafer.init_states()["t/deep"] {
+        wafer_run::BlockInitState::Failed { reason } => {
+            assert!(reason.contains("ResourceExhausted"), "{reason}")
+        }
+        other => panic!("expected a failed slot, got {other:?}"),
+    }
     past_first_backoff().await;
     let again = run(&wafer, "t/deep").await.expect_err("still failed");
     assert_eq!(again.code, ErrorCode::FailedPrecondition, "{again:?}");
@@ -502,7 +509,21 @@ async fn init_panic_is_caught_and_cached_as_permanent() {
 
     let first = run(&wafer, "t/panicky").await.expect_err("init panicked");
     assert_eq!(first.code, ErrorCode::FailedPrecondition, "{first:?}");
-    assert!(first.message.contains("init exploded"), "{first:?}");
+    // The panic is the cause: logged under the refusal's reference, kept in
+    // the slot's state, never answered.
+    assert!(
+        first
+            .message
+            .starts_with("block `t/panicky` failed to initialize (ref: "),
+        "{first:?}"
+    );
+    assert!(!first.message.contains("init exploded"), "{first:?}");
+    match &wafer.init_states()["t/panicky"] {
+        wafer_run::BlockInitState::Failed { reason } => {
+            assert!(reason.contains("init exploded"), "{reason}")
+        }
+        other => panic!("expected a failed slot, got {other:?}"),
+    }
     let again = run(&wafer, "t/panicky").await.expect_err("cached");
     assert_eq!(again.code, ErrorCode::FailedPrecondition, "{again:?}");
     assert_eq!(
@@ -550,7 +571,13 @@ async fn concurrent_cross_init_cycle_is_refused_not_deadlocked() {
     for (block, out) in [("t/a", a), ("t/b", b)] {
         let e = out.expect_err("an init in a cycle fails");
         assert_eq!(e.code, ErrorCode::FailedPrecondition, "{block}: {e:?}");
-        assert!(e.message.contains("init cycle detected"), "{block}: {e:?}");
+        // The cycle's path names the other block; it is logged, not answered.
+        assert!(
+            e.message
+                .starts_with(&format!("block `{block}` failed to initialize (ref: ")),
+            "{block}: {e:?}"
+        );
+        assert!(!e.message.contains("->"), "{block}: {e:?}");
     }
 }
 

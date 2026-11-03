@@ -4,6 +4,35 @@
 
 ### Breaking changes
 
+- **A dispatch refused because its block's `Init` failed no longer answers
+  the `Init`'s error.** The refusal is the dispatch's terminal, and every
+  HTTP adapter renders its message verbatim into the response body
+  (`http_codec::error_to_http_response`), so a database outage reached the
+  client as `block `x` init transient failure: D1_ERROR: …`, table names and
+  quota text included.
+  - The four refusals now answer fixed text naming the block and a
+    reference: ``block `x` is temporarily unavailable (ref: <id>)`` for a
+    transient failure and for `InitWait::Refuse`'s unsettled slot (was
+    ``… init transient failure: <cause>`` and
+    ``… is not initialized in this runtime``), and
+    ``block `x` failed to initialize (ref: <id>)`` for a permanent failure
+    and an init cycle (was ``… init failed permanently: <cause>`` and
+    ``… init cycle detected: a -> b``). Codes, statuses and `Retry-After`
+    are unchanged.
+  - The cause is logged under the reference: `warn` for a transient failure
+    and an unsettled slot (with the slot's last failure, if any), `error` for
+    a permanent failure and a cycle. `Wafer::init_states()` still reports a
+    transient or permanent failure's cause; an init cycle is never cached in
+    the slot, and a `Refuse` block whose `Init` has not run has none, so for
+    those the log line is the only record.
+  - When block A's `Init` dispatches to a refused block B, A's slot records
+    B's reference, not B's cause; B's slot and the log hold it.
+  - Added: `wafer_block::response::correlation_id()` is public — the
+    reference `err_internal` and these refusals hand the client.
+  - Migrating: a caller that matched the old texts reads the cause from the
+    log under the reference, or from `Wafer::init_states()` where the slot
+    keeps it (above).
+
 - **The table-existence probe and the scalar decoders are strict: a
   malformed answer is an error, never "absent" or `0`.** `codec::scalar_i64`
   read a missing row, `NULL` or a non-numeric value as `0`, so a backend that
