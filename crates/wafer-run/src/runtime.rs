@@ -708,6 +708,10 @@ impl Wafer {
 /// message is fixed text naming the block and that reference
 /// ([`unavailable_message`], [`failed_message`]), as
 /// [`err_internal`](wafer_block::response::err_internal) does for a handler.
+///
+/// When block A's `Init` dispatches to a block B that is refused, A's `Init`
+/// fails with B's refusal, so A's slot records B's reference, not B's cause:
+/// B's own slot (and the log line under that reference) holds it.
 pub(crate) fn init_error_to_wafer_error(
     block: &str,
     e: crate::runtime::slot::InitError,
@@ -765,8 +769,8 @@ pub(crate) fn init_error_to_wafer_error(
 /// owns the retry delay.
 ///
 /// Sanitized like [`init_error_to_wafer_error`]: `last_failure` — the slot's
-/// last transient `Init` error, when it has one — is logged under the
-/// reference and never put in the message.
+/// last `Init` error, when it has one — is logged under the reference and
+/// never put in the message.
 pub(crate) fn not_initialized_error(
     block: &str,
     last_failure: Option<&str>,
@@ -1296,6 +1300,17 @@ mod tests {
     fn an_init_failure_refusal_logs_its_cause_and_never_answers_it() {
         use crate::runtime::slot::InitError;
 
+        /// One log line names both `reference` and `cause`.
+        fn logged_together(reference: &str, cause: &str) {
+            logs_assert(|lines: &[&str]| {
+                lines
+                    .iter()
+                    .any(|line| line.contains(reference) && line.contains(cause))
+                    .then_some(())
+                    .ok_or_else(|| format!("no line names `{reference}` and `{cause}`"))
+            });
+        }
+
         let transient = init_error_to_wafer_error("a/b", InitError::Transient(CAUSE.into()), None);
         assert_eq!(transient.code, ErrorCode::Unavailable);
         let reference = reference_of(&transient.message, |r| unavailable_message("a/b", r));
@@ -1304,17 +1319,19 @@ mod tests {
             format!("block `a/b` is temporarily unavailable (ref: {reference})")
         );
         assert_body_has_no_cause(&transient, CAUSE);
-        assert!(logs_contain(&reference) && logs_contain(CAUSE));
+        logged_together(&reference, CAUSE);
 
-        let permanent = init_error_to_wafer_error("a/b", InitError::Permanent(CAUSE.into()), None);
+        let permanent_cause = "D1_ERROR: no such column: secret__schema__users.hash";
+        let permanent =
+            init_error_to_wafer_error("a/b", InitError::Permanent(permanent_cause.into()), None);
         assert_eq!(permanent.code, ErrorCode::FailedPrecondition);
         let reference = reference_of(&permanent.message, |r| failed_message("a/b", r));
         assert_eq!(
             permanent.message,
             format!("block `a/b` failed to initialize (ref: {reference})")
         );
-        assert_body_has_no_cause(&permanent, CAUSE);
-        assert!(logs_contain(&reference));
+        assert_body_has_no_cause(&permanent, permanent_cause);
+        logged_together(&reference, permanent_cause);
 
         let cycle = init_error_to_wafer_error(
             "a/b",
@@ -1326,7 +1343,7 @@ mod tests {
         assert_eq!(cycle.code, ErrorCode::FailedPrecondition);
         let reference = reference_of(&cycle.message, |r| failed_message("a/b", r));
         assert_body_has_no_cause(&cycle, "secret/peer");
-        assert!(logs_contain(&reference) && logs_contain("a/b -> secret/peer -> a/b"));
+        logged_together(&reference, "a/b -> secret/peer -> a/b");
     }
 
     /// The `Refuse` mode's refusal of an unsettled slot is sanitized the same
@@ -1342,7 +1359,13 @@ mod tests {
         );
         let reference = reference_of(&e.message, |r| unavailable_message("a/b", r));
         assert_body_has_no_cause(&e, CAUSE);
-        assert!(logs_contain(&reference) && logs_contain(CAUSE));
+        logs_assert(|lines: &[&str]| {
+            lines
+                .iter()
+                .any(|line| line.contains(&reference) && line.contains(CAUSE))
+                .then_some(())
+                .ok_or_else(|| format!("no line names `{reference}` and the cause"))
+        });
     }
 
     /// Two refusals never share a reference: each names its own log line.

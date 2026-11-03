@@ -226,6 +226,38 @@ fn assert_not_initialized(e: &WaferError, block: &str) {
     );
 }
 
+/// **Past the backoff, the refusal's log line carries the slot's last
+/// failure beside the reference the body names** — the `Refuse` path an
+/// embedder that rebuilds its runtime (impresspress on Cloudflare, during a
+/// D1 outage) serves every request from. The dispatch reaches no cause of
+/// its own there (`try_cached` is `None`), so the runner reads the slot's;
+/// without it the line would say `none` and the reference would lead
+/// nowhere.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn refuse_past_the_backoff_logs_the_last_failure_under_the_reference() {
+    let probe = Probe::failing("test/probe");
+    let w = runtime(InitWait::Refuse, &[&probe]).await;
+    assert!(w.init_block("test/probe").await.is_err(), "Init fails");
+    tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
+
+    let e = error_of(run_block(&w, "test/probe").await).await;
+    let reference = refusal_reference(&e, "test/probe", "is temporarily unavailable");
+    logs_assert(|lines: &[&str]| {
+        lines
+            .iter()
+            .any(|line| {
+                line.contains(&reference)
+                    && line.contains("not initialized in this runtime")
+                    && line.contains("backend down")
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                format!("no refusal line names both `{reference}` and the cause: {lines:#?}")
+            })
+    });
+}
+
 // --- the mode and its accessor --------------------------------------------
 
 #[tokio::test]

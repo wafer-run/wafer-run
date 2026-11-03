@@ -21,11 +21,17 @@
     are unchanged.
   - The cause is logged under the reference: `warn` for a transient failure
     and an unsettled slot (with the slot's last failure, if any), `error` for
-    a permanent failure and a cycle. `Wafer::init_states()` still reports it.
+    a permanent failure and a cycle. `Wafer::init_states()` still reports a
+    transient or permanent failure's cause; an init cycle is never cached in
+    the slot, and a `Refuse` block whose `Init` has not run has none, so for
+    those the log line is the only record.
+  - When block A's `Init` dispatches to a refused block B, A's slot records
+    B's reference, not B's cause; B's slot and the log hold it.
   - Added: `wafer_block::response::correlation_id()` is public — the
     reference `err_internal` and these refusals hand the client.
-  - Migrating: a caller that matched the old texts reads the cause from
-    `Wafer::init_states()` or the log instead.
+  - Migrating: a caller that matched the old texts reads the cause from the
+    log under the reference, or from `Wafer::init_states()` where the slot
+    keeps it (above).
 
 - **The table-existence probe and the scalar decoders are strict: a
   malformed answer is an error, never "absent" or `0`.** `codec::scalar_i64`
