@@ -4,6 +4,29 @@
 
 ### Breaking changes
 
+- **A name is a block or an alias, never both.** `add_alias` accepted an
+  alias whose name was a registered block, and registration accepted a
+  block under a name that was already an alias. With the alias pointing at
+  an unregistered block, the runtime kept the registered block under the
+  name, dispatch fell back to it under the target's identity, and
+  `run_block` / `call_block` on that name panicked ("slot must exist for
+  any registered block") — on Workers, a poisoned isolate.
+  - Added: `AliasError::ShadowsBlock { alias }`. `add_alias` refuses an
+    alias whose name is a registered block.
+  - Added: `RuntimeError::NameIsAlias { name, target }`. Registration
+    (`register_block`, inventory, a `seal()` download) refuses a block
+    under a name that is an alias. The `wafer.lock` pre-download check
+    answers it too, where it answered `RuntimeError::Config("wafer.lock
+    entry … is already an alias of …")`.
+  - The runtime's block lookup (`Wafer::lookup_block`, `run_block`, flow
+    steps) resolves the alias and looks up the resolved name alone; the
+    fallback to the name as written could only find a shadowed block.
+    `call_gates::admit_call` keeps that fallback for embedder frames.
+  - Migrating: an embedder that registered a block and an alias under one
+    name gets the refusal at the second call; drop the alias, or register
+    the block under another name. An exhaustive `match` on `AliasError` or
+    `RuntimeError` needs the new arm.
+
 - **A block's `BlockInfo` is read once, at registration, and shared from
   then on.** `Block::info()` builds its declaration from scratch on every
   call, and the runtime called it about ten times per block per build:
@@ -21,10 +44,7 @@
     `call_block`'s callee facts and allowlist, context construction, the
     `Init` pipeline's budget and declared config keys,
     `validate_all_block_configs` (on the `Wafer` and from a context), and
-    `block_infos()`. `info()` runs exactly once per registration, except
-    for a `call_block` admitted under a registered name that is also an
-    alias of an unregistered block, whose callee facts are still read
-    from `info()`.
+    `block_infos()`. `info()` runs exactly once per registration.
   - The invariant: a block's declaration is fixed for its registration. A
     `Wafer` never replaces or removes a registered block (`DuplicateBlock`),
     so nothing can make the copy stale; a block whose declaration changes —

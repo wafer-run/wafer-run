@@ -222,9 +222,11 @@ pub fn admit_call<'a>(
         }
     }
 
-    // The resolved name first, then the name as written — the same
-    // canonicalize-then-fallback the flow runner and `Wafer::lookup_block`
-    // use. `NotFound` is reserved for a service saying the thing a request
+    // The resolved name first, then the name as written, for an embedder's
+    // frame whose `lookup` knows a name its `canonicalize` maps elsewhere.
+    // The runtime's own frame never needs the second lookup: a name is
+    // never both a block and an alias there, so the flow runner and
+    // `Wafer::lookup_block` look up the resolved name alone. `NotFound` is reserved for a service saying the thing a request
     // names does not exist; nothing to dispatch to is `Unimplemented`.
     let Some(block) = frame.lookup(resolved).or_else(|| frame.lookup(name)) else {
         return Err(refuse(
