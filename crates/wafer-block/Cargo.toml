@@ -16,7 +16,9 @@ chrono = { workspace = true }
 # Random correlation IDs for `response::correlation_id`. Diagnostic-grade only;
 # falls back to a timestamp when the OS source is unavailable.
 getrandom = "0.2"
-serde = { workspace = true }
+# `rc`: `Context::registered_blocks()` lends `Arc<BlockInfo>`s, and a
+# consumer serializes them (the inspector's block list) without copying.
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 serde_bytes = { workspace = true }
 indexmap = { workspace = true }

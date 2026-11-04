@@ -18,6 +18,8 @@
     `&b.endpoints`); a function taking `&[BlockInfo]` takes
     `&[Arc<BlockInfo>]` or is generic over `Borrow<BlockInfo>`. An
     embedder's `Context` implementation returns `&[Arc<BlockInfo>]`.
+    `wafer-block` enables serde's `rc` feature, so the lent `Arc`s serialize
+    as the declarations they hold.
   - Changed: `wafer_core::discovery::{generate_openapi,
     generate_agent_card, generate_webmcp, generate_webmcp_declared_auth,
     generate_webmcp_report, generate_webmcp_selected}` take `blocks: &[B]`
@@ -37,7 +39,12 @@
     neither the holder type nor the closure type instantiates it again.
   - `generate_webmcp_selected` copies only the selected endpoints (it
     copied every declaration per call). Blocks no selection names, and
-    unselected endpoints, do not change its result.
+    unselected endpoints, do not change its result. A selection still
+    projects onto the first endpoint declaring its method and path, and
+    `effective_auth` is asked about the block's real declaration.
+  - Changed: a selection naming an endpoint `effective_auth` does not
+    publish is refused as `WebMcpRefusal::SelectionNotFound`, as one naming
+    an undeclared endpoint is.
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that
