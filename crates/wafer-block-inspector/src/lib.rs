@@ -303,6 +303,13 @@ fn masked_url_credentials(value: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+/// The registered declarations as they serialize: borrowed out of the `Arc`s
+/// the runtime lends, so the JSON does not depend on serde's `rc` feature
+/// (which this crate does not enable, and a consumer's build may not either).
+fn declarations(blocks: &[Arc<BlockInfo>]) -> Vec<&BlockInfo> {
+    blocks.iter().map(|b| &**b).collect()
+}
+
 /// Every config key a registered block declares as sensitive
 /// ([`ConfigVar::is_sensitive`]), in either `config_keys` or `flow_config`.
 fn declared_sensitive_keys(blocks: &[Arc<BlockInfo>]) -> std::collections::HashSet<&str> {
@@ -456,12 +463,12 @@ impl Block for InspectorBlock {
                 ok_json(&serde_json::json!({
                     "flows": flows,
                     "configs": configs,
-                    "blocks": blocks,
+                    "blocks": declarations(blocks),
                     "interfaces": interfaces,
                 }))
             }
 
-            Route::Blocks => ok_json(&ctx.registered_blocks()),
+            Route::Blocks => ok_json(&declarations(ctx.registered_blocks())),
 
             Route::Block(name) => {
                 let decoded = percent_encoding::percent_decode_str(name)
@@ -469,7 +476,7 @@ impl Block for InspectorBlock {
                     .into_owned();
                 let blocks = ctx.registered_blocks();
                 match blocks.iter().find(|b| b.name == decoded) {
-                    Some(info) => ok_json(info),
+                    Some(info) => ok_json(&**info),
                     None => OutputStream::error(WaferError {
                         code: ErrorCode::NotFound,
                         message: format!("block '{decoded}' not found"),
