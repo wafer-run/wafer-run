@@ -18,8 +18,8 @@
 //! # The data contract
 //!
 //! `/app` serializes the runtime's own types verbatim — `BlockInfo`,
-//! `WaferFlow`, `InterfaceSpec`, and each block's config — and the only
-//! transformation applied is [`redacted`]. Every field the page reads is a
+//! `WaferFlow`, `InterfaceSpec`, each block's config and the alias table —
+//! and the only transformation applied is [`redacted`]. Every field the page reads is a
 //! field on one of those types, so a change to them shows up in the page
 //! instead of silently dropping out of it.
 
@@ -318,7 +318,8 @@ fn redacted(value: &serde_json::Value, declared: &HashSet<&str>) -> serde_json::
 ///   "blocks":     [BlockInfo, …],
 ///   "flows":      [WaferFlow, …],           // redacted
 ///   "configs":    { "<block>": <config> },  // redacted
-///   "interfaces": [InterfaceSpec, …]
+///   "interfaces": [InterfaceSpec, …],
+///   "aliases":    { "<alias>": "<block>" }
 /// }
 /// ```
 ///
@@ -342,6 +343,7 @@ fn app_view(ctx: &dyn Context) -> Option<serde_json::Value> {
         "flows": flows,
         "configs": configs,
         "interfaces": ctx.interface_specs(),
+        "aliases": ctx.block_aliases(),
     }))
 }
 
@@ -749,6 +751,7 @@ mod redaction_tests {
             }),
         );
         wafer.add_flow_json(FLOW).expect("flow");
+        wafer.add_alias("@vault", "test-org/vault").expect("alias");
         let wafer = wafer.start().await.expect("start");
 
         let path = "/_inspector/app";
@@ -784,6 +787,12 @@ mod redaction_tests {
         assert!(
             app.contains("\"mode\":\"plain\""),
             "non-secret step config stays: {app}"
+        );
+        let app: serde_json::Value = serde_json::from_str(&app).expect("JSON");
+        assert_eq!(
+            app["aliases"],
+            serde_json::json!({ "@vault": "test-org/vault" }),
+            "the alias table is sent so the page can resolve aliased steps and routes"
         );
     }
 }

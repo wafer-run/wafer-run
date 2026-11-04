@@ -13,7 +13,8 @@
     any other path. `/app` already carried all of it — `{ blocks, flows,
     configs, interfaces }`, the runtime's own `BlockInfo` / `WaferFlow` /
     `InterfaceSpec` serialized verbatim with sensitive config values
-    redacted — so migrate with `jq` over `/app`, e.g.
+    redacted — and now also `aliases` (`{ "<alias>": "<block>" }`, from
+    the new `Context::block_aliases`, empty by default), so migrate with `jq` over `/app`, e.g.
     `jq '.blocks[] | select(.name == "org/x") | .capabilities'`.
   - The UI loads `/app` once and has four views. **Blocks** shows each
     block's full declaration — endpoints, declared config
@@ -26,12 +27,14 @@
     `routes` config of every block declaring `router@v1`, nesting a route
     whose target is another router; it replaces the App topology view,
     which matched `wafer-run/router` and `wafer-run/http-listener` by name.
+    A flow step or route that names an alias links to the block it
+    resolves to, and a block's page lists its aliases.
     **Agent tools** is unchanged.
   - The access policy is declared config: `allow_anonymous` (toggle,
     default `false`) and `allowed_roles` (default `admin`) in
     `flow_config`, read per request so a flow step's config overrides the
-    block's, as monitoring's `stats_*` variables are. `allowed_roles` is now a comma-separated string, like
-    monitoring's `stats_roles`; it was a JSON array. A present but
+    block's, as monitoring's `stats_*` variables are. `allowed_roles` is
+    now a comma-separated string, like monitoring's `stats_roles`; it was a JSON array. A present but
     malformed value, or a role list naming no roles, fails Init with
     `InvalidArgument` where it fell back to the default.
 

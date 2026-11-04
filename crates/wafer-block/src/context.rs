@@ -117,6 +117,17 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         &EMPTY
     }
 
+    /// Block aliases, alias name → the registered block it resolves to
+    /// (e.g. `"@db"` → `"my-org/sqlite"`). A flow step, route or
+    /// `call_block` may name a block by either.
+    ///
+    /// Fixed at seal, like [`Context::registered_blocks`]. Default: none.
+    fn block_aliases(&self) -> &std::collections::HashMap<String, String> {
+        static EMPTY: std::sync::LazyLock<std::collections::HashMap<String, String>> =
+            std::sync::LazyLock::new(std::collections::HashMap::new);
+        &EMPTY
+    }
+
     /// List registered interface specifications.
     ///
     /// Borrows the runtime's sealed snapshot (see

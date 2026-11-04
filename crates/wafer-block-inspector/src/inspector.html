@@ -6,7 +6,7 @@
 <title>wafer.run / inspector</title>
 <!--
   Renders two payloads and nothing else:
-    {mount}/app    → { blocks: [BlockInfo], flows: [WaferFlow], configs: {name: config}, interfaces: [InterfaceSpec] }
+    {mount}/app    → { blocks: [BlockInfo], flows: [WaferFlow], configs: {name: config}, interfaces: [InterfaceSpec], aliases: {alias: block} }
     {mount}/webmcp → the per-auth-level tool manifest (see webmcp.rs)
   Every field read below is a field on one of those Rust types. Nothing here
   re-derives runtime semantics: flows are listed as declared, and the Routes
@@ -89,6 +89,7 @@
   td { padding: 7px 10px; border-bottom: 1px solid var(--border-2); vertical-align: top; word-break: break-word; }
   tr:last-child td { border-bottom: none; }
   td .sub { display: block; font-size: 12px; color: var(--text-2); margin-top: 2px; }
+  .sub-inline { font-size: 12px; color: var(--text-2); }
   .scroll-x { overflow-x: auto; }
   pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-word; }
   details.more { margin-top: 6px; }
@@ -206,6 +207,7 @@
   let app = null;
   let routers = [];
   let interfaces = new Map(); // name → InterfaceSpec
+  let aliases = {};           // alias → registered block
 
   // ── Navigation: the hash is the state ───────────────
   const TABS = ['blocks', 'flows', 'routes', 'agent-tools'];
@@ -242,6 +244,7 @@
       app.blocks.sort((a, b) => a.name.localeCompare(b.name));
       app.flows.sort((a, b) => a.id.localeCompare(b.id));
       interfaces = new Map(app.interfaces.map(spec => [spec.name, spec]));
+      aliases = app.aliases || {};
       routers = app.blocks.filter(b => b.interface === 'router@v1').map(b => b.name);
       $('n-blocks').textContent = app.blocks.length;
       $('n-flows').textContent = app.flows.length;
@@ -260,7 +263,9 @@
     const r = (app.configs[name] || {}).routes;
     return Array.isArray(r) ? r : [];
   };
-  const findBlock = name => app.blocks.find(b => b.name === name);
+  /** The registered block a name refers to: itself, or an alias's target (aliases are single-hop). */
+  const resolve = name => aliases[name] || name;
+  const findBlock = name => app.blocks.find(b => b.name === resolve(name));
 
   // ── Side lists ──────────────────────────────────────
   function bindFilter(input, list) {
@@ -316,13 +321,14 @@
       ['Instance mode', esc(b.instance_mode)],
       ['Calls', (b.requires || []).map(blockLink).join(', ')],
       ['May call', (b.optional_requires || []).map(blockLink).join(', ')],
+      ['Aliases', Object.keys(aliases).filter(a => aliases[a] === b.name).sort().map(a => '<code>' + esc(a) + '</code>').join(', ')],
       ['Admin page', b.admin_url ? safeLink(b.admin_url) : ''],
     ].filter(([, v]) => v);
     html += '<dl class="facts">' + facts.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('') + '</dl>';
 
     // Where it is used — the question you usually came here with.
-    const inFlows = app.flows.filter(f => allSteps(f.steps).some(s => s.block === b.name));
-    const routedBy = routers.flatMap(r => routesOf(r).filter(rt => rt.block === b.name).map(rt => [r, rt]));
+    const inFlows = app.flows.filter(f => allSteps(f.steps).some(s => resolve(s.block) === b.name));
+    const routedBy = routers.flatMap(r => routesOf(r).filter(rt => resolve(rt.block) === b.name).map(rt => [r, rt]));
     if (inFlows.length || routedBy.length) {
       html += section('Used by', null,
         (inFlows.length ? '<p>Flows: ' + inFlows.map(f => '<a href="' + href('flows', f.id) + '"><code>' + esc(f.id) + '</code></a>').join(', ') + '</p>' : '') +
@@ -438,7 +444,7 @@
   }
 
   function renderRoutes() {
-    const targeted = new Set(routers.flatMap(n => routesOf(n).map(r => r.block)));
+    const targeted = new Set(routers.flatMap(n => routesOf(n).map(r => resolve(r.block))));
     const roots = routers.filter(n => !targeted.has(n));
     // A cycle of routers has no root; show each one rather than nothing.
     const shown = roots.length ? roots : routers;
@@ -447,8 +453,9 @@
       const routes = routesOf(name);
       if (!routes.length) return '<p class="empty">No routes configured.</p>';
       return table(['Request', 'Handled by'], routes.map(r => {
-        const sub = routers.includes(r.block) && !seen.has(r.block)
-          ? '<div class="nested">' + router(r.block, new Set([...seen, r.block])) + '</div>' : '';
+        const target = resolve(r.block);
+        const sub = routers.includes(target) && !seen.has(target)
+          ? '<div class="nested">' + router(target, new Set([...seen, target])) + '</div>' : '';
         return ['<span class="method">' + esc(methodsOf(r)) + '</span> <code>' + esc(r.path) + '</code>', blockLink(r.block) + sub];
       }));
     }
@@ -546,9 +553,10 @@
   }
   /** A link to a block's page, or plain text when no block by that name is registered. */
   function blockLink(name) {
-    return app && findBlock(name)
-      ? '<a href="' + href('blocks', name) + '"><code>' + esc(name) + '</code></a>'
-      : '<code title="not a registered block">' + esc(name) + '</code>';
+    if (!app || !findBlock(name)) return '<code title="not a registered block">' + esc(name) + '</code>';
+    const target = resolve(name);
+    return '<a href="' + href('blocks', target) + '"><code>' + esc(name) + '</code></a>' +
+      (target !== name ? ' <span class="sub-inline">→ <code>' + esc(target) + '</code></span>' : '');
   }
   /**
    * A block-declared URL as a link only when it is a path or http(s): a
