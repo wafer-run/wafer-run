@@ -2031,8 +2031,10 @@ fn rewrite_schema_map(node: &Value, renames: &Renames) -> Value {
 /// describes routes its reader cannot call is recon surface. `effective_auth`
 /// says, for one block and one of its endpoints, what access level the
 /// consumer's router enforces on that route — see [`generate_webmcp`] for
-/// why that is an argument and not `ep.auth`. The same level decides whether
-/// the operation carries a `security` requirement.
+/// why that is an argument and not `ep.auth` — or `None` for an endpoint
+/// the consumer does not publish, which is left out of the document as
+/// though it were never declared. The same level decides whether the
+/// operation carries a `security` requirement.
 ///
 /// Operations are keyed by method and path. `Wafer::seal()` refuses two
 /// endpoints declaring the same method on the same route
@@ -2223,7 +2225,8 @@ fn openapi_over(
 /// schema-carrying endpoints `caller` is allowed to invoke.
 ///
 /// Filtered exactly as [`generate_openapi`] is: an endpoint whose
-/// `effective_auth` level is above `caller` is omitted.
+/// `effective_auth` level is above `caller`, or which `effective_auth`
+/// answers `None` for (not published), is omitted.
 pub fn generate_agent_card<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
@@ -2481,10 +2484,19 @@ pub enum WebMcpRefusal {
     /// truncated document rather than a weaker one.
     OutputSchemaTooLarge,
     /// A [`ToolSelection`] named a block/method/path that the block set
-    /// declares no endpoint for — or declares one its `effective_auth` does
-    /// not publish, which every generator treats as never declared — so
-    /// [`generate_webmcp_selected`] has nothing to project it onto.
+    /// declares no endpoint for, so [`generate_webmcp_selected`] has nothing
+    /// to project it onto.
     SelectionNotFound,
+    /// A [`ToolSelection`] named an endpoint the block set declares but the
+    /// consumer does not publish (`effective_auth` answered `None`: a
+    /// switched-off block, a server-only endpoint on a runtime without a
+    /// server). Reported with `visible_to_caller: false`: the selection is
+    /// the operator's to fix or to expect, and naming it to a caller would
+    /// say the unpublished endpoint exists.
+    SelectionUnpublished,
+    /// A [`ToolSelection`] named the same endpoint as a later selection, which
+    /// is the one it is published under; this one projects nothing.
+    SelectionShadowed,
 }
 
 /// What a [`WebMcpRefusalReport`] is about: the whole tool, or one optional
@@ -2593,7 +2605,13 @@ impl std::fmt::Display for WebMcpRefusal {
                 "the declared output schema expands past {MAX_INLINED_NODES} JSON nodes when its $refs are inlined — nothing is missing and every reference resolves, but a definition reached from several levels is copied out once per path, so the self-contained outputSchema has no workable size"
             ),
             Self::SelectionNotFound => f.write_str(
-                "this selection names no published endpoint the block set declares at that method and path",
+                "this selection names no endpoint the block set declares at that method and path",
+            ),
+            Self::SelectionUnpublished => f.write_str(
+                "this selection names an endpoint this consumer does not publish",
+            ),
+            Self::SelectionShadowed => f.write_str(
+                "a later selection names the same endpoint and is the one published",
             ),
         }
     }
@@ -2687,11 +2705,13 @@ impl std::fmt::Display for WebMcpRefusalReport {
 ///
 /// It answers `None` for an endpoint the consumer does not serve at all
 /// here — a block it has switched off, or a server-only endpoint on a
-/// runtime with no server. That endpoint is left out of the document as
-/// though it were never declared: no entry, no refusal, no share of a tool
-/// name. Every generator takes the same `effective_auth`, so the documents
-/// a consumer publishes agree on what exists, and a consumer never copies a
-/// declaration to remove an endpoint from it.
+/// runtime with no server. That endpoint is in no document: no entry, no
+/// refusal, no share of a tool name. Every generator takes the same
+/// `effective_auth`, so the documents a consumer publishes agree on what
+/// exists, and a consumer never copies a declaration to remove an endpoint
+/// from it. A [`generate_webmcp_selected`] selection naming such an endpoint
+/// is refused for the operator only
+/// ([`WebMcpRefusal::SelectionUnpublished`], `visible_to_caller: false`).
 ///
 /// It is an argument rather than a default because only the consumer knows
 /// its prefix table, and getting it wrong is not a cosmetic error in either
@@ -2744,7 +2764,7 @@ fn webmcp_over(
 /// # Read this as a claim, not a default
 ///
 /// This function is the whole of `generate_webmcp(blocks, caller, |_, ep|
-/// ep.auth)`, and it exists only so that the claim it makes is written at
+/// Some(ep.auth))`, and it exists only so that the claim it makes is written at
 /// the call site. It used to be the one *called* `generate_webmcp` — the
 /// short, autocomplete-first name — while the resolver-taking form was
 /// `generate_webmcp_with`. That put the looser filter on the obvious name,
@@ -3275,13 +3295,18 @@ pub struct ToolSelection {
 /// keep in sync with the first. Endpoints nobody selected, and blocks no
 /// selection names, are not copied and do not change the result.
 ///
-/// A [`ToolSelection`] naming a block/method/path the block set declares no
-/// endpoint for, or one `effective_auth` does not publish, cannot be
-/// projected onto anything, and is reported as
-/// [`WebMcpRefusal::SelectionNotFound`] (scoped to
-/// [`WebMcpRefusalScope::Tool`], and always `visible_to_caller: true` since
-/// it is a defect in the selection itself, not a property of what the
-/// caller may see).
+/// A selection that projects onto nothing is reported, scoped to
+/// [`WebMcpRefusalScope::Tool`]:
+///
+/// - naming a block/method/path the block set declares no endpoint for:
+///   [`WebMcpRefusal::SelectionNotFound`], `visible_to_caller: true`, since it
+///   is a defect in the selection itself, not a property of what the caller
+///   may see;
+/// - naming an endpoint `effective_auth` does not publish:
+///   [`WebMcpRefusal::SelectionUnpublished`], `visible_to_caller: false`, so
+///   a caller is never told the unpublished endpoint exists;
+/// - naming the same endpoint as a later selection, which wins:
+///   [`WebMcpRefusal::SelectionShadowed`], `visible_to_caller: true`.
 pub fn generate_webmcp_selected<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
@@ -3306,11 +3331,12 @@ fn webmcp_selected_over(
     // no annotation there and so produce nothing, which is why it is not
     // copied: the copy is the selected endpoints, never the block set.
     //
-    // A shadow block carries the block's name and its selected endpoints,
-    // which is all the report reads of it. `effective_auth` is asked about
-    // the block's real declaration (`published` below), never the shadow, so
-    // a resolver that reads any other field of it answers here exactly as it
-    // does for `generate_webmcp_report`.
+    // `effective_auth` is asked once per selected endpoint, here, about the
+    // real block and the real declared endpoint — its own `agent_tool`
+    // included — so a resolver answers exactly as it does for
+    // `generate_webmcp_report`. The report body is handed those answers
+    // (`resolved`), not the resolver: it reads only the shadow's name and
+    // endpoints, and never asks again.
     //
     // Selections are grouped by block name once, so a block no selection
     // names is passed over without looking at its endpoints.
@@ -3319,24 +3345,27 @@ fn webmcp_selected_over(
     for (index, sel) in selections.iter().enumerate() {
         by_block.entry(sel.block.as_str()).or_default().push(index);
     }
-    let mut found = vec![false; selections.len()];
-    let mut originals: std::collections::HashMap<&str, &BlockInfo> =
-        std::collections::HashMap::new();
+    let mut outcome: Vec<Option<WebMcpRefusal>> =
+        vec![Some(WebMcpRefusal::SelectionNotFound); selections.len()];
+    // `(block, method, path, level)` for each selected endpoint: one entry
+    // per shadow endpoint, since a selection projects onto the first
+    // endpoint declaring its method and path.
+    let mut resolved: Vec<(&str, HttpMethod, &str, AuthLevel)> = Vec::new();
+    let mut named_seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut shadow: Vec<BlockInfo> = Vec::new();
     for block in blocks {
-        // The first block of a name is the one a selection names, as a
-        // runtime resolves a name to one block.
-        if originals.contains_key(block.name.as_str()) {
-            continue;
-        }
-        originals.insert(block.name.as_str(), block);
         let Some(indices) = by_block.get(block.name.as_str()) else {
             continue;
         };
+        // The first block of a name is the one a selection names, as a
+        // runtime resolves a name to one block.
+        if !named_seen.insert(block.name.as_str()) {
+            continue;
+        }
         // Each selection projects onto the first endpoint declaring its
         // method and path; selections apply in order, so the last one naming
         // an endpoint is the one it is published under.
-        let mut chosen: std::collections::BTreeMap<usize, &ToolSelection> =
+        let mut chosen: std::collections::BTreeMap<usize, usize> =
             std::collections::BTreeMap::new();
         for &index in indices {
             let sel = &selections[index];
@@ -3347,13 +3376,17 @@ fn webmcp_selected_over(
             else {
                 continue;
             };
-            // An endpoint the consumer does not publish is, to a
-            // selection, an endpoint that is not there.
-            if effective_auth(block, &block.endpoints[position]).is_none() {
+            let ep = &block.endpoints[position];
+            let Some(level) = effective_auth(block, ep) else {
+                outcome[index] = Some(WebMcpRefusal::SelectionUnpublished);
                 continue;
+            };
+            if let Some(earlier) = chosen.insert(position, index) {
+                outcome[earlier] = Some(WebMcpRefusal::SelectionShadowed);
+            } else {
+                resolved.push((block.name.as_str(), ep.method, ep.path.as_str(), level));
             }
-            found[index] = true;
-            chosen.insert(position, sel);
+            outcome[index] = None;
         }
         if chosen.is_empty() {
             continue;
@@ -3366,7 +3399,8 @@ fn webmcp_selected_over(
         );
         projected.endpoints = chosen
             .into_iter()
-            .map(|(position, sel)| {
+            .map(|(position, index)| {
+                let sel = &selections[index];
                 let mut ep = block.endpoints[position].clone();
                 ep.agent_tool = Some(AgentTool {
                     name: sel.name.clone(),
@@ -3377,27 +3411,30 @@ fn webmcp_selected_over(
             .collect();
         shadow.push(projected);
     }
-    let not_found = selections
-        .iter()
-        .zip(&found)
-        .filter(|(_, found)| !**found)
-        .map(|(sel, _)| WebMcpRefusalReport {
+    let selection_refusals = selections.iter().zip(outcome).filter_map(|(sel, outcome)| {
+        let reason = outcome?;
+        Some(WebMcpRefusalReport {
             block: sel.block.clone(),
             method: sel.method,
             path: sel.path.clone(),
             tool_name: sel.name.clone(),
             scope: WebMcpRefusalScope::Tool,
-            reason: WebMcpRefusal::SelectionNotFound,
-            visible_to_caller: true,
-        });
-    let published = |shadow_block: &BlockInfo, ep: &BlockEndpoint| {
-        originals
-            .get(shadow_block.name.as_str())
-            .and_then(|original| effective_auth(original, ep))
+            visible_to_caller: reason != WebMcpRefusal::SelectionUnpublished,
+            reason,
+        })
+    });
+    let answer = |block: &BlockInfo, ep: &BlockEndpoint| {
+        let (_, _, _, level) = resolved
+            .iter()
+            .find(|(name, method, path, _)| {
+                *name == block.name && *method == ep.method && *path == ep.path
+            })
+            .expect("every shadow endpoint is one the selection loop resolved");
+        Some(*level)
     };
     let shadow: Vec<&BlockInfo> = shadow.iter().collect();
-    let (doc, mut refused) = webmcp_report_over(&shadow, caller, &published);
-    refused.extend(not_found);
+    let (doc, mut refused) = webmcp_report_over(&shadow, caller, &answer);
+    refused.extend(selection_refusals);
     (doc, refused)
 }
 
@@ -3544,14 +3581,14 @@ mod tests {
             ],
         );
         assert_eq!(tool_names(&selected), vec!["pick_item".to_string()]);
-        // Selecting an unpublished endpoint is selecting one that is not
-        // there: reported, as an undeclared one is.
+        // Selecting an unpublished endpoint is reported to the operator,
+        // and never to a caller: the refusal would say the endpoint exists.
         assert_eq!(
             refused
                 .iter()
-                .map(|r| (r.tool_name.as_str(), &r.reason))
+                .map(|r| (r.tool_name.as_str(), &r.reason, r.visible_to_caller))
                 .collect::<Vec<_>>(),
-            vec![("pick_secret", &WebMcpRefusal::SelectionNotFound)],
+            vec![("pick_secret", &WebMcpRefusal::SelectionUnpublished, false)],
         );
 
         // The same fixture with every endpoint served publishes all three
@@ -3629,7 +3666,72 @@ mod tests {
                 .iter()
                 .map(|r| (r.tool_name.as_str(), &r.reason))
                 .collect::<Vec<_>>(),
-            vec![("get_off_item", &WebMcpRefusal::SelectionNotFound)],
+            vec![("get_off_item", &WebMcpRefusal::SelectionUnpublished)],
+        );
+    }
+
+    /// `effective_auth` sees the endpoint as declared — its own `agent_tool`,
+    /// not the selection's — so a resolver keyed on the declaration answers
+    /// on the selected path as it does for the report.
+    #[test]
+    fn a_selected_manifest_resolves_against_the_declared_endpoint() {
+        let bare = BlockInfo::new("test/bare", "1.0.0", "http-handler@v1", "Bare").endpoints(vec![
+            BlockEndpoint::get("/b/bare/items/{id}")
+                .summary("Get an item")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                })),
+        ]);
+        // Publishes only endpoints whose block declared them as agent tools.
+        let declared_tools_only =
+            |_: &BlockInfo, ep: &BlockEndpoint| ep.agent_tool.is_some().then_some(ep.auth);
+        let (doc, refused) = generate_webmcp_selected(
+            std::slice::from_ref(&bare),
+            AuthLevel::Admin,
+            declared_tools_only,
+            &[ToolSelection {
+                block: "test/bare".into(),
+                method: HttpMethod::Get,
+                path: "/b/bare/items/{id}".into(),
+                name: "get_bare_item".into(),
+                description: "Selected.".into(),
+            }],
+        );
+        assert_eq!(doc["tools"], json!([]));
+        assert_eq!(
+            refused.iter().map(|r| &r.reason).collect::<Vec<_>>(),
+            vec![&WebMcpRefusal::SelectionUnpublished],
+        );
+    }
+
+    /// Two selections naming one endpoint: the later is the one published,
+    /// and the earlier is refused as shadowed, for the operator to see.
+    #[test]
+    fn an_earlier_selection_of_the_same_endpoint_is_shadowed() {
+        let blocks = [filter_fixture()];
+        let select = |name: &str| ToolSelection {
+            block: "test/filter".into(),
+            method: HttpMethod::Get,
+            path: "/b/filter/items/{id}".into(),
+            name: name.into(),
+            description: "Selected.".into(),
+        };
+        let (doc, refused) = generate_webmcp_selected(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| Some(ep.auth),
+            &[select("first_name"), select("second_name")],
+        );
+        assert_eq!(tool_names(&doc), vec!["second_name".to_string()]);
+        assert_eq!(
+            refused
+                .iter()
+                .map(|r| (r.tool_name.as_str(), &r.reason, r.visible_to_caller))
+                .collect::<Vec<_>>(),
+            vec![("first_name", &WebMcpRefusal::SelectionShadowed, true)],
         );
     }
 

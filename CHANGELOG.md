@@ -17,9 +17,9 @@
     Field access reads through the `Arc` unchanged (`b.name`,
     `&b.endpoints`); a function taking `&[BlockInfo]` takes
     `&[Arc<BlockInfo>]` or is generic over `Borrow<BlockInfo>`. An
-    embedder's `Context` implementation returns `&[Arc<BlockInfo>]`.
-    `wafer-block` enables serde's `rc` feature, so the lent `Arc`s serialize
-    as the declarations they hold.
+    embedder's `Context` implementation returns `&[Arc<BlockInfo>]`. To
+    serialize them without serde's `rc` feature (which `wafer-block` does not
+    enable), borrow each: `blocks.iter().map(|b| &**b)`.
   - Changed: `wafer_core::discovery::{generate_openapi,
     generate_agent_card, generate_webmcp, generate_webmcp_declared_auth,
     generate_webmcp_report, generate_webmcp_selected}` take `blocks: &[B]`
@@ -41,10 +41,16 @@
     copied every declaration per call). Blocks no selection names, and
     unselected endpoints, do not change its result. A selection still
     projects onto the first endpoint declaring its method and path, and
-    `effective_auth` is asked about the block's real declaration.
-  - Changed: a selection naming an endpoint `effective_auth` does not
-    publish is refused as `WebMcpRefusal::SelectionNotFound`, as one naming
-    an undeclared endpoint is.
+    `effective_auth` is asked once per selected endpoint, about the block's
+    real declaration and the endpoint as declared.
+  - Added: `WebMcpRefusal::SelectionUnpublished`. A selection naming an
+    endpoint `effective_auth` does not publish is refused with it, with
+    `visible_to_caller: false`, so a caller is never told the endpoint
+    exists. `SelectionNotFound` stays for an endpoint the block set does not
+    declare.
+  - Added: `WebMcpRefusal::SelectionShadowed`. Of two selections naming one
+    endpoint the later is published, as before; the earlier is now refused
+    with it instead of vanishing.
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that
