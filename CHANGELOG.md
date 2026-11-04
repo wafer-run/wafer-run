@@ -52,13 +52,15 @@
   - Changed: of two selections naming one endpoint, the earlier is now the
     one published (it was the later), as the first endpoint declaring a
     route is the one a selection names. Added:
-    `WebMcpRefusal::SelectionShadowed`, refusing the later one, which
-    vanished silently before.
+    `WebMcpRefusal::SelectionShadowed`, refusing a later, different
+    selection of the same endpoint, which vanished silently before. An
+    identical selection row repeated is one selection, not a refusal.
   - Changed: every selection refusal (`SelectionNotFound`,
     `SelectionUnpublished`, `SelectionShadowed`) carries
     `visible_to_caller: false` (`SelectionNotFound` carried `true`). A
     selection is the operator's; what it names, and whether that exists, is
-    never told to a caller.
+    never told to a caller. So is a refusal the selected manifest makes
+    about a selected tool's name (`InvalidToolName`, `DuplicateToolName`).
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that
