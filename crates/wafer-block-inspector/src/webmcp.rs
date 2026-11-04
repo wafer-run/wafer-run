@@ -179,9 +179,16 @@ mod tests {
 
     /// `GET {mount}/webmcp` through the real handler, as an admin.
     async fn webmcp_body(blocks: Vec<BlockInfo>) -> serde_json::Value {
-        let body = get(&BlocksContext { blocks }, "/_inspector/webmcp", &admin())
-            .await
-            .unwrap_or_else(|code| panic!("unexpected error: {code:?}"));
+        let body = get(
+            &BlocksContext {
+                blocks,
+                ..Default::default()
+            },
+            "/_inspector/webmcp",
+            &admin(),
+        )
+        .await
+        .unwrap_or_else(|code| panic!("unexpected error: {code:?}"));
         serde_json::from_slice(&body).expect("valid JSON body")
     }
 
@@ -373,7 +380,10 @@ mod tests {
         // The columns name every admin-only tool, so the page must not be
         // reachable by a caller the default policy denies.
         let denied = get(
-            &BlocksContext { blocks: fixture() },
+            &BlocksContext {
+                blocks: fixture(),
+                ..Default::default()
+            },
             "/_inspector/webmcp",
             &[],
         )

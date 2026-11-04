@@ -6,7 +6,7 @@
 <title>wafer.run / inspector</title>
 <!--
   Renders two payloads and nothing else:
-    {mount}/app    → { blocks: [BlockInfo], flows: [WaferFlow], configs: {name: config}, interfaces: {name: InterfaceSpec} }
+    {mount}/app    → { blocks: [BlockInfo], flows: [WaferFlow], configs: {name: config}, interfaces: [InterfaceSpec] }
     {mount}/webmcp → the per-auth-level tool manifest (see webmcp.rs)
   Every field read below is a field on one of those Rust types. Nothing here
   re-derives runtime semantics: flows are listed as declared, and the Routes
@@ -200,15 +200,18 @@
 <script>
 (function () {
   'use strict';
-  const base = location.pathname.replace(/\/ui\/?$/, '');
+  // Served at {mount}, {mount}/ or {mount}/ui; the data routes sit beside it.
+  const base = location.pathname.replace(/\/+$/, '').replace(/\/ui$/, '');
   const $ = id => document.getElementById(id);
   let app = null;
   let routers = [];
+  let interfaces = new Map(); // name → InterfaceSpec
 
   // ── Navigation: the hash is the state ───────────────
   const TABS = ['blocks', 'flows', 'routes', 'agent-tools'];
   function parseHash() {
-    const raw = decodeURIComponent(location.hash.slice(1));
+    let raw;
+    try { raw = decodeURIComponent(location.hash.slice(1)); } catch (_) { raw = ''; } // a stray `%`
     const slash = raw.indexOf('/');
     const tab = slash < 0 ? raw : raw.slice(0, slash);
     return { tab: TABS.includes(tab) ? tab : 'blocks', item: slash < 0 ? '' : raw.slice(slash + 1) };
@@ -238,6 +241,7 @@
       app = data;
       app.blocks.sort((a, b) => a.name.localeCompare(b.name));
       app.flows.sort((a, b) => a.id.localeCompare(b.id));
+      interfaces = new Map(app.interfaces.map(spec => [spec.name, spec]));
       routers = app.blocks.filter(b => b.interface === 'router@v1').map(b => b.name);
       $('n-blocks').textContent = app.blocks.length;
       $('n-flows').textContent = app.flows.length;
@@ -312,7 +316,7 @@
       ['Instance mode', esc(b.instance_mode)],
       ['Calls', (b.requires || []).map(blockLink).join(', ')],
       ['May call', (b.optional_requires || []).map(blockLink).join(', ')],
-      ['Admin page', b.admin_url ? '<a href="' + esc(b.admin_url) + '">' + esc(b.admin_url) + '</a>' : ''],
+      ['Admin page', b.admin_url ? safeLink(b.admin_url) : ''],
     ].filter(([, v]) => v);
     html += '<dl class="facts">' + facts.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('') + '</dl>';
 
@@ -339,24 +343,32 @@
   }
 
   /**
-   * One table for the block's config: each declared variable with the value
-   * it is running with, then any running key the block does not declare.
+   * The block's config in one table. `flow_config` variables show the value
+   * the block's config sets, or their default; running keys the block does
+   * not declare follow. `config_keys` are environment variables, read by the
+   * block from its own process environment, which this page cannot see — so
+   * they show their default and say so rather than claim it is in effect.
    */
   function configTable(b) {
     const running = app.configs[b.name];
-    const values = running && typeof running === 'object' && !Array.isArray(running) ? running : {};
-    const declared = [...(b.config_keys || []), ...(b.flow_config || [])];
-    const seen = new Set(declared.map(v => v.key));
-    const rows = declared.map(v => [
-      '<code>' + esc(v.key) + '</code><span class="sub">' + esc(v.name || v.description) + '</span>',
-      v.key in values ? value(values[v.key]) : '<span class="empty">default</span> <code>' + esc(v.default) + '</code>',
-    ]);
-    Object.keys(values).filter(k => !seen.has(k)).sort().forEach(k => {
+    const isMap = running !== null && typeof running === 'object' && !Array.isArray(running);
+    const values = isMap ? running : {};
+    const flowVars = b.flow_config || [];
+    const envVars = b.config_keys || [];
+    const declared = new Set([...flowVars, ...envVars].map(v => v.key));
+    const label = (v, note) => '<code>' + esc(v.key) + '</code><span class="sub">' + esc(v.name || v.description) + note + '</span>';
+    const fallback = v => '<span class="empty">default</span> <code>' + esc(JSON.stringify(v.default)) + '</code>';
+
+    const rows = flowVars.map(v => [label(v, ''), v.key in values ? value(values[v.key]) : fallback(v)]);
+    envVars.forEach(v => {
+      rows.push([label(v, ' · environment variable'), v.key in values
+        ? value(values[v.key])
+        : fallback(v) + '<span class="sub">unless set in the environment</span>']);
+    });
+    Object.keys(values).filter(k => !declared.has(k)).sort().forEach(k => {
       rows.push(['<code>' + esc(k) + '</code><span class="sub">not declared</span>', value(values[k])]);
     });
-    if (running !== undefined && !Object.keys(values).length && typeof running !== 'object') {
-      rows.push(['<span class="sub">(whole config)</span>', value(running)]);
-    }
+    if (running !== undefined && !isMap) rows.push(['<span class="sub">whole config</span>', value(running)]);
     return rows.length ? table(['Key', 'Value'], rows) : '<p class="empty">No config declared or set.</p>';
   }
 
@@ -538,6 +550,15 @@
       ? '<a href="' + href('blocks', name) + '"><code>' + esc(name) + '</code></a>'
       : '<code title="not a registered block">' + esc(name) + '</code>';
   }
+  /**
+   * A block-declared URL as a link only when it is a path or http(s): a
+   * `javascript:` URL from a third-party block would otherwise run in an
+   * admin's session. Anything else is shown as text.
+   */
+  function safeLink(url) {
+    const ok = /^\/(?!\/)/.test(url) || /^https?:\/\//i.test(url);
+    return ok ? '<a href="' + esc(url) + '">' + esc(url) + '</a>' : '<code>' + esc(url) + '</code>';
+  }
   function json(v) { return '<pre>' + esc(JSON.stringify(v, null, 2)) + '</pre>'; }
   function table(head, rows) {
     return '<div class="scroll-x"><table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
@@ -551,7 +572,7 @@
   document.addEventListener('click', e => {
     const iface = e.target.closest('[data-interface]');
     if (!iface) return;
-    const spec = app && app.interfaces[iface.dataset.interface];
+    const spec = interfaces.get(iface.dataset.interface);
     const actions = spec ? Object.entries(spec.actions || {}).sort(([a], [b]) => a.localeCompare(b)) : [];
     $('dialog-body').innerHTML = '<h2>' + esc(iface.dataset.interface) + '</h2>' + (spec
       ? '<p class="lead">' + esc(spec.description) + '</p>' + (actions.length

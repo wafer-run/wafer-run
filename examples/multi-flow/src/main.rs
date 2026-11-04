@@ -9,8 +9,7 @@
 //! Run with: cargo run
 //! Test with:
 //!   curl http://localhost:8080/greet?name=Alice
-//!   curl http://localhost:8080/_inspector/flows | python3 -m json.tool
-//!   curl http://localhost:8080/_inspector/flows/onboarding | python3 -m json.tool
+//!   curl -s http://localhost:8080/_inspector/app | jq '.flows[].id'
 
 use std::sync::Arc;
 

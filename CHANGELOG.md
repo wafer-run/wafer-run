@@ -4,9 +4,10 @@
 
 ### Breaking changes
 
-- **The inspector serves three routes, and its UI renders the runtime's
-  types as they are.** `wafer-run/inspector` answers `{mount}/ui`,
-  `{mount}/app` and `{mount}/webmcp`; anything else is `NotFound`.
+- **The inspector serves two data routes, and its UI renders the
+  runtime's types as they are.** `wafer-run/inspector` answers
+  `{mount}/app` and `{mount}/webmcp` with data; every other path, the mount
+  root included, serves the UI.
   - Removed: `{mount}/blocks`, `{mount}/blocks/{name}`, `{mount}/flows`,
     `{mount}/flows/{id}`, `{mount}/interfaces`, and the counts summary at
     any other path. `/app` already carried all of it — `{ blocks, flows,
@@ -28,7 +29,8 @@
     **Agent tools** is unchanged.
   - The access policy is declared config: `allow_anonymous` (toggle,
     default `false`) and `allowed_roles` (default `admin`) in
-    `flow_config`. `allowed_roles` is now a comma-separated string, like
+    `flow_config`, read per request so a flow step's config overrides the
+    block's, as monitoring's `stats_*` variables are. `allowed_roles` is now a comma-separated string, like
     monitoring's `stats_roles`; it was a JSON array. A present but
     malformed value, or a role list naming no roles, fails Init with
     `InvalidArgument` where it fell back to the default.

@@ -8,7 +8,8 @@
 //! Three routes, resolved from the last path segment so any mount prefix
 //! works:
 //!
-//! - `{mount}/ui` — the HTML page (`inspector.html`, embedded).
+//! - `{mount}/ui` (and any path that is not one of the two below, including
+//!   the mount root) — the HTML page (`inspector.html`, embedded).
 //! - `{mount}/app` — everything the page renders except the agent tools, in
 //!   one payload (see [`app_view`]).
 //! - `{mount}/webmcp` — the WebMCP tool manifest per auth level (see
@@ -28,8 +29,8 @@ use std::{collections::HashSet, sync::OnceLock};
 
 use wafer_block::*;
 
-/// Who may use the inspector, resolved once at `lifecycle(Init)` from the
-/// two variables [`InspectorBlock::info`] declares.
+/// Who may use the inspector: resolved per request from the two variables
+/// [`InspectorBlock::info`] declares (see [`InspectorBlock::policy`]).
 #[derive(Debug, PartialEq, Eq)]
 enum AccessPolicy {
     /// `allow_anonymous` is set: anyone, authenticated or not (dev only).
@@ -44,6 +45,9 @@ const ALLOW_ANONYMOUS: &str = "allow_anonymous";
 /// Config key: comma-separated roles that may use the inspector.
 const ALLOWED_ROLES: &str = "allowed_roles";
 
+/// Default of [`ALLOW_ANONYMOUS`].
+const DEFAULT_ALLOW_ANONYMOUS: bool = false;
+
 /// Default of [`ALLOWED_ROLES`].
 const DEFAULT_ALLOWED_ROLES: &str = "admin";
 
@@ -56,46 +60,79 @@ fn parse_roles(list: &str) -> Vec<String> {
         .collect()
 }
 
-/// The policy that applies when no config overrides it: the declared
-/// default of [`ALLOWED_ROLES`].
-fn default_policy() -> AccessPolicy {
-    AccessPolicy::Roles(parse_roles(DEFAULT_ALLOWED_ROLES))
+fn invalid(reason: String) -> WaferError {
+    WaferError::new(ErrorCode::InvalidArgument, reason)
 }
 
-/// Resolve the access policy from block config. A key that is present but
-/// malformed — or a role list with no roles, which would lock everyone out —
-/// fails Init instead of falling back to a default the operator did not ask
-/// for.
-fn policy_from_config(config: &BlockConfig) -> Result<AccessPolicy, WaferError> {
-    let invalid = |reason: String| WaferError::new(ErrorCode::InvalidArgument, reason);
+/// `"true"` / `"false"`, the stringified form flow-step config arrives in.
+fn parse_bool(value: &str) -> Result<bool, WaferError> {
+    value.parse().map_err(|_| {
+        invalid(format!(
+            "inspector: `{ALLOW_ANONYMOUS}` must be true or false, got {value:?}"
+        ))
+    })
+}
 
-    let anonymous = match config.get(ALLOW_ANONYMOUS) {
-        None => false,
-        Some(value) => config.bool(ALLOW_ANONYMOUS).ok_or_else(|| {
-            invalid(format!(
-                "inspector: `{ALLOW_ANONYMOUS}` must be a boolean, got {value}"
-            ))
-        })?,
-    };
-    if anonymous {
-        return Ok(AccessPolicy::Anonymous);
-    }
+/// The block-level settings, validated at `lifecycle(Init)`; each request
+/// starts from these and applies its flow step's overrides.
+#[derive(Debug, Clone)]
+struct Settings {
+    allow_anonymous: bool,
+    allowed_roles: String,
+}
 
-    let roles = match config.get(ALLOWED_ROLES) {
-        None => return Ok(default_policy()),
-        Some(serde_json::Value::String(list)) => parse_roles(list),
-        Some(other) => {
-            return Err(invalid(format!(
-                "inspector: `{ALLOWED_ROLES}` must be a comma-separated string, got {other}"
-            )))
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            allow_anonymous: DEFAULT_ALLOW_ANONYMOUS,
+            allowed_roles: DEFAULT_ALLOWED_ROLES.to_string(),
         }
-    };
-    if roles.is_empty() {
-        return Err(invalid(format!(
-            "inspector: `{ALLOWED_ROLES}` names no roles, which would deny every caller"
-        )));
     }
-    Ok(AccessPolicy::Roles(roles))
+}
+
+impl Settings {
+    /// Read the block config. A key that is present but malformed fails Init
+    /// instead of falling back to a default the operator did not ask for.
+    fn from_config(config: &BlockConfig) -> Result<Self, WaferError> {
+        let allow_anonymous = match config.get(ALLOW_ANONYMOUS) {
+            None => DEFAULT_ALLOW_ANONYMOUS,
+            Some(value) => config.bool(ALLOW_ANONYMOUS).ok_or_else(|| {
+                invalid(format!(
+                    "inspector: `{ALLOW_ANONYMOUS}` must be a boolean, got {value}"
+                ))
+            })?,
+        };
+        let allowed_roles = match config.get(ALLOWED_ROLES) {
+            None => DEFAULT_ALLOWED_ROLES.to_string(),
+            Some(serde_json::Value::String(list)) => list.clone(),
+            Some(other) => {
+                return Err(invalid(format!(
+                    "inspector: `{ALLOWED_ROLES}` must be a comma-separated string, got {other}"
+                )))
+            }
+        };
+        let settings = Self {
+            allow_anonymous,
+            allowed_roles,
+        };
+        settings.policy()?;
+        Ok(settings)
+    }
+
+    /// The policy these settings describe. A role list naming no roles would
+    /// deny every caller, so it is refused rather than enforced.
+    fn policy(&self) -> Result<AccessPolicy, WaferError> {
+        if self.allow_anonymous {
+            return Ok(AccessPolicy::Anonymous);
+        }
+        let roles = parse_roles(&self.allowed_roles);
+        if roles.is_empty() {
+            return Err(invalid(format!(
+                "inspector: `{ALLOWED_ROLES}` names no roles, which would deny every caller"
+            )));
+        }
+        Ok(AccessPolicy::Roles(roles))
+    }
 }
 
 impl AccessPolicy {
@@ -131,9 +168,9 @@ impl AccessPolicy {
 /// interface specs, with a static HTML UI at `{mount}/ui`. See the crate
 /// docs for the routes.
 pub struct InspectorBlock {
-    /// Init-resolved access policy (write-once); [`default_policy`] applies
-    /// when no Init has run.
-    policy: OnceLock<AccessPolicy>,
+    /// Block-level access settings, validated at Init (write-once); the
+    /// declared defaults apply when no Init has run.
+    settings: OnceLock<Settings>,
 }
 
 impl Default for InspectorBlock {
@@ -143,20 +180,36 @@ impl Default for InspectorBlock {
 }
 
 impl InspectorBlock {
-    /// Construct an inspector. Its access policy is read at `lifecycle(Init)`
-    /// from the `allow_anonymous` / `allowed_roles` variables declared in
-    /// [`Block::info`]; until then the default (`admin` role) applies.
+    /// Construct an inspector. Its access policy comes from the
+    /// `allow_anonymous` / `allowed_roles` variables declared in
+    /// [`Block::info`]; with neither set, only the `admin` role is admitted.
     pub fn new() -> Self {
         Self {
-            policy: OnceLock::new(),
+            settings: OnceLock::new(),
         }
+    }
+
+    /// The access policy for one request: the Init-validated block config,
+    /// overridden by the flow step's config (`ctx.config_get`) as monitoring
+    /// does for its `stats_*` variables.
+    fn policy(&self, ctx: &dyn Context) -> Result<AccessPolicy, WaferError> {
+        let mut settings = self.settings.get().cloned().unwrap_or_default();
+        if let Some(value) = ctx.config_get(ALLOW_ANONYMOUS) {
+            settings.allow_anonymous = parse_bool(value)?;
+        }
+        if let Some(roles) = ctx.config_get(ALLOWED_ROLES) {
+            settings.allowed_roles = roles.to_string();
+        }
+        settings.policy()
     }
 }
 
 /// One of the inspector's routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {
-    /// `{mount}/ui` — the static HTML UI.
+    /// Any other path — `{mount}/ui`, the mount root, anything else — the
+    /// static HTML UI, which finds the data routes relative to where it is
+    /// served.
     Ui,
     /// `{mount}/app` — see [`app_view`].
     App,
@@ -167,14 +220,14 @@ enum Route {
 /// Resolve `path` to a route from its last non-empty segment.
 ///
 /// The block cannot see its own mount prefix — nothing in the message
-/// carries it — but every route is exactly one segment below that prefix,
-/// so the last segment settles it. Anything else is `None`.
-fn route_of(path: &str) -> Option<Route> {
-    match path.rsplit('/').find(|segment| !segment.is_empty())? {
-        "ui" => Some(Route::Ui),
-        "app" => Some(Route::App),
-        "webmcp" => Some(Route::WebMcp),
-        _ => None,
+/// carries it — but each data route is exactly one segment below that
+/// prefix, so the last segment settles it. Every other path is the UI, so
+/// the mount root opens it too.
+fn route_of(path: &str) -> Route {
+    match path.rsplit('/').find(|segment| !segment.is_empty()) {
+        Some("app") => Route::App,
+        Some("webmcp") => Route::WebMcp,
+        _ => Route::Ui,
     }
 }
 
@@ -265,7 +318,7 @@ fn redacted(value: &serde_json::Value, declared: &HashSet<&str>) -> serde_json::
 ///   "blocks":     [BlockInfo, …],
 ///   "flows":      [WaferFlow, …],           // redacted
 ///   "configs":    { "<block>": <config> },  // redacted
-///   "interfaces": { "<name>": InterfaceSpec }
+///   "interfaces": [InterfaceSpec, …]
 /// }
 /// ```
 ///
@@ -336,7 +389,7 @@ impl Block for InspectorBlock {
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
         // The gate runs before anything is read: every route exposes
         // something an unauthorized caller must not see.
-        if let Err(e) = self.policy.get_or_init(default_policy).admit(&msg) {
+        if let Err(e) = self.policy(ctx).and_then(|policy| policy.admit(&msg)) {
             return OutputStream::error(e);
         }
 
@@ -349,8 +402,8 @@ impl Block for InspectorBlock {
         }
 
         match route_of(msg.path()) {
-            Some(Route::Ui) => html_respond(include_str!("inspector.html")),
-            Some(Route::App) => match app_view(ctx) {
+            Route::Ui => html_respond(include_str!("inspector.html")),
+            Route::App => match app_view(ctx) {
                 Some(view) => ok_json(&view),
                 // A request handler must not panic over a host that does not
                 // expose the capability, so it is a typed error instead.
@@ -361,11 +414,7 @@ impl Block for InspectorBlock {
             },
             // A pure projection of `BlockInfo::endpoints`: no flow state, so
             // a runtime without `FlowIntrospection` still serves it.
-            Some(Route::WebMcp) => ok_json(&webmcp::webmcp_view(ctx.registered_blocks())),
-            None => OutputStream::error(WaferError::new(
-                ErrorCode::NotFound,
-                "inspector routes are {mount}/ui, {mount}/app and {mount}/webmcp",
-            )),
+            Route::WebMcp => ok_json(&webmcp::webmcp_view(ctx.registered_blocks())),
         }
     }
 
@@ -375,8 +424,8 @@ impl Block for InspectorBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
-            let policy = policy_from_config(&BlockConfig::from_event(&event))?;
-            match &policy {
+            let settings = Settings::from_config(&BlockConfig::from_event(&event))?;
+            match settings.policy()? {
                 AccessPolicy::Anonymous => {
                     tracing::warn!("inspector: anonymous access enabled — do not use in production")
                 }
@@ -385,7 +434,7 @@ impl Block for InspectorBlock {
                 }
             }
             // Write-once: Init fires a single time per registration.
-            let _ = self.policy.set(policy);
+            let _ = self.settings.set(settings);
         }
         Ok(())
     }
@@ -408,6 +457,8 @@ pub(crate) mod test_support {
     #[derive(Clone, Default)]
     pub struct BlocksContext {
         pub blocks: Vec<BlockInfo>,
+        /// What `config_get` answers: the flow step's config.
+        pub step_config: Vec<(&'static str, &'static str)>,
     }
 
     #[async_trait::async_trait]
@@ -426,8 +477,11 @@ pub(crate) mod test_support {
         fn is_cancelled(&self) -> bool {
             false
         }
-        fn config_get(&self, _key: &str) -> Option<&str> {
-            None
+        fn config_get(&self, key: &str) -> Option<&str> {
+            self.step_config
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| *v)
         }
         fn registered_blocks(&self) -> &[BlockInfo] {
             &self.blocks
@@ -484,9 +538,8 @@ mod auth_tests {
     use wafer_block::{BlockConfig, ErrorCode, LifecycleEvent, LifecycleType};
 
     use super::{
-        policy_from_config,
         test_support::{get, BlocksContext},
-        AccessPolicy,
+        AccessPolicy, Settings,
     };
 
     async fn code(meta: &[(&str, &str)]) -> ErrorCode {
@@ -529,9 +582,47 @@ mod auth_tests {
 
     #[tokio::test]
     async fn the_gate_runs_before_routing() {
-        // An unknown path must not tell an outsider anything either.
-        let denied = get(&BlocksContext::default(), "/_inspector/nope", &[]).await;
+        // The UI itself is not served to an outsider either.
+        let denied = get(&BlocksContext::default(), "/_inspector", &[]).await;
         assert_eq!(denied, Err(ErrorCode::Unauthenticated));
+    }
+
+    #[tokio::test]
+    async fn flow_step_config_overrides_the_policy_per_request() {
+        let ops = BlocksContext {
+            step_config: vec![("allowed_roles", "ops")],
+            ..Default::default()
+        };
+        let ops_caller = [("auth.user_id", "u1"), ("auth.user_roles", "ops")];
+        assert_eq!(
+            get(&ops, "/_inspector/app", &ops_caller).await,
+            Err(ErrorCode::FailedPrecondition),
+            "the step's role list admits an ops caller"
+        );
+        assert_eq!(
+            get(&ops, "/_inspector/app", &super::test_support::admin()).await,
+            Err(ErrorCode::PermissionDenied),
+            "and replaces the default, so admin alone no longer passes"
+        );
+
+        let open = BlocksContext {
+            step_config: vec![("allow_anonymous", "true")],
+            ..Default::default()
+        };
+        assert_eq!(
+            get(&open, "/_inspector/app", &[]).await,
+            Err(ErrorCode::FailedPrecondition)
+        );
+
+        let malformed = BlocksContext {
+            step_config: vec![("allow_anonymous", "yes")],
+            ..Default::default()
+        };
+        assert_eq!(
+            get(&malformed, "/_inspector/app", &[]).await,
+            Err(ErrorCode::InvalidArgument),
+            "a malformed step value is refused, not read as false"
+        );
     }
 
     fn policy(config: &serde_json::Value) -> Result<AccessPolicy, ErrorCode> {
@@ -539,7 +630,9 @@ mod auth_tests {
             event_type: LifecycleType::Init,
             data: serde_json::to_vec(config).expect("config JSON"),
         };
-        policy_from_config(&BlockConfig::from_event(&event)).map_err(|e| e.code)
+        Settings::from_config(&BlockConfig::from_event(&event))
+            .and_then(|settings| settings.policy())
+            .map_err(|e| e.code)
     }
 
     #[test]
@@ -575,12 +668,13 @@ mod auth_tests {
     #[test]
     fn routes_resolve_from_the_last_segment_under_any_mount() {
         use super::{route_of, Route};
-        assert_eq!(route_of("/_inspector/ui"), Some(Route::Ui));
-        assert_eq!(route_of("/b/inspector/app/"), Some(Route::App));
-        assert_eq!(route_of("/a/b/c/webmcp"), Some(Route::WebMcp));
-        assert_eq!(route_of("/_inspector"), None);
-        assert_eq!(route_of("/_inspector/blocks"), None);
-        assert_eq!(route_of("/"), None);
+        assert_eq!(route_of("/_inspector/ui"), Route::Ui);
+        assert_eq!(route_of("/b/inspector/app/"), Route::App);
+        assert_eq!(route_of("/a/b/c/webmcp"), Route::WebMcp);
+        // The mount root and anything else open the UI.
+        assert_eq!(route_of("/_inspector"), Route::Ui);
+        assert_eq!(route_of("/_inspector/blocks"), Route::Ui);
+        assert_eq!(route_of("/"), Route::Ui);
     }
 }
 
