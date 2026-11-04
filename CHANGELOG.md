@@ -54,13 +54,16 @@
     route is the one a selection names. Added:
     `WebMcpRefusal::SelectionShadowed`, refusing a later, different
     selection of the same endpoint, which vanished silently before. An
-    identical selection row repeated is one selection, not a refusal.
+    identical selection row repeated is one selection — no further refusal,
+    whether the first was accepted or refused.
   - Changed: every selection refusal (`SelectionNotFound`,
     `SelectionUnpublished`, `SelectionShadowed`) carries
     `visible_to_caller: false` (`SelectionNotFound` carried `true`). A
     selection is the operator's; what it names, and whether that exists, is
-    never told to a caller. So is a refusal the selected manifest makes
-    about a selected tool's name (`InvalidToolName`, `DuplicateToolName`).
+    never told to a caller. So is every other refusal
+    `generate_webmcp_selected` reports, whatever its reason (a selected
+    name, a schema wall, a path): the selected manifest is the operator's
+    list.
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that

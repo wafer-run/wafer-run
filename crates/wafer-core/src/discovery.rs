@@ -2869,20 +2869,21 @@ fn webmcp_report_over(
                 .collect()
         })
         .collect();
-    webmcp_report_resolved(blocks, &levels, caller, ToolNames::Declared)
+    webmcp_report_resolved(blocks, &levels, caller, Mode::Declared)
 }
 
-/// Where the tool names a [`webmcp_report_resolved`] manifest publishes
-/// come from, which decides who may read a refusal about one.
+/// What a [`webmcp_report_resolved`] manifest projects, which decides who
+/// may read its refusals.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolNames {
-    /// From the blocks' own `agent_tool` declarations: a refusal about a
-    /// name a caller could invoke is the caller's to read, as every refusal
-    /// about such an endpoint is.
+enum Mode {
+    /// The blocks' own `agent_tool` declarations ([`generate_webmcp_report`]):
+    /// a refusal about an endpoint the caller may invoke is the caller's to
+    /// read.
     Declared,
-    /// From a [`generate_webmcp_selected`] selection: the name is the
-    /// operator's data, so a refusal about it (`InvalidToolName`,
-    /// `DuplicateToolName`) is operator-only, as every selection refusal is.
+    /// A [`generate_webmcp_selected`] selection: the operator's list, so every
+    /// refusal the projection makes — about a selected name, a schema, a
+    /// path, anything — is operator-only (`visible_to_caller: false`), as
+    /// every selection refusal is.
     Selected,
 }
 
@@ -2893,7 +2894,7 @@ fn webmcp_report_resolved(
     blocks: &[&BlockInfo],
     levels: &[Vec<Option<AuthLevel>>],
     caller: AuthLevel,
-    names: ToolNames,
+    mode: Mode,
 ) -> (Value, Vec<WebMcpRefusalReport>) {
     use WebMcpRefusalScope as Scope;
 
@@ -3020,15 +3021,10 @@ fn webmcp_report_resolved(
             // not re-derive that decision itself. The filter below still
             // decides the manifest; this only records what it will decide.
             let visible_to_caller = required <= caller;
+            // In `Mode::Selected` every refusal is the operator's.
+            let reported_visible = visible_to_caller && mode == Mode::Declared;
 
             let mut refuse = |scope: Scope, reason: WebMcpRefusal| {
-                // A refusal about a selected name is about the selection.
-                let about_the_name = matches!(
-                    reason,
-                    WebMcpRefusal::InvalidToolName | WebMcpRefusal::DuplicateToolName { .. }
-                );
-                let visible_to_caller =
-                    visible_to_caller && !(about_the_name && names == ToolNames::Selected);
                 refused.push(WebMcpRefusalReport {
                     block: block.name.clone(),
                     method: ep.method,
@@ -3036,7 +3032,7 @@ fn webmcp_report_resolved(
                     tool_name: tool.name.clone(),
                     scope,
                     reason,
-                    visible_to_caller,
+                    visible_to_caller: reported_visible,
                 });
             };
 
@@ -3340,10 +3336,11 @@ pub struct ToolSelection {
 /// keep in sync with the first. Endpoints nobody selected, and blocks no
 /// selection names, are not copied and do not change the result.
 ///
-/// A selection that projects onto nothing is reported, scoped to
-/// [`WebMcpRefusalScope::Tool`] and with `visible_to_caller: false` — a
-/// selection is the operator's, and none of these tells a caller anything
-/// about what exists:
+/// Every refusal this reports carries `visible_to_caller: false`, whatever
+/// its reason: a selection is the operator's, and nothing the projection of
+/// it finds wrong — a name, a schema, a path — is a caller's to read. A
+/// selection that projects onto nothing is reported, scoped to
+/// [`WebMcpRefusalScope::Tool`]:
 ///
 /// - naming a block/method/path the block set declares no endpoint for:
 ///   [`WebMcpRefusal::SelectionNotFound`];
@@ -3406,6 +3403,10 @@ fn webmcp_selected_over(
         // then.
         let mut resolved: std::collections::BTreeMap<usize, (usize, Option<AuthLevel>)> =
             std::collections::BTreeMap::new();
+        // Every row seen per endpoint, accepted or refused: a row repeated
+        // verbatim is one selection, said again, whatever became of it.
+        let mut rows: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
         for index in indices {
             let sel = &selections[index];
             let Some(position) = block
@@ -3415,15 +3416,18 @@ fn webmcp_selected_over(
             else {
                 continue;
             };
-            if let Some(&(first, level)) = resolved.get(&position) {
-                outcome[index] = if selections[first] == *sel {
-                    // The same row twice: one selection, said again.
-                    None
-                } else if level.is_none() {
-                    Some(WebMcpRefusal::SelectionUnpublished)
+            let seen = rows.entry(position).or_default();
+            if seen.iter().any(|&row| selections[row] == *sel) {
+                outcome[index] = None;
+                continue;
+            }
+            seen.push(index);
+            if let Some(&(_, level)) = resolved.get(&position) {
+                outcome[index] = Some(if level.is_none() {
+                    WebMcpRefusal::SelectionUnpublished
                 } else {
-                    Some(WebMcpRefusal::SelectionShadowed)
-                };
+                    WebMcpRefusal::SelectionShadowed
+                });
                 continue;
             }
             let level = effective_auth(block, &block.endpoints[position]);
@@ -3467,7 +3471,7 @@ fn webmcp_selected_over(
         })
     });
     let shadow: Vec<&BlockInfo> = shadow.iter().collect();
-    let (doc, mut refused) = webmcp_report_resolved(&shadow, &levels, caller, ToolNames::Selected);
+    let (doc, mut refused) = webmcp_report_resolved(&shadow, &levels, caller, Mode::Selected);
     refused.extend(selection_refusals);
     (doc, refused)
 }
@@ -3860,12 +3864,27 @@ mod tests {
         );
     }
 
-    /// A refusal the report body makes about a selected tool's name —
-    /// invalid, or claimed by two selections — is about the selection, so it
-    /// is operator-only even where the endpoint is one the caller may invoke.
+    /// Every refusal a selected manifest makes is operator-only, whatever its
+    /// reason — a selected name invalid or claimed twice, or a defect in the
+    /// selected endpoint's own contract (colliding parameter names) — even
+    /// where the endpoint is one the caller may invoke.
     #[test]
-    fn a_refusal_about_a_selected_name_is_operator_only() {
-        let blocks = [filter_fixture()];
+    fn every_refusal_of_a_selected_manifest_is_operator_only() {
+        let colliding = BlockInfo::new("test/collide", "1.0.0", "http-handler@v1", "Collide")
+            .endpoints(vec![BlockEndpoint::get("/b/collide/{id}")
+                .summary("Colliding")
+                .auth(AuthLevel::Public)
+                .path_params_schema(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }))
+                .query_params_schema(json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } }
+                }))
+                .agent_tool("get_collide", "Colliding parameters.")]);
+        let blocks = [filter_fixture(), colliding];
         let select = |path: &str, name: &str| ToolSelection {
             block: "test/filter".into(),
             method: HttpMethod::Get,
@@ -3882,6 +3901,13 @@ mod tests {
                 select("/b/filter/items/{id}", "same_name"),
                 select("/b/filter/secret/{id}", "same_name"),
                 select("/b/filter/bad", "bad name!"),
+                ToolSelection {
+                    block: "test/collide".into(),
+                    method: HttpMethod::Get,
+                    path: "/b/collide/{id}".into(),
+                    name: "pick_collide".into(),
+                    description: "Selected.".into(),
+                },
             ],
         );
         assert_eq!(doc["tools"], json!([]));
@@ -3895,6 +3921,13 @@ mod tests {
             vec![
                 ("bad name!", WebMcpRefusal::InvalidToolName, false),
                 (
+                    "pick_collide",
+                    WebMcpRefusal::CollidingParameterNames {
+                        names: vec!["id".to_string()],
+                    },
+                    false
+                ),
+                (
                     "same_name",
                     WebMcpRefusal::DuplicateToolName { count: 2 },
                     false
@@ -3906,14 +3939,77 @@ mod tests {
                 ),
             ],
         );
-        // The same names declared by the block itself are the caller's to
-        // read, as before.
+        // The same defects declared by the blocks themselves are the caller's
+        // to read, as before.
         let (_, declared) = generate_webmcp_report(&blocks, AuthLevel::Public, auth);
+        let collision = WebMcpRefusal::CollidingParameterNames {
+            names: vec!["id".to_string()],
+        };
+        assert!(
+            declared
+                .iter()
+                .any(|r| r.reason == collision && r.visible_to_caller),
+            "{declared:?}"
+        );
         assert!(
             declared
                 .iter()
                 .any(|r| r.reason == WebMcpRefusal::InvalidToolName && r.visible_to_caller),
             "{declared:?}"
+        );
+    }
+
+    /// A selection row repeated verbatim is one selection, said again, whatever
+    /// became of it: a refused row repeated is refused once.
+    #[test]
+    fn a_repeated_refused_row_is_refused_once() {
+        let blocks = [filter_fixture()];
+        let row = |path: &str, name: &str| ToolSelection {
+            block: "test/filter".into(),
+            method: HttpMethod::Get,
+            path: path.into(),
+            name: name.into(),
+            description: "Selected.".into(),
+        };
+        let served = |_: &BlockInfo, ep: &BlockEndpoint| (!ep.server_only).then_some(ep.auth);
+        let reasons = |refused: &[WebMcpRefusalReport]| -> Vec<(String, WebMcpRefusal)> {
+            refused
+                .iter()
+                .map(|r| (r.tool_name.clone(), r.reason.clone()))
+                .collect()
+        };
+        // [A, B, B]: B is shadowed by A, once.
+        let (_, refused) = generate_webmcp_selected(
+            &blocks,
+            AuthLevel::Admin,
+            served,
+            &[
+                row("/b/filter/items/{id}", "a"),
+                row("/b/filter/items/{id}", "b"),
+                row("/b/filter/items/{id}", "b"),
+            ],
+        );
+        assert_eq!(
+            reasons(&refused),
+            vec![("b".to_string(), WebMcpRefusal::SelectionShadowed)],
+        );
+        // [A_unpublished, B, B]: B names the unpublished endpoint, once.
+        let (_, refused) = generate_webmcp_selected(
+            &blocks,
+            AuthLevel::Admin,
+            served,
+            &[
+                row("/b/filter/secret/{id}", "a"),
+                row("/b/filter/secret/{id}", "b"),
+                row("/b/filter/secret/{id}", "b"),
+            ],
+        );
+        assert_eq!(
+            reasons(&refused),
+            vec![
+                ("a".to_string(), WebMcpRefusal::SelectionUnpublished),
+                ("b".to_string(), WebMcpRefusal::SelectionUnpublished),
+            ],
         );
     }
 
