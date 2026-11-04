@@ -467,7 +467,7 @@ impl Context for RuntimeContext {
             .map(|s| s.as_str())
     }
 
-    fn registered_blocks(&self) -> &[wafer_block::BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<wafer_block::BlockInfo>] {
         &self.snapshot.blocks
     }
 

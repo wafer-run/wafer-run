@@ -301,3 +301,68 @@ async fn each_registration_reads_the_declaration_once() {
         "the second registration read its own declaration, once"
     );
 }
+
+/// Hands the declarations its context lends to the test.
+struct Lender(Arc<std::sync::Mutex<Vec<Arc<BlockInfo>>>>);
+
+#[async_trait]
+impl Block for Lender {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(
+            "test/lender",
+            "0.1.0",
+            "test/lender@v1",
+            "lends its context's blocks",
+        )
+    }
+
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        *self.0.lock().expect("lent lock") = ctx.registered_blocks().to_vec();
+        OutputStream::respond(Vec::new())
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        _event: LifecycleEvent,
+    ) -> Result<(), WaferError> {
+        Ok(())
+    }
+}
+
+/// The sealed snapshot a context lends is the registrations' own
+/// declarations, not copies of them: every entry of
+/// `Context::registered_blocks()` is the same allocation as the matching
+/// `Wafer::block_infos()` entry.
+#[tokio::test]
+async fn the_sealed_snapshot_shares_the_registered_declarations() {
+    let lent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut wafer = empty_wafer();
+    wafer
+        .register_block("test/lender", Arc::new(Lender(Arc::clone(&lent))))
+        .expect("register the lender");
+    wafer
+        .register_block(HELPER, Arc::new(Helper))
+        .expect("register a second block");
+    wafer.seal().await.expect("seal");
+    if let Err(e) = wafer
+        .run_block("test/lender", Message::new("lend"), InputStream::empty())
+        .await
+        .collect_buffered()
+        .await
+    {
+        panic!("run_block(test/lender) failed: {e:?}");
+    }
+
+    let lent = lent.lock().expect("lent lock");
+    let registered = wafer.block_infos();
+    assert_eq!(lent.len(), registered.len());
+    for (lent, registered) in lent.iter().zip(&registered) {
+        assert_eq!(lent.name, registered.name);
+        assert!(
+            Arc::ptr_eq(lent, registered),
+            "{} is lent as a copy of its registered declaration",
+            lent.name
+        );
+    }
+}

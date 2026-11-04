@@ -27,7 +27,12 @@
 
 #![warn(missing_docs)]
 
-use std::{collections::HashMap, net::IpAddr, sync::OnceLock, time::Instant};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use parking_lot::Mutex;
 use wafer_block::{
@@ -182,7 +187,7 @@ impl MonitoringBlock {
 /// endpoint path equal to it, else the first template matching it, else
 /// [`UNMATCHED_ROUTE`]. Every key is therefore declared by some block, so
 /// no request-supplied segment is ever stored.
-fn route_template(blocks: &[BlockInfo], path: &str) -> String {
+fn route_template(blocks: &[Arc<BlockInfo>], path: &str) -> String {
     let templates = || {
         blocks
             .iter()
