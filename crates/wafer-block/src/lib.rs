@@ -65,7 +65,7 @@ pub use capabilities::{Allowlist, BlockCapabilities};
 pub use common::{ServiceName, ServiceOp};
 pub use compat::{MaybeSend, MaybeSync};
 pub use config::{BlockConfig, DispatchTarget};
-pub use context::Context;
+pub use context::{declarations, Context};
 pub use error::{BlockConfigRef, RuntimeError};
 pub use executor::{extract_path_vars, match_path, matches_pattern, route_shape};
 #[cfg(not(target_arch = "wasm32"))]

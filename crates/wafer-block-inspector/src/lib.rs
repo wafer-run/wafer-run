@@ -25,7 +25,10 @@
 
 mod webmcp;
 
-use std::{collections::HashSet, sync::OnceLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+};
 
 use wafer_block::*;
 
@@ -274,7 +277,7 @@ fn masked_url_credentials(value: &str) -> Option<String> {
 
 /// Every config key a registered block declares as sensitive
 /// ([`ConfigVar::is_sensitive`]), in either `config_keys` or `flow_config`.
-fn declared_sensitive_keys(blocks: &[BlockInfo]) -> HashSet<&str> {
+fn declared_sensitive_keys(blocks: &[Arc<BlockInfo>]) -> HashSet<&str> {
     blocks
         .iter()
         .flat_map(|b| b.config_keys.iter().chain(b.flow_config.iter()))
@@ -339,7 +342,7 @@ fn app_view(ctx: &dyn Context) -> Option<serde_json::Value> {
         .map(|(name, cfg)| (name.clone(), redacted(cfg, &declared)))
         .collect();
     Some(serde_json::json!({
-        "blocks": blocks,
+        "blocks": wafer_block::declarations(blocks),
         "flows": flows,
         "configs": configs,
         "interfaces": ctx.interface_specs(),
@@ -458,7 +461,7 @@ pub(crate) mod test_support {
 
     #[derive(Clone, Default)]
     pub struct BlocksContext {
-        pub blocks: Vec<BlockInfo>,
+        pub blocks: Vec<std::sync::Arc<BlockInfo>>,
         /// What `config_get` answers: the flow step's config.
         pub step_config: Vec<(&'static str, &'static str)>,
     }
@@ -485,7 +488,7 @@ pub(crate) mod test_support {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| *v)
         }
-        fn registered_blocks(&self) -> &[BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<BlockInfo>] {
             &self.blocks
         }
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {

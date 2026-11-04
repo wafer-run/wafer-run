@@ -1,6 +1,8 @@
 //! The `{mount}/webmcp` view: the WebMCP tool manifest as each auth level
 //! receives it. The inspector's only page whose content is a security claim.
 
+use std::sync::Arc;
+
 use wafer_block::{AuthLevel, BlockInfo};
 
 /// The auth levels the WebMCP view renders a manifest for, in increasing
@@ -66,14 +68,16 @@ const WEBMCP_LEVELS: [AuthLevel; 3] = [
 /// `BlockInfo::default_enabled` is a first-run default, not what the admin
 /// has since switched off. Rather than filter on something that is not the
 /// answer, the page states plainly that it ignores feature gating.
-pub(crate) fn webmcp_view(blocks: &[BlockInfo]) -> serde_json::Value {
+pub(crate) fn webmcp_view(blocks: &[Arc<BlockInfo>]) -> serde_json::Value {
     use wafer_core::discovery::WebMcpRefusalScope;
 
     let levels: Vec<serde_json::Value> = WEBMCP_LEVELS
         .iter()
         .map(|level| {
             let (manifest, refusals) =
-                wafer_core::discovery::generate_webmcp_report(blocks, *level, |_block, ep| ep.auth);
+                wafer_core::discovery::generate_webmcp_report(blocks, *level, |_block, ep| {
+                    Some(ep.auth)
+                });
             // See "A level's refusals name only endpoints that level can
             // see" above.
             let visible: Vec<_> = refusals
@@ -143,6 +147,8 @@ mod tests {
     //! named with a reason, and that the route does not need the runtime's
     //! flow capability to answer.
 
+    use std::sync::Arc;
+
     use wafer_block::{AuthLevel, BlockEndpoint, BlockInfo, ErrorCode};
 
     use crate::test_support::{admin, get, BlocksContext};
@@ -181,7 +187,7 @@ mod tests {
     async fn webmcp_body(blocks: Vec<BlockInfo>) -> serde_json::Value {
         let body = get(
             &BlocksContext {
-                blocks,
+                blocks: blocks.into_iter().map(Arc::new).collect(),
                 ..Default::default()
             },
             "/_inspector/webmcp",
@@ -381,7 +387,7 @@ mod tests {
         // reachable by a caller the default policy denies.
         let denied = get(
             &BlocksContext {
-                blocks: fixture(),
+                blocks: fixture().into_iter().map(Arc::new).collect(),
                 ..Default::default()
             },
             "/_inspector/webmcp",

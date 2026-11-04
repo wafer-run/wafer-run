@@ -14,7 +14,8 @@
     configs, interfaces }`, the runtime's own `BlockInfo` / `WaferFlow` /
     `InterfaceSpec` serialized verbatim with sensitive config values
     redacted — and now also `aliases` (`{ "<alias>": "<block>" }`, from
-    the new `Context::block_aliases`, empty by default), so migrate with `jq` over `/app`, e.g.
+    the new `Context::block_aliases`, empty by default), so migrate with
+    `jq` over `/app`, e.g.
     `jq '.blocks[] | select(.name == "org/x") | .capabilities'`.
   - The UI loads `/app` once and has four views. **Blocks** shows each
     block's full declaration — endpoints, declared config
@@ -34,9 +35,71 @@
     default `false`) and `allowed_roles` (default `admin`) in
     `flow_config`, read per request so a flow step's config overrides the
     block's, as monitoring's `stats_*` variables are. `allowed_roles` is
-    now a comma-separated string, like monitoring's `stats_roles`; it was a JSON array. A present but
-    malformed value, or a role list naming no roles, fails Init with
+    now a comma-separated string, like monitoring's `stats_roles`; it was
+    a JSON array. A present but malformed value, or a role list naming no
+    roles, fails Init with
     `InvalidArgument` where it fell back to the default.
+
+- **A declaration is never copied to be described: `registered_blocks()`
+  lends the runtime's `Arc`s, and the discovery generators take them.**
+  Since #478 a runtime holds each block's `BlockInfo` once, as an `Arc`, but
+  two paths still copied every declaration: the startup snapshot behind
+  `Context::registered_blocks()` (one deep copy per `seal()`), and every
+  consumer that had to hand the generators a `&[BlockInfo]` — or copy a
+  declaration to drop endpoints it does not serve before describing it.
+  - Changed: `Context::registered_blocks()` returns
+    `&[Arc<BlockInfo>]` (was `&[BlockInfo]`), and `StartupSnapshot::blocks`
+    is `Vec<Arc<BlockInfo>>`: the registration-time declarations, shared.
+    Field access reads through the `Arc` unchanged (`b.name`,
+    `&b.endpoints`); a function taking `&[BlockInfo]` takes
+    `&[Arc<BlockInfo>]` or is generic over `Borrow<BlockInfo>`. An
+    embedder's `Context` implementation returns `&[Arc<BlockInfo>]`. To
+    read or serialize them as plain declarations — serde's `rc` feature,
+    which `wafer-block` does not enable, is not needed — borrow them with the
+    new `wafer_block::declarations(blocks) -> Vec<&BlockInfo>` (generic over
+    `Borrow<BlockInfo>`).
+  - Changed: `wafer_core::discovery::{generate_openapi,
+    generate_agent_card, generate_webmcp, generate_webmcp_declared_auth,
+    generate_webmcp_report, generate_webmcp_selected}` take `blocks: &[B]`
+    with `B: Borrow<BlockInfo>` (was `&[BlockInfo]`): owned, borrowed or
+    `Arc`-held declarations. An empty literal (`&[]`) no longer infers its
+    element type: name it, as
+    `generate_webmcp_declared_auth::<BlockInfo>(&[], level)`.
+  - Changed: `effective_auth` returns `Option<AuthLevel>` (was
+    `AuthLevel`). `None` says the consumer does not serve the endpoint here
+    — a block it switched off, a server-only endpoint on a runtime with no
+    server — and the endpoint is in no document: no path, no skill, no
+    tool, no refusal, no share of a tool name. Migrating: wrap the level,
+    `|_, ep| Some(ep.auth)`; a consumer that copied declarations to remove
+    endpoints answers `None` for them instead.
+  - Each generator's body is compiled once: the public function borrows one
+    `&BlockInfo` per block and passes `effective_auth` as `&dyn Fn`, so
+    neither the holder type nor the closure type instantiates it again.
+  - `generate_webmcp_selected` copies only the selected endpoints (it
+    copied every declaration per call). Blocks no selection names, and
+    unselected endpoints, do not change its result. A selection still
+    projects onto the first endpoint declaring its method and path, and
+    `effective_auth` is asked once per selected endpoint, about the block's
+    real declaration and the endpoint as declared.
+  - Added: `WebMcpRefusal::SelectionUnpublished`. A selection naming an
+    endpoint `effective_auth` does not publish is refused with it.
+    `SelectionNotFound` stays for an endpoint the block set does not
+    declare.
+  - Changed: of two selections naming one endpoint, the earlier is now the
+    one published (it was the later), as the first endpoint declaring a
+    route is the one a selection names. Added:
+    `WebMcpRefusal::SelectionShadowed`, refusing a later, different
+    selection of the same endpoint, which vanished silently before. An
+    identical selection row repeated is one selection — no further refusal,
+    whether the first was accepted or refused.
+  - Changed: every selection refusal (`SelectionNotFound`,
+    `SelectionUnpublished`, `SelectionShadowed`) carries
+    `visible_to_caller: false` (`SelectionNotFound` carried `true`). A
+    selection is the operator's; what it names, and whether that exists, is
+    never told to a caller. So is every other refusal
+    `generate_webmcp_selected` reports, whatever its reason (a selected
+    name, a schema wall, a path): the selected manifest is the operator's
+    list.
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that
