@@ -11,6 +11,9 @@
   Every field read below is a field on one of those Rust types. Nothing here
   re-derives runtime semantics: flows are listed as declared, and the Routes
   view reads the `routes` config of blocks that declare `router@v1`.
+
+  Navigation is the URL hash — #blocks/<name>, #flows/<id>, #routes,
+  #agent-tools — so every view can be linked, reloaded, and gone back from.
 -->
 <style>
   :root {
@@ -31,81 +34,99 @@
     }
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-2); color: var(--text); font-size: 14px; }
-  code, pre, .mono { font-family: var(--mono); }
+  html, body { height: 100%; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-2); color: var(--text); font-size: 14px; display: flex; flex-direction: column; }
+  code, pre { font-family: var(--mono); font-size: 12.5px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
 
-  header { background: var(--bg); border-bottom: 1px solid var(--border); padding: 10px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
-  header h1 { font-size: 17px; font-weight: 600; }
-  header h1 .w { color: #b8860b; } header h1 .r { color: var(--accent); } header h1 .s { color: var(--border); margin: 0 4px; }
-  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
-  nav button { padding: 6px 14px; border-radius: 6px; cursor: pointer; background: transparent; border: 1px solid transparent; color: var(--text-2); font: inherit; }
-  nav button:hover { color: var(--text); }
-  nav button[aria-selected="true"] { background: var(--hl-bg); border-color: var(--hl-border); color: var(--hl-text); font-weight: 600; }
-  main { padding: 20px 24px; max-width: 1400px; }
-  section[hidden] { display: none; }
-  .intro { color: var(--text-2); margin-bottom: 16px; line-height: 1.5; max-width: 760px; }
-  .status { color: var(--muted); padding: 16px 0; }
-  .empty { color: var(--muted); font-style: italic; }
+  /* ── Header ─────────────────────────────────────────── */
+  header { background: var(--bg); border-bottom: 1px solid var(--border); padding: 0 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 0 20px; flex-shrink: 0; }
+  header h1 { font-size: 16px; font-weight: 600; padding: 12px 0; white-space: nowrap; }
+  header h1 .w { color: #b8860b; } header h1 .r { color: var(--accent); } header h1 .s { color: var(--muted); margin: 0 6px; font-weight: 400; }
+  nav { display: flex; gap: 2px; overflow-x: auto; }
+  nav a { padding: 13px 12px 11px; color: var(--text-2); border-bottom: 2px solid transparent; white-space: nowrap; }
+  nav a:hover { color: var(--text); text-decoration: none; }
+  nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--wafer); font-weight: 600; }
+  nav .n { font-size: 11px; color: var(--muted); margin-left: 4px; font-weight: 400; }
 
-  input[type=search] { width: 100%; max-width: 480px; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit; margin-bottom: 14px; }
+  /* ── List + detail layout ───────────────────────────── */
+  main { flex: 1; min-height: 0; display: flex; }
+  .pane { display: flex; flex: 1; min-height: 0; min-width: 0; }
+  .pane[hidden] { display: none; }
+  .side { width: 300px; flex-shrink: 0; border-right: 1px solid var(--border); background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
+  .side input { margin: 10px; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-2); color: var(--text); font: inherit; }
+  .side input:focus { outline: 2px solid var(--wafer); outline-offset: -1px; }
+  .list { overflow-y: auto; flex: 1; padding: 0 6px 10px; }
+  .list a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--text); }
+  .list a:hover { background: var(--bg-2); text-decoration: none; }
+  .list a[aria-current="true"] { background: var(--hl-bg); color: var(--hl-text); }
+  .list a .t { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  .list a .d { display: block; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .list .group { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 12px 10px 4px; }
+  .detail { flex: 1; overflow-y: auto; padding: 20px 28px 40px; min-width: 0; }
+  .page { flex: 1; overflow-y: auto; padding: 20px 28px 40px; }
+  @media (max-width: 760px) {
+    main, .pane { flex-direction: column; }
+    .side { width: auto; max-height: 40vh; border-right: none; border-bottom: 1px solid var(--border); }
+    .detail, .page { padding: 16px; }
+  }
 
-  details.card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
-  details.card > summary { padding: 10px 14px; cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; list-style: none; }
-  details.card > summary::-webkit-details-marker { display: none; }
-  details.card > summary::before { content: '▸'; color: var(--muted); }
-  details.card[open] > summary::before { content: '▾'; }
-  details.card > summary .name { font-family: var(--mono); font-weight: 600; color: var(--accent); word-break: break-all; }
-  details.card > summary .sum { color: var(--text-2); flex-basis: 100%; padding-left: 18px; }
-  .card-body { padding: 4px 14px 14px 32px; border-top: 1px solid var(--border-2); }
-
-  h3 { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 14px 0 6px; }
-  dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
-  dl.facts dt { color: var(--text-2); } dl.facts dd { word-break: break-word; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 4px 8px; border-bottom: 1px solid var(--border); }
-  td { padding: 4px 8px; border-bottom: 1px solid var(--border-2); vertical-align: top; word-break: break-word; }
-  .table-wrap { overflow-x: auto; }
-  pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); }
+  /* ── Detail content ─────────────────────────────────── */
+  .title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+  .title h2 { font-family: var(--mono); font-size: 18px; word-break: break-all; }
+  .lead { color: var(--text-2); margin: 6px 0 0; line-height: 1.5; max-width: 760px; }
+  .empty { color: var(--muted); }
+  .status { color: var(--muted); padding: 16px; }
+  section.block { margin-top: 24px; }
+  section.block > h3 { font-size: 12px; font-weight: 700; color: var(--text-2); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+  section.block > h3 .n { color: var(--muted); font-weight: 400; }
+  dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin-top: 16px; }
+  dl.facts dt { color: var(--text-2); }
+  dl.facts dd { word-break: break-word; }
+  table { border-collapse: collapse; width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th { text-align: left; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 7px 10px; border-bottom: 1px solid var(--border); background: var(--bg-2); }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border-2); vertical-align: top; word-break: break-word; }
+  tr:last-child td { border-bottom: none; }
+  td .sub { display: block; font-size: 12px; color: var(--text-2); margin-top: 2px; }
+  .scroll-x { overflow-x: auto; }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-word; }
+  details.more { margin-top: 6px; }
+  details.more > summary { cursor: pointer; color: var(--text-2); font-size: 12px; user-select: none; }
+  details.more > summary:hover { color: var(--text); }
+  details.more[open] > summary { margin-bottom: 6px; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); white-space: nowrap; font-family: inherit; }
   .badge.iface { background: var(--hl-bg); color: var(--hl-text); border-color: var(--hl-border); }
-  button.badge { cursor: pointer; font-family: inherit; }
+  button.badge { cursor: pointer; }
   .badge.ok { background: var(--ok-bg); color: var(--ok-text); border-color: var(--ok-border); }
   .badge.bad { background: var(--bad-bg); color: var(--bad-text); border-color: var(--bad-border); }
-  a.block-link { color: var(--accent); font-family: var(--mono); cursor: pointer; text-decoration: none; }
-  a.block-link:hover { text-decoration: underline; }
+  .method { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--text-2); }
+  .secret { color: var(--muted); font-style: italic; }
 
-  /* Flows */
-  .flows { display: grid; grid-template-columns: 240px 1fr; gap: 16px; align-items: start; }
-  @media (max-width: 760px) { .flows { grid-template-columns: 1fr; } }
-  .flow-list button { display: block; width: 100%; text-align: left; padding: 8px 10px; border-radius: 6px; border: 1px solid transparent; background: none; color: var(--text-2); font: inherit; cursor: pointer; word-break: break-all; }
-  .flow-list button:hover { background: var(--bg); }
-  .flow-list button[aria-current="true"] { background: var(--hl-bg); border-color: var(--hl-border); color: var(--hl-text); font-weight: 600; }
-  .flow-detail { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; min-width: 0; }
-  .flow-detail h2 { font-size: 16px; color: var(--accent); }
-  ol.steps { list-style: none; counter-reset: step; }
-  ol.steps > li { counter-increment: step; border-left: 3px solid var(--accent); padding: 6px 0 6px 12px; margin: 8px 0; }
-  ol.steps > li > .step-head::before { content: counter(step) '. '; color: var(--muted); }
-  .step-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  /* ── Flow steps ─────────────────────────────────────── */
+  ol.steps { list-style: none; }
+  ol.steps > li { position: relative; padding: 8px 12px 8px 40px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+  ol.steps > li > .num { position: absolute; left: 10px; top: 9px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: var(--bg); font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .step-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
   .step-head .id { font-weight: 600; }
-  .step-desc { color: var(--text-2); margin: 2px 0; }
-  ul.next { list-style: none; font-size: 13px; }
-  ul.next li::before { content: '→ '; color: var(--muted); }
-  .when { font-family: var(--mono); color: var(--hl-text); }
-  .branch { border: 1px dashed var(--border); border-radius: 6px; padding: 4px 10px; margin: 6px 0; }
-  .branch > .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .step-head .arrow { color: var(--muted); }
+  .step-desc { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  ul.next { list-style: none; font-size: 13px; margin-top: 4px; }
+  ul.next li::before { content: '↳ '; color: var(--muted); }
+  .when { font-family: var(--mono); font-size: 12px; color: var(--hl-text); }
+  .branch { border-left: 2px dashed var(--border); padding-left: 10px; margin-top: 8px; }
+  .branch > .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
 
-  /* Routes */
-  .router { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
-  .router .router { margin: 6px 0 4px; background: var(--bg-2); }
-  .router-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+  /* ── Routes ─────────────────────────────────────────── */
+  .nested { margin: 6px 0 2px; }
 
-  /* Agent tools */
-  .caveat { font-size: 13px; line-height: 1.5; color: var(--hl-text); background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; max-width: 900px; }
+  /* ── Agent tools ────────────────────────────────────── */
+  .caveat { font-size: 13px; line-height: 1.5; color: var(--hl-text); background: var(--hl-bg); border: 1px solid var(--hl-border); border-radius: 8px; padding: 10px 14px; margin: 16px 0; max-width: 900px; }
   .tiers { display: grid; grid-template-columns: repeat(var(--tier-count, 3), minmax(0, 1fr)); gap: 14px; align-items: start; }
   @media (max-width: 900px) { .tiers { grid-template-columns: 1fr; } }
   .tier { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
   .tier-head { padding: 10px 14px; border-bottom: 1px solid var(--border-2); display: flex; align-items: baseline; gap: 8px; }
-  .tier-head h2 { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
+  .tier-head h3 { font-size: 13px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
   .tier-head .count { font-size: 12px; color: var(--text-2); margin-left: auto; }
   .tier-body { padding: 10px 14px 14px; }
   .tool { border-left: 3px solid var(--border); padding: 6px 0 6px 10px; margin-bottom: 10px; }
@@ -117,53 +138,58 @@
   .tool .t-mono { font-family: var(--mono); font-size: 11px; color: var(--muted); word-break: break-all; }
   .tool .t-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
   .refusals { border-top: 1px solid var(--border-2); padding: 10px 14px 14px; background: var(--bg-2); font-size: 12px; }
-  .refusals h3 { margin-top: 0; }
+  .refusals h4 { font-size: 11px; font-weight: 700; color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
   .refusal { margin-bottom: 10px; }
   .refusal .r-tool { font-family: var(--mono); font-weight: 600; color: var(--bad-text); word-break: break-all; }
   .refusal .r-tool.partial { color: var(--hl-text); }
 
-  dialog { border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; max-width: min(640px, 92vw); max-height: 80vh; background: var(--bg); color: var(--text); }
-  dialog::backdrop { background: rgba(0,0,0,.3); }
-  dialog h2 { font-size: 16px; color: var(--accent); margin-bottom: 8px; padding-right: 28px; word-break: break-all; }
+  dialog { border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; width: min(640px, 92vw); max-height: 80vh; background: var(--bg); color: var(--text); margin: auto; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog h2 { font-family: var(--mono); font-size: 16px; margin-bottom: 6px; padding-right: 28px; word-break: break-all; }
+  dialog h4 { font-family: var(--mono); font-size: 13px; margin-top: 14px; }
   dialog .close { position: absolute; top: 10px; right: 14px; background: none; border: none; font-size: 22px; color: var(--muted); cursor: pointer; }
 </style>
 </head>
 <body>
 <header>
   <h1><span class="w">wafer</span><span class="r">.run</span><span class="s">/</span>inspector</h1>
-  <nav role="tablist">
-    <button role="tab" data-view="blocks" aria-selected="true">Blocks</button>
-    <button role="tab" data-view="flows" aria-selected="false">Flows</button>
-    <button role="tab" data-view="routes" aria-selected="false">Routes</button>
-    <button role="tab" data-view="webmcp" aria-selected="false">Agent tools</button>
+  <nav>
+    <a href="#blocks" data-tab="blocks">Blocks<span class="n" id="n-blocks"></span></a>
+    <a href="#flows" data-tab="flows">Flows<span class="n" id="n-flows"></span></a>
+    <a href="#routes" data-tab="routes">Routes<span class="n" id="n-routes"></span></a>
+    <a href="#agent-tools" data-tab="agent-tools">Agent tools</a>
   </nav>
 </header>
 
 <main>
-  <section id="blocks">
-    <p class="intro">Every registered block as it declares itself, with the config it is running with. Sensitive values are redacted.</p>
-    <input type="search" id="block-filter" placeholder="Filter by name, interface or summary…">
-    <div id="block-list"><div class="status">Loading…</div></div>
-  </section>
-
-  <section id="flows" hidden>
-    <p class="intro">Flows as declared: steps run in order unless a step's <code>next</code> redirects.</p>
-    <div class="flows">
-      <div class="flow-list" id="flow-list"><div class="status">Loading…</div></div>
-      <div class="flow-detail" id="flow-detail"><div class="empty">Select a flow.</div></div>
+  <div class="pane" id="pane-blocks">
+    <div class="side">
+      <input type="search" id="filter-blocks" placeholder="Filter blocks…" aria-label="Filter blocks">
+      <div class="list" id="list-blocks"><div class="status">Loading…</div></div>
     </div>
-  </section>
+    <div class="detail" id="detail-blocks"></div>
+  </div>
 
-  <section id="routes" hidden>
-    <p class="intro">The <code>routes</code> config of every block that declares the <code>router@v1</code> interface. A route that targets another router is shown nested under it.</p>
-    <div id="route-list"><div class="status">Loading…</div></div>
-  </section>
+  <div class="pane" id="pane-flows" hidden>
+    <div class="side">
+      <input type="search" id="filter-flows" placeholder="Filter flows…" aria-label="Filter flows">
+      <div class="list" id="list-flows"><div class="status">Loading…</div></div>
+    </div>
+    <div class="detail" id="detail-flows"></div>
+  </div>
 
-  <section id="webmcp" hidden>
-    <p class="intro">The WebMCP tool manifest as each caller receives it. An endpoint becomes a tool only by opting in, and only when its declarations can be projected into one honestly &mdash; so the same site presents a different tool surface depending on who is asking, and an endpoint that opted in and produced no tool says why.</p>
-    <div id="webmcp-caveat"></div>
-    <div id="webmcp-tiers"><div class="status">Loading…</div></div>
-  </section>
+  <div class="pane" id="pane-routes" hidden>
+    <div class="page" id="page-routes"><div class="status">Loading…</div></div>
+  </div>
+
+  <div class="pane" id="pane-agent-tools" hidden>
+    <div class="page">
+      <div class="title"><h2>Agent tools</h2></div>
+      <p class="lead">The WebMCP tool manifest as each caller receives it. An endpoint becomes a tool only by opting in, and only when its declarations can be projected into one honestly &mdash; so the same site offers a different tool surface depending on who is asking, and an endpoint that opted in but produced no tool says why.</p>
+      <div id="webmcp-caveat"></div>
+      <div id="webmcp-tiers"><div class="status">Loading…</div></div>
+    </div>
+  </div>
 </main>
 
 <dialog id="dialog">
@@ -176,129 +202,230 @@
   'use strict';
   const base = location.pathname.replace(/\/ui\/?$/, '');
   const $ = id => document.getElementById(id);
-  let app = { blocks: [], flows: [], configs: {}, interfaces: {} };
+  let app = null;
+  let routers = [];
 
-  // ── Tabs ────────────────────────────────────────────
+  // ── Navigation: the hash is the state ───────────────
+  const TABS = ['blocks', 'flows', 'routes', 'agent-tools'];
+  function parseHash() {
+    const raw = decodeURIComponent(location.hash.slice(1));
+    const slash = raw.indexOf('/');
+    const tab = slash < 0 ? raw : raw.slice(0, slash);
+    return { tab: TABS.includes(tab) ? tab : 'blocks', item: slash < 0 ? '' : raw.slice(slash + 1) };
+  }
+  const href = (tab, item) => '#' + tab + (item ? '/' + encodeURIComponent(item) : '');
+
   // `/webmcp` runs one full manifest projection per auth level server-side,
   // so it is fetched only when its tab is first opened.
-  const onFirstOpen = { webmcp: loadWebmcp };
-  function show(view) {
-    document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === view)));
-    document.querySelectorAll('main > section').forEach(s => { s.hidden = s.id !== view; });
-    const once = onFirstOpen[view];
-    if (once) { delete onFirstOpen[view]; once(); }
+  let webmcpLoaded = false;
+
+  function route() {
+    const { tab, item } = parseHash();
+    document.querySelectorAll('nav a').forEach(a => a.setAttribute('aria-current', a.dataset.tab === tab ? 'page' : 'false'));
+    TABS.forEach(t => { $('pane-' + t).hidden = t !== tab; });
+    if (tab === 'agent-tools' && !webmcpLoaded) { webmcpLoaded = true; loadWebmcp(); }
+    if (!app) return;
+    if (tab === 'blocks') selectBlock(item);
+    if (tab === 'flows') selectFlow(item);
   }
-  document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => show(b.dataset.view)));
+  window.addEventListener('hashchange', route);
+  route();
 
   // ── Data ────────────────────────────────────────────
   fetch(base + '/app')
     .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(new Error(r.status + ' ' + t))))
-    .then(data => { app = data; renderBlocks(); renderFlowList(); renderRoutes(); })
+    .then(data => {
+      app = data;
+      app.blocks.sort((a, b) => a.name.localeCompare(b.name));
+      app.flows.sort((a, b) => a.id.localeCompare(b.id));
+      routers = app.blocks.filter(b => b.interface === 'router@v1').map(b => b.name);
+      $('n-blocks').textContent = app.blocks.length;
+      $('n-flows').textContent = app.flows.length;
+      $('n-routes').textContent = routers.reduce((n, r) => n + routesOf(r).length, 0);
+      renderBlockList();
+      renderFlowList();
+      renderRoutes();
+      route();
+    })
     .catch(e => {
-      const msg = '<div class="status">Could not load ' + esc(base) + '/app: ' + esc(e.message) + '</div>';
-      ['block-list', 'flow-list', 'route-list'].forEach(id => { $(id).innerHTML = msg; });
+      const msg = '<div class="status">Could not load ' + esc(base) + '/app — ' + esc(e.message) + '</div>';
+      ['list-blocks', 'list-flows', 'page-routes'].forEach(id => { $(id).innerHTML = msg; });
     });
 
-  // ── Blocks ──────────────────────────────────────────
-  function renderBlocks() {
-    const blocks = [...app.blocks].sort((a, b) => a.name.localeCompare(b.name));
-    $('block-list').innerHTML = blocks.length
-      ? blocks.map(blockCard).join('')
-      : '<div class="empty">No blocks registered.</div>';
+  const routesOf = name => {
+    const r = (app.configs[name] || {}).routes;
+    return Array.isArray(r) ? r : [];
+  };
+  const findBlock = name => app.blocks.find(b => b.name === name);
+
+  // ── Side lists ──────────────────────────────────────
+  function bindFilter(input, list) {
+    input.addEventListener('input', () => {
+      const q = input.value.toLowerCase().trim();
+      list.querySelectorAll('a').forEach(a => { a.hidden = q && !a.dataset.search.includes(q); });
+      list.querySelectorAll('.group').forEach(g => {
+        let el = g.nextElementSibling, any = false;
+        while (el && !el.classList.contains('group')) { if (!el.hidden) any = true; el = el.nextElementSibling; }
+        g.hidden = !any;
+      });
+    });
+  }
+  bindFilter($('filter-blocks'), $('list-blocks'));
+  bindFilter($('filter-flows'), $('list-flows'));
+
+  function markCurrent(list, key) {
+    list.querySelectorAll('a').forEach(a => a.setAttribute('aria-current', String(a.dataset.key === key)));
+    const cur = list.querySelector('a[aria-current="true"]');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
   }
 
-  function blockCard(b) {
+  // ── Blocks ──────────────────────────────────────────
+  function renderBlockList() {
+    // Grouped by org (the part before the first `/`), which is how block
+    // names are already namespaced.
+    let html = '', org = null;
+    app.blocks.forEach(b => {
+      const o = b.name.includes('/') ? b.name.slice(0, b.name.indexOf('/')) : '';
+      if (o !== org) { org = o; html += '<div class="group">' + esc(o || 'other') + '</div>'; }
+      html += '<a href="' + href('blocks', b.name) + '" data-key="' + esc(b.name) + '" data-search="' +
+        esc((b.name + ' ' + b.interface + ' ' + b.summary).toLowerCase()) + '">' +
+        '<span class="t">' + esc(b.name.slice(o ? o.length + 1 : 0)) + '</span><span class="d">' + esc(b.summary) + '</span></a>';
+    });
+    $('list-blocks').innerHTML = html || '<div class="status">No blocks registered.</div>';
+  }
+
+  function selectBlock(name) {
+    const b = findBlock(name) || app.blocks[0];
+    markCurrent($('list-blocks'), b ? b.name : '');
+    $('detail-blocks').innerHTML = b ? blockDetail(b) : '<p class="empty">No blocks registered.</p>';
+    $('detail-blocks').scrollTop = 0;
+  }
+
+  function blockDetail(b) {
+    let html = '<div class="title"><h2>' + esc(b.name) + '</h2>' + ifaceBadge(b.interface) +
+      '<span class="badge">v' + esc(b.version) + '</span></div>' +
+      '<p class="lead">' + esc(b.description || b.summary) + '</p>';
+
     const facts = [
-      ['Version', esc(b.version)],
       ['Category', esc(b.category)],
       ['Runtime', esc(b.runtime)],
       ['Instance mode', esc(b.instance_mode)],
-      ['Requires', list(b.requires)],
-      ['Optional requires', list(b.optional_requires)],
-      ['Admin UI', b.admin_url ? '<a href="' + esc(b.admin_url) + '">' + esc(b.admin_url) + '</a>' : ''],
+      ['Calls', (b.requires || []).map(blockLink).join(', ')],
+      ['May call', (b.optional_requires || []).map(blockLink).join(', ')],
+      ['Admin page', b.admin_url ? '<a href="' + esc(b.admin_url) + '">' + esc(b.admin_url) + '</a>' : ''],
     ].filter(([, v]) => v);
+    html += '<dl class="facts">' + facts.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('') + '</dl>';
 
-    let body = (b.description ? '<p class="step-desc">' + esc(b.description) + '</p>' : '') +
-      '<dl class="facts">' + facts.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('') + '</dl>';
+    // Where it is used — the question you usually came here with.
+    const inFlows = app.flows.filter(f => allSteps(f.steps).some(s => s.block === b.name));
+    const routedBy = routers.flatMap(r => routesOf(r).filter(rt => rt.block === b.name).map(rt => [r, rt]));
+    if (inFlows.length || routedBy.length) {
+      html += section('Used by', null,
+        (inFlows.length ? '<p>Flows: ' + inFlows.map(f => '<a href="' + href('flows', f.id) + '"><code>' + esc(f.id) + '</code></a>').join(', ') + '</p>' : '') +
+        (routedBy.length ? '<p>Routes: ' + routedBy.map(([, rt]) => '<a href="#routes"><code>' + esc(methodsOf(rt) + ' ' + rt.path) + '</code></a>').join(', ') + '</p>' : ''));
+    }
 
     if (b.endpoints && b.endpoints.length) {
-      body += '<h3>Endpoints</h3>' + table(['Method', 'Path', 'Auth', 'Summary'], b.endpoints.map(ep => [
-        '<code>' + esc(ep.method) + '</code>', '<code>' + esc(ep.path) + '</code>',
-        esc(ep.auth) + (ep.agent_tool ? ' <span class="badge ok">agent tool</span>' : ''), esc(ep.summary),
-      ]));
+      html += section('Endpoints', b.endpoints.length, table(['Endpoint', 'Auth', ''], b.endpoints.map(ep => [
+        '<span class="method">' + esc(ep.method) + '</span> <code>' + esc(ep.path) + '</code>' + (ep.summary ? '<span class="sub">' + esc(ep.summary) + '</span>' : ''),
+        esc(ep.auth),
+        (ep.agent_tool ? '<span class="badge ok">agent tool</span> ' : '') + (ep.deprecated ? '<span class="badge bad">deprecated</span>' : ''),
+      ])));
     }
 
-    const vars = [...(b.config_keys || []).map(v => [v, 'config_keys']), ...(b.flow_config || []).map(v => [v, 'flow_config'])];
-    if (vars.length) {
-      body += '<h3>Declared config</h3>' + table(['Key', 'Label', 'Type', 'Default', 'Slot'], vars.map(([v, slot]) => [
-        '<code>' + esc(v.key) + '</code>', esc(v.name), esc(v.input_type), '<code>' + esc(v.default) + '</code>', '<code>' + slot + '</code>',
-      ]));
-    }
-
-    const config = app.configs[b.name];
-    body += '<h3>Running config</h3>' + (config === undefined ? '<div class="empty">None.</div>' : json(config));
-    body += '<details><summary><h3 style="display:inline">Full declaration</h3></summary>' + json(b) + '</details>';
-
-    return '<details class="card" data-block="' + esc(b.name) + '" data-search="' +
-      esc((b.name + ' ' + b.interface + ' ' + b.summary).toLowerCase()) + '"><summary>' +
-      '<span class="name">' + esc(b.name) + '</span>' + ifaceBadge(b.interface) +
-      '<span class="sum">' + esc(b.summary) + '</span></summary><div class="card-body">' + body + '</div></details>';
+    html += section('Config', null, configTable(b));
+    html += '<section class="block"><details class="more"><summary>Full declaration (JSON)</summary>' + json(b) + '</details></section>';
+    return html;
   }
 
-  $('block-filter').addEventListener('input', e => {
-    const q = e.target.value.toLowerCase().trim();
-    document.querySelectorAll('#block-list details.card').forEach(c => { c.hidden = q && !c.dataset.search.includes(q); });
-  });
+  /**
+   * One table for the block's config: each declared variable with the value
+   * it is running with, then any running key the block does not declare.
+   */
+  function configTable(b) {
+    const running = app.configs[b.name];
+    const values = running && typeof running === 'object' && !Array.isArray(running) ? running : {};
+    const declared = [...(b.config_keys || []), ...(b.flow_config || [])];
+    const seen = new Set(declared.map(v => v.key));
+    const rows = declared.map(v => [
+      '<code>' + esc(v.key) + '</code><span class="sub">' + esc(v.name || v.description) + '</span>',
+      v.key in values ? value(values[v.key]) : '<span class="empty">default</span> <code>' + esc(v.default) + '</code>',
+    ]);
+    Object.keys(values).filter(k => !seen.has(k)).sort().forEach(k => {
+      rows.push(['<code>' + esc(k) + '</code><span class="sub">not declared</span>', value(values[k])]);
+    });
+    if (running !== undefined && !Object.keys(values).length && typeof running !== 'object') {
+      rows.push(['<span class="sub">(whole config)</span>', value(running)]);
+    }
+    return rows.length ? table(['Key', 'Value'], rows) : '<p class="empty">No config declared or set.</p>';
+  }
+
+  function value(v) {
+    if (v === '[redacted]') return '<span class="secret">redacted</span>';
+    if (v !== null && typeof v === 'object') {
+      return '<details class="more"><summary>' + (Array.isArray(v) ? v.length + ' items' : Object.keys(v).length + ' keys') + '</summary>' + json(v) + '</details>';
+    }
+    return '<code>' + esc(JSON.stringify(v)) + '</code>';
+  }
 
   // ── Flows ───────────────────────────────────────────
   function renderFlowList() {
-    const flows = [...app.flows].sort((a, b) => a.id.localeCompare(b.id));
-    if (!flows.length) { $('flow-list').innerHTML = '<div class="empty">No flows.</div>'; return; }
-    $('flow-list').innerHTML = flows.map(f => '<button data-flow="' + esc(f.id) + '">' + esc(f.id) + '</button>').join('');
-    $('flow-list').querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => selectFlow(btn.dataset.flow)));
-    selectFlow(flows[0].id);
+    $('list-flows').innerHTML = app.flows.map(f =>
+      '<a href="' + href('flows', f.id) + '" data-key="' + esc(f.id) + '" data-search="' + esc((f.id + ' ' + f.name).toLowerCase()) + '">' +
+      '<span class="t">' + esc(f.id) + '</span><span class="d">' + esc(f.name) + ' · ' + f.steps.length + ' steps</span></a>').join('') ||
+      '<div class="status">No flows.</div>';
   }
 
   function selectFlow(id) {
-    $('flow-list').querySelectorAll('button').forEach(b => b.setAttribute('aria-current', String(b.dataset.flow === id)));
-    const f = app.flows.find(x => x.id === id);
-    let html = '<h2>' + esc(f.name) + '</h2><dl class="facts"><dt>ID</dt><dd><code>' + esc(f.id) + '</code></dd>' +
-      '<dt>Version</dt><dd>' + esc(f.version) + '</dd></dl>' +
-      (f.description ? '<p class="step-desc">' + esc(f.description) + '</p>' : '');
-    if (f.config) html += '<h3>Execution policy</h3>' + json(f.config);
-    if (f.config_map) html += '<h3>Config map</h3>' + json(f.config_map);
-    if (f.config_defaults) html += '<h3>Config defaults</h3>' + json(f.config_defaults);
-    html += '<h3>Steps</h3>' + steps(f.steps);
-    $('flow-detail').innerHTML = html;
+    const f = app.flows.find(x => x.id === id) || app.flows[0];
+    markCurrent($('list-flows'), f ? f.id : '');
+    $('detail-flows').scrollTop = 0;
+    if (!f) { $('detail-flows').innerHTML = '<p class="empty">No flows.</p>'; return; }
+    let html = '<div class="title"><h2>' + esc(f.id) + '</h2><span class="badge">v' + esc(f.version) + '</span></div>' +
+      '<p class="lead">' + esc(f.name) + (f.description ? ' — ' + esc(f.description) : '') + '</p>';
+    html += section('Steps', f.steps.length, '<p class="lead" style="margin:0 0 8px">Run top to bottom unless a step\'s rules jump elsewhere.</p>' + steps(f.steps));
+    const extra = [['Execution policy', f.config], ['Config map', f.config_map], ['Config defaults', f.config_defaults]].filter(([, v]) => v);
+    if (extra.length) {
+      html += section('Flow config', null, extra.map(([k, v]) => '<details class="more"><summary>' + k + '</summary>' + json(v) + '</details>').join(''));
+    }
+    $('detail-flows').innerHTML = html;
   }
 
-  /** A `Step[]` as an ordered list: a direct projection, nested for `parallel`. */
+  function allSteps(list) {
+    return list.flatMap(s => [s, ...(s.parallel || []).flatMap(br => allSteps(br.steps))]);
+  }
+
+  /** A `Step[]` as a numbered list; input and config tucked behind a toggle. */
   function steps(list) {
-    return '<ol class="steps">' + list.map(s => {
-      let li = '<li><div class="step-head"><span class="id">' + esc(s.id) + '</span>' + blockLink(s.block) +
-        (s.each ? '<span class="badge">each <code>' + esc(s.each) + '</code></span>' : '') + '</div>';
+    return '<ol class="steps">' + list.map((s, i) => {
+      let li = '<li><span class="num">' + (i + 1) + '</span><div class="step-head"><span class="id">' + esc(s.id) + '</span>' +
+        '<span class="arrow">→</span>' + blockLink(s.block) +
+        (s.each ? '<span class="badge">for each <code>' + esc(s.each) + '</code></span>' : '') + '</div>';
       if (s.description) li += '<div class="step-desc">' + esc(s.description) + '</div>';
-      (s.parallel || []).forEach((branch, i) => {
-        li += '<div class="branch"><div class="label">parallel branch ' + (i + 1) + '</div>' + steps(branch.steps) + '</div>';
+      (s.parallel || []).forEach((branch, n) => {
+        li += '<div class="branch"><div class="label">In parallel · branch ' + (n + 1) + '</div>' + steps(branch.steps) + '</div>';
       });
-      if (s.input !== undefined) li += '<h3>Input</h3>' + json(s.input);
-      if (s.config !== undefined) li += '<h3>Config</h3>' + json(s.config);
       if (s.next && s.next.length) {
         li += '<ul class="next">' + s.next.map(n =>
-          '<li>' + (n.when ? '<span class="when">when ' + esc(n.when) + '</span> ' : 'otherwise ') +
-          (n.step ? 'step <code>' + esc(n.step) + '</code>' : 'flow <code>' + esc(n.flow) + '</code>') + '</li>').join('') + '</ul>';
+          '<li>' + (n.when ? 'if <span class="when">' + esc(n.when) + '</span> → ' : 'otherwise → ') +
+          (n.step ? 'step <b>' + esc(n.step) + '</b>' : 'flow <a href="' + href('flows', n.flow) + '"><code>' + esc(n.flow) + '</code></a>') + '</li>').join('') + '</ul>';
+      }
+      const parts = [['input', s.input], ['config', s.config]].filter(([, v]) => v !== undefined);
+      if (parts.length) {
+        li += '<details class="more"><summary>Show ' + parts.map(([k]) => k).join(' & ') + '</summary>' +
+          parts.map(([k, v]) => (parts.length > 1 ? '<div class="step-desc">' + k + '</div>' : '') + json(v)).join('') + '</details>';
       }
       return li + '</li>';
     }).join('') + '</ol>';
   }
 
   // ── Routes ──────────────────────────────────────────
+  function methodsOf(r) {
+    const m = r.methods || r.actions;
+    return m && m.length ? m.join(',') : 'ANY';
+  }
+
   function renderRoutes() {
-    const routers = app.blocks.filter(b => b.interface === 'router@v1').map(b => b.name);
-    const routesOf = name => {
-      const r = (app.configs[name] || {}).routes;
-      return Array.isArray(r) ? r : [];
-    };
     const targeted = new Set(routers.flatMap(n => routesOf(n).map(r => r.block)));
     const roots = routers.filter(n => !targeted.has(n));
     // A cycle of routers has no root; show each one rather than nothing.
@@ -306,29 +433,27 @@
 
     function router(name, seen) {
       const routes = routesOf(name);
-      const rows = routes.length ? routes.map(r => {
-        const methods = r.methods || r.actions;
-        const nested = routers.includes(r.block) && !seen.has(r.block)
-          ? '<tr><td colspan="3">' + router(r.block, new Set([...seen, r.block])) + '</td></tr>' : '';
-        return '<tr><td><code>' + esc(methods ? methods.join(', ') : 'any') + '</code></td><td><code>' + esc(r.path) +
-          '</code></td><td>' + blockLink(r.block) + '</td></tr>' + nested;
-      }).join('') : '<tr><td colspan="3" class="empty">No routes configured.</td></tr>';
-      return '<div class="router"><div class="router-head">' + blockLink(name) + ifaceBadge('router@v1') + '</div>' +
-        '<div class="table-wrap"><table><thead><tr><th>Methods</th><th>Path</th><th>Block</th></tr></thead><tbody>' +
-        rows + '</tbody></table></div></div>';
+      if (!routes.length) return '<p class="empty">No routes configured.</p>';
+      return table(['Request', 'Handled by'], routes.map(r => {
+        const sub = routers.includes(r.block) && !seen.has(r.block)
+          ? '<div class="nested">' + router(r.block, new Set([...seen, r.block])) + '</div>' : '';
+        return ['<span class="method">' + esc(methodsOf(r)) + '</span> <code>' + esc(r.path) + '</code>', blockLink(r.block) + sub];
+      }));
     }
 
-    $('route-list').innerHTML = shown.length
-      ? shown.map(n => router(n, new Set([n]))).join('')
-      : '<div class="empty">No block declares the router@v1 interface.</div>';
+    $('page-routes').innerHTML = '<div class="title"><h2>Routes</h2></div>' +
+      '<p class="lead">Which block handles each request, in match order — the first route that matches wins. Read from the <code>routes</code> config of every block declaring <code>router@v1</code>; a route handed to another router shows that router\'s table inside it.</p>' +
+      (shown.length
+        ? shown.map(n => section(blockLink(n), routesOf(n).length, router(n, new Set([n])))).join('')
+        : '<p class="empty" style="margin-top:16px">No block declares the <code>router@v1</code> interface.</p>');
   }
 
   // ── Agent tools (WebMCP) ────────────────────────────
   function loadWebmcp() {
     fetch(base + '/webmcp')
-      .then(r => r.json())
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
       .then(renderWebmcp)
-      .catch(e => { $('webmcp-tiers').innerHTML = '<div class="status">Error loading agent tools: ' + esc(e.message) + '</div>'; });
+      .catch(e => { $('webmcp-tiers').innerHTML = '<div class="status">Could not load agent tools — ' + esc(e.message) + '</div>'; });
   }
 
   /**
@@ -348,7 +473,7 @@
         'blocks will serve a narrower one again — this page shows every registered block, because live ' +
         'enablement is not something the runtime hands this block. It shows what the declarations alone say.</div>';
     }
-    if (!levels.length) { $('webmcp-tiers').innerHTML = '<div class="empty">No auth levels reported.</div>'; return; }
+    if (!levels.length) { $('webmcp-tiers').innerHTML = '<p class="empty">No auth levels reported.</p>'; return; }
 
     let previous = null;
     const cols = levels.map(level => {
@@ -356,9 +481,9 @@
       const names = new Set(tools.map(t => t.name));
       const removed = previous ? [...previous].filter(n => !names.has(n)) : [];
       // "N of M" compares like with like: M is what opted in at this level.
-      let html = '<div class="tier"><div class="tier-head"><h2>' + esc(level.level) + '</h2>' +
+      let html = '<div class="tier"><div class="tier-head"><h3>' + esc(level.level) + '</h3>' +
         '<span class="count">' + tools.length + ' of ' + level.opted_in + ' opted in</span></div><div class="tier-body">';
-      if (!tools.length) html += '<div class="empty">No tools at this level.</div>';
+      if (!tools.length) html += '<p class="empty">No tools at this level.</p>';
       tools.forEach(t => {
         const isNew = previous && !previous.has(t.name);
         const inv = t.invocation || {};
@@ -377,7 +502,7 @@
       });
       html += '</div>';
       if (level.refusals.length) {
-        html += '<div class="refusals"><h3>Opted in, no tool</h3>' + level.refusals.map(r => {
+        html += '<div class="refusals"><h4>Opted in, no tool</h4>' + level.refusals.map(r => {
           const partial = r.scope === 'outputSchema';
           return '<div class="refusal"><span class="r-tool' + (partial ? ' partial' : '') + '">' + esc(r.tool_name) + '</span>' +
             (partial ? ' <span class="badge">outputSchema only</span>' : '') +
@@ -401,48 +526,41 @@
   }
 
   // ── Shared pieces ───────────────────────────────────
+  function section(title, count, body) {
+    return '<section class="block"><h3>' + title + (count != null ? ' <span class="n">' + count + '</span>' : '') + '</h3>' + body + '</section>';
+  }
   function ifaceBadge(name) {
-    return '<button class="badge iface" data-interface="' + esc(name) + '">' + esc(name) + '</button>';
+    return '<button class="badge iface" data-interface="' + esc(name) + '" title="Show the interface contract">' + esc(name) + '</button>';
   }
+  /** A link to a block's page, or plain text when no block by that name is registered. */
   function blockLink(name) {
-    return '<a class="block-link" data-goto-block="' + esc(name) + '">' + esc(name) + '</a>';
+    return app && findBlock(name)
+      ? '<a href="' + href('blocks', name) + '"><code>' + esc(name) + '</code></a>'
+      : '<code title="not a registered block">' + esc(name) + '</code>';
   }
-  function list(items) { return items && items.length ? items.map(i => '<code>' + esc(i) + '</code>').join(', ') : ''; }
   function json(v) { return '<pre>' + esc(JSON.stringify(v, null, 2)) + '</pre>'; }
   function table(head, rows) {
-    return '<div class="table-wrap"><table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
+    return '<div class="scroll-x"><table><thead><tr>' + head.map(h => '<th>' + h + '</th>').join('') + '</tr></thead><tbody>' +
       rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</tbody></table></div>';
   }
   function esc(s) {
     return s == null ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // Interface badges open the interface's contract.
   document.addEventListener('click', e => {
     const iface = e.target.closest('[data-interface]');
-    if (iface) {
-      e.preventDefault();
-      const spec = app.interfaces[iface.dataset.interface];
-      const actions = spec ? Object.entries(spec.actions || {}).sort(([a], [b]) => a.localeCompare(b)) : [];
-      $('dialog-body').innerHTML = '<h2>' + esc(iface.dataset.interface) + '</h2>' + (spec
-        ? '<p class="step-desc">' + esc(spec.description) + '</p>' + (actions.length
-          ? actions.map(([name, a]) => '<h3>' + esc(name) + '</h3><p>' + esc(a.description) + '</p>' +
-            (a.message_schema ? '<h3>Message schema</h3>' + json(a.message_schema) : '') +
-            (a.response_schema ? '<h3>Response schema</h3>' + json(a.response_schema) : '')).join('')
-          : '<p class="empty">Action-agnostic: no actions declared.</p>')
-        : '<p class="empty">No spec registered for this interface.</p>');
-      $('dialog').showModal();
-      return;
-    }
-    const link = e.target.closest('[data-goto-block]');
-    if (link) {
-      const card = document.querySelector('#block-list details.card[data-block="' + CSS.escape(link.dataset.gotoBlock) + '"]');
-      if (!card) return;
-      $('block-filter').value = '';
-      document.querySelectorAll('#block-list details.card').forEach(c => { c.hidden = false; });
-      show('blocks');
-      card.open = true;
-      card.scrollIntoView({ block: 'start' });
-    }
+    if (!iface) return;
+    const spec = app && app.interfaces[iface.dataset.interface];
+    const actions = spec ? Object.entries(spec.actions || {}).sort(([a], [b]) => a.localeCompare(b)) : [];
+    $('dialog-body').innerHTML = '<h2>' + esc(iface.dataset.interface) + '</h2>' + (spec
+      ? '<p class="lead">' + esc(spec.description) + '</p>' + (actions.length
+        ? actions.map(([name, a]) => '<h4>' + esc(name) + '</h4><p class="step-desc">' + esc(a.description) + '</p>' +
+          (a.message_schema ? '<details class="more"><summary>Message schema</summary>' + json(a.message_schema) + '</details>' : '') +
+          (a.response_schema ? '<details class="more"><summary>Response schema</summary>' + json(a.response_schema) + '</details>' : '')).join('')
+        : '<p class="empty" style="margin-top:10px">Accepts any action.</p>')
+      : '<p class="empty">No spec is registered for this interface.</p>');
+    $('dialog').showModal();
   });
   $('dialog').addEventListener('click', e => { if (e.target === $('dialog')) $('dialog').close(); });
 })();
