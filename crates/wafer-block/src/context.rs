@@ -13,6 +13,23 @@ use crate::{
     types::BlockInfo,
 };
 
+/// The declarations in `blocks`, borrowed: one `&BlockInfo` per entry.
+///
+/// [`Context::registered_blocks`] lends the runtime's declarations as
+/// `Arc<BlockInfo>`s (shared with the registrations, never copied), and a
+/// caller may hold owned `BlockInfo`s instead. This borrows either for code
+/// that reads or serializes plain declarations — serde serializes a
+/// `&BlockInfo` without its `rc` feature, which this crate does not enable —
+/// and it is how `wafer_core::discovery`'s generators borrow theirs.
+///
+/// The `Vec` is one pointer per block. Its callers allocate far more per use
+/// (a generator, every JSON value it emits), and a body over `&[&BlockInfo]`
+/// is compiled once, where threading the holder type through it would
+/// compile it once per holder.
+pub fn declarations<B: std::borrow::Borrow<BlockInfo>>(blocks: &[B]) -> Vec<&BlockInfo> {
+    blocks.iter().map(std::borrow::Borrow::borrow).collect()
+}
+
 /// Context provides runtime capabilities to blocks.
 #[wafer_async_trait]
 pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {

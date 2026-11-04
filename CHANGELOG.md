@@ -18,8 +18,10 @@
     `&b.endpoints`); a function taking `&[BlockInfo]` takes
     `&[Arc<BlockInfo>]` or is generic over `Borrow<BlockInfo>`. An
     embedder's `Context` implementation returns `&[Arc<BlockInfo>]`. To
-    serialize them without serde's `rc` feature (which `wafer-block` does not
-    enable), borrow each: `blocks.iter().map(|b| &**b)`.
+    read or serialize them as plain declarations — serde's `rc` feature,
+    which `wafer-block` does not enable, is not needed — borrow them with the
+    new `wafer_block::declarations(blocks) -> Vec<&BlockInfo>` (generic over
+    `Borrow<BlockInfo>`).
   - Changed: `wafer_core::discovery::{generate_openapi,
     generate_agent_card, generate_webmcp, generate_webmcp_declared_auth,
     generate_webmcp_report, generate_webmcp_selected}` take `blocks: &[B]`
@@ -44,13 +46,19 @@
     `effective_auth` is asked once per selected endpoint, about the block's
     real declaration and the endpoint as declared.
   - Added: `WebMcpRefusal::SelectionUnpublished`. A selection naming an
-    endpoint `effective_auth` does not publish is refused with it, with
-    `visible_to_caller: false`, so a caller is never told the endpoint
-    exists. `SelectionNotFound` stays for an endpoint the block set does not
+    endpoint `effective_auth` does not publish is refused with it.
+    `SelectionNotFound` stays for an endpoint the block set does not
     declare.
-  - Added: `WebMcpRefusal::SelectionShadowed`. Of two selections naming one
-    endpoint the later is published, as before; the earlier is now refused
-    with it instead of vanishing.
+  - Changed: of two selections naming one endpoint, the earlier is now the
+    one published (it was the later), as the first endpoint declaring a
+    route is the one a selection names. Added:
+    `WebMcpRefusal::SelectionShadowed`, refusing the later one, which
+    vanished silently before.
+  - Changed: every selection refusal (`SelectionNotFound`,
+    `SelectionUnpublished`, `SelectionShadowed`) carries
+    `visible_to_caller: false` (`SelectionNotFound` carried `true`). A
+    selection is the operator's; what it names, and whether that exists, is
+    never told to a caller.
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that

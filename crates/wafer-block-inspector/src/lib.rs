@@ -456,17 +456,12 @@ impl Block for InspectorBlock {
                 ok_json(&serde_json::json!({
                     "flows": flows,
                     "configs": configs,
-                    "blocks": blocks.iter().map(|b| &**b).collect::<Vec<&BlockInfo>>(),
+                    "blocks": wafer_block::declarations(blocks),
                     "interfaces": interfaces,
                 }))
             }
 
-            Route::Blocks => ok_json(
-                &ctx.registered_blocks()
-                    .iter()
-                    .map(|b| &**b)
-                    .collect::<Vec<&BlockInfo>>(),
-            ),
+            Route::Blocks => ok_json(&wafer_block::declarations(ctx.registered_blocks())),
 
             Route::Block(name) => {
                 let decoded = percent_encoding::percent_decode_str(name)
