@@ -4,6 +4,35 @@
 
 ### Breaking changes
 
+- **The inspector serves three routes, and its UI renders the runtime's
+  types as they are.** `wafer-run/inspector` answers `{mount}/ui`,
+  `{mount}/app` and `{mount}/webmcp`; anything else is `NotFound`.
+  - Removed: `{mount}/blocks`, `{mount}/blocks/{name}`, `{mount}/flows`,
+    `{mount}/flows/{id}`, `{mount}/interfaces`, and the counts summary at
+    any other path. `/app` already carried all of it — `{ blocks, flows,
+    configs, interfaces }`, the runtime's own `BlockInfo` / `WaferFlow` /
+    `InterfaceSpec` serialized verbatim with sensitive config values
+    redacted — so migrate with `jq` over `/app`, e.g.
+    `jq '.blocks[] | select(.name == "org/x") | .capabilities'`.
+  - The UI loads `/app` once and has four views. **Blocks** shows each
+    block's full declaration — endpoints, declared config
+    (`config_keys` / `flow_config`), `admin_url` — and its running config;
+    the old cards read `admin_ui` and `config_schema`, which `BlockInfo`
+    no longer has, and never showed the declared config. **Flows** lists
+    each flow's steps in order with their `next`, `each` and `parallel`
+    entries; the old tree re-derived sequencing in JavaScript and drew
+    flows using `parallel` or `each` wrongly. **Routes** shows the
+    `routes` config of every block declaring `router@v1`, nesting a route
+    whose target is another router; it replaces the App topology view,
+    which matched `wafer-run/router` and `wafer-run/http-listener` by name.
+    **Agent tools** is unchanged.
+  - The access policy is declared config: `allow_anonymous` (toggle,
+    default `false`) and `allowed_roles` (default `admin`) in
+    `flow_config`. `allowed_roles` is now a comma-separated string, like
+    monitoring's `stats_roles`; it was a JSON array. A present but
+    malformed value, or a role list naming no roles, fails Init with
+    `InvalidArgument` where it fell back to the default.
+
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that
   every dispatch resolves against, but the registry stayed open: an alias

@@ -25,7 +25,6 @@ wafer-block = { path = "../wafer-block" }
 wafer-core = { path = "../wafer-core" }
 async-trait = { workspace = true }
 wafer-block-macro = { workspace = true }
-percent-encoding = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
