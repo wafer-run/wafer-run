@@ -12,10 +12,16 @@ use wafer_block::types::{
 ///
 /// Every generator is generic over how its caller holds a declaration — a
 /// `BlockInfo` it built, or the `Arc<BlockInfo>` a runtime lends
-/// (`Wafer::block_infos`), so a consumer never copies a declaration to
-/// describe it — and does its work over these references. The work is
-/// compiled once, not once per holder; the generic part is this collection
-/// of one pointer per block.
+/// (`Wafer::block_infos`, `Context::registered_blocks`), so a consumer never
+/// copies a declaration to describe it — and over its `effective_auth`
+/// closure. Both are confined to the public shim: the body (`*_over`) takes
+/// these references and the closure as `&dyn Fn`, so each generator's body
+/// is compiled once, whatever its callers hold and pass.
+///
+/// The `Vec` is one pointer per block, allocated once per document. A
+/// document build allocates far more than that (every JSON value it emits),
+/// and the alternative — threading the holder type through every helper —
+/// is the per-holder copy of each body this function exists to avoid.
 fn declarations<B: Borrow<BlockInfo>>(blocks: &[B]) -> Vec<&BlockInfo> {
     blocks.iter().map(Borrow::borrow).collect()
 }
@@ -2036,7 +2042,7 @@ fn rewrite_schema_map(node: &Value, renames: &Renames) -> Value {
 pub fn generate_openapi<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
     project_name: &str,
     project_description: &str,
     server_url: &str,
@@ -2044,7 +2050,7 @@ pub fn generate_openapi<B: Borrow<BlockInfo>>(
     openapi_over(
         &declarations(blocks),
         caller,
-        effective_auth,
+        &effective_auth,
         project_name,
         project_description,
         server_url,
@@ -2054,7 +2060,7 @@ pub fn generate_openapi<B: Borrow<BlockInfo>>(
 fn openapi_over(
     blocks: &[&BlockInfo],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: &dyn Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
     project_name: &str,
     project_description: &str,
     server_url: &str,
@@ -2077,7 +2083,9 @@ fn openapi_over(
             if !ep.has_schema() {
                 continue;
             }
-            let required = effective_auth(block, ep);
+            let Some(required) = effective_auth(block, ep) else {
+                continue;
+            };
             if required > caller {
                 continue;
             }
@@ -2219,7 +2227,7 @@ fn openapi_over(
 pub fn generate_agent_card<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
     project_name: &str,
     project_description: &str,
     server_url: &str,
@@ -2227,7 +2235,7 @@ pub fn generate_agent_card<B: Borrow<BlockInfo>>(
     agent_card_over(
         &declarations(blocks),
         caller,
-        effective_auth,
+        &effective_auth,
         project_name,
         project_description,
         server_url,
@@ -2237,7 +2245,7 @@ pub fn generate_agent_card<B: Borrow<BlockInfo>>(
 fn agent_card_over(
     blocks: &[&BlockInfo],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: &dyn Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
     project_name: &str,
     project_description: &str,
     server_url: &str,
@@ -2246,7 +2254,7 @@ fn agent_card_over(
 
     for block in blocks {
         for ep in &block.endpoints {
-            if !ep.has_schema() || effective_auth(block, ep) > caller {
+            if !ep.has_schema() || effective_auth(block, ep).is_none_or(|level| level > caller) {
                 continue;
             }
 
@@ -2676,6 +2684,14 @@ impl std::fmt::Display for WebMcpRefusalReport {
 /// For a router that mounts blocks under access-tiered prefixes that is
 /// `max(prefix_tier, ep.auth)`, not `ep.auth` alone.
 ///
+/// It answers `None` for an endpoint the consumer does not serve at all
+/// here — a block it has switched off, or a server-only endpoint on a
+/// runtime with no server. That endpoint is left out of the document as
+/// though it were never declared: no entry, no refusal, no share of a tool
+/// name. Every generator takes the same `effective_auth`, so the documents
+/// a consumer publishes agree on what exists, and a consumer never copies a
+/// declaration to remove an endpoint from it.
+///
 /// It is an argument rather than a default because only the consumer knows
 /// its prefix table, and getting it wrong is not a cosmetic error in either
 /// direction. A `Public` endpoint mounted under an admin-only prefix, judged
@@ -2686,7 +2702,7 @@ impl std::fmt::Display for WebMcpRefusalReport {
 ///
 /// A consumer whose routing cannot raise an endpoint's declared level may
 /// use [`generate_webmcp_declared_auth`], which is this function with
-/// `|_, ep| ep.auth`. Its name says at the call site which claim is being
+/// `|_, ep| Some(ep.auth)`. Its name says at the call site which claim is being
 /// made, so a reviewer can check it without opening the docs.
 ///
 /// Every endpoint this refuses is logged at `warn!` with the block, method,
@@ -2695,9 +2711,9 @@ impl std::fmt::Display for WebMcpRefusalReport {
 pub fn generate_webmcp<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
 ) -> Value {
-    let (manifest, refused) = webmcp_report_over(&declarations(blocks), caller, effective_auth);
+    let (manifest, refused) = webmcp_report_over(&declarations(blocks), caller, &effective_auth);
     for refusal in &refused {
         tracing::warn!(
             block = %refusal.block,
@@ -2739,7 +2755,7 @@ pub fn generate_webmcp_declared_auth<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
 ) -> Value {
-    generate_webmcp(blocks, caller, |_block, ep| ep.auth)
+    generate_webmcp(blocks, caller, |_block, ep| Some(ep.auth))
 }
 
 /// [`generate_webmcp`], returning the refused endpoints alongside the
@@ -2802,15 +2818,15 @@ pub fn generate_webmcp_declared_auth<B: Borrow<BlockInfo>>(
 pub fn generate_webmcp_report<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
 ) -> (Value, Vec<WebMcpRefusalReport>) {
-    webmcp_report_over(&declarations(blocks), caller, effective_auth)
+    webmcp_report_over(&declarations(blocks), caller, &effective_auth)
 }
 
 fn webmcp_report_over(
     blocks: &[&BlockInfo],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: &dyn Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
 ) -> (Value, Vec<WebMcpRefusalReport>) {
     use WebMcpRefusalScope as Scope;
 
@@ -2908,7 +2924,9 @@ fn webmcp_report_over(
     for block in blocks {
         for ep in &block.endpoints {
             if let Some(tool) = ep.agent_tool.as_ref() {
-                if AgentTool::is_valid_name(&tool.name) && effective_auth(block, ep) <= caller {
+                if AgentTool::is_valid_name(&tool.name)
+                    && effective_auth(block, ep).is_some_and(|level| level <= caller)
+                {
                     *name_counts.entry(tool.name.as_str()).or_insert(0) += 1;
                 }
             }
@@ -2922,6 +2940,11 @@ fn webmcp_report_over(
             let Some(tool) = ep.agent_tool.as_ref() else {
                 continue;
             };
+            // An endpoint the consumer does not publish is not in any
+            // document: no tool, no refusal, no share of a name.
+            let Some(required) = effective_auth(block, ep) else {
+                continue;
+            };
 
             // Resolved here rather than at the filter below because every
             // refusal recorded on the way there has to carry it: a consumer
@@ -2929,7 +2952,7 @@ fn webmcp_report_over(
             // entries about endpoints this caller cannot see, and it must
             // not re-derive that decision itself. The filter below still
             // decides the manifest; this only records what it will decide.
-            let visible_to_caller = effective_auth(block, ep) <= caller;
+            let visible_to_caller = required <= caller;
 
             let mut refuse = |scope: Scope, reason: WebMcpRefusal| {
                 refused.push(WebMcpRefusalReport {
@@ -3236,10 +3259,11 @@ pub struct ToolSelection {
 /// under the name and description each selection supplies. Everything else
 /// about the projection — auth filtering via `effective_auth`, per-manifest
 /// duplicate-name detection, schema walls, the deprecated-tool prefix — is
-/// unchanged, because this builds a shadow copy of `blocks` with every
-/// endpoint's own `agent_tool` cleared and only the selected endpoints
-/// annotated, then delegates to [`generate_webmcp_report`]. There is no
-/// second projection code path to keep in sync with the first.
+/// unchanged, because this projects the selected endpoints — copies of
+/// them alone, each annotated by its selection — onto the body of
+/// [`generate_webmcp_report`]. There is no second projection code path to
+/// keep in sync with the first. Endpoints nobody selected, and blocks no
+/// selection names, are not copied and do not change the result.
 ///
 /// A [`ToolSelection`] naming a block/method/path the block set declares no
 /// endpoint for cannot be projected onto anything, and is reported as
@@ -3250,61 +3274,84 @@ pub struct ToolSelection {
 pub fn generate_webmcp_selected<B: Borrow<BlockInfo>>(
     blocks: &[B],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
     selections: &[ToolSelection],
 ) -> (Value, Vec<WebMcpRefusalReport>) {
-    webmcp_selected_over(&declarations(blocks), caller, effective_auth, selections)
+    webmcp_selected_over(&declarations(blocks), caller, &effective_auth, selections)
 }
 
 fn webmcp_selected_over(
     blocks: &[&BlockInfo],
     caller: AuthLevel,
-    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    effective_auth: &dyn Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel>,
     selections: &[ToolSelection],
 ) -> (Value, Vec<WebMcpRefusalReport>) {
-    // Build a shadow block set: every endpoint loses its own annotation and
-    // only selected endpoints gain one. `generate_webmcp_report` then does
-    // exactly what it does for the global manifest — name validation,
-    // per-manifest duplicate detection, auth filtering, schema walls.
-    let mut shadow: Vec<BlockInfo> = blocks
-        .iter()
-        .map(|b| {
-            let mut b = BlockInfo::clone(b);
-            for ep in &mut b.endpoints {
-                ep.agent_tool = None;
+    // Project onto a shadow block set holding only what was selected: for
+    // each block a selection names, the selected endpoints, each annotated
+    // by its selection and by nothing else. The body of
+    // `generate_webmcp_report` then does exactly what it does for the
+    // global manifest — name validation, per-manifest duplicate detection,
+    // auth filtering, schema walls. An endpoint nobody selected would carry
+    // no annotation there and so produce nothing, which is why it is not
+    // copied: the copy is the selected endpoints, never the block set.
+    //
+    // A shadow block carries the block's name and its selected endpoints; the
+    // report reads nothing else of a declaration.
+    let mut found = vec![false; selections.len()];
+    let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut shadow: Vec<BlockInfo> = Vec::new();
+    for block in blocks {
+        // The first block of a name is the one a selection names, as a
+        // runtime resolves a name to one block.
+        if !seen_names.insert(block.name.as_str()) {
+            continue;
+        }
+        let mut endpoints = Vec::new();
+        for ep in &block.endpoints {
+            let mut chosen = None;
+            for (index, sel) in selections.iter().enumerate() {
+                if sel.block == block.name && sel.method == ep.method && sel.path == ep.path {
+                    found[index] = true;
+                    // Selections apply in order, so the last one naming an
+                    // endpoint is the one it is published under.
+                    chosen = Some(sel);
+                }
             }
-            b
-        })
-        .collect();
-    let mut not_found = Vec::new();
-    for sel in selections {
-        let hit = shadow
-            .iter_mut()
-            .find(|b| b.name == sel.block)
-            .and_then(|b| {
-                b.endpoints
-                    .iter_mut()
-                    .find(|ep| ep.method == sel.method && ep.path == sel.path)
-            });
-        match hit {
-            Some(ep) => {
+            if let Some(sel) = chosen {
+                let mut ep = ep.clone();
                 ep.agent_tool = Some(AgentTool {
                     name: sel.name.clone(),
                     description: sel.description.clone(),
                 });
+                endpoints.push(ep);
             }
-            None => not_found.push(WebMcpRefusalReport {
-                block: sel.block.clone(),
-                method: sel.method,
-                path: sel.path.clone(),
-                tool_name: sel.name.clone(),
-                scope: WebMcpRefusalScope::Tool,
-                reason: WebMcpRefusal::SelectionNotFound,
-                visible_to_caller: true,
-            }),
+        }
+        if !endpoints.is_empty() {
+            let mut projected = BlockInfo::new(
+                block.name.clone(),
+                block.version.clone(),
+                block.interface.clone(),
+                String::new(),
+            );
+            projected.endpoints = endpoints;
+            shadow.push(projected);
         }
     }
-    let (doc, mut refused) = generate_webmcp_report(&shadow, caller, effective_auth);
+    let not_found = selections
+        .iter()
+        .zip(&found)
+        .filter(|(_, found)| !**found)
+        .map(|(sel, _)| WebMcpRefusalReport {
+            block: sel.block.clone(),
+            method: sel.method,
+            path: sel.path.clone(),
+            tool_name: sel.name.clone(),
+            scope: WebMcpRefusalScope::Tool,
+            reason: WebMcpRefusal::SelectionNotFound,
+            visible_to_caller: true,
+        });
+    let shadow: Vec<&BlockInfo> = shadow.iter().collect();
+    let (doc, mut refused) = webmcp_report_over(&shadow, caller, effective_auth);
     refused.extend(not_found);
     (doc, refused)
 }
@@ -3340,79 +3387,173 @@ mod tests {
             ])
     }
 
-    /// Every generator describes `Arc`-held declarations — what
-    /// `Wafer::block_infos` lends — exactly as it describes owned ones, so a
-    /// consumer passes the runtime's copies instead of cloning them.
+    /// Every generator takes the declarations however its caller holds them:
+    /// owned, borrowed, or the `Arc`s a runtime lends. A compile-level check:
+    /// a generator that lost the `Borrow` bound fails to build this test.
     #[test]
-    fn arc_held_declarations_describe_the_same_documents() {
-        let tools =
-            BlockInfo::new("test/tools", "1.0.0", "http-handler@v1", "Tools").endpoints(vec![
-                BlockEndpoint::get("/b/tools/api/items/{id}")
-                    .summary("Get an item")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(json!({
-                        "type": "object",
-                        "properties": { "id": { "type": "string" } },
-                        "required": ["id"]
-                    }))
-                    .output_schema(
-                        json!({"type": "object", "properties": {"id": {"type": "string"}}}),
-                    )
-                    .agent_tool("get_item", "Fetch an item by id."),
-                // Refused: a tool name an MCP client rejects.
-                BlockEndpoint::get("/b/tools/api/bad")
-                    .summary("Bad")
-                    .auth(AuthLevel::Public)
-                    .path_params_schema(json!({"type": "object", "properties": {}}))
-                    .agent_tool("bad name!", "Refused."),
-            ]);
-        let owned = vec![test_block(), tools];
+    fn every_generator_accepts_owned_borrowed_and_arc_held_declarations() {
+        let owned = vec![test_block()];
+        let borrowed: Vec<&BlockInfo> = owned.iter().collect();
         let shared: Vec<std::sync::Arc<BlockInfo>> =
             owned.iter().cloned().map(std::sync::Arc::new).collect();
-        let auth = |_: &BlockInfo, ep: &BlockEndpoint| ep.auth;
-        let selections = [ToolSelection {
-            block: "test/block".into(),
-            method: HttpMethod::Post,
-            path: "/b/test/api/login".into(),
-            name: "log_in".into(),
-            description: "Log in.".into(),
-        }];
+        let auth = |_: &BlockInfo, ep: &BlockEndpoint| Some(ep.auth);
+        fn all<B: Borrow<BlockInfo>>(
+            blocks: &[B],
+            auth: impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel> + Copy,
+        ) -> usize {
+            let level = AuthLevel::Admin;
+            [
+                generate_openapi(blocks, level, auth, "p", "d", "u"),
+                generate_agent_card(blocks, level, auth, "p", "d", "u"),
+                generate_webmcp(blocks, level, auth),
+                generate_webmcp_declared_auth(blocks, level),
+                generate_webmcp_report(blocks, level, auth).0,
+                generate_webmcp_selected(blocks, level, auth, &[]).0,
+            ]
+            .len()
+        }
+        assert_eq!(all(&owned, auth), 6);
+        assert_eq!(all(&borrowed, auth), 6);
+        assert_eq!(all(&shared, auth), 6);
+    }
 
-        for caller in [AuthLevel::Public, AuthLevel::Admin] {
-            assert_eq!(
-                generate_openapi(&shared, caller, auth, "p", "d", "https://example.com"),
-                generate_openapi(&owned, caller, auth, "p", "d", "https://example.com"),
+    /// A block whose endpoints exercise every generator: a schema-carrying
+    /// operation, an agent tool, and a server-only endpoint that is both.
+    fn filter_fixture() -> BlockInfo {
+        let params = json!({
+            "type": "object",
+            "properties": { "id": { "type": "string" } },
+            "required": ["id"]
+        });
+        BlockInfo::new("test/filter", "1.0.0", "http-handler@v1", "Filter").endpoints(vec![
+            BlockEndpoint::get("/b/filter/items/{id}")
+                .summary("Get an item")
+                .auth(AuthLevel::Public)
+                .path_params_schema(params.clone())
+                .agent_tool("get_item", "Fetch an item by id."),
+            BlockEndpoint::get("/b/filter/secret/{id}")
+                .summary("Server only")
+                .auth(AuthLevel::Public)
+                .path_params_schema(params)
+                .server_only()
+                .agent_tool("get_secret", "Needs the server."),
+            // Refused for its name; unpublished, it must not be reported.
+            BlockEndpoint::get("/b/filter/bad")
+                .summary("Bad")
+                .auth(AuthLevel::Public)
+                .server_only()
+                .path_params_schema(json!({"type": "object", "properties": {}}))
+                .agent_tool("bad name!", "Refused."),
+        ])
+    }
+
+    /// `effective_auth` answering `None` takes an endpoint out of every
+    /// document, as though it were never declared: no path, no skill, no
+    /// tool, no refusal.
+    #[test]
+    fn an_unpublished_endpoint_is_in_no_document() {
+        let blocks = [filter_fixture()];
+        let served = |_: &BlockInfo, ep: &BlockEndpoint| (!ep.server_only).then_some(ep.auth);
+        let level = AuthLevel::Admin;
+
+        let openapi = generate_openapi(&blocks, level, served, "p", "d", "u");
+        assert!(
+            openapi["paths"].get("/b/filter/items/{id}").is_some(),
+            "{openapi}"
+        );
+        assert!(
+            openapi["paths"].get("/b/filter/secret/{id}").is_none(),
+            "{openapi}"
+        );
+
+        let card = generate_agent_card(&blocks, level, served, "p", "d", "u");
+        let card = card.to_string();
+        assert!(card.contains("test/filter/get_b_filter_items_id"), "{card}");
+        assert!(!card.contains("secret"), "{card}");
+
+        let (manifest, refused) = generate_webmcp_report(&blocks, level, served);
+        assert_eq!(tool_names(&manifest), vec!["get_item".to_string()]);
+        assert!(
+            refused.is_empty(),
+            "an unpublished endpoint is not refused: {refused:?}"
+        );
+        assert_eq!(
+            tool_names(&generate_webmcp(&blocks, level, served)),
+            vec!["get_item".to_string()]
+        );
+
+        let select = |path: &str, name: &str| ToolSelection {
+            block: "test/filter".into(),
+            method: HttpMethod::Get,
+            path: path.into(),
+            name: name.into(),
+            description: "Selected.".into(),
+        };
+        let (selected, refused) = generate_webmcp_selected(
+            &blocks,
+            level,
+            served,
+            &[
+                select("/b/filter/items/{id}", "pick_item"),
+                select("/b/filter/secret/{id}", "pick_secret"),
+            ],
+        );
+        assert_eq!(tool_names(&selected), vec!["pick_item".to_string()]);
+        assert!(refused.is_empty(), "{refused:?}");
+
+        // The same fixture with every endpoint served publishes all three
+        // and refuses the bad name, so the assertions above are the filter's.
+        let everything = |_: &BlockInfo, ep: &BlockEndpoint| Some(ep.auth);
+        let (manifest, refused) = generate_webmcp_report(&blocks, level, everything);
+        assert_eq!(
+            tool_names(&manifest),
+            vec!["get_item".to_string(), "get_secret".to_string()]
+        );
+        assert_eq!(refused.len(), 1, "{refused:?}");
+    }
+
+    /// A selected manifest depends on the blocks its selections name and on
+    /// nothing else: unrelated blocks, and the named block's unselected
+    /// endpoints, change neither the tools nor the refusals.
+    #[test]
+    fn a_selected_manifest_ignores_unrelated_blocks() {
+        let named = filter_fixture();
+        let unrelated = test_block();
+        let selections = [
+            ToolSelection {
+                block: "test/filter".into(),
+                method: HttpMethod::Get,
+                path: "/b/filter/items/{id}".into(),
+                name: "pick_item".into(),
+                description: "Selected.".into(),
+            },
+            ToolSelection {
+                block: "test/missing".into(),
+                method: HttpMethod::Get,
+                path: "/nowhere".into(),
+                name: "pick_missing".into(),
+                description: "Not there.".into(),
+            },
+        ];
+        let auth = |_: &BlockInfo, ep: &BlockEndpoint| Some(ep.auth);
+        for level in [AuthLevel::Public, AuthLevel::Admin] {
+            let alone =
+                generate_webmcp_selected(std::slice::from_ref(&named), level, auth, &selections);
+            let among = generate_webmcp_selected(
+                &[unrelated.clone(), named.clone(), unrelated.clone()],
+                level,
+                auth,
+                &selections,
             );
+            assert_eq!(among, alone);
+            assert_eq!(tool_names(&alone.0), vec!["pick_item".to_string()]);
             assert_eq!(
-                generate_agent_card(&shared, caller, auth, "p", "d", "https://example.com"),
-                generate_agent_card(&owned, caller, auth, "p", "d", "https://example.com"),
-            );
-            assert_eq!(
-                generate_webmcp(&shared, caller, auth),
-                generate_webmcp(&owned, caller, auth),
-            );
-            assert_eq!(
-                generate_webmcp_declared_auth(&shared, caller),
-                generate_webmcp_declared_auth(&owned, caller),
-            );
-            let report = generate_webmcp_report(&shared, caller, auth);
-            assert_eq!(report, generate_webmcp_report(&owned, caller, auth));
-            assert!(
-                !report.1.is_empty(),
-                "the fixture's refused tool is reported"
-            );
-            assert_eq!(
-                generate_webmcp_selected(&shared, caller, auth, &selections),
-                generate_webmcp_selected(&owned, caller, auth, &selections),
+                alone.1.len(),
+                1,
+                "the missing selection is reported: {:?}",
+                alone.1
             );
         }
-        let (manifest, _) = generate_webmcp_report(&shared, AuthLevel::Admin, auth);
-        assert!(
-            manifest["tools"]
-                .as_array()
-                .is_some_and(|tools| tools.iter().any(|t| t["name"] == "get_item")),
-            "the comparison is over a manifest with a tool in it: {manifest}"
-        );
     }
 
     // 1. openapi_basic_structure
@@ -3422,7 +3563,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "My Project",
             "A test project",
             "https://example.com",
@@ -3442,7 +3583,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -3472,7 +3613,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -3496,7 +3637,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -3514,7 +3655,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -3543,7 +3684,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -3563,7 +3704,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -3590,7 +3731,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -3645,7 +3786,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -3760,7 +3901,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -3839,7 +3980,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -3888,7 +4029,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "d",
             "https://x.com",
@@ -4007,7 +4148,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -4055,7 +4196,7 @@ mod tests {
         generate_openapi(
             blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -4427,7 +4568,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -4499,7 +4640,7 @@ mod tests {
         let doc = generate_openapi(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "t",
             "t",
             "https://x.test",
@@ -4541,7 +4682,7 @@ mod tests {
         let card = generate_agent_card(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "My Project",
             "A test project",
             "https://example.com",
@@ -4567,7 +4708,7 @@ mod tests {
         let card = generate_agent_card(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -4598,7 +4739,7 @@ mod tests {
         let card = generate_agent_card(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -4621,7 +4762,7 @@ mod tests {
         let card = generate_agent_card(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "https://x.com",
@@ -4654,13 +4795,20 @@ mod tests {
     #[test]
     fn openapi_omits_endpoints_above_the_caller() {
         let blocks = [test_block()];
-        let public = generate_openapi(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
+        let public = generate_openapi(
+            &blocks,
+            AuthLevel::Public,
+            |_, ep| Some(ep.auth),
+            "P",
+            "",
+            "u",
+        );
         assert_eq!(openapi_paths(&public), vec!["/b/test/api/login"]);
 
         let signed_in = generate_openapi(
             &blocks,
             AuthLevel::Authenticated,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "u",
@@ -4677,7 +4825,7 @@ mod tests {
         // Admin on the Public login endpoint. An anonymous caller must not be
         // told it exists, and an admin must be told it needs a bearer token.
         let blocks = [test_block()];
-        let admin_mount = |_: &BlockInfo, _: &BlockEndpoint| AuthLevel::Admin;
+        let admin_mount = |_: &BlockInfo, _: &BlockEndpoint| Some(AuthLevel::Admin);
 
         let public = generate_openapi(&blocks, AuthLevel::Public, admin_mount, "P", "", "u");
         assert!(openapi_paths(&public).is_empty(), "got {public}");
@@ -4710,11 +4858,25 @@ mod tests {
             ]),
         ];
 
-        let public = generate_openapi(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
+        let public = generate_openapi(
+            &blocks,
+            AuthLevel::Public,
+            |_, ep| Some(ep.auth),
+            "P",
+            "",
+            "u",
+        );
         assert!(public["components"].get("schemas").is_none(), "{public}");
         assert!(!public.to_string().contains("AdminOnlySecret"), "{public}");
 
-        let admin = generate_openapi(&blocks, AuthLevel::Admin, |_, ep| ep.auth, "P", "", "u");
+        let admin = generate_openapi(
+            &blocks,
+            AuthLevel::Admin,
+            |_, ep| Some(ep.auth),
+            "P",
+            "",
+            "u",
+        );
         assert!(
             admin["components"]["schemas"]
                 .get("AdminOnlySecret")
@@ -4726,10 +4888,17 @@ mod tests {
     #[test]
     fn agent_card_omits_endpoints_above_the_caller() {
         let blocks = [test_block()];
-        let public = generate_agent_card(&blocks, AuthLevel::Public, |_, ep| ep.auth, "P", "", "u");
+        let public = generate_agent_card(
+            &blocks,
+            AuthLevel::Public,
+            |_, ep| Some(ep.auth),
+            "P",
+            "",
+            "u",
+        );
         assert_eq!(agent_card_skill_names(&public), vec!["Login"]);
 
-        let admin_mount = |_: &BlockInfo, _: &BlockEndpoint| AuthLevel::Admin;
+        let admin_mount = |_: &BlockInfo, _: &BlockEndpoint| Some(AuthLevel::Admin);
         let public_under_admin_mount =
             generate_agent_card(&blocks, AuthLevel::Public, admin_mount, "P", "", "u");
         assert!(
@@ -4740,7 +4909,7 @@ mod tests {
         let signed_in = generate_agent_card(
             &blocks,
             AuthLevel::Authenticated,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "P",
             "",
             "u",
@@ -6430,7 +6599,8 @@ mod tests {
                     .agent_tool("create_offer", "Create an offer."),
             ]),
         ];
-        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&blocks, AuthLevel::Public, |_b, ep| Some(ep.auth));
         assert!(refused.is_empty(), "{refused:?}");
         let tool = &doc["tools"][0];
         assert_eq!(tool["name"], "create_offer");
@@ -6501,7 +6671,7 @@ mod tests {
                 .auth(AuthLevel::Public)
                 .agent_tool("shared", "Shared definition.")]),
         ];
-        let (_, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, e| e.auth);
+        let (_, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, e| Some(e.auth));
         assert_eq!(
             refused[0].reason,
             WebMcpRefusal::NonScalarPathOrQueryParams {
@@ -6528,7 +6698,8 @@ mod tests {
                     .agent_tool("x", "x"),
             ]),
         ];
-        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Public, |_b, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&blocks, AuthLevel::Public, |_b, ep| Some(ep.auth));
         assert!(doc["tools"].as_array().unwrap().is_empty());
         assert!(
             matches!(refused[0].reason, WebMcpRefusal::CollidingDefinitions { ref names } if names == &["T".to_string()]),
@@ -6794,7 +6965,8 @@ mod tests {
             "$defs": { "Status": { "type": "string", "enum": ["draft", "active"] } }
         }));
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert!(refused.is_empty(), "nothing to report: {refused:?}");
         assert_eq!(
             doc["tools"][0]["outputSchema"],
@@ -6825,7 +6997,8 @@ mod tests {
                     .agent_tool("get_thing", "Fetch a thing."),
             ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert!(refused.is_empty(), "nothing was declared: {refused:?}");
         assert!(
             doc["tools"][0].get("outputSchema").is_none(),
@@ -6838,7 +7011,7 @@ mod tests {
         for empty in [json!(null), json!({})] {
             let block = block_with_output_schema(empty.clone());
             let (doc, refused) =
-                generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+                generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
             assert!(refused.is_empty(), "{empty} is not a defect: {refused:?}");
             assert!(
                 doc["tools"][0].get("outputSchema").is_none(),
@@ -6863,7 +7036,7 @@ mod tests {
         let (doc, refused) = generate_webmcp_report(
             &[block_with_output_schema(dangling.clone())],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
         );
         assert_eq!(
             tool_names(&doc),
@@ -6900,7 +7073,8 @@ mod tests {
                     .input_schema(dangling)
                     .agent_tool("set_thing", "Set a thing."),
             ]);
-        let (doc, refused) = generate_webmcp_report(&[on_input], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[on_input], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(doc["tools"], json!([]), "{doc}");
         assert_eq!(refused[0].scope, WebMcpRefusalScope::Tool);
     }
@@ -6917,7 +7091,7 @@ mod tests {
                 "items": { "type": "object", "properties": { "id": { "type": "string" } } }
             }))],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
         );
         assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
         assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
@@ -6946,7 +7120,7 @@ mod tests {
                 "properties": "oops"
             }))],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
         );
         assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
         assert!(
@@ -6988,7 +7162,7 @@ mod tests {
             let (doc, refused) = generate_webmcp_report(
                 &[block_with_output_schema(schema.clone())],
                 AuthLevel::Admin,
-                |_, ep| ep.auth,
+                |_, ep| Some(ep.auth),
             );
             assert!(
                 doc["tools"][0].get("outputSchema").is_some(),
@@ -7014,7 +7188,7 @@ mod tests {
                 }
             }))],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
         );
         assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
         assert!(refused.is_empty(), "{refused:?}");
@@ -7048,7 +7222,7 @@ mod tests {
         let (doc, refused) = generate_webmcp_report(
             &[block_with_output_schema(doubling_schema(22))],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
         );
         assert_eq!(tool_names(&doc), vec!["get_thing".to_string()], "{doc}");
         assert!(doc["tools"][0].get("outputSchema").is_none(), "{doc}");
@@ -7080,10 +7254,10 @@ mod tests {
 
         let (public_doc, public_refusals) =
             generate_webmcp_report(std::slice::from_ref(&block), AuthLevel::Public, |_, ep| {
-                ep.auth
+                Some(ep.auth)
             });
         let (admin_doc, admin_refusals) =
-            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
 
         assert_eq!(
             tool_names(&public_doc),
@@ -7125,7 +7299,8 @@ mod tests {
                     .agent_tool("get_thing", "Second."),
             ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(doc["tools"], json!([]), "{doc}");
         assert_eq!(
             refused
@@ -7314,7 +7489,7 @@ mod tests {
         let doc = generate_openapi(
             &[block],
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             "T",
             "D",
             "https://example.test",
@@ -7367,7 +7542,8 @@ mod tests {
                 ],
             );
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(refused, Vec::new(), "{refused:?}");
         assert_eq!(
             doc["tools"][0]["invocation"]["path"],
@@ -7513,11 +7689,11 @@ mod tests {
     fn webmcp_resolver_hides_a_tool_whose_effective_auth_exceeds_the_caller() {
         let blocks = [tiered_block()];
         let with_admin_prefix = |_block: &BlockInfo, ep: &BlockEndpoint| {
-            if ep.path.starts_with("/b/admin/") {
+            Some(if ep.path.starts_with("/b/admin/") {
                 AuthLevel::Admin
             } else {
                 ep.auth
-            }
+            })
         };
 
         // The declared-auth wrapper trusts `ep.auth` and would publish it.
@@ -7565,7 +7741,7 @@ mod tests {
         );
         assert_eq!(
             tool_names(&generate_webmcp(&blocks, AuthLevel::Public, |_, _| {
-                AuthLevel::Public
+                Some(AuthLevel::Public)
             })),
             vec!["read_mirror".to_string()],
         );
@@ -7576,11 +7752,11 @@ mod tests {
         // A consumer mounts *blocks* under prefixes, so the resolver has to
         // be able to key off the owning block, not just the endpoint.
         let doc = generate_webmcp(&webmcp_fixture_blocks(), AuthLevel::Public, |block, ep| {
-            if block.name == "impresspress/products" {
+            Some(if block.name == "impresspress/products" {
                 AuthLevel::Public
             } else {
                 ep.auth
-            }
+            })
         });
         let mut names = tool_names(&doc);
         names.sort();
@@ -7638,7 +7814,8 @@ mod tests {
         // At the admin's own tier the name really is ambiguous, so neither
         // claimant may have it — and the collision is reported, to the one
         // caller who can do something about it.
-        let (doc, refused) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(
             tool_names(&doc),
             vec!["get_other_thing".to_string()],
@@ -7730,7 +7907,8 @@ mod tests {
                     .agent_tool("get_thing", "Colliding endpoint."),
             ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(
             doc["tools"],
             json!([]),
@@ -8003,7 +8181,7 @@ mod tests {
     fn report_for(ep: BlockEndpoint) -> (Value, Vec<WebMcpRefusalReport>) {
         let block =
             BlockInfo::new("test/block", "1.0.0", "http-handler@v1", "Test").endpoints(vec![ep]);
-        generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth)
+        generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth))
     }
 
     #[test]
@@ -8225,7 +8403,8 @@ mod tests {
                     .agent_tool("get_thing", "Perfectly fine."),
             ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(
             tool_names(&doc),
             vec!["get_thing".to_string()],
@@ -8593,7 +8772,8 @@ mod tests {
         ]);
 
         let blocks = vec![block];
-        let (doc, mut refused) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, mut refused) =
+            generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(
             tool_names(&doc),
             Vec::<String>::new(),
@@ -8606,7 +8786,7 @@ mod tests {
         let (selected_doc, selected_refused) = generate_webmcp_selected(
             &blocks,
             AuthLevel::Admin,
-            |_, ep| ep.auth,
+            |_, ep| Some(ep.auth),
             &[ToolSelection {
                 block: "test/block".to_string(),
                 method: HttpMethod::Get,
@@ -8741,7 +8921,8 @@ mod tests {
                     .agent_tool("wide_body", "Wide body."),
             ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(
             tool_names(&doc),
             Vec::<String>::new(),
@@ -8792,7 +8973,8 @@ mod tests {
                     .agent_tool("big_body", "Big body."),
             ]);
 
-        let (doc, refused) = generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+        let (doc, refused) =
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert!(refused.is_empty(), "nothing is wrong with it: {refused:?}");
         assert_eq!(tool_names(&doc), vec!["big_body".to_string()], "{doc}");
         assert_eq!(
@@ -8818,10 +9000,10 @@ mod tests {
 
         let (public_doc, public_refusals) =
             generate_webmcp_report(std::slice::from_ref(&block), AuthLevel::Public, |_, ep| {
-                ep.auth
+                Some(ep.auth)
             });
         let (_, admin_refusals) =
-            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| ep.auth);
+            generate_webmcp_report(&[block], AuthLevel::Admin, |_, ep| Some(ep.auth));
 
         assert_eq!(tool_names(&public_doc), Vec::<String>::new());
         let diagnostic = |r: &WebMcpRefusalReport| {
@@ -8858,7 +9040,9 @@ mod tests {
     #[test]
     fn webmcp_auth_filtering_is_not_reported_as_a_refusal() {
         let (doc, refused) =
-            generate_webmcp_report(&webmcp_fixture_blocks(), AuthLevel::Public, |_, ep| ep.auth);
+            generate_webmcp_report(&webmcp_fixture_blocks(), AuthLevel::Public, |_, ep| {
+                Some(ep.auth)
+            });
         assert_eq!(tool_names(&doc), vec!["get_product".to_string()]);
         assert!(
             refused.is_empty(),
@@ -8870,7 +9054,8 @@ mod tests {
     #[test]
     fn webmcp_matches_the_report_variant_manifest() {
         let blocks = webmcp_fixture_blocks();
-        let (reported, _) = generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| ep.auth);
+        let (reported, _) =
+            generate_webmcp_report(&blocks, AuthLevel::Admin, |_, ep| Some(ep.auth));
         assert_eq!(
             generate_webmcp_declared_auth(&blocks, AuthLevel::Admin),
             reported
@@ -8898,7 +9083,7 @@ mod tests {
             description: "Do the thing.".into(),
         }];
         let (doc, refused) =
-            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &selections);
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| Some(e.auth), &selections);
         assert!(refused.is_empty(), "{refused:?}");
         assert_eq!(tool_names(&doc), vec!["shop_do_thing".to_string()]);
         assert_eq!(doc["tools"][0]["description"], "Do the thing.");
@@ -8908,7 +9093,8 @@ mod tests {
     #[test]
     fn selected_projection_ignores_the_blocks_own_annotations() {
         let blocks = webmcp_fixture_blocks();
-        let (doc, _) = generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &[]);
+        let (doc, _) =
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| Some(e.auth), &[]);
         assert!(
             doc["tools"].as_array().unwrap().is_empty(),
             "nothing selected, nothing published: {doc}"
@@ -8926,7 +9112,7 @@ mod tests {
             description: "x".into(),
         }];
         let (doc, refused) =
-            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| e.auth, &selections);
+            generate_webmcp_selected(&blocks, AuthLevel::Admin, |_b, e| Some(e.auth), &selections);
         assert!(doc["tools"].as_array().unwrap().is_empty());
         assert_eq!(refused.len(), 1);
         assert!(matches!(
@@ -8951,8 +9137,12 @@ mod tests {
             name: "admin_thing".into(),
             description: "x".into(),
         }];
-        let (doc, _) =
-            generate_webmcp_selected(&blocks, AuthLevel::Public, |_b, e| e.auth, &selections);
+        let (doc, _) = generate_webmcp_selected(
+            &blocks,
+            AuthLevel::Public,
+            |_b, e| Some(e.auth),
+            &selections,
+        );
         assert!(
             doc["tools"].as_array().unwrap().is_empty(),
             "a Public caller sees no Admin tool"

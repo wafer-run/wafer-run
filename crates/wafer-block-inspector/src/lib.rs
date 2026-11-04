@@ -5,7 +5,7 @@
 //! flows, and interface specs, plus a small static HTML UI for browsing them.
 //! Intended for operators and developers; access defaults to the `admin` role.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use wafer_block::*;
 
@@ -190,14 +190,16 @@ const WEBMCP_LEVELS: [AuthLevel; 3] = [
 /// `BlockInfo::default_enabled` is a first-run default, not what the admin
 /// has since switched off. Rather than filter on something that is not the
 /// answer, the page states plainly that it ignores feature gating.
-fn webmcp_view(blocks: &[BlockInfo]) -> serde_json::Value {
+fn webmcp_view(blocks: &[Arc<BlockInfo>]) -> serde_json::Value {
     use wafer_core::discovery::WebMcpRefusalScope;
 
     let levels: Vec<serde_json::Value> = WEBMCP_LEVELS
         .iter()
         .map(|level| {
             let (manifest, refusals) =
-                wafer_core::discovery::generate_webmcp_report(blocks, *level, |_block, ep| ep.auth);
+                wafer_core::discovery::generate_webmcp_report(blocks, *level, |_block, ep| {
+                    Some(ep.auth)
+                });
             // See "A level's refusals name only endpoints that level can
             // see" above.
             let visible: Vec<_> = refusals
@@ -303,7 +305,7 @@ fn masked_url_credentials(value: &str) -> Option<String> {
 
 /// Every config key a registered block declares as sensitive
 /// ([`ConfigVar::is_sensitive`]), in either `config_keys` or `flow_config`.
-fn declared_sensitive_keys(blocks: &[BlockInfo]) -> std::collections::HashSet<&str> {
+fn declared_sensitive_keys(blocks: &[Arc<BlockInfo>]) -> std::collections::HashSet<&str> {
     blocks
         .iter()
         .flat_map(|b| b.config_keys.iter().chain(b.flow_config.iter()))
@@ -692,7 +694,7 @@ mod webmcp_tests {
 
     #[derive(Clone)]
     struct BlocksContext {
-        blocks: Vec<BlockInfo>,
+        blocks: Vec<std::sync::Arc<BlockInfo>>,
     }
 
     #[async_trait::async_trait]
@@ -714,7 +716,7 @@ mod webmcp_tests {
         fn config_get(&self, _key: &str) -> Option<&str> {
             None
         }
-        fn registered_blocks(&self) -> &[BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<BlockInfo>] {
             &self.blocks
         }
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
@@ -768,7 +770,13 @@ mod webmcp_tests {
         msg.set_meta("auth.user_id", "u1");
         msg.set_meta("auth.user_roles", "admin");
         let out = InspectorBlock::new()
-            .handle(&BlocksContext { blocks }, msg, InputStream::empty())
+            .handle(
+                &BlocksContext {
+                    blocks: blocks.into_iter().map(std::sync::Arc::new).collect(),
+                },
+                msg,
+                InputStream::empty(),
+            )
             .await;
         match out.collect_buffered().await {
             Ok(response) => serde_json::from_slice(&response.body).expect("valid JSON body"),
@@ -994,7 +1002,9 @@ mod webmcp_tests {
         msg.set_meta(wafer_block::meta::META_REQ_RESOURCE, "/_inspector/webmcp");
         let out = InspectorBlock::new()
             .handle(
-                &BlocksContext { blocks: fixture() },
+                &BlocksContext {
+                    blocks: fixture().into_iter().map(std::sync::Arc::new).collect(),
+                },
                 msg,
                 InputStream::empty(),
             )

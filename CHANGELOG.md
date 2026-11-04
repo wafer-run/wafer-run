@@ -4,19 +4,40 @@
 
 ### Breaking changes
 
-- **The discovery generators read a declaration however the caller holds
-  it.** `wafer_core::discovery::{generate_openapi, generate_agent_card,
-  generate_webmcp, generate_webmcp_declared_auth, generate_webmcp_report,
-  generate_webmcp_selected}` take `blocks: &[B]` with `B: Borrow<BlockInfo>`
-  (was `&[BlockInfo]`). A consumer holding the `Arc<BlockInfo>`s
-  `Wafer::block_infos()` lends passes them as they are; before, it had to
-  deep-copy every declaration into a `Vec<BlockInfo>` to describe them. Each
-  generator collects one reference per block and does its work over those, so
-  the work is compiled once whatever the holder; the documents are unchanged
-  (`arc_held_declarations_describe_the_same_documents`).
-  - Migrating: a `&[BlockInfo]` or `&Vec<BlockInfo>` argument compiles
-    unchanged. An empty literal (`&[]`) no longer infers its element type:
-    name it, as `generate_webmcp_declared_auth::<BlockInfo>(&[], level)`.
+- **A declaration is never copied to be described: `registered_blocks()`
+  lends the runtime's `Arc`s, and the discovery generators take them.**
+  Since #478 a runtime holds each block's `BlockInfo` once, as an `Arc`, but
+  two paths still copied every declaration: the startup snapshot behind
+  `Context::registered_blocks()` (one deep copy per `seal()`), and every
+  consumer that had to hand the generators a `&[BlockInfo]` — or copy a
+  declaration to drop endpoints it does not serve before describing it.
+  - Changed: `Context::registered_blocks()` returns
+    `&[Arc<BlockInfo>]` (was `&[BlockInfo]`), and `StartupSnapshot::blocks`
+    is `Vec<Arc<BlockInfo>>`: the registration-time declarations, shared.
+    Field access reads through the `Arc` unchanged (`b.name`,
+    `&b.endpoints`); a function taking `&[BlockInfo]` takes
+    `&[Arc<BlockInfo>]` or is generic over `Borrow<BlockInfo>`. An
+    embedder's `Context` implementation returns `&[Arc<BlockInfo>]`.
+  - Changed: `wafer_core::discovery::{generate_openapi,
+    generate_agent_card, generate_webmcp, generate_webmcp_declared_auth,
+    generate_webmcp_report, generate_webmcp_selected}` take `blocks: &[B]`
+    with `B: Borrow<BlockInfo>` (was `&[BlockInfo]`): owned, borrowed or
+    `Arc`-held declarations. An empty literal (`&[]`) no longer infers its
+    element type: name it, as
+    `generate_webmcp_declared_auth::<BlockInfo>(&[], level)`.
+  - Changed: `effective_auth` returns `Option<AuthLevel>` (was
+    `AuthLevel`). `None` says the consumer does not serve the endpoint here
+    — a block it switched off, a server-only endpoint on a runtime with no
+    server — and the endpoint is in no document: no path, no skill, no
+    tool, no refusal, no share of a tool name. Migrating: wrap the level,
+    `|_, ep| Some(ep.auth)`; a consumer that copied declarations to remove
+    endpoints answers `None` for them instead.
+  - Each generator's body is compiled once: the public function borrows one
+    `&BlockInfo` per block and passes `effective_auth` as `&dyn Fn`, so
+    neither the holder type nor the closure type instantiates it again.
+  - `generate_webmcp_selected` copies only the selected endpoints (it
+    copied every declaration per call). Blocks no selection names, and
+    unselected endpoints, do not change its result.
 
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that

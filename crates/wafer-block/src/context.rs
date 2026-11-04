@@ -92,10 +92,11 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
 
     /// List all registered blocks.
     ///
-    /// Borrows the runtime's sealed snapshot — the data is built once at
-    /// seal time, so implementations return a reference instead of
-    /// deep-cloning per call.
-    fn registered_blocks(&self) -> &[BlockInfo] {
+    /// Borrows the runtime's sealed snapshot of the declarations each block's
+    /// registration read (wafer-run#478). They are shared, not copied, so
+    /// implementations lend the `Arc`s a runtime holds; every
+    /// `wafer_core::discovery` generator takes them as they are.
+    fn registered_blocks(&self) -> &[std::sync::Arc<BlockInfo>] {
         &[]
     }
 

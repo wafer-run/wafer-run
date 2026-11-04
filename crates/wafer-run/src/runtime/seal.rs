@@ -6,12 +6,9 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use wafer_block::{
-    error::{
-        AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateEndpointRouteError,
-        DuplicateToolNameError, RouteClaimant, RuntimeError,
-    },
-    BlockInfo,
+use wafer_block::error::{
+    AgentToolClaimant, BlockReferenceError, BlockReferenceSource, DuplicateEndpointRouteError,
+    DuplicateToolNameError, RouteClaimant, RuntimeError,
 };
 
 use super::Wafer;
@@ -518,13 +515,9 @@ impl Wafer {
     fn finalize_snapshot(&mut self) {
         self.registration.rebuild_all_blocks();
         self.snapshot = Arc::new(crate::snapshot::StartupSnapshot {
-            // The context API lends `&[BlockInfo]`, so the snapshot holds its
-            // own copy: one clone of each registration-time `BlockInfo` per
-            // seal, never a rebuild.
-            blocks: super::lifecycle::sorted_infos(&self.registration.blocks)
-                .into_iter()
-                .map(|info| BlockInfo::clone(&info))
-                .collect(),
+            // The registration-time declarations, shared: the context API
+            // lends `&[Arc<BlockInfo>]`, so nothing is copied.
+            blocks: super::lifecycle::sorted_infos(&self.registration.blocks),
             flow_infos: self.flows_info(),
             flow_defs: self.flow_defs(),
             block_configs: self.registration.block_configs.clone(),
