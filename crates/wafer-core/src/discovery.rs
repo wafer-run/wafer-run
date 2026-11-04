@@ -1,12 +1,24 @@
 //! Discovery document generation — OpenAPI 3.1 and A2A AgentCard.
 
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 
 use serde_json::{json, Value};
 use wafer_block::types::{
     decode_ref_name, encode_ref_name, keyword_value, AgentTool, AuthLevel, BlockEndpoint,
     BlockInfo, HttpMethod, KeywordValue,
 };
+
+/// The declarations a generator reads, borrowed from `blocks`.
+///
+/// Every generator is generic over how its caller holds a declaration — a
+/// `BlockInfo` it built, or the `Arc<BlockInfo>` a runtime lends
+/// (`Wafer::block_infos`), so a consumer never copies a declaration to
+/// describe it — and does its work over these references. The work is
+/// compiled once, not once per holder; the generic part is this collection
+/// of one pointer per block.
+fn declarations<B: Borrow<BlockInfo>>(blocks: &[B]) -> Vec<&BlockInfo> {
+    blocks.iter().map(Borrow::borrow).collect()
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2021,8 +2033,26 @@ fn rewrite_schema_map(node: &Value, renames: &Renames) -> Value {
 /// (`RuntimeError::DuplicateEndpointRoutes`), so declarations from a sealed
 /// runtime never share a key; for declarations that never passed through
 /// `seal()`, the later endpoint in `blocks` order replaces the earlier one.
-pub fn generate_openapi(
-    blocks: &[BlockInfo],
+pub fn generate_openapi<B: Borrow<BlockInfo>>(
+    blocks: &[B],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    project_name: &str,
+    project_description: &str,
+    server_url: &str,
+) -> Value {
+    openapi_over(
+        &declarations(blocks),
+        caller,
+        effective_auth,
+        project_name,
+        project_description,
+        server_url,
+    )
+}
+
+fn openapi_over(
+    blocks: &[&BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
     project_name: &str,
@@ -2186,8 +2216,26 @@ pub fn generate_openapi(
 ///
 /// Filtered exactly as [`generate_openapi`] is: an endpoint whose
 /// `effective_auth` level is above `caller` is omitted.
-pub fn generate_agent_card(
-    blocks: &[BlockInfo],
+pub fn generate_agent_card<B: Borrow<BlockInfo>>(
+    blocks: &[B],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    project_name: &str,
+    project_description: &str,
+    server_url: &str,
+) -> Value {
+    agent_card_over(
+        &declarations(blocks),
+        caller,
+        effective_auth,
+        project_name,
+        project_description,
+        server_url,
+    )
+}
+
+fn agent_card_over(
+    blocks: &[&BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
     project_name: &str,
@@ -2644,12 +2692,12 @@ impl std::fmt::Display for WebMcpRefusalReport {
 /// Every endpoint this refuses is logged at `warn!` with the block, method,
 /// path, tool name, scope, and reason. Use [`generate_webmcp_report`] to
 /// receive the refusals as data instead.
-pub fn generate_webmcp(
-    blocks: &[BlockInfo],
+pub fn generate_webmcp<B: Borrow<BlockInfo>>(
+    blocks: &[B],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
 ) -> Value {
-    let (manifest, refused) = generate_webmcp_report(blocks, caller, effective_auth);
+    let (manifest, refused) = webmcp_report_over(&declarations(blocks), caller, effective_auth);
     for refusal in &refused {
         tracing::warn!(
             block = %refusal.block,
@@ -2687,7 +2735,10 @@ pub fn generate_webmcp(
 /// the declared level is not the enforced one and this will publish tools
 /// that fail on every call, or hide tools that would have worked. See
 /// [`generate_webmcp`].
-pub fn generate_webmcp_declared_auth(blocks: &[BlockInfo], caller: AuthLevel) -> Value {
+pub fn generate_webmcp_declared_auth<B: Borrow<BlockInfo>>(
+    blocks: &[B],
+    caller: AuthLevel,
+) -> Value {
     generate_webmcp(blocks, caller, |_block, ep| ep.auth)
 }
 
@@ -2748,8 +2799,16 @@ pub fn generate_webmcp_declared_auth(blocks: &[BlockInfo], caller: AuthLevel) ->
 /// A consumer that counts refusals as missing tools must filter on the
 /// scope. See [`agent_output_schema`] for why that case refuses a field
 /// rather than a tool.
-pub fn generate_webmcp_report(
-    blocks: &[BlockInfo],
+pub fn generate_webmcp_report<B: Borrow<BlockInfo>>(
+    blocks: &[B],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+) -> (Value, Vec<WebMcpRefusalReport>) {
+    webmcp_report_over(&declarations(blocks), caller, effective_auth)
+}
+
+fn webmcp_report_over(
+    blocks: &[&BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
 ) -> (Value, Vec<WebMcpRefusalReport>) {
@@ -3188,8 +3247,17 @@ pub struct ToolSelection {
 /// [`WebMcpRefusalScope::Tool`], and always `visible_to_caller: true` since
 /// it is a defect in the selection itself, not a property of what the
 /// caller may see).
-pub fn generate_webmcp_selected(
-    blocks: &[BlockInfo],
+pub fn generate_webmcp_selected<B: Borrow<BlockInfo>>(
+    blocks: &[B],
+    caller: AuthLevel,
+    effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
+    selections: &[ToolSelection],
+) -> (Value, Vec<WebMcpRefusalReport>) {
+    webmcp_selected_over(&declarations(blocks), caller, effective_auth, selections)
+}
+
+fn webmcp_selected_over(
+    blocks: &[&BlockInfo],
     caller: AuthLevel,
     effective_auth: impl Fn(&BlockInfo, &BlockEndpoint) -> AuthLevel,
     selections: &[ToolSelection],
@@ -3201,7 +3269,7 @@ pub fn generate_webmcp_selected(
     let mut shadow: Vec<BlockInfo> = blocks
         .iter()
         .map(|b| {
-            let mut b = b.clone();
+            let mut b = BlockInfo::clone(b);
             for ep in &mut b.endpoints {
                 ep.agent_tool = None;
             }
@@ -3270,6 +3338,81 @@ mod tests {
                 BlockEndpoint::get("/b/test/health")
                     .summary("Health check"),
             ])
+    }
+
+    /// Every generator describes `Arc`-held declarations — what
+    /// `Wafer::block_infos` lends — exactly as it describes owned ones, so a
+    /// consumer passes the runtime's copies instead of cloning them.
+    #[test]
+    fn arc_held_declarations_describe_the_same_documents() {
+        let tools =
+            BlockInfo::new("test/tools", "1.0.0", "http-handler@v1", "Tools").endpoints(vec![
+                BlockEndpoint::get("/b/tools/api/items/{id}")
+                    .summary("Get an item")
+                    .auth(AuthLevel::Authenticated)
+                    .path_params_schema(json!({
+                        "type": "object",
+                        "properties": { "id": { "type": "string" } },
+                        "required": ["id"]
+                    }))
+                    .output_schema(
+                        json!({"type": "object", "properties": {"id": {"type": "string"}}}),
+                    )
+                    .agent_tool("get_item", "Fetch an item by id."),
+                // Refused: a tool name an MCP client rejects.
+                BlockEndpoint::get("/b/tools/api/bad")
+                    .summary("Bad")
+                    .auth(AuthLevel::Public)
+                    .path_params_schema(json!({"type": "object", "properties": {}}))
+                    .agent_tool("bad name!", "Refused."),
+            ]);
+        let owned = vec![test_block(), tools];
+        let shared: Vec<std::sync::Arc<BlockInfo>> =
+            owned.iter().cloned().map(std::sync::Arc::new).collect();
+        let auth = |_: &BlockInfo, ep: &BlockEndpoint| ep.auth;
+        let selections = [ToolSelection {
+            block: "test/block".into(),
+            method: HttpMethod::Post,
+            path: "/b/test/api/login".into(),
+            name: "log_in".into(),
+            description: "Log in.".into(),
+        }];
+
+        for caller in [AuthLevel::Public, AuthLevel::Admin] {
+            assert_eq!(
+                generate_openapi(&shared, caller, auth, "p", "d", "https://example.com"),
+                generate_openapi(&owned, caller, auth, "p", "d", "https://example.com"),
+            );
+            assert_eq!(
+                generate_agent_card(&shared, caller, auth, "p", "d", "https://example.com"),
+                generate_agent_card(&owned, caller, auth, "p", "d", "https://example.com"),
+            );
+            assert_eq!(
+                generate_webmcp(&shared, caller, auth),
+                generate_webmcp(&owned, caller, auth),
+            );
+            assert_eq!(
+                generate_webmcp_declared_auth(&shared, caller),
+                generate_webmcp_declared_auth(&owned, caller),
+            );
+            let report = generate_webmcp_report(&shared, caller, auth);
+            assert_eq!(report, generate_webmcp_report(&owned, caller, auth));
+            assert!(
+                !report.1.is_empty(),
+                "the fixture's refused tool is reported"
+            );
+            assert_eq!(
+                generate_webmcp_selected(&shared, caller, auth, &selections),
+                generate_webmcp_selected(&owned, caller, auth, &selections),
+            );
+        }
+        let (manifest, _) = generate_webmcp_report(&shared, AuthLevel::Admin, auth);
+        assert!(
+            manifest["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|t| t["name"] == "get_item")),
+            "the comparison is over a manifest with a tool in it: {manifest}"
+        );
     }
 
     // 1. openapi_basic_structure
@@ -6477,7 +6620,7 @@ mod tests {
 
     #[test]
     fn webmcp_emits_schema_version_and_empty_tools_for_no_blocks() {
-        let doc = generate_webmcp_declared_auth(&[], AuthLevel::Admin);
+        let doc = generate_webmcp_declared_auth::<BlockInfo>(&[], AuthLevel::Admin);
         assert_eq!(doc["schema_version"], json!(1));
         assert_eq!(doc["tools"], json!([]));
     }

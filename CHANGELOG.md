@@ -4,6 +4,20 @@
 
 ### Breaking changes
 
+- **The discovery generators read a declaration however the caller holds
+  it.** `wafer_core::discovery::{generate_openapi, generate_agent_card,
+  generate_webmcp, generate_webmcp_declared_auth, generate_webmcp_report,
+  generate_webmcp_selected}` take `blocks: &[B]` with `B: Borrow<BlockInfo>`
+  (was `&[BlockInfo]`). A consumer holding the `Arc<BlockInfo>`s
+  `Wafer::block_infos()` lends passes them as they are; before, it had to
+  deep-copy every declaration into a `Vec<BlockInfo>` to describe them. Each
+  generator collects one reference per block and does its work over those, so
+  the work is compiled once whatever the holder; the documents are unchanged
+  (`arc_held_declarations_describe_the_same_documents`).
+  - Migrating: a `&[BlockInfo]` or `&Vec<BlockInfo>` argument compiles
+    unchanged. An empty literal (`&[]`) no longer infers its element type:
+    name it, as `generate_webmcp_declared_auth::<BlockInfo>(&[], level)`.
+
 - **A name is a block or an alias, never both, and both are fixed at
   `seal()`.** `seal()` snapshots the registered blocks and aliases that
   every dispatch resolves against, but the registry stayed open: an alias
