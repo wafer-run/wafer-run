@@ -12,13 +12,16 @@ use wafer_core::interfaces::database::service::DatabaseError;
 ///   taken key would misdirect the caller.
 /// - The server unable to answer is [`DatabaseError::Unavailable`]: it could
 ///   not be reached or the connection broke (an I/O error, SQLSTATE class
-///   `08` except `08P01`, protocol_violation), no pooled connection came free
-///   in time, the server is shutting down or starting up (`57P01`–`57P03`),
-///   or has no connection slot left (`53300`).
+///   `08` except `08P01`, protocol_violation), or it is shutting down or
+///   starting up (`57P01`–`57P03`). So is a pool timeout read here, with no
+///   pool to look at: sqlx also answers `PoolTimedOut` when it could not open
+///   a connection at all. The service classifies the timeouts of its own pool
+///   by the pool's state instead ([`pool_timeout`]).
 /// - The server up but refusing this statement because of other work is
 ///   [`DatabaseError::Contended`]: it rolled the transaction back to break a
-///   deadlock or a serialization conflict (`40P01`, `40001`), or could not
-///   take a lock (`55P03`).
+///   deadlock or a serialization conflict (`40P01`, `40001`), could not take
+///   a lock (`55P03`), or has no connection slot left for the application's
+///   own connections (`53300`, too_many_connections).
 /// - Anything else is `Internal`.
 pub(crate) fn sqlx_error(e: &sqlx::Error) -> DatabaseError {
     match e {
@@ -70,14 +73,37 @@ pub(crate) fn is_stale_plan(e: &sqlx::Error) -> bool {
 fn is_unavailable_sqlstate(code: &str) -> bool {
     // `08P01` (protocol_violation) is in the connection class but is a bug on
     // one side of the wire, not a fault that clears.
-    (code.starts_with("08") && code != "08P01")
-        || matches!(code, "53300" | "57P01" | "57P02" | "57P03")
+    (code.starts_with("08") && code != "08P01") || matches!(code, "57P01" | "57P02" | "57P03")
 }
 
 /// The server up, refusing this statement because of other work: a
-/// serialization conflict or deadlock broken, a lock not taken.
+/// serialization conflict or deadlock broken, a lock not taken, no
+/// connection slot left.
 fn is_contention_sqlstate(code: &str) -> bool {
-    matches!(code, "40001" | "40P01" | "55P03")
+    matches!(code, "40001" | "40P01" | "55P03" | "53300")
+}
+
+/// `PoolTimedOut` from acquiring a connection of `pool`, classified by the
+/// pool's state, read once, now. sqlx answers it both when every connection
+/// of the pool is checked out by the application's own work and when the
+/// pool could not open a connection at all, and the error does not say
+/// which. The deciding test is the pool's state:
+///
+/// - at its maximum size with no idle connection: the application's own
+///   connections are all in use — [`DatabaseError::Contended`];
+/// - anything else (fewer live connections than the maximum, so it was
+///   trying to open one and could not): [`DatabaseError::Unavailable`].
+///
+/// The read can race: a connection may free up between the timeout and the
+/// read, so a pool that was full reads as not full. The rule above, applied
+/// to that read, decides; such a timeout reads `Unavailable`.
+pub(crate) fn pool_timeout(pool: &sqlx::PgPool, e: &sqlx::Error) -> DatabaseError {
+    let at_max = pool.size() >= pool.options().get_max_connections();
+    if at_max && pool.num_idle() == 0 {
+        DatabaseError::Contended(e.to_string())
+    } else {
+        DatabaseError::Unavailable(e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -87,12 +113,12 @@ mod tests {
     #[test]
     fn the_server_down_is_unavailable_and_contention_is_contended() {
         for code in [
-            "08000", "08003", "08006", "08001", "08004", "53300", "57P01", "57P02", "57P03",
+            "08000", "08003", "08006", "08001", "08004", "57P01", "57P02", "57P03",
         ] {
             assert!(is_unavailable_sqlstate(code), "{code} is the server down");
             assert!(!is_contention_sqlstate(code), "{code} is not contention");
         }
-        for code in ["40001", "40P01", "55P03"] {
+        for code in ["40001", "40P01", "55P03", "53300"] {
             assert!(is_contention_sqlstate(code), "{code} is contention");
             assert!(
                 !is_unavailable_sqlstate(code),

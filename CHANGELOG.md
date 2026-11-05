@@ -4,56 +4,81 @@
 
 ### Breaking changes
 
-- **A transient `Init` failure keeps its detail code, a database outage
-  has one (`database.unavailable`), and contention is told apart from an
-  outage.** An embedder that retries a runtime by rebuilding it (impresspress
-  on Cloudflare) has to tell "the database failed this block's `Init`" from
-  "the block failed on its own", so that a deploy gate does not roll a good
-  version back during an outage. Both were an `Unavailable` with only text
-  to tell them apart.
-  - Added: `wire::database::DATABASE_UNAVAILABLE` (`"database.unavailable"`).
-    `DatabaseError::Unavailable(_).detail_code()` returns it, so the
-    database handler's scrubbed `Unavailable` answer carries it, on the
-    transaction path too. A client that renders detail codes now sees it on
-    a database outage's 503.
-  - Added: `DatabaseError::Contended(String)`. The database is up but
-    refused the statement because of other work: SQLite busy or locked, or
-    PostgreSQL `40001`, `40P01` or `55P03`. These were `Unavailable`. They
-    keep code `Unavailable` (still a 503, still retried), carry no detail
-    code, and answer with the scrubbed message `"database busy, retry"`.
-    `Unavailable` is now the database unable to answer: connection faults,
-    `53300` and `57P01`–`57P03`.
-  - Added: `TransientFailure { message, detail_code }` (`wafer_block`,
-    re-exported by `wafer_run`). It is the one shape a transient failure is
-    kept in.
+- **A block's transient `Init` failure is classed by what the attempt's own
+  database calls saw, and the database has three classes:
+  `database.unavailable`, `database.contended`,
+  `database.call_budget_exhausted`.** An embedder that retries a runtime by
+  rebuilding it (impresspress on Cloudflare) has to tell "the database
+  failed this block's `Init`" from "the block failed on its own". A deploy
+  gate needs it so that it does not roll a good version back during an
+  outage. Both were an `Unavailable` with only text to tell them apart.
+  - Added: `wafer_block::init_attempt`. Each `Init` attempt has an
+    `InitAttemptRecord`, reachable from its context and every context
+    derived from it, through the new `Context::init_attempt_record()`
+    (defaulted to `None`).
+    - The database handler notes into it where the database's typed answer
+      is known: each call in flight, and each failed call's class
+      (`DatabaseError::attempt_answer`).
+    - An attempt started from inside another (A's `Init` reaching B's) also
+      notes into the outer attempt.
+    - A record closes when its attempt settles, so a later call (deferred
+      work) notes nothing.
+  - At settle, a transient failure's `TransientFailure::detail_code` is the
+    record's class when the record saw anything. This holds whatever error
+    the block returned: one it wrapped in a new `WaferError`, or a hang the
+    init budget cut off with a call still in flight, which reads
+    `database.unavailable`. An attempt whose calls all answered keeps the
+    block's own failure: its code, or `None`.
+  - Added: `wire::database::DATABASE_UNAVAILABLE`
+    (`"database.unavailable"`) and `DATABASE_CONTENDED`
+    (`"database.contended"`). `DatabaseError::detail_code()` returns them
+    for `Unavailable` and for the new `Contended`, so the handler's
+    scrubbed `Unavailable` answer carries them, on the transaction path
+    too. A client that renders detail codes now sees them on a 503.
+  - Added: `DatabaseError::Contended(String)`. The database is up but busy:
+    - SQLite busy or locked;
+    - PostgreSQL `40001`, `40P01`, `55P03` and `53300`;
+    - a PostgreSQL pool timeout with the pool at its maximum and none idle.
+      This is read from the pool's state when the timeout is raised. The
+      read can race, and that rule decides.
+
+    These were `Unavailable`. They keep code `Unavailable`, so they are
+    still retried, and answer with the scrubbed text
+    `"database busy, retry"`. `Unavailable` is now the database unable to
+    answer: connection faults, `57P01`–`57P03`, and a pool timeout that is
+    not the pool full.
+  - Added: `TransientFailure { message, detail_code }` (in `wafer_block`,
+    re-exported by `wafer_run`), the one shape a transient failure is kept
+    in. Build one with `TransientFailure::new(..).classed(Option<..>)`.
+  - Added: `WaferError::with_optional_detail_code`.
   - Changed: `InitError::Transient(String)` is
-    `InitError::Transient(TransientFailure)`.
-    `InitError::from_lifecycle_error` keeps the `lifecycle(Init)` error's
-    detail code.
+    `InitError::Transient(TransientFailure)`. `from_lifecycle_error` keeps
+    the error's detail code.
   - Changed: `BlockInitState::Retrying { reason, retry_in }` is
-    `BlockInitState::Retrying { failure: TransientFailure, retry_in }`. It
-    holds the last failure, with its detail code, during the backoff and
-    after it.
-  - Changed: `ConfigError::Transient` has a `detail_code: Option<String>`. A
-    database-backed config source sets it from
-    `DatabaseError::detail_code()`, and the block's failure carries it.
-  - A refused dispatch keeps the refused block's transient detail code, on
-    both the `Await` path and the `Refuse` path. A block whose `Init`
-    propagates the refusal keeps it too. An init budget overrun keeps the
-    detail code of a transient failure that arrives late.
-  - Limit: a block that propagates its database's error from
-    `lifecycle(Init)` (`?` on a `wafer_core::clients::database` call) keeps
-    the code. A block that wraps the error in a new `WaferError` drops it,
-    and its failure reads as its own.
+    `BlockInitState::Retrying { failure, retry_in }`.
+  - Changed: `ConfigError::Transient` has a `detail_code`, which a
+    database-backed source sets from `DatabaseError::detail_code()`. It is
+    carried into the block's failure and into the validation report's
+    `UnavailableBlock::detail_code` (a new field).
+  - A refused dispatch to a block whose `Init` failed transiently carries
+    only `database.unavailable`, on both the `Await` and the `Refuse` path.
+    The database being down is true of another caller's request too. A
+    call-budget refusal keeps its meaning (`ResourceExhausted`, of the
+    invocation that met it), and contention and a block's own codes stay
+    that block's.
+  - Limit: config reads are not attempt-recorded. The config source calls
+    the `DatabaseService` directly, not through the handler, so a pre-Init
+    config load is classed by `ConfigError::Transient::detail_code`. A block
+    that reads config inside `Init` and wraps the error is unattributed.
   - Migrate:
-    - Match `InitError::Transient(failure)` and read `failure.message`.
-      Construct with `InitError::Transient(TransientFailure::new(msg))`.
-    - Patterns on `Retrying` read `failure.message` where they read
-      `reason`.
-    - `ConfigError::Transient` literals add `detail_code`.
-    - Exhaustive matches on `DatabaseError` add `Contended`.
-    - A backend adapter that maps contention to `Unavailable` maps it to
-      `Contended`.
+    - Match `InitError::Transient(failure)`.
+    - Read `Retrying`'s `failure.message`.
+    - Add `detail_code` to `ConfigError::Transient` and `UnavailableBlock`
+      literals.
+    - Add `Contended` to exhaustive `DatabaseError` matches.
+    - Map an adapter's contention to `Contended`.
+    - Embedder `Context` implementations compile unchanged; return a record
+      from `init_attempt_record` to have their contexts' calls attributed.
 
 - **The inspector serves two data routes, and its UI renders the
   runtime's types as they are.** `wafer-run/inspector` answers

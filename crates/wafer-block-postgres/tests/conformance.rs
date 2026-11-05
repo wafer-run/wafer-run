@@ -77,6 +77,46 @@ async fn postgres_existence_probe_is_strict() {
     run_existence_probe_conformance(&svc).await;
 }
 
+/// A pool exhausted by the application's own connections answers a pool
+/// timeout as contention, not as the database down: every connection is
+/// checked out and held, so the next call's acquire times out with the pool
+/// at its maximum and none idle. (A server that cannot be reached times out
+/// too, and reads `Unavailable`: `an_unreachable_server_is_unavailable`.)
+/// Skipped unless `WAFER_CONFORMANCE_POSTGRES_URL` points at a live server.
+#[tokio::test]
+async fn a_pool_exhausted_by_its_own_connections_is_contended() {
+    use std::str::FromStr as _;
+
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+
+    let Ok(url) = std::env::var(URL_ENV) else {
+        eprintln!("skipping postgres pool-exhaustion conformance: set {URL_ENV} to run");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_millis(300))
+        .connect_with(PgConnectOptions::from_str(&url).expect("a valid URL"))
+        .await
+        .expect("connect a one-connection pool");
+    let held = pool
+        .acquire()
+        .await
+        .expect("take the pool's one connection");
+    let svc = PostgresDatabaseService::from_pool(pool).expect("a pool with a statement cache");
+    let err = svc
+        .count("anything", &[])
+        .await
+        .expect_err("no connection comes free while it is held");
+    assert!(matches!(err, DatabaseError::Contended(_)), "{err:?}");
+    assert_eq!(
+        err.detail_code(),
+        Some(wafer_block::wire::database::DATABASE_CONTENDED)
+    );
+    drop(held);
+}
+
 /// Two pools on one database — two replicas' worth of connections and schema
 /// caches — must not hide each other's schema changes: a table one saw
 /// missing and the other created is visible to the first. Skipped unless

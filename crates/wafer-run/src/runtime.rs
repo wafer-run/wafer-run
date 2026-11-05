@@ -712,10 +712,10 @@ impl Wafer {
 /// When block A's `Init` dispatches to a block B that is refused, A's `Init`
 /// fails with B's refusal, so A's slot records B's reference, not B's cause:
 /// B's own slot (and the log line under that reference) holds it. The
-/// refusal keeps a transient failure's detail code (it is a class, not
-/// text), so A's `Init` that propagates it with `?` keeps it too: a block
-/// refused because its database was down carries `database.unavailable` to
-/// every block that failed on it.
+/// refusal keeps a transient failure's database outage
+/// ([`refusal_detail`]), so A's `Init` that propagates it with `?` keeps it
+/// too: a block refused because its database was down carries
+/// `database.unavailable` to every block that failed on it.
 pub(crate) fn init_error_to_wafer_error(
     block: &str,
     e: crate::runtime::slot::InitError,
@@ -745,13 +745,11 @@ pub(crate) fn init_error_to_wafer_error(
                 error = %failure.message,
                 "dispatch refused: the block's Init failed transiently",
             );
-            let mut err = with_failure_detail(
-                WaferError::new(
-                    ErrorCode::Unavailable,
-                    unavailable_message(block, &reference),
-                ),
-                failure.detail_code.as_deref(),
-            );
+            let mut err = WaferError::new(
+                ErrorCode::Unavailable,
+                unavailable_message(block, &reference),
+            )
+            .with_optional_detail_code(refusal_detail(failure.detail_code.as_deref()));
             err.meta.extend(retry_in.map(retry_after_meta));
             err
         }
@@ -777,8 +775,9 @@ pub(crate) fn init_error_to_wafer_error(
 ///
 /// Sanitized like [`init_error_to_wafer_error`]: the slot's last `Init`
 /// error, read from its `state` when it has one, is logged under the
-/// reference and never put in the message; a transient one's detail code is
-/// kept on the error, as [`init_error_to_wafer_error`] keeps it.
+/// reference and never put in the message; a transient one's database
+/// outage is kept on the error ([`refusal_detail`]), as
+/// [`init_error_to_wafer_error`] keeps it.
 pub(crate) fn not_initialized_error(
     block: &str,
     state: &BlockInitState,
@@ -800,24 +799,24 @@ pub(crate) fn not_initialized_error(
         last_failure = last_failure.unwrap_or("none"),
         "dispatch refused: the block is not initialized in this runtime",
     );
-    with_failure_detail(
-        wafer_block::core_types::WaferError::new(
-            wafer_block::core_types::ErrorCode::Unavailable,
-            unavailable_message(block, &reference),
-        ),
-        detail_code,
+    wafer_block::core_types::WaferError::new(
+        wafer_block::core_types::ErrorCode::Unavailable,
+        unavailable_message(block, &reference),
     )
+    .with_optional_detail_code(refusal_detail(detail_code))
 }
 
-/// `err` with a transient failure's `detail_code`, when it has one.
-fn with_failure_detail(
-    err: wafer_block::core_types::WaferError,
-    detail_code: Option<&str>,
-) -> wafer_block::core_types::WaferError {
-    match detail_code {
-        Some(detail_code) => err.with_detail_code(detail_code),
-        None => err,
-    }
+/// The detail code a refusal of a block whose `Init` failed transiently
+/// carries, from that failure's class: only
+/// [`DATABASE_UNAVAILABLE`](wafer_block::wire::database::DATABASE_UNAVAILABLE).
+/// The refusal answers another caller on another route, and the database
+/// being down is the one class that is true of it too. The others stay
+/// where they mean what they say: `database.call_budget_exhausted` is a
+/// `ResourceExhausted` of the invocation that met it, not of this
+/// `Unavailable`; contention and a block's own codes were that block's.
+fn refusal_detail(detail_code: Option<&str>) -> Option<&'static str> {
+    use wafer_block::wire::database::DATABASE_UNAVAILABLE;
+    (detail_code == Some(DATABASE_UNAVAILABLE)).then_some(DATABASE_UNAVAILABLE)
 }
 
 /// The message of a refused dispatch to `block` that a retry may cure: its
@@ -893,7 +892,12 @@ pub(crate) async fn run_init_pipeline(
         .transpose()
         .map_err(|path| InitError::Cycle { path })?;
 
-    let attempt = template.init_waits.attempt(name);
+    // Started from inside another block's Init (the template's attempt),
+    // what this one's database calls see is that one's too.
+    let attempt = template
+        .init_waits
+        .attempt(name, template.init_attempt.as_ref());
+    let record = attempt.record().clone();
     let init_ctx = template.for_init(name, registered, attempt.clone());
     let init_waits = template.init_waits.clone();
     let config_source = template.config_source.clone();
@@ -947,26 +951,57 @@ pub(crate) async fn run_init_pipeline(
             run_init_lifecycle(block.as_ref(), &init_ctx, data).await?;
             Ok(crate::runtime::slot::InitializedState::new())
         };
-        let (Some(budget), Some(timer)) = (budget, timer) else {
-            return attempt.await;
-        };
-        futures::pin_mut!(attempt, timer);
-        match futures::future::select(attempt, timer).await {
-            // An attempt that failed once its deadline had passed failed
-            // because of it — a `call_block` answered `DeadlineExceeded`,
-            // which the block may have reported as anything, `Internal`
-            // included. Its outcome is the timeout, never a permanent
-            // failure cached for the runtime's life.
-            futures::future::Either::Left((Err(e), _))
-                if deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
-            {
-                Err(budget.exceeded(name, Some(&e)))
+        let outcome = match (budget, timer) {
+            (Some(budget), Some(timer)) => {
+                futures::pin_mut!(attempt, timer);
+                match futures::future::select(attempt, timer).await {
+                    // An attempt that failed once its deadline had passed
+                    // failed because of it — a `call_block` answered
+                    // `DeadlineExceeded`, which the block may have reported
+                    // as anything, `Internal` included. Its outcome is the
+                    // timeout, never a permanent failure cached for the
+                    // runtime's life.
+                    futures::future::Either::Left((Err(e), _))
+                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
+                    {
+                        record.note_unanswered();
+                        Err(budget.exceeded(name, Some(&e)))
+                    }
+                    futures::future::Either::Left((outcome, _)) => outcome,
+                    // Cut off with a database call still waiting: the
+                    // database did not answer. Noted before the attempt is
+                    // dropped, while its call is still in flight.
+                    futures::future::Either::Right(((), _)) => {
+                        record.note_unanswered();
+                        Err(budget.exceeded(name, None))
+                    }
+                }
             }
-            futures::future::Either::Left((outcome, _)) => outcome,
-            futures::future::Either::Right(((), _)) => Err(budget.exceeded(name, None)),
-        }
+            _ => attempt.await,
+        };
+        settle_attempt(&record, outcome)
     })
     .await
+}
+
+/// An init attempt's `outcome`, settled with what its database calls saw
+/// (`record`, closed here so nothing later is noted in it). A transient
+/// failure takes its class from the record when the record saw anything —
+/// whatever error the block returned, wrapped or not
+/// ([`TransientFailure::detail_code`]) — and keeps its own otherwise.
+fn settle_attempt(
+    record: &wafer_block::init_attempt::InitAttemptRecord,
+    outcome: Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError>,
+) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
+    use crate::runtime::slot::InitError;
+    let seen = record.close();
+    match (outcome, seen) {
+        (Err(InitError::Transient(mut failure)), Some(answer)) => {
+            failure.detail_code = Some(answer.detail_code().to_string());
+            Err(InitError::Transient(failure))
+        }
+        (outcome, _) => outcome,
+    }
 }
 
 /// The longest one attempt at a block's init may run, and who set it.
@@ -1029,9 +1064,7 @@ impl InitBudget {
             }
             _ => None,
         };
-        crate::runtime::slot::InitError::Transient(
-            TransientFailure::new(msg).with_detail_code(detail_code),
-        )
+        crate::runtime::slot::InitError::Transient(TransientFailure::new(msg).classed(detail_code))
     }
 }
 
@@ -1442,7 +1475,7 @@ mod tests {
         use wafer_block::wire::database::DATABASE_UNAVAILABLE;
 
         use crate::runtime::slot::InitError;
-        let outage = TransientFailure::new(CAUSE).with_detail_code(Some(DATABASE_UNAVAILABLE));
+        let outage = TransientFailure::new(CAUSE).classed(Some(DATABASE_UNAVAILABLE));
 
         let awaited = init_error_to_wafer_error("b/db", InitError::Transient(outage.clone()), None);
         assert_eq!(awaited.detail_code(), Some(DATABASE_UNAVAILABLE));
@@ -1472,6 +1505,20 @@ mod tests {
             None,
         );
         assert_eq!(own.detail_code(), None);
+        // Only the database being down is true of another caller's refusal:
+        // a spent call budget, contention or a block's own code is not.
+        for kept_home in [
+            wafer_block::wire::database::CALL_BUDGET_EXHAUSTED,
+            wafer_block::wire::database::DATABASE_CONTENDED,
+            "auth.invalid_token",
+        ] {
+            let refusal = init_error_to_wafer_error(
+                "b/db",
+                InitError::Transient(TransientFailure::new(CAUSE).classed(Some(kept_home))),
+                None,
+            );
+            assert_eq!(refusal.detail_code(), None, "{kept_home}");
+        }
         let failed = not_initialized_error(
             "b/db",
             &BlockInitState::Failed {
@@ -1495,7 +1542,7 @@ mod tests {
         };
         let late = InitError::Transient(
             TransientFailure::new("database temporarily unavailable")
-                .with_detail_code(Some(DATABASE_UNAVAILABLE)),
+                .classed(Some(DATABASE_UNAVAILABLE)),
         );
         let detail = |e: InitError| match e {
             InitError::Transient(failure) => failure.detail_code,

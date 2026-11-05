@@ -37,6 +37,11 @@ pub struct UnavailableBlock {
     /// summary line per validation call, and never carried here, so a
     /// report can be served as-is.
     pub reason: UnavailableReason,
+    /// The detail code of the source's failure, when it had one: a database
+    /// that could not answer is
+    /// [`DATABASE_UNAVAILABLE`](crate::wire::database::DATABASE_UNAVAILABLE).
+    /// A class, safe to serve, like `reason`.
+    pub detail_code: Option<String>,
 }
 
 /// Why a block's config could not be validated: the class of the config

@@ -624,8 +624,64 @@ fn is_preserved_db_error(msg: &str) -> bool {
         .any(|needle| lower.contains(needle))
 }
 
+/// Which transient failure a scrubbed answer is ([`scrubbed`]).
+#[derive(Clone, Copy)]
+enum Transient {
+    /// The database could not answer.
+    Unavailable,
+    /// The database is up but busy with other work.
+    Contended,
+}
+
+/// The fixed text a transient failure answers with, `msg` (its own text)
+/// logged. The driver's message can name hosts, files, relations and other
+/// sessions, so it is never returned. Every op scrubs through here.
+fn scrubbed(kind: Transient, msg: &str) -> &'static str {
+    match kind {
+        Transient::Unavailable => {
+            tracing::warn!(error = %msg, "database temporarily unavailable");
+            "database temporarily unavailable"
+        }
+        Transient::Contended => {
+            tracing::warn!(error = %msg, "database busy");
+            "database busy, retry"
+        }
+    }
+}
+
+/// `e`, as the init attempt `ctx` runs under saw it ([`DatabaseError::attempt_answer`]):
+/// the database handler is where an attempt's calls are answered, so it is
+/// where what they saw is noted, whatever the block then does with the
+/// error ([`wafer_block::init_attempt`]).
+fn observed(ctx: &dyn Context, e: DatabaseError) -> DatabaseError {
+    if let (Some(record), Some(answer)) = (ctx.init_attempt_record(), e.attempt_answer()) {
+        record.note(answer);
+    }
+    e
+}
+
+/// A failed op's answer, noted in the init attempt `ctx` runs under.
+fn failed(ctx: &dyn Context, e: DatabaseError) -> WaferError {
+    db_error_to_wafer(observed(ctx, e))
+}
+
+/// A failed `database.ddl_transaction`'s answer, noted in the init attempt
+/// `ctx` runs under.
+fn failed_transaction(ctx: &dyn Context, failure: TransactionError) -> WaferError {
+    let TransactionError { statement, error } = failure;
+    transaction_error_to_wafer(TransactionError {
+        statement,
+        error: observed(ctx, error),
+    })
+}
+
 fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     let code = e.code();
+    // The detail code tells a caller what the coarse code cannot: a
+    // call-budget refusal shares `ResourceExhausted` with other refusals (a
+    // rate limit's, the call-depth limit's), and the database being down or
+    // busy shares `Unavailable` with any other dependency a block has
+    // (`DatabaseError::detail_code`).
     let detail = e.detail_code();
     let err = match e {
         DatabaseError::NotFound => WaferError::new(code, "record not found"),
@@ -642,18 +698,12 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         // (or the platform's own refusal of that limit), never the schema.
         DatabaseError::CallBudgetExhausted(msg) => WaferError::new(code, msg),
         // Transient: the caller may retry (and the runtime retries a block
-        // Init that failed this way instead of caching the failure). The
-        // driver's message can name hosts, files, relations and other
-        // sessions, so it is logged, not returned. An outage carries the
-        // `database.unavailable` detail code (set below); contention, with
-        // the database up, carries none.
+        // Init that failed this way instead of caching the failure).
         DatabaseError::Unavailable(msg) => {
-            tracing::warn!(error = %msg, "database temporarily unavailable");
-            WaferError::new(code, "database temporarily unavailable")
+            WaferError::new(code, scrubbed(Transient::Unavailable, &msg))
         }
         DatabaseError::Contended(msg) => {
-            tracing::warn!(error = %msg, "database busy");
-            WaferError::new(code, "database busy, retry")
+            WaferError::new(code, scrubbed(Transient::Contended, &msg))
         }
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {
@@ -675,21 +725,12 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
             }
         }
     };
-    // The detail code tells a caller what the coarse code cannot: a
-    // call-budget refusal shares `ResourceExhausted` with other refusals (a
-    // rate limit's, the call-depth limit's), and the database being down
-    // shares `Unavailable` with contention and with any other dependency a
-    // block has (`DatabaseError::detail_code`).
-    match detail {
-        Some(detail) => err.with_detail_code(detail),
-        None => err,
-    }
+    err.with_optional_detail_code(detail)
 }
 
 /// The answer to a `database.ddl_transaction` that did not commit: the
-/// classified [`DatabaseError`]'s code and detail code (a call-budget
-/// refusal's, or the database being down: as [`db_error_to_wafer`] sets
-/// them), the backend's own message, and, when the
+/// classified [`DatabaseError`]'s code and detail code (as
+/// [`db_error_to_wafer`] sets them), the backend's own message, and, when the
 /// backend attributed the failure to one statement, its position under
 /// [`wire::META_FAILED_STATEMENT_INDEX`].
 ///
@@ -700,9 +741,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 /// statement that failed and why, and a duplicate key keeps its constraint.
 ///
 /// [`DatabaseError::Unavailable`] and [`DatabaseError::Contended`] are the
-/// exceptions, scrubbed exactly as [`db_error_to_wafer`] scrubs them: their
-/// text is the driver's or the connection's (it can name hosts, files and
-/// other sessions), not the caller's statements.
+/// exceptions, scrubbed by the same [`scrubbed`] as every other op:
+/// their text is the driver's or the connection's (it can name hosts, files
+/// and other sessions), not the caller's statements.
 fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
     let TransactionError { statement, error } = failed;
     let code = error.code();
@@ -713,20 +754,11 @@ fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
         | DatabaseError::InvalidArgument(msg)
         | DatabaseError::CallBudgetExhausted(msg)
         | DatabaseError::Internal(msg) => msg,
-        DatabaseError::Unavailable(msg) => {
-            tracing::warn!(error = %msg, "database temporarily unavailable");
-            "database temporarily unavailable".to_string()
-        }
-        DatabaseError::Contended(msg) => {
-            tracing::warn!(error = %msg, "database busy");
-            "database busy, retry".to_string()
-        }
+        DatabaseError::Unavailable(msg) => scrubbed(Transient::Unavailable, &msg).to_string(),
+        DatabaseError::Contended(msg) => scrubbed(Transient::Contended, &msg).to_string(),
         DatabaseError::Other(err) => err.to_string(),
     };
-    let mut err = WaferError::new(code, message);
-    if let Some(detail) = detail {
-        err = err.with_detail_code(detail);
-    }
+    let mut err = WaferError::new(code, message).with_optional_detail_code(detail);
     if let Some(index) = statement {
         MetaSet::set(
             &mut err.meta,
@@ -861,6 +893,21 @@ pub async fn handle_message(
     msg: &Message,
     body: &[u8],
 ) -> OutputStream {
+    // One call of the init attempt this context runs under, if any: in
+    // flight until it is answered, so an attempt whose init budget runs out
+    // while it waits on the database reads as the database not answering
+    // (`wafer_block::init_attempt`).
+    let _call = ctx.init_attempt_record().map(|record| record.call());
+    handle_op(service, ctx, msg, body).await
+}
+
+/// [`handle_message`]'s op dispatch.
+async fn handle_op(
+    service: &dyn DatabaseService,
+    ctx: &dyn Context,
+    msg: &Message,
+    body: &[u8],
+) -> OutputStream {
     match msg.kind.as_str() {
         ServiceOp::DATABASE_GET => {
             let req = match decode_and_authorize_op::<wire::GetRequest>(
@@ -874,7 +921,7 @@ pub async fn handle_message(
             };
             match service.get(&req.collection, &req.id).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_LIST => {
@@ -924,7 +971,7 @@ pub async fn handle_message(
             };
             match service.list(&req.collection, &opts).await {
                 Ok(list) => to_output(service_record_list_to_wire(list)),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_CREATE => {
@@ -948,7 +995,7 @@ pub async fn handle_message(
             }
             match service.create(&req.collection, req.data).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_CREATE_MANY => {
@@ -971,7 +1018,7 @@ pub async fn handle_message(
             }
             match service.create_many(&req.collection, req.rows).await {
                 Ok(rows_affected) => to_output(&wire::CreateManyResponse { rows_affected }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_BATCH => {
@@ -1043,7 +1090,7 @@ pub async fn handle_message(
                 Ok(outcomes) => to_output(&wire::BatchResponse {
                     results: outcomes.into_iter().map(write_outcome_to_wire).collect(),
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_INSERT_GUARDED => {
@@ -1081,7 +1128,7 @@ pub async fn handle_message(
                 Ok(service::GuardedInsert::Refused { guard }) => {
                     to_output(&wire::InsertGuardedResponse::Refused { guard })
                 }
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_UPDATE_GUARDED => {
@@ -1118,7 +1165,7 @@ pub async fn handle_message(
                     }
                     service::GuardedUpdate::NoMatch => wire::UpdateGuardedResponse::NoMatch,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_UPDATE => {
@@ -1136,7 +1183,7 @@ pub async fn handle_message(
             }
             match service.update(&req.collection, &req.id, req.data).await {
                 Ok(record) => to_output(service_record_to_wire(record)),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_DELETE => {
@@ -1151,7 +1198,7 @@ pub async fn handle_message(
             };
             match service.delete(&req.collection, &req.id).await {
                 Ok(()) => OutputStream::respond(vec![]),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_COUNT => {
@@ -1174,7 +1221,7 @@ pub async fn handle_message(
             };
             match service.count(&req.collection, &filters).await {
                 Ok(count) => to_output(&wire::CountResponse { count }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_QUERY_RAW => {
@@ -1193,7 +1240,7 @@ pub async fn handle_message(
                         records.into_iter().map(service_record_to_wire).collect();
                     to_output(&wire_records)
                 }
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_SUM => {
@@ -1219,7 +1266,7 @@ pub async fn handle_message(
             }
             match service.sum(&req.collection, &req.field, &filters).await {
                 Ok(sum) => to_output(&wire::SumResponse { sum }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_EXEC_RAW => {
@@ -1236,7 +1283,7 @@ pub async fn handle_message(
                 Ok(rows) => to_output(&wire::ExecRawResponse {
                     rows_affected: rows,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_DDL => {
@@ -1257,7 +1304,7 @@ pub async fn handle_message(
                 Ok(rows) => to_output(&wire::ExecRawResponse {
                     rows_affected: rows,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_DDL_TRANSACTION => {
@@ -1274,7 +1321,7 @@ pub async fn handle_message(
             };
             match service.exec_raw_transaction(&req.statements).await {
                 Ok(rows_affected) => to_output(&wire::DdlTransactionResponse { rows_affected }),
-                Err(e) => OutputStream::error(transaction_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed_transaction(ctx, e)),
             }
         }
         ServiceOp::DATABASE_DELETE_WHERE => {
@@ -1297,7 +1344,7 @@ pub async fn handle_message(
             };
             match service.delete_where(&req.collection, &filters).await {
                 Ok(()) => OutputStream::respond(vec![]),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_DELETE_WHERE_COUNT => {
@@ -1320,7 +1367,7 @@ pub async fn handle_message(
             };
             match service.delete_where_count(&req.collection, &filters).await {
                 Ok(count) => to_output(&wire::DeleteWhereCountResponse { count }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_TAKE_WHERE => {
@@ -1345,7 +1392,7 @@ pub async fn handle_message(
                 Ok(records) => to_output(&wire::TakeWhereResponse {
                     records: records.into_iter().map(service_record_to_wire).collect(),
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_UPDATE_WHERE => {
@@ -1374,7 +1421,7 @@ pub async fn handle_message(
                 .await
             {
                 Ok(()) => OutputStream::respond(vec![]),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_UPDATE_WHERE_COUNT => {
@@ -1403,7 +1450,7 @@ pub async fn handle_message(
                 .await
             {
                 Ok(count) => to_output(&wire::UpdateWhereCountResponse { count }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_INCREMENT_FIELD_WHERE => {
@@ -1434,7 +1481,7 @@ pub async fn handle_message(
                 Ok(rows) => to_output(&wire::ExecRawResponse {
                     rows_affected: rows,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_UPSERT => {
@@ -1456,7 +1503,7 @@ pub async fn handle_message(
                     rows_affected: i64::from(record.is_some()),
                     record: record.map(service_record_to_wire),
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_AGGREGATE => {
@@ -1484,7 +1531,7 @@ pub async fn handle_message(
                         records.into_iter().map(service_record_to_wire).collect();
                     to_output(&wire_records)
                 }
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_ENSURE_TABLE => {
@@ -1513,7 +1560,7 @@ pub async fn handle_message(
                 Ok(()) => to_output(&wire::SchemaOpResponse {
                     table: req.table.name,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_ADD_COLUMN => {
@@ -1537,7 +1584,7 @@ pub async fn handle_message(
             };
             match service.schema_add_column(&req.table, &column).await {
                 Ok(()) => to_output(&wire::SchemaOpResponse { table: req.table }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_DROP_TABLE => {
@@ -1557,7 +1604,7 @@ pub async fn handle_message(
             }
             match service.schema_drop_table(&req.table).await {
                 Ok(()) => to_output(&wire::SchemaOpResponse { table: req.table }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_TABLE_EXISTS => {
@@ -1575,7 +1622,7 @@ pub async fn handle_message(
                     table: req.table,
                     exists,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         // The catalog reads name tables as the catalog spells them (`Foo`,
@@ -1594,7 +1641,7 @@ pub async fn handle_message(
             }
             match service.catalog_tables().await {
                 Ok(tables) => to_output(&wire::CatalogTablesResponse { tables }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_CATALOG_COLUMNS => {
@@ -1612,7 +1659,7 @@ pub async fn handle_message(
                     table: req.table,
                     columns,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         ServiceOp::DATABASE_CATALOG_ROW_COUNT => {
@@ -1630,7 +1677,7 @@ pub async fn handle_message(
                     table: req.table,
                     count,
                 }),
-                Err(e) => OutputStream::error(db_error_to_wafer(e)),
+                Err(e) => OutputStream::error(failed(ctx, e)),
             }
         }
         other => OutputStream::error(WaferError::new(
@@ -1653,10 +1700,10 @@ pub async fn handle_lifecycle(
         } else {
             // A transient fault keeps its `Unavailable` code, so the runtime
             // retries this Init rather than caching the failure.
-            service
-                .ensure_schema_tables(tables)
-                .await
-                .map_err(|e| WaferError::new(e.code(), format!("schema migration failed: {e}")))?;
+            service.ensure_schema_tables(tables).await.map_err(|e| {
+                WaferError::new(e.code(), format!("schema migration failed: {e}"))
+                    .with_optional_detail_code(e.detail_code())
+            })?;
             tracing::info!(tables = tables.len(), "database schema migrations applied");
         }
     }
@@ -1739,7 +1786,11 @@ mod tests {
             "deadlock detected: process 41 waits for ShareLock".into(),
         ));
         assert_eq!(w.code, ErrorCode::Unavailable);
-        assert_eq!(w.detail_code(), None, "contention is not an outage");
+        assert_eq!(
+            w.detail_code(),
+            Some(wafer_block::wire::database::DATABASE_CONTENDED),
+            "contention is not an outage"
+        );
         assert_eq!(w.message, "database busy, retry");
 
         for other in [

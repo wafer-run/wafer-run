@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
+use wafer_block::init_attempt::DatabaseAnswer;
 pub use wafer_block::wire::database::{CatalogColumn, RawStatement, RecordData};
-use wafer_block::wire::database::{CALL_BUDGET_EXHAUSTED, DATABASE_UNAVAILABLE};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_schema::{
@@ -44,16 +44,18 @@ pub enum DatabaseError {
     /// resets. Says nothing about the request, and retrying it later may
     /// succeed. Each backend classifies its driver's errors into this
     /// variant; see its error mapping for the exact set. Answered with
-    /// `Unavailable` and detail code [`DATABASE_UNAVAILABLE`].
+    /// `Unavailable` and detail code [`DATABASE_UNAVAILABLE`](wafer_block::wire::database::DATABASE_UNAVAILABLE).
     #[error("database unavailable: {0}")]
     Unavailable(String),
     /// The database is up, but refused this statement because of other work
     /// on it: a lock it could not take (a busy or locked SQLite file,
-    /// PostgreSQL's `55P03`), or a transaction it rolled back to break a
-    /// deadlock or a serialization conflict (`40P01`, `40001`). Retrying the
-    /// same statement may succeed once that work is done. Answered with
-    /// `Unavailable`, like an outage, but with no detail code: the database
-    /// is not down, and nothing should treat it as an outage.
+    /// PostgreSQL's `55P03`), a transaction it rolled back to break a
+    /// deadlock or a serialization conflict (`40P01`, `40001`), or no
+    /// connection of the application's own free in time (a pool timeout,
+    /// PostgreSQL's `53300`, too many connections). Retrying the same
+    /// statement may succeed once that work is done. Answered with
+    /// `Unavailable`, like an outage, but with detail code
+    /// [`DATABASE_CONTENDED`](wafer_block::wire::database::DATABASE_CONTENDED): the database is not down.
     #[error("database contended: {0}")]
     Contended(String),
     /// The backend limits the database calls one invocation may make, and
@@ -63,7 +65,7 @@ pub enum DatabaseError {
     /// transaction or native batch whatever its length), and maps its platform's own refusal of the same
     /// limit to this variant (see [`DbExec`](super::exec::DbExec)'s
     /// "Per-invocation call limits"). Answered with `ResourceExhausted` and
-    /// detail code [`CALL_BUDGET_EXHAUSTED`].
+    /// detail code [`CALL_BUDGET_EXHAUSTED`](wafer_block::wire::database::CALL_BUDGET_EXHAUSTED).
     #[error("call budget exhausted: {0}")]
     CallBudgetExhausted(String),
     /// Backend-internal failure.
@@ -95,19 +97,33 @@ impl DatabaseError {
 
     /// The detail code ([`wafer_block::WaferError::detail_code`]) this error
     /// answers with, telling it apart from every other error sharing its
-    /// [`code`](Self::code): [`CALL_BUDGET_EXHAUSTED`] for
+    /// [`code`](Self::code): [`CALL_BUDGET_EXHAUSTED`](wafer_block::wire::database::CALL_BUDGET_EXHAUSTED) for
     /// `CallBudgetExhausted` (a `ResourceExhausted` like the runtime's own
-    /// limits), [`DATABASE_UNAVAILABLE`] for `Unavailable` (an `Unavailable`
-    /// like contention, or any dependency a block has), none otherwise.
+    /// limits), [`DATABASE_UNAVAILABLE`](wafer_block::wire::database::DATABASE_UNAVAILABLE) for `Unavailable` and
+    /// [`DATABASE_CONTENDED`](wafer_block::wire::database::DATABASE_CONTENDED) for `Contended` (each an `Unavailable` like any
+    /// other dependency a block has), none otherwise.
     #[must_use]
     pub const fn detail_code(&self) -> Option<&'static str> {
+        match self.attempt_answer() {
+            Some(answer) => Some(answer.detail_code()),
+            None => None,
+        }
+    }
+
+    /// The class an init attempt notes for a call that failed with this
+    /// error ([`wafer_block::init_attempt`]): the failures that say
+    /// something about the database rather than the request. `None` for the
+    /// rest — a missing row, a taken key, a bad argument, a statement the
+    /// database ran and failed.
+    #[must_use]
+    pub const fn attempt_answer(&self) -> Option<DatabaseAnswer> {
         match self {
-            Self::CallBudgetExhausted(_) => Some(CALL_BUDGET_EXHAUSTED),
-            Self::Unavailable(_) => Some(DATABASE_UNAVAILABLE),
+            Self::Unavailable(_) => Some(DatabaseAnswer::Unavailable),
+            Self::Contended(_) => Some(DatabaseAnswer::Contended),
+            Self::CallBudgetExhausted(_) => Some(DatabaseAnswer::CallBudgetExhausted),
             Self::NotFound
             | Self::AlreadyExists(_)
             | Self::InvalidArgument(_)
-            | Self::Contended(_)
             | Self::Internal(_)
             | Self::Other(_) => None,
         }

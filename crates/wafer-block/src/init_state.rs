@@ -16,22 +16,30 @@ pub struct TransientFailure {
     /// What failed. It may quote a backend's error (a table's name, a host);
     /// a public body reports the class, not this text.
     pub message: String,
-    /// The detail code ([`crate::WaferError::detail_code`]) of the error the
-    /// attempt failed with: a typed account of the failure that, unlike
-    /// `message`, is safe to act on.
+    /// The failure's class, as a detail code
+    /// ([`crate::WaferError::detail_code`]): a typed account that, unlike
+    /// `message`, is safe to act on. Exactly one of:
     ///
-    /// - [`DATABASE_UNAVAILABLE`](crate::wire::database::DATABASE_UNAVAILABLE):
-    ///   the database itself could not answer — a block's `lifecycle(Init)`
-    ///   that propagated its database's outage, the config source's read
-    ///   that met one, or a block's `Init` that propagated another block's
-    ///   refusal carrying it.
-    /// - [`CALL_BUDGET_EXHAUSTED`](crate::wire::database::CALL_BUDGET_EXHAUSTED):
-    ///   the invocation's database call budget was spent.
-    /// - `None`: the failure has no detail code — an `Unavailable` a block
-    ///   raised for a dependency of its own, a database error a block wrapped
-    ///   in a new `WaferError` (which drops it), a config source failure
-    ///   with no coded cause, or an init budget overrun with no failure of
-    ///   its own.
+    /// - What the attempt's own database calls saw, when they saw anything
+    ///   ([`crate::init_attempt`]). It takes precedence over whatever error
+    ///   the block returned, so a block that wrapped its database's error, or
+    ///   hung on a call until the init budget cut it off, still reads as the
+    ///   database's failure. One of
+    ///   [`DATABASE_UNAVAILABLE`](crate::wire::database::DATABASE_UNAVAILABLE)
+    ///   (the database could not answer, or a call was still waiting on it
+    ///   at the init budget),
+    ///   [`DATABASE_CONTENDED`](crate::wire::database::DATABASE_CONTENDED)
+    ///   (busy with other work), or
+    ///   [`CALL_BUDGET_EXHAUSTED`](crate::wire::database::CALL_BUDGET_EXHAUSTED)
+    ///   (the invocation's call budget spent).
+    /// - Otherwise, the detail code of the error the attempt failed with,
+    ///   when it had one: the config source's (a database-backed source
+    ///   passes its read's, e.g. `database.unavailable`), a refused
+    ///   dispatch's (`database.unavailable` only), or any code the block's
+    ///   own error carried (`auth.invalid_token`, …).
+    /// - `None`: none of those — every call the attempt made answered, and
+    ///   the block failed on its own with no code, or the init budget ran out
+    ///   with no call in flight and no failure of the block's own.
     pub detail_code: Option<String>,
 }
 
@@ -44,9 +52,9 @@ impl TransientFailure {
         }
     }
 
-    /// This failure with `detail_code`.
+    /// This failure with class `detail_code` (see [`Self::detail_code`]).
     #[must_use]
-    pub fn with_detail_code(mut self, detail_code: Option<impl Into<String>>) -> Self {
+    pub fn classed(mut self, detail_code: Option<impl Into<String>>) -> Self {
         self.detail_code = detail_code.map(Into::into);
         self
     }

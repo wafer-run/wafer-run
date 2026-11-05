@@ -31,6 +31,16 @@ impl crate::WaferError {
         self
     }
 
+    /// [`Self::with_detail_code`] when `code` is `Some`; `self` unchanged
+    /// when it is `None`.
+    #[must_use]
+    pub fn with_optional_detail_code(self, code: Option<impl Into<String>>) -> Self {
+        match code {
+            Some(code) => self.with_detail_code(code),
+            None => self,
+        }
+    }
+
     /// Read the structured application error code set via
     /// [`Self::with_detail_code`], if any.
     pub fn detail_code(&self) -> Option<&str> {

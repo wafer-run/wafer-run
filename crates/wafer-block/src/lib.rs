@@ -46,6 +46,7 @@ pub mod context;
 pub mod db;
 pub mod executor;
 pub mod hash;
+pub mod init_attempt;
 pub mod init_state;
 pub mod interfaces;
 pub mod introspection;

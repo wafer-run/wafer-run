@@ -49,6 +49,17 @@ use parking_lot::Mutex;
 pub(crate) struct InitAttempt {
     id: u64,
     block: Arc<str>,
+    /// What this run's database calls saw, noted by the database handler
+    /// through every context derived from the run's
+    /// ([`wafer_block::init_attempt`]).
+    record: Arc<wafer_block::init_attempt::InitAttemptRecord>,
+}
+
+impl InitAttempt {
+    /// What this run's database calls saw.
+    pub(crate) fn record(&self) -> &Arc<wafer_block::init_attempt::InitAttemptRecord> {
+        &self.record
+    }
 }
 
 /// The owners and waits of every in-flight init.
@@ -101,12 +112,17 @@ pub(crate) struct InitWaits {
 }
 
 impl InitWaits {
-    /// A new attempt at `block`'s init. It becomes the block's owner only
-    /// when it starts running ([`own`](Self::own)).
-    pub(crate) fn attempt(&self, block: &str) -> InitAttempt {
+    /// A new attempt at `block`'s init, started from inside `outer` when
+    /// another block's Init reaches it: what its database calls see is also
+    /// what `outer` saw. It becomes the block's owner only when it starts
+    /// running ([`own`](Self::own)).
+    pub(crate) fn attempt(&self, block: &str, outer: Option<&InitAttempt>) -> InitAttempt {
         InitAttempt {
             id: self.next_attempt.fetch_add(1, Ordering::Relaxed),
             block: Arc::from(block),
+            record: wafer_block::init_attempt::InitAttemptRecord::new(
+                outer.map(|outer| outer.record.clone()),
+            ),
         }
     }
 
@@ -206,7 +222,7 @@ mod tests {
     #[test]
     fn waiting_on_a_block_nobody_owns_is_allowed() {
         let waits = Arc::new(InitWaits::default());
-        let a = waits.attempt("t/a");
+        let a = waits.attempt("t/a", None);
         let _own_a = waits.own(&a);
         assert!(waits.wait_for(&a, "t/b").is_ok());
     }
@@ -214,7 +230,7 @@ mod tests {
     #[test]
     fn waiting_on_the_own_block_is_a_cycle() {
         let waits = Arc::new(InitWaits::default());
-        let a = waits.attempt("t/a");
+        let a = waits.attempt("t/a", None);
         let _own_a = waits.own(&a);
         assert_eq!(
             waits.wait_for(&a, "t/a").unwrap_err(),
@@ -225,8 +241,8 @@ mod tests {
     #[test]
     fn two_attempts_waiting_on_each_other_close_a_cycle() {
         let waits = Arc::new(InitWaits::default());
-        let a = waits.attempt("t/a");
-        let b = waits.attempt("t/b");
+        let a = waits.attempt("t/a", None);
+        let b = waits.attempt("t/b", None);
         let _own_a = waits.own(&a);
         let _own_b = waits.own(&b);
         let _a_waits_b = waits.wait_for(&a, "t/b").expect("no cycle yet");
@@ -239,9 +255,9 @@ mod tests {
     #[test]
     fn a_longer_cycle_reports_every_block() {
         let waits = Arc::new(InitWaits::default());
-        let a = waits.attempt("t/a");
-        let b = waits.attempt("t/b");
-        let c = waits.attempt("t/c");
+        let a = waits.attempt("t/a", None);
+        let b = waits.attempt("t/b", None);
+        let c = waits.attempt("t/c", None);
         let _owners = [waits.own(&a), waits.own(&b), waits.own(&c)];
         let _ab = waits.wait_for(&a, "t/b").expect("no cycle yet");
         let _bc = waits.wait_for(&b, "t/c").expect("no cycle yet");
@@ -254,8 +270,8 @@ mod tests {
     #[test]
     fn dropped_edges_and_owners_no_longer_count() {
         let waits = Arc::new(InitWaits::default());
-        let a = waits.attempt("t/a");
-        let b = waits.attempt("t/b");
+        let a = waits.attempt("t/a", None);
+        let b = waits.attempt("t/b", None);
         let own_a = waits.own(&a);
         let _own_b = waits.own(&b);
         let a_waits_b = waits.wait_for(&a, "t/b").expect("no cycle yet");
@@ -263,7 +279,7 @@ mod tests {
         assert!(waits.wait_for(&b, "t/a").is_ok(), "a no longer waits on b");
 
         drop(own_a);
-        let a2 = waits.attempt("t/a");
+        let a2 = waits.attempt("t/a", None);
         assert!(
             waits.wait_for(&a2, "t/a").is_ok(),
             "t/a has no owner once its attempt ended"
@@ -273,8 +289,8 @@ mod tests {
     #[test]
     fn concurrent_waits_from_one_attempt_are_counted_separately() {
         let waits = Arc::new(InitWaits::default());
-        let a = waits.attempt("t/a");
-        let b = waits.attempt("t/b");
+        let a = waits.attempt("t/a", None);
+        let b = waits.attempt("t/b", None);
         let _own_a = waits.own(&a);
         let _own_b = waits.own(&b);
         let first = waits.wait_for(&a, "t/b").expect("no cycle");

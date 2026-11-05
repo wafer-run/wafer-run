@@ -90,7 +90,7 @@ impl InitError {
     pub fn from_lifecycle_error(e: &WaferError) -> Self {
         let msg = format!("lifecycle init failed: {e}");
         if init_failure_is_transient(e.code, e.detail_code()) {
-            Self::Transient(TransientFailure::new(msg).with_detail_code(e.detail_code()))
+            Self::Transient(TransientFailure::new(msg).classed(e.detail_code()))
         } else {
             Self::Permanent(msg)
         }
@@ -510,10 +510,7 @@ mod tests {
                 transient,
                 "{code:?} {detail:?}"
             );
-            let mut e = WaferError::new(code, "x");
-            if let Some(detail) = detail {
-                e = e.with_detail_code(detail);
-            }
+            let e = WaferError::new(code, "x").with_optional_detail_code(detail);
             assert_eq!(
                 matches!(InitError::from_lifecycle_error(&e), InitError::Transient(_)),
                 transient,

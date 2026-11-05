@@ -116,7 +116,7 @@ impl ConfigError {
                 ..
             } => InitError::Transient(
                 wafer_block::TransientFailure::new(format!("config fetch failed: {source}"))
-                    .with_detail_code(detail_code),
+                    .classed(detail_code),
             ),
             Self::SourceFault { source, .. } => {
                 InitError::Permanent(format!("config source fault: {source}"))
@@ -297,14 +297,20 @@ pub(crate) async fn validate_block_configs<'a>(
                     missing_keys: vec![key],
                 });
             }
-            Err(ConfigError::Transient { block, source, .. }) => failures.push(SourceFailure {
+            Err(ConfigError::Transient {
+                block,
+                source,
+                detail_code,
+            }) => failures.push(SourceFailure {
                 block,
                 reason: UnavailableReason::Transient,
+                detail_code,
                 error: source.to_string(),
             }),
             Err(ConfigError::SourceFault { block, source }) => failures.push(SourceFailure {
                 block,
                 reason: UnavailableReason::SourceFault,
+                detail_code: None,
                 error: source.to_string(),
             }),
         }
@@ -315,6 +321,7 @@ pub(crate) async fn validate_block_configs<'a>(
         .map(|f| UnavailableBlock {
             block: f.block.clone(),
             reason: f.reason,
+            detail_code: f.detail_code.clone(),
         })
         .collect();
     log_unavailable_summary(failures);
@@ -329,6 +336,8 @@ pub(crate) async fn validate_block_configs<'a>(
 struct SourceFailure {
     block: String,
     reason: wafer_block::UnavailableReason,
+    /// The source's detail code ([`ConfigError::Transient`]'s).
+    detail_code: Option<String>,
     error: String,
 }
 
@@ -723,6 +732,7 @@ mod validate_block_configs_tests {
         let unavailable = |block: &str, reason| UnavailableBlock {
             block: block.to_string(),
             reason,
+            detail_code: None,
         };
         assert_eq!(
             report.unavailable,

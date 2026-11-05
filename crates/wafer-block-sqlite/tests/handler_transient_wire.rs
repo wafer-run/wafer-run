@@ -2,8 +2,9 @@
 //! connection holds the write lock on a real SQLite file, a `database.create`
 //! request goes through the shared database handler to the real service, and
 //! the error it gets back carries the transient code a caller — and the
-//! runtime, for a block whose Init hit the fault — may retry on, and no
-//! detail code: it is contention, not the database down. The Init-time
+//! runtime, for a block whose Init hit the fault — may retry on, and the
+//! `database.contended` detail code: it is contention, not the database
+//! down. The Init-time
 //! schema migration (`handle_lifecycle`) answers the same way. Once the lock
 //! is released, both succeed.
 
@@ -130,7 +131,7 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
     assert_eq!(err.message, "database busy, retry");
     assert_eq!(
         err.detail_code(),
-        None,
+        Some(wafer_block::wire::database::DATABASE_CONTENDED),
         "a busy database is contention, not an outage: {err:?}"
     );
 
@@ -155,7 +156,7 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
     );
     assert_eq!(
         err.detail_code(),
-        None,
+        Some(wafer_block::wire::database::DATABASE_CONTENDED),
         "contention, not an outage: {err:?}"
     );
 
