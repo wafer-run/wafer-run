@@ -643,11 +643,17 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
         DatabaseError::CallBudgetExhausted(msg) => WaferError::new(code, msg),
         // Transient: the caller may retry (and the runtime retries a block
         // Init that failed this way instead of caching the failure). The
-        // driver's message can name hosts and files, so it is logged, not
-        // returned.
+        // driver's message can name hosts, files, relations and other
+        // sessions, so it is logged, not returned. An outage carries the
+        // `database.unavailable` detail code (set below); contention, with
+        // the database up, carries none.
         DatabaseError::Unavailable(msg) => {
             tracing::warn!(error = %msg, "database temporarily unavailable");
             WaferError::new(code, "database temporarily unavailable")
+        }
+        DatabaseError::Contended(msg) => {
+            tracing::warn!(error = %msg, "database busy");
+            WaferError::new(code, "database busy, retry")
         }
         DatabaseError::Internal(msg) => {
             if is_preserved_db_error(&msg) {
@@ -671,7 +677,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
     };
     // The detail code tells a caller what the coarse code cannot: a
     // call-budget refusal shares `ResourceExhausted` with other refusals (a
-    // rate limit's, the call-depth limit's).
+    // rate limit's, the call-depth limit's), and the database being down
+    // shares `Unavailable` with contention and with any other dependency a
+    // block has (`DatabaseError::detail_code`).
     match detail {
         Some(detail) => err.with_detail_code(detail),
         None => err,
@@ -679,8 +687,9 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 }
 
 /// The answer to a `database.ddl_transaction` that did not commit: the
-/// classified [`DatabaseError`]'s code (and its call-budget detail code,
-/// as [`db_error_to_wafer`] sets it), the backend's own message, and, when the
+/// classified [`DatabaseError`]'s code and detail code (a call-budget
+/// refusal's, or the database being down: as [`db_error_to_wafer`] sets
+/// them), the backend's own message, and, when the
 /// backend attributed the failure to one statement, its position under
 /// [`wire::META_FAILED_STATEMENT_INDEX`].
 ///
@@ -690,9 +699,10 @@ fn db_error_to_wafer(e: DatabaseError) -> WaferError {
 /// statements are its own. It needs the text: a migration runner names the
 /// statement that failed and why, and a duplicate key keeps its constraint.
 ///
-/// [`DatabaseError::Unavailable`] is the exception, scrubbed exactly as
-/// [`db_error_to_wafer`] scrubs it: its text is the driver's or the
-/// connection's (it can name hosts and files), not the caller's statements.
+/// [`DatabaseError::Unavailable`] and [`DatabaseError::Contended`] are the
+/// exceptions, scrubbed exactly as [`db_error_to_wafer`] scrubs them: their
+/// text is the driver's or the connection's (it can name hosts, files and
+/// other sessions), not the caller's statements.
 fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
     let TransactionError { statement, error } = failed;
     let code = error.code();
@@ -706,6 +716,10 @@ fn transaction_error_to_wafer(failed: TransactionError) -> WaferError {
         DatabaseError::Unavailable(msg) => {
             tracing::warn!(error = %msg, "database temporarily unavailable");
             "database temporarily unavailable".to_string()
+        }
+        DatabaseError::Contended(msg) => {
+            tracing::warn!(error = %msg, "database busy");
+            "database busy, retry".to_string()
         }
         DatabaseError::Other(err) => err.to_string(),
     };
@@ -1720,6 +1734,13 @@ mod tests {
         assert_eq!(w.code, ErrorCode::Unavailable);
         assert_eq!(w.detail_code(), Some(DATABASE_UNAVAILABLE));
         assert_eq!(w.message, "database temporarily unavailable");
+
+        let w = db_error_to_wafer(DatabaseError::Contended(
+            "deadlock detected: process 41 waits for ShareLock".into(),
+        ));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.detail_code(), None, "contention is not an outage");
+        assert_eq!(w.message, "database busy, retry");
 
         for other in [
             DatabaseError::NotFound,

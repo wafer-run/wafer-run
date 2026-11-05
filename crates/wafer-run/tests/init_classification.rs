@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use wafer_block::{
     core_types::{LifecycleEvent, LifecycleType, Message, WaferError},
     streams::{input::InputStream, output::OutputStream},
+    wire::database::DATABASE_UNAVAILABLE,
     Block, BlockInfo, ConfigVar, ErrorCode,
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
@@ -42,7 +43,7 @@ use wafer_core::{
 };
 use wafer_run::{
     runtime::slot::TRANSIENT_RETRY_BASE, BlockInitState, ConfigError, ConfigSource, Context,
-    EnvBlockConfig, InitError, UnavailableBlock, UnavailableReason, Wafer,
+    EnvBlockConfig, InitError, TransientFailure, UnavailableBlock, UnavailableReason, Wafer,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,9 +97,12 @@ impl ConfigSource for ScriptedSource {
             .unwrap_or(Answer::Ok);
         match answer {
             Answer::Ok => Ok(EnvBlockConfig::default()),
+            // A database-backed source passes its error's detail code: this
+            // read met the database's outage.
             Answer::Transient => Err(ConfigError::Transient {
                 block: block.to_string(),
                 source: Box::new(SourceErr("D1_ERROR: daily row read limit exceeded")),
+                detail_code: Some(DATABASE_UNAVAILABLE.to_string()),
             }),
             Answer::SourceFault => Err(ConfigError::SourceFault {
                 block: block.to_string(),
@@ -233,6 +237,9 @@ fn bare_wafer(source: Arc<dyn ConfigSource>) -> Wafer {
 struct Budgeted {
     inner: SQLiteDatabaseService,
     spent: AtomicBool,
+    /// The database is down: every write is refused as the backend's
+    /// outage, `DatabaseError::Unavailable`.
+    down: AtomicBool,
 }
 
 impl Budgeted {
@@ -241,6 +248,11 @@ impl Budgeted {
     }
 
     fn spend_call(&self, what: &str) -> Result<(), DatabaseError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(DatabaseError::Unavailable(format!(
+                "{what}: connection to db-1.internal:5432 refused"
+            )));
+        }
         if self.spent.load(Ordering::SeqCst) {
             return Err(DatabaseError::CallBudgetExhausted(format!(
                 "{what}: this invocation has no database call left"
@@ -328,6 +340,7 @@ async fn budget_wafer(rows: usize) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
     let svc = Arc::new(Budgeted {
         inner,
         spent: AtomicBool::new(false),
+        down: AtomicBool::new(false),
     });
     register_with_tables(&mut wafer, svc.clone(), vec![]).expect("register wafer-run/database");
     let (probe, inits) = Probe::new("test/budget-init", InitBehaviour::WriteRows(rows));
@@ -406,14 +419,20 @@ async fn a_transient_config_error_is_not_cached() {
 
     let err = wafer.init_block("test/flaky").await.expect_err("transient");
     assert!(
-        matches!(err, InitError::Transient { ref message, detail_code: None } if message.contains("config fetch failed")),
-        "{err:?}"
+        matches!(&err, InitError::Transient(failure)
+            if failure.message.contains("config fetch failed")
+                && failure.detail_code.as_deref() == Some(DATABASE_UNAVAILABLE)),
+        "the source's detail code is carried: {err:?}"
     );
     match wafer.init_states().get("test/flaky") {
-        Some(BlockInitState::Retrying {
-            reason, retry_in, ..
-        }) => {
+        Some(BlockInitState::Retrying { failure, retry_in }) => {
+            let reason = &failure.message;
             assert!(reason.contains("daily row read limit"), "{reason}");
+            assert_eq!(
+                failure.detail_code.as_deref(),
+                Some(DATABASE_UNAVAILABLE),
+                "the slot keeps it"
+            );
             // At most the first backoff; it may already have elapsed on a
             // slow runner (then zero), so no lower bound is asserted.
             assert!(*retry_in <= TRANSIENT_RETRY_BASE, "{retry_in:?}");
@@ -464,7 +483,7 @@ async fn an_init_that_meets_a_spent_call_budget_fails_transiently_and_reruns() {
         .await
         .expect_err("the call budget refuses the write");
     match err {
-        InitError::Transient { message: msg, .. } => {
+        InitError::Transient(TransientFailure { message: msg, .. }) => {
             assert!(
                 msg.contains("lifecycle init failed") && msg.contains("ResourceExhausted"),
                 "the database's own refusal: {msg}"
@@ -498,6 +517,57 @@ async fn an_init_that_meets_a_spent_call_budget_fails_transiently_and_reruns() {
     assert_eq!(
         svc.inner.count(OWN_COLLECTION, &[]).await.expect("count"),
         3
+    );
+}
+
+/// The same through a database outage: the real `wafer-run/database` block
+/// answers the backend's `DatabaseError::Unavailable` as `Unavailable` with
+/// the `database.unavailable` detail code; the client hands it to the
+/// block's `lifecycle(Init)`, which propagates it with `?`; the Init fails
+/// transiently, and the block's slot keeps the detail code — in the error and
+/// in its `Retrying` state — through the backoff. Back up, the re-run writes
+/// its rows.
+#[tokio::test]
+async fn an_init_that_meets_a_database_outage_keeps_its_detail_code_and_reruns() {
+    let (wafer, inits, svc) = budget_wafer(3).await;
+    svc.down.store(true, Ordering::SeqCst);
+    let err = wafer
+        .init_block("test/budget-init")
+        .await
+        .expect_err("the database is down");
+    match &err {
+        InitError::Transient(failure) => {
+            assert_eq!(
+                failure.detail_code.as_deref(),
+                Some(DATABASE_UNAVAILABLE),
+                "{failure:?}"
+            );
+            assert!(
+                !failure.message.contains("db-1.internal"),
+                "the driver's text is scrubbed: {failure:?}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+    match wafer.init_states().get("test/budget-init") {
+        Some(BlockInitState::Retrying { failure, .. }) => assert_eq!(
+            failure.detail_code.as_deref(),
+            Some(DATABASE_UNAVAILABLE),
+            "{failure:?}"
+        ),
+        other => panic!("expected Retrying, got {other:?}"),
+    }
+
+    svc.down.store(false, Ordering::SeqCst);
+    tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
+    wafer
+        .init_block("test/budget-init")
+        .await
+        .expect("the re-run writes its rows");
+    assert_eq!(inits.load(Ordering::SeqCst), 2, "Init ran again");
+    assert_eq!(
+        wafer.init_states().get("test/budget-init"),
+        Some(&BlockInitState::Ready)
     );
 }
 
@@ -696,7 +766,7 @@ async fn init_states_report_every_block_without_running_or_waiting_for_init() {
     );
     assert!(matches!(
         states.get("test/retrying"),
-        Some(BlockInitState::Retrying { reason, .. }) if reason.contains("config fetch failed")
+        Some(BlockInitState::Retrying { failure, .. }) if failure.message.contains("config fetch failed")
     ));
     assert!(matches!(
         states.get("test/failed"),

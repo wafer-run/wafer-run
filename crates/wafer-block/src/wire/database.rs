@@ -27,9 +27,12 @@ pub const CALL_BUDGET_EXHAUSTED: &str = "database.call_budget_exhausted";
 
 /// Detail code ([`crate::WaferError::detail_code`]) of the `Unavailable`
 /// answering a database call the backend itself could not answer: the
-/// database is down, overloaded, was reset, or is over a quota that resets
-/// (a backend's `DatabaseError::Unavailable`). Nothing can be assumed
-/// written. A retry may succeed once the backend recovers.
+/// database is down or unreachable, overloaded, restarting, was reset, or is
+/// over a quota that resets (a backend's `DatabaseError::Unavailable`).
+/// Nothing can be assumed written. A retry may succeed once the backend
+/// recovers. Contention — a lock not taken, a deadlock or serialization
+/// conflict broken (`DatabaseError::Contended`) — is also `Unavailable`, but
+/// carries no detail code: the database is up.
 ///
 /// It tells a database outage apart from any other `Unavailable`, which a
 /// block raises for a dependency of its own. A block whose `lifecycle(Init)`

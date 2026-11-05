@@ -47,7 +47,8 @@ pub use runner::run_block_with_recovery;
 // definitions live in `wafer-block`, alongside the `Context` trait whose
 // `validate_all_block_configs` and `block_init_states` methods return them.
 pub use wafer_block::{
-    BlockInitState, BrokenBlock, UnavailableBlock, UnavailableReason, ValidationReport,
+    BlockInitState, BrokenBlock, TransientFailure, UnavailableBlock, UnavailableReason,
+    ValidationReport,
 };
 
 /// Thin, clonable handle that blocks can store to call flows from async tasks.
@@ -710,7 +711,11 @@ impl Wafer {
 ///
 /// When block A's `Init` dispatches to a block B that is refused, A's `Init`
 /// fails with B's refusal, so A's slot records B's reference, not B's cause:
-/// B's own slot (and the log line under that reference) holds it.
+/// B's own slot (and the log line under that reference) holds it. The
+/// refusal keeps a transient failure's detail code (it is a class, not
+/// text), so A's `Init` that propagates it with `?` keeps it too: a block
+/// refused because its database was down carries `database.unavailable` to
+/// every block that failed on it.
 pub(crate) fn init_error_to_wafer_error(
     block: &str,
     e: crate::runtime::slot::InitError,
@@ -733,16 +738,19 @@ pub(crate) fn init_error_to_wafer_error(
                 failed_message(block, &reference),
             )
         }
-        InitError::Transient { message: cause, .. } => {
+        InitError::Transient(failure) => {
             tracing::warn!(
                 correlation_id = %reference,
                 block = %block,
-                error = %cause,
+                error = %failure.message,
                 "dispatch refused: the block's Init failed transiently",
             );
-            let mut err = WaferError::new(
-                ErrorCode::Unavailable,
-                unavailable_message(block, &reference),
+            let mut err = with_failure_detail(
+                WaferError::new(
+                    ErrorCode::Unavailable,
+                    unavailable_message(block, &reference),
+                ),
+                failure.detail_code.as_deref(),
             );
             err.meta.extend(retry_in.map(retry_after_meta));
             err
@@ -767,13 +775,24 @@ pub(crate) fn init_error_to_wafer_error(
 /// no pending backoff to name, and the embedder that rebuilds the runtime
 /// owns the retry delay.
 ///
-/// Sanitized like [`init_error_to_wafer_error`]: `last_failure` — the slot's
-/// last `Init` error, when it has one — is logged under the reference and
-/// never put in the message.
+/// Sanitized like [`init_error_to_wafer_error`]: the slot's last `Init`
+/// error, read from its `state` when it has one, is logged under the
+/// reference and never put in the message; a transient one's detail code is
+/// kept on the error, as [`init_error_to_wafer_error`] keeps it.
 pub(crate) fn not_initialized_error(
     block: &str,
-    last_failure: Option<&str>,
+    state: &BlockInitState,
 ) -> wafer_block::core_types::WaferError {
+    let (last_failure, detail_code) = match state {
+        BlockInitState::Retrying { failure, .. } => (
+            Some(failure.message.as_str()),
+            failure.detail_code.as_deref(),
+        ),
+        BlockInitState::Failed { reason } => (Some(reason.as_str()), None),
+        BlockInitState::NotInitialized | BlockInitState::Initializing | BlockInitState::Ready => {
+            (None, None)
+        }
+    };
     let reference = wafer_block::response::correlation_id();
     tracing::warn!(
         correlation_id = %reference,
@@ -781,10 +800,24 @@ pub(crate) fn not_initialized_error(
         last_failure = last_failure.unwrap_or("none"),
         "dispatch refused: the block is not initialized in this runtime",
     );
-    wafer_block::core_types::WaferError::new(
-        wafer_block::core_types::ErrorCode::Unavailable,
-        unavailable_message(block, &reference),
+    with_failure_detail(
+        wafer_block::core_types::WaferError::new(
+            wafer_block::core_types::ErrorCode::Unavailable,
+            unavailable_message(block, &reference),
+        ),
+        detail_code,
     )
+}
+
+/// `err` with a transient failure's `detail_code`, when it has one.
+fn with_failure_detail(
+    err: wafer_block::core_types::WaferError,
+    detail_code: Option<&str>,
+) -> wafer_block::core_types::WaferError {
+    match detail_code {
+        Some(detail_code) => err.with_detail_code(detail_code),
+        None => err,
+    }
 }
 
 /// The message of a refused dispatch to `block` that a retry may cure: its
@@ -969,7 +1002,8 @@ impl InitBudget {
 
     /// The transient failure of an attempt at `name`'s init that ran past
     /// this budget; `failed` is the error it returned after the deadline, if
-    /// it returned one.
+    /// it returned one. A transient one keeps its detail code: the overrun
+    /// was its failure arriving late.
     fn exceeded(
         self,
         name: &str,
@@ -989,7 +1023,15 @@ impl InitBudget {
         if let Some(failed) = failed {
             msg.push_str(&format!("; it failed after the budget passed: {failed}"));
         }
-        crate::runtime::slot::InitError::transient(msg)
+        let detail_code = match failed {
+            Some(crate::runtime::slot::InitError::Transient(failure)) => {
+                failure.detail_code.clone()
+            }
+            _ => None,
+        };
+        crate::runtime::slot::InitError::Transient(
+            TransientFailure::new(msg).with_detail_code(detail_code),
+        )
     }
 }
 
@@ -1247,10 +1289,12 @@ mod tests {
         let wait = Some(Duration::from_secs(3));
         let has = |e: &WaferError| e.meta.iter().any(|m| m.key == "resp.header.Retry-After");
 
-        let transient = init_error_to_wafer_error("b", InitError::transient("x"), wait);
+        let transient =
+            init_error_to_wafer_error("b", InitError::Transient(TransientFailure::new("x")), wait);
         assert_eq!(transient.code, ErrorCode::Unavailable);
         assert!(has(&transient));
-        let none = init_error_to_wafer_error("b", InitError::transient("x"), None);
+        let none =
+            init_error_to_wafer_error("b", InitError::Transient(TransientFailure::new("x")), None);
         assert!(!has(&none));
         for e in [
             InitError::Permanent("x".into()),
@@ -1311,7 +1355,11 @@ mod tests {
             });
         }
 
-        let transient = init_error_to_wafer_error("a/b", InitError::transient(CAUSE), None);
+        let transient = init_error_to_wafer_error(
+            "a/b",
+            InitError::Transient(TransientFailure::new(CAUSE)),
+            None,
+        );
         assert_eq!(transient.code, ErrorCode::Unavailable);
         let reference = reference_of(&transient.message, |r| unavailable_message("a/b", r));
         assert_eq!(
@@ -1351,7 +1399,13 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn a_not_initialized_refusal_logs_the_last_failure_and_never_answers_it() {
-        let e = not_initialized_error("a/b", Some(CAUSE));
+        let e = not_initialized_error(
+            "a/b",
+            &BlockInitState::Retrying {
+                failure: TransientFailure::new(CAUSE),
+                retry_in: std::time::Duration::ZERO,
+            },
+        );
         assert_eq!(e.code, ErrorCode::Unavailable);
         assert!(
             !e.meta.iter().any(|m| m.key == "resp.header.Retry-After"),
@@ -1371,9 +1425,91 @@ mod tests {
     /// Two refusals never share a reference: each names its own log line.
     #[test]
     fn each_refusal_has_its_own_reference() {
-        let a = not_initialized_error("a/b", None).message;
-        let b = not_initialized_error("a/b", None).message;
+        let a = not_initialized_error("a/b", &BlockInitState::NotInitialized).message;
+        let b = not_initialized_error("a/b", &BlockInitState::NotInitialized).message;
         assert_ne!(a, b);
+    }
+
+    /// A refusal keeps the refused block's transient failure's detail code —
+    /// on both the `Await` path ([`init_error_to_wafer_error`]) and the
+    /// `Refuse` one ([`not_initialized_error`]) — so block A whose `Init`
+    /// failed on B's refusal and propagated it carries the same code: B
+    /// refused because its database was down makes A's failure the database
+    /// being down too. A failure without one, or a permanent one, carries
+    /// none.
+    #[test]
+    fn a_refusal_keeps_the_detail_code_of_the_failure_it_refuses_on() {
+        use wafer_block::wire::database::DATABASE_UNAVAILABLE;
+
+        use crate::runtime::slot::InitError;
+        let outage = TransientFailure::new(CAUSE).with_detail_code(Some(DATABASE_UNAVAILABLE));
+
+        let awaited = init_error_to_wafer_error("b/db", InitError::Transient(outage.clone()), None);
+        assert_eq!(awaited.detail_code(), Some(DATABASE_UNAVAILABLE));
+        assert_body_has_no_cause(&awaited, CAUSE);
+        let refused = not_initialized_error(
+            "b/db",
+            &BlockInitState::Retrying {
+                failure: outage,
+                retry_in: std::time::Duration::ZERO,
+            },
+        );
+        assert_eq!(refused.detail_code(), Some(DATABASE_UNAVAILABLE));
+        for refusal in [awaited, refused] {
+            match InitError::from_lifecycle_error(&refusal) {
+                InitError::Transient(failure) => assert_eq!(
+                    failure.detail_code.as_deref(),
+                    Some(DATABASE_UNAVAILABLE),
+                    "A's Init that propagated B's refusal"
+                ),
+                other => panic!("expected Transient, got {other:?}"),
+            }
+        }
+
+        let own = init_error_to_wafer_error(
+            "b/db",
+            InitError::Transient(TransientFailure::new(CAUSE)),
+            None,
+        );
+        assert_eq!(own.detail_code(), None);
+        let failed = not_initialized_error(
+            "b/db",
+            &BlockInitState::Failed {
+                reason: CAUSE.into(),
+            },
+        );
+        assert_eq!(failed.detail_code(), None);
+    }
+
+    /// An init that runs past its budget and then fails transiently keeps
+    /// that failure's detail code; one with no failure, or a permanent one,
+    /// has none.
+    #[test]
+    fn an_init_budget_overrun_keeps_a_late_transient_failures_detail_code() {
+        use wafer_block::wire::database::DATABASE_UNAVAILABLE;
+
+        use crate::runtime::slot::InitError;
+        let budget = InitBudget {
+            limit: std::time::Duration::from_millis(50),
+            capped: false,
+        };
+        let late = InitError::Transient(
+            TransientFailure::new("database temporarily unavailable")
+                .with_detail_code(Some(DATABASE_UNAVAILABLE)),
+        );
+        let detail = |e: InitError| match e {
+            InitError::Transient(failure) => failure.detail_code,
+            other => panic!("expected Transient, got {other:?}"),
+        };
+        assert_eq!(
+            detail(budget.exceeded("a/b", Some(&late))).as_deref(),
+            Some(DATABASE_UNAVAILABLE)
+        );
+        assert_eq!(detail(budget.exceeded("a/b", None)), None);
+        assert_eq!(
+            detail(budget.exceeded("a/b", Some(&InitError::Permanent("x".into())))),
+            None
+        );
     }
 
     /// `requires` is looked up by registration name. A block whose `info()`

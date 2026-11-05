@@ -38,14 +38,24 @@ pub enum DatabaseError {
     /// for a page it cannot render (a zero limit, an offset with no limit).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
-    /// A fault in reaching or using the database that says nothing about the
-    /// request and may clear on its own — a busy or locked SQLite file, a
-    /// refused or broken connection, a pool with no connection free, a
-    /// transaction the server rolled back to break a deadlock. Retrying the
-    /// same request later may succeed. Each backend classifies its driver's
-    /// errors into this variant; see its error mapping for the exact set.
+    /// The database itself cannot answer: it is down or unreachable, a
+    /// connection broke, it is overloaded (no connection slot or pooled
+    /// connection free), restarting, was reset, or is over a quota that
+    /// resets. Says nothing about the request, and retrying it later may
+    /// succeed. Each backend classifies its driver's errors into this
+    /// variant; see its error mapping for the exact set. Answered with
+    /// `Unavailable` and detail code [`DATABASE_UNAVAILABLE`].
     #[error("database unavailable: {0}")]
     Unavailable(String),
+    /// The database is up, but refused this statement because of other work
+    /// on it: a lock it could not take (a busy or locked SQLite file,
+    /// PostgreSQL's `55P03`), or a transaction it rolled back to break a
+    /// deadlock or a serialization conflict (`40P01`, `40001`). Retrying the
+    /// same statement may succeed once that work is done. Answered with
+    /// `Unavailable`, like an outage, but with no detail code: the database
+    /// is not down, and nothing should treat it as an outage.
+    #[error("database contended: {0}")]
+    Contended(String),
     /// The backend limits the database calls one invocation may make, and
     /// this invocation has none left, so the call was refused before it was
     /// sent; a fresh invocation may run it. Nothing was written. A backend
@@ -77,7 +87,7 @@ impl DatabaseError {
             Self::NotFound => ErrorCode::NotFound,
             Self::AlreadyExists(_) => ErrorCode::AlreadyExists,
             Self::InvalidArgument(_) => ErrorCode::InvalidArgument,
-            Self::Unavailable(_) => ErrorCode::Unavailable,
+            Self::Unavailable(_) | Self::Contended(_) => ErrorCode::Unavailable,
             Self::CallBudgetExhausted(_) => ErrorCode::ResourceExhausted,
             Self::Internal(_) | Self::Other(_) => ErrorCode::Internal,
         }
@@ -88,7 +98,7 @@ impl DatabaseError {
     /// [`code`](Self::code): [`CALL_BUDGET_EXHAUSTED`] for
     /// `CallBudgetExhausted` (a `ResourceExhausted` like the runtime's own
     /// limits), [`DATABASE_UNAVAILABLE`] for `Unavailable` (an `Unavailable`
-    /// like any dependency a block has), none otherwise.
+    /// like contention, or any dependency a block has), none otherwise.
     #[must_use]
     pub const fn detail_code(&self) -> Option<&'static str> {
         match self {
@@ -97,6 +107,7 @@ impl DatabaseError {
             Self::NotFound
             | Self::AlreadyExists(_)
             | Self::InvalidArgument(_)
+            | Self::Contended(_)
             | Self::Internal(_)
             | Self::Other(_) => None,
         }
@@ -136,8 +147,9 @@ pub struct TransactionError {
     pub statement: Option<usize>,
     /// The failure, classified as every other operation classifies it: a
     /// statement that would duplicate a primary or unique key is
-    /// [`DatabaseError::AlreadyExists`] on every backend, a transient fault
-    /// [`DatabaseError::Unavailable`], and so on. Its text is the backend's
+    /// [`DatabaseError::AlreadyExists`] on every backend, the database being
+    /// down [`DatabaseError::Unavailable`], a lock or deadlock
+    /// [`DatabaseError::Contended`], and so on. Its text is the backend's
     /// own message.
     pub error: DatabaseError,
 }

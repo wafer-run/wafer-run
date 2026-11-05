@@ -72,7 +72,7 @@ fn hangs(budget: Option<Duration>) -> Vec<(&'static str, Arc<dyn Block>)> {
 
 fn transient(err: &InitError) -> &str {
     match err {
-        InitError::Transient { message, .. } => message,
+        InitError::Transient(failure) => &failure.message,
         other => panic!("an init over its budget is transient: {other:?}"),
     }
 }
@@ -107,7 +107,8 @@ async fn a_hung_init_does_not_hang_boot() {
         other => panic!("expected an init error, got {other:?}"),
     }
     match &wafer.init_states()["test/hangs"] {
-        wafer_run::BlockInitState::Retrying { reason, .. } => {
+        wafer_run::BlockInitState::Retrying { failure, .. } => {
+            let reason = &failure.message;
             assert!(reason.contains("init budget of 50ms"), "{reason}")
         }
         other => panic!("expected a retrying slot, got {other:?}"),

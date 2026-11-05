@@ -107,15 +107,11 @@ where
         {
             // The slot's last failure, if it has one — transient, or (in a
             // race with a concurrent `init_block`) permanent — is what the log
-            // names beside the refusal's reference.
-            let last_failure = match target.slot.init_state() {
-                super::BlockInitState::Retrying { reason, .. }
-                | super::BlockInitState::Failed { reason } => Some(reason),
-                _ => None,
-            };
+            // names beside the refusal's reference, and a transient one's
+            // detail code is what the refusal carries.
             return Err(super::not_initialized_error(
                 target.resolved,
-                last_failure.as_deref(),
+                &target.slot.init_state(),
             ));
         }
         None => {
@@ -157,7 +153,7 @@ fn init_failure(
     e: super::slot::InitError,
 ) -> WaferError {
     let retry_in = match (&e, template.init_wait) {
-        (super::slot::InitError::Transient { .. }, super::InitWait::Await) => {
+        (super::slot::InitError::Transient(_), super::InitWait::Await) => {
             target.slot.pending_retry_in()
         }
         _ => None,

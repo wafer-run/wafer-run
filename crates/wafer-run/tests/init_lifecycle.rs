@@ -242,10 +242,7 @@ async fn transient_failure_during_eager_init_does_not_wedge_the_block() {
         .await;
         let boot = wafer.init_block("t/flaky").await;
         assert!(
-            matches!(
-                boot,
-                Err(wafer_run::runtime::slot::InitError::Transient { .. })
-            ),
+            matches!(boot, Err(wafer_run::runtime::slot::InitError::Transient(_))),
             "{code:?}: {boot:?}"
         );
         past_first_backoff().await;

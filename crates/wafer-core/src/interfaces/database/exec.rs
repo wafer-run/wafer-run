@@ -446,12 +446,14 @@ fn batch_shape_error(what: &str, got: Option<&BatchResult>) -> DatabaseError {
 
 /// A failed schema step (`CREATE TABLE`, `ADD COLUMN`, `CREATE INDEX`) with
 /// `what` naming it. The failure is the backend's, never the caller's, so it is
-/// `Internal` — unless it is transient: a busy database or a dropped connection
-/// stays [`DatabaseError::Unavailable`], so a block Init migrating its schema
-/// is retried rather than failed for good.
+/// `Internal` — unless it is transient: a dropped connection stays
+/// [`DatabaseError::Unavailable`] and a busy database
+/// [`DatabaseError::Contended`], so a block Init migrating its schema is
+/// retried rather than failed for good.
 fn schema_step_error(what: &str, e: DatabaseError) -> DatabaseError {
     match e {
         DatabaseError::Unavailable(msg) => DatabaseError::Unavailable(format!("{what}: {msg}")),
+        DatabaseError::Contended(msg) => DatabaseError::Contended(format!("{what}: {msg}")),
         other => DatabaseError::Internal(format!("{what}: {other}")),
     }
 }

@@ -77,6 +77,12 @@ pub enum ConfigError {
         /// Underlying transport error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
+        /// The backend error's detail code, when it had one: a
+        /// database-backed source passes `DatabaseError::detail_code()`, so a
+        /// read that met the database's outage carries
+        /// [`DATABASE_UNAVAILABLE`](wafer_block::wire::database::DATABASE_UNAVAILABLE)
+        /// into the block's [`TransientFailure`](wafer_block::TransientFailure).
+        detail_code: Option<String>,
     },
 
     /// The source answered with an error retrying cannot fix: its table is
@@ -104,9 +110,14 @@ impl ConfigError {
             Self::MissingRequired { block, key } => InitError::Permanent(format!(
                 "block `{block}` missing required config key `{key}`"
             )),
-            Self::Transient { source, .. } => {
-                InitError::transient(format!("config fetch failed: {source}"))
-            }
+            Self::Transient {
+                source,
+                detail_code,
+                ..
+            } => InitError::Transient(
+                wafer_block::TransientFailure::new(format!("config fetch failed: {source}"))
+                    .with_detail_code(detail_code),
+            ),
             Self::SourceFault { source, .. } => {
                 InitError::Permanent(format!("config source fault: {source}"))
             }
@@ -286,7 +297,7 @@ pub(crate) async fn validate_block_configs<'a>(
                     missing_keys: vec![key],
                 });
             }
-            Err(ConfigError::Transient { block, source }) => failures.push(SourceFailure {
+            Err(ConfigError::Transient { block, source, .. }) => failures.push(SourceFailure {
                 block,
                 reason: UnavailableReason::Transient,
                 error: source.to_string(),
@@ -641,6 +652,7 @@ mod validate_block_configs_tests {
                 Some((UnavailableReason::Transient, text)) => Err(ConfigError::Transient {
                     block: block.to_string(),
                     source: (*text).into(),
+                    detail_code: None,
                 }),
                 Some((UnavailableReason::SourceFault, text)) => Err(ConfigError::SourceFault {
                     block: block.to_string(),
