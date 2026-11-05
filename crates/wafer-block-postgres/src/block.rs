@@ -52,7 +52,7 @@ wafer_core::service_block! {
     handle: |service, _this, ctx, msg, body| {
         handler::handle_message(service.as_ref(), ctx, &msg, &body).await
     },
-    lifecycle: |this, _ctx, event| {
+    lifecycle: |this, ctx, event| {
         if event.event_type == LifecycleType::Init && this.service.get().is_none() {
             let config = BlockConfig::from_event(&event);
 
@@ -90,9 +90,14 @@ wafer_core::service_block! {
 
             // A server that is down or still starting keeps its
             // `Unavailable` code, so the runtime retries this Init.
-            let svc = PostgresDatabaseService::connect(url)
-                .await
-                .map_err(|e| WaferError::new(e.code(), format!("wafer-run/postgres: {e}")))?;
+            let svc = {
+                let _call = ctx.init_attempt_record().map(|record| record.call());
+                PostgresDatabaseService::connect(url).await.map_err(|e| {
+                    let e = handler::observed(ctx, e);
+                    WaferError::new(e.code(), format!("wafer-run/postgres: {e}"))
+                        .with_optional_detail_code(e.detail_code())
+                })?
+            };
             tracing::info!("PostgreSQL database connected");
             this.service.set(Arc::new(svc)).ok();
         }
@@ -101,7 +106,7 @@ wafer_core::service_block! {
         if event.event_type == LifecycleType::Init {
             let tables = this.tables.get().map_or(&[][..], |t| t.as_slice());
             if let Some(service) = this.service.get() {
-                handler::handle_lifecycle(service.as_ref(), tables, &event).await?;
+                handler::handle_lifecycle(service.as_ref(), ctx, tables, &event).await?;
             }
         }
 

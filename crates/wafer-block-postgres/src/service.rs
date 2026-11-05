@@ -98,14 +98,8 @@ impl PostgresDatabaseService {
 
     /// A pooled connection; a statement's arguments are encoded for, and it
     /// is executed on, one connection (see [`params::bind`]).
-    ///
-    /// A pool timeout is classified by this pool's state
-    /// ([`pool_timeout`](crate::errors::pool_timeout)).
     async fn connection(&self) -> Result<PoolConnection<Postgres>, DatabaseError> {
-        self.pool.acquire().await.map_err(|e| match e {
-            sqlx::Error::PoolTimedOut => crate::errors::pool_timeout(&self.pool, &e),
-            e => sqlx_error(&e),
-        })
+        self.pool.acquire().await.map_err(|e| sqlx_error(&e))
     }
 
     // -----------------------------------------------------------------

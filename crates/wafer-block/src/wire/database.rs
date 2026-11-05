@@ -45,9 +45,8 @@ pub const DATABASE_UNAVAILABLE: &str = "database.unavailable";
 /// Detail code ([`crate::WaferError::detail_code`]) of the `Unavailable`
 /// answering a database call the database refused because of other work on
 /// it, with the database up (a backend's `DatabaseError::Contended`): a lock
-/// not taken, a deadlock or serialization conflict broken, or no connection
-/// of the application's own free in time. Retrying the same call may succeed
-/// once that work is done.
+/// not taken, or a deadlock or serialization conflict broken. Retrying the
+/// same call may succeed once that work is done.
 pub const DATABASE_CONTENDED: &str = "database.contended";
 
 /// Meta key ([`crate::WaferError::meta`]) of the error answering a

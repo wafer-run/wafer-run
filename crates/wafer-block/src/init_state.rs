@@ -40,6 +40,11 @@ pub struct TransientFailure {
     /// - `None`: none of those — every call the attempt made answered, and
     ///   the block failed on its own with no code, or the init budget ran out
     ///   with no call in flight and no failure of the block's own.
+    ///
+    /// The record's limits ([`crate::init_attempt`]'s "Limits") apply: it
+    /// reports what the attempt's calls saw, which may be a failure the block
+    /// handled rather than the one it failed on; it classes only a transient
+    /// failure; and it does not see an attempt this one only waited on.
     pub detail_code: Option<String>,
 }
 

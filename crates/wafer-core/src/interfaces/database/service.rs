@@ -39,20 +39,19 @@ pub enum DatabaseError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
     /// The database itself cannot answer: it is down or unreachable, a
-    /// connection broke, it is overloaded (no connection slot or pooled
-    /// connection free), restarting, was reset, or is over a quota that
-    /// resets. Says nothing about the request, and retrying it later may
+    /// connection broke, it is restarting, was reset, or is over a quota
+    /// that resets. Says nothing about the request, and retrying it later may
     /// succeed. Each backend classifies its driver's errors into this
-    /// variant; see its error mapping for the exact set. Answered with
+    /// variant; see its error mapping for the exact set (PostgreSQL's
+    /// includes every pool timeout, which its driver cannot tell from an
+    /// unreachable server). Answered with
     /// `Unavailable` and detail code [`DATABASE_UNAVAILABLE`](wafer_block::wire::database::DATABASE_UNAVAILABLE).
     #[error("database unavailable: {0}")]
     Unavailable(String),
     /// The database is up, but refused this statement because of other work
     /// on it: a lock it could not take (a busy or locked SQLite file,
     /// PostgreSQL's `55P03`), a transaction it rolled back to break a
-    /// deadlock or a serialization conflict (`40P01`, `40001`), or no
-    /// connection of the application's own free in time (a pool timeout,
-    /// PostgreSQL's `53300`, too many connections). Retrying the same
+    /// deadlock or a serialization conflict (`40P01`, `40001`). Retrying the same
     /// statement may succeed once that work is done. Answered with
     /// `Unavailable`, like an outage, but with detail code
     /// [`DATABASE_CONTENDED`](wafer_block::wire::database::DATABASE_CONTENDED): the database is not down.

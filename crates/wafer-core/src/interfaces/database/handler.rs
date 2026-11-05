@@ -652,8 +652,9 @@ fn scrubbed(kind: Transient, msg: &str) -> &'static str {
 /// `e`, as the init attempt `ctx` runs under saw it ([`DatabaseError::attempt_answer`]):
 /// the database handler is where an attempt's calls are answered, so it is
 /// where what they saw is noted, whatever the block then does with the
-/// error ([`wafer_block::init_attempt`]).
-fn observed(ctx: &dyn Context, e: DatabaseError) -> DatabaseError {
+/// error ([`wafer_block::init_attempt`]). Public for a database block's own
+/// Init work outside this handler (opening its connection).
+pub fn observed(ctx: &dyn Context, e: DatabaseError) -> DatabaseError {
     if let (Some(record), Some(answer)) = (ctx.init_attempt_record(), e.attempt_answer()) {
         record.note(answer);
     }
@@ -821,6 +822,7 @@ fn inserts_append_only(ctx: &dyn Context, collection: &str) -> bool {
 /// grants append declares all three columns.
 async fn check_append_only_rows<'a>(
     service: &dyn DatabaseService,
+    ctx: &dyn Context,
     collection: &str,
     rows: impl IntoIterator<Item = &'a HashMap<String, serde_json::Value>>,
 ) -> Result<(), WaferError> {
@@ -845,7 +847,7 @@ async fn check_append_only_rows<'a>(
     let existing = service
         .schema_columns(collection)
         .await
-        .map_err(db_error_to_wafer)?;
+        .map_err(|e| failed(ctx, e))?;
     let missing = SERVER_OWNED_COLUMNS
         .iter()
         .map(|c| (*c).to_string())
@@ -988,7 +990,8 @@ async fn handle_op(
                 return OutputStream::error(e);
             }
             if inserts_append_only(ctx, &req.collection) {
-                if let Err(e) = check_append_only_rows(service, &req.collection, [&req.data]).await
+                if let Err(e) =
+                    check_append_only_rows(service, ctx, &req.collection, [&req.data]).await
                 {
                     return OutputStream::error(e);
                 }
@@ -1012,7 +1015,9 @@ async fn handle_op(
                 return OutputStream::error(e);
             }
             if inserts_append_only(ctx, &req.collection) {
-                if let Err(e) = check_append_only_rows(service, &req.collection, &req.rows).await {
+                if let Err(e) =
+                    check_append_only_rows(service, ctx, &req.collection, &req.rows).await
+                {
                     return OutputStream::error(e);
                 }
             }
@@ -1073,7 +1078,7 @@ async fn handle_op(
                     } if c == collection => Some(data),
                     _ => None,
                 });
-                if let Err(e) = check_append_only_rows(service, collection, rows).await {
+                if let Err(e) = check_append_only_rows(service, ctx, collection, rows).await {
                     return OutputStream::error(e);
                 }
             }
@@ -1111,7 +1116,8 @@ async fn handle_op(
                 return OutputStream::error(e);
             }
             if inserts_append_only(ctx, &req.collection) {
-                if let Err(e) = check_append_only_rows(service, &req.collection, [&req.data]).await
+                if let Err(e) =
+                    check_append_only_rows(service, ctx, &req.collection, [&req.data]).await
                 {
                     return OutputStream::error(e);
                 }
@@ -1688,9 +1694,12 @@ async fn handle_op(
 }
 
 /// Handle database lifecycle events: on Init, ensure the block's declared
-/// schema tables.
+/// schema tables. Its database calls are the database block's own Init's,
+/// noted in that attempt's record through `ctx` (and in every attempt it runs
+/// inside: a caller's Init whose first call started it).
 pub async fn handle_lifecycle(
     service: &dyn DatabaseService,
+    ctx: &dyn Context,
     tables: &[Table],
     event: &LifecycleEvent,
 ) -> std::result::Result<(), WaferError> {
@@ -1700,7 +1709,9 @@ pub async fn handle_lifecycle(
         } else {
             // A transient fault keeps its `Unavailable` code, so the runtime
             // retries this Init rather than caching the failure.
+            let _call = ctx.init_attempt_record().map(|record| record.call());
             service.ensure_schema_tables(tables).await.map_err(|e| {
+                let e = observed(ctx, e);
                 WaferError::new(e.code(), format!("schema migration failed: {e}"))
                     .with_optional_detail_code(e.detail_code())
             })?;
@@ -1712,6 +1723,31 @@ pub async fn handle_lifecycle(
 
 #[cfg(test)]
 mod tests {
+    /// Every database answer the handler turns into an error goes through
+    /// [`failed`] / [`failed_transaction`], which note it in the init attempt
+    /// the call runs under. The only direct mapping left is the windowed
+    /// counter's request check, which makes no database call.
+    #[test]
+    fn every_database_answer_is_noted_in_the_attempt() {
+        let source = include_str!("handler.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("a test module")];
+        let direct: Vec<&str> = production
+            .lines()
+            .filter(|line| {
+                line.contains("db_error_to_wafer") || line.contains("transaction_error_to_wafer")
+            })
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| {
+                !(line.contains("fn db_error_to_wafer")
+                    || line.contains("fn transaction_error_to_wafer")
+                    || line.contains("db_error_to_wafer(observed(ctx, e))")
+                    || line.contains("transaction_error_to_wafer(TransactionError {")
+                    || line.contains("windowed_counter_row("))
+            })
+            .collect();
+        assert!(direct.is_empty(), "mapped without noting: {direct:#?}");
+    }
+
     use super::*;
 
     #[test]

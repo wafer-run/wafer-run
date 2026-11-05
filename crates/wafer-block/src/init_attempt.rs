@@ -17,6 +17,22 @@
 //! also what A's attempt saw. A record is closed when its attempt settles;
 //! a call made through a context kept past that (deferred work) notes
 //! nothing, so one attempt never reads another's.
+//!
+//! # Limits
+//!
+//! - The record says what the attempt's calls saw, not what made it fail. A
+//!   database failure the block handled earlier in the attempt (a call it
+//!   retried, a read it fell back from) still classes a later, unrelated
+//!   transient failure of that attempt.
+//! - Only a transient outcome consults it. A block that turns a database
+//!   outage into a permanent error (`Internal`, say) stays permanent: the
+//!   record classes a transient failure, it does not decide transience.
+//! - An attempt that waits on another caller's attempt at B's init, already
+//!   in flight, does not get B's observations: B's attempt started outside
+//!   it, so its record has no parent to note into.
+//! - Config reads are not recorded: a config source reads the database
+//!   directly, not through the database handler. A pre-`Init` config load
+//!   is classed by `ConfigError::Transient`'s detail code instead.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -29,7 +45,7 @@ use crate::wire::database::{CALL_BUDGET_EXHAUSTED, DATABASE_CONTENDED, DATABASE_
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DatabaseAnswer {
     /// The database was up but busy with other work (a lock, a deadlock or
-    /// serialization conflict, no connection of the application's own free).
+    /// serialization conflict).
     Contended,
     /// The invocation's database call budget was spent.
     CallBudgetExhausted,
@@ -90,18 +106,20 @@ impl InitAttemptRecord {
 
     /// A database call starts; it is answered when the returned guard drops.
     /// A call still unanswered when the attempt's init budget runs out counts
-    /// as [`DatabaseAnswer::Unavailable`] ([`Self::note_unanswered`]).
+    /// as [`DatabaseAnswer::Unavailable`] ([`Self::note_unanswered`]). As
+    /// with [`Self::note`], a call through a settled attempt counts nowhere,
+    /// not in the attempts it ran inside either.
     #[must_use]
     pub fn call(self: &Arc<Self>) -> DatabaseCall {
-        for record in self.lineage() {
-            record.with_state(|state| {
-                if !state.closed {
-                    state.in_flight += 1;
-                }
-            });
+        let counted = !self.with_state(|state| state.closed);
+        if counted {
+            for record in self.lineage() {
+                record.with_state(|state| state.in_flight += 1);
+            }
         }
         DatabaseCall {
             record: self.clone(),
+            counted,
         }
     }
 
@@ -142,12 +160,17 @@ impl InitAttemptRecord {
 #[derive(Debug)]
 pub struct DatabaseCall {
     record: Arc<InitAttemptRecord>,
+    /// Whether [`InitAttemptRecord::call`] counted it in flight: what the
+    /// drop gives back.
+    counted: bool,
 }
 
 impl Drop for DatabaseCall {
     fn drop(&mut self) {
-        for record in self.record.lineage() {
-            record.with_state(|state| state.in_flight = state.in_flight.saturating_sub(1));
+        if self.counted {
+            for record in self.record.lineage() {
+                record.with_state(|state| state.in_flight = state.in_flight.saturating_sub(1));
+            }
         }
     }
 }
@@ -178,6 +201,18 @@ mod tests {
         assert_eq!(outer.close(), None, "a settled inner attempt's late call");
         let fresh = InitAttemptRecord::new(None);
         assert_eq!(fresh.close(), None, "another attempt's record is its own");
+    }
+
+    /// A call through a settled inner attempt counts in flight nowhere: the
+    /// outer attempt's budget running out does not read it as unanswered.
+    #[test]
+    fn a_call_through_a_settled_attempt_counts_in_no_outer_attempt() {
+        let outer = InitAttemptRecord::new(None);
+        let inner = InitAttemptRecord::new(Some(outer.clone()));
+        inner.close();
+        let _late = inner.call();
+        outer.note_unanswered();
+        assert_eq!(outer.close(), None);
     }
 
     #[test]

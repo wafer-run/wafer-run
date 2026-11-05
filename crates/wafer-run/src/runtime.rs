@@ -964,7 +964,6 @@ pub(crate) async fn run_init_pipeline(
                     futures::future::Either::Left((Err(e), _))
                         if deadline.is_some_and(|deadline| Instant::now() >= deadline) =>
                     {
-                        record.note_unanswered();
                         Err(budget.exceeded(name, Some(&e)))
                     }
                     futures::future::Either::Left((outcome, _)) => outcome,

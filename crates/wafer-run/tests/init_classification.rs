@@ -377,7 +377,7 @@ wafer_core::forward_database_service! {
             insert_guarded: forward,
             update_guarded: forward,
             ensure_schema_table: forward,
-            ensure_schema_tables: forward,
+            ensure_schema_tables: custom,
             schema_table_exists: forward,
             schema_columns: forward,
             schema_drop_table: forward,
@@ -400,6 +400,11 @@ wafer_core::forward_database_service! {
             self.spend_call("batch").await?;
             self.inner.batch(ops).await
         }
+
+        async fn ensure_schema_tables(&self, tables: &[Table]) -> Result<(), DatabaseError> {
+            self.spend_call("ensure_schema_tables").await?;
+            self.inner.ensure_schema_tables(tables).await
+        }
     }
 }
 
@@ -415,6 +420,16 @@ async fn budget_wafer(rows: usize) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
 async fn db_wafer(
     behaviour: InitBehaviour,
     init_timeout: Option<Duration>,
+) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
+    db_wafer_migrating(behaviour, init_timeout, vec![]).await
+}
+
+/// [`db_wafer`] with the database block's own Init migrating `tables`: it
+/// runs lazily, on the first call made to the database block.
+async fn db_wafer_migrating(
+    behaviour: InitBehaviour,
+    init_timeout: Option<Duration>,
+    tables: Vec<Table>,
 ) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
     let mut wafer = bare_wafer(Arc::new(ScriptedSource::default()));
     let inner = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
@@ -455,7 +470,7 @@ async fn db_wafer(
         contended: AtomicBool::new(false),
         hang: AtomicBool::new(false),
     });
-    register_with_tables(&mut wafer, svc.clone(), vec![]).expect("register wafer-run/database");
+    register_with_tables(&mut wafer, svc.clone(), tables).expect("register wafer-run/database");
     let inits = Arc::new(AtomicUsize::new(0));
     let probe = Arc::new(Probe {
         name: "test/budget-init",
@@ -1064,4 +1079,26 @@ async fn an_attempt_does_not_read_another_attempts_calls() {
     svc.down.store(false, Ordering::SeqCst);
     tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
     assert_eq!(attempt_class(&wafer).await, None, "the next attempt's own");
+}
+
+/// The database block's own Init — its schema migration, started lazily by
+/// the first call another block's Init makes to it — meets the outage. Its
+/// call is noted in its attempt and in the attempt it runs inside, so the
+/// caller, which wraps the refusal it gets, reads as the database down.
+#[tokio::test]
+async fn the_database_blocks_own_init_during_an_outage_reaches_the_callers_attempt() {
+    let migrated = Table {
+        name: "test__budget_init__migrated".to_string(),
+        columns: vec![pk("id")],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    let (wafer, _, svc) =
+        db_wafer_migrating(InitBehaviour::WriteRowsWrapped(1), None, vec![migrated]).await;
+    svc.down.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
 }

@@ -36,17 +36,19 @@
     scrubbed `Unavailable` answer carries them, on the transaction path
     too. A client that renders detail codes now sees them on a 503.
   - Added: `DatabaseError::Contended(String)`. The database is up but busy:
-    - SQLite busy or locked;
-    - PostgreSQL `40001`, `40P01`, `55P03` and `53300`;
-    - a PostgreSQL pool timeout with the pool at its maximum and none idle.
-      This is read from the pool's state when the timeout is raised. The
-      read can race, and that rule decides.
-
+    SQLite busy or locked, and PostgreSQL `40001`, `40P01` and `55P03`.
     These were `Unavailable`. They keep code `Unavailable`, so they are
     still retried, and answer with the scrubbed text
-    `"database busy, retry"`. `Unavailable` is now the database unable to
-    answer: connection faults, `57P01`–`57P03`, and a pool timeout that is
-    not the pool full.
+    `"database busy, retry"`.
+  - `Unavailable` is now the database unable to answer: connection faults,
+    `57P01`, `57P02`, and every PostgreSQL pool timeout. sqlx answers
+    `PoolTimedOut` both for a pool exhausted by the application's own work
+    and for a server it cannot connect to. It exposes no count of
+    established connections to tell the two apart, so an exhausted pool
+    reads as the database down.
+  - `53300` (too_many_connections) and `57P03` (cannot_connect_now) never
+    reach the mapping as themselves: sqlx retries both while connecting,
+    and they surface as that pool timeout. Neither is mapped.
   - Added: `TransientFailure { message, detail_code }` (in `wafer_block`,
     re-exported by `wafer_run`), the one shape a transient failure is kept
     in. Build one with `TransientFailure::new(..).classed(Option<..>)`.
@@ -66,10 +68,21 @@
     call-budget refusal keeps its meaning (`ResourceExhausted`, of the
     invocation that met it), and contention and a block's own codes stay
     that block's.
-  - Limit: config reads are not attempt-recorded. The config source calls
-    the `DatabaseService` directly, not through the handler, so a pre-Init
-    config load is classed by `ConfigError::Transient::detail_code`. A block
-    that reads config inside `Init` and wraps the error is unattributed.
+  - The database block's own `Init` (its schema migration) notes into the
+    record too (`handle_lifecycle` takes the context). So does
+    `wafer-run/postgres`'s connect. Started lazily by another block's first
+    call, it reaches that caller's attempt.
+  - Limits, in `wafer_block::init_attempt`'s docs:
+    - The record says what the attempt's calls saw, not what made it fail.
+      A database failure the block handled earlier in the attempt classes a
+      later, unrelated transient failure.
+    - Only a transient outcome consults the record. A block that turns an
+      outage into a permanent error stays permanent.
+    - Waiting on another caller's in-flight init of B does not give B's
+      observations to the waiter.
+    - Config reads are not recorded. The config source calls the
+      `DatabaseService` directly, so a pre-Init config load is classed by
+      `ConfigError::Transient::detail_code`.
   - Migrate:
     - Match `InitError::Transient(failure)`.
     - Read `Retrying`'s `failure.message`.
@@ -77,6 +90,8 @@
       literals.
     - Add `Contended` to exhaustive `DatabaseError` matches.
     - Map an adapter's contention to `Contended`.
+    - Pass the context to `handler::handle_lifecycle(service, ctx, tables,
+      event)`.
     - Embedder `Context` implementations compile unchanged; return a record
       from `init_attempt_record` to have their contexts' calls attributed.
 
