@@ -2,7 +2,8 @@
 //! connection holds the write lock on a real SQLite file, a `database.create`
 //! request goes through the shared database handler to the real service, and
 //! the error it gets back carries the transient code a caller — and the
-//! runtime, for a block whose Init hit the fault — may retry on. The Init-time
+//! runtime, for a block whose Init hit the fault — may retry on, and no
+//! detail code: it is contention, not the database down. The Init-time
 //! schema migration (`handle_lifecycle`) answers the same way. Once the lock
 //! is released, both succeed.
 
@@ -126,7 +127,12 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         ErrorCode::Unavailable,
         "a busy database is transient: {err:?}"
     );
-    assert_eq!(err.message, "database temporarily unavailable");
+    assert_eq!(err.message, "database busy, retry");
+    assert_eq!(
+        err.detail_code(),
+        None,
+        "a busy database is contention, not an outage: {err:?}"
+    );
 
     let init = LifecycleEvent {
         event_type: LifecycleType::Init,
@@ -146,6 +152,11 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         err.code,
         ErrorCode::Unavailable,
         "a busy database during Init is transient: {err:?}"
+    );
+    assert_eq!(
+        err.detail_code(),
+        None,
+        "contention, not an outage: {err:?}"
     );
 
     other.execute_batch("ROLLBACK").expect("release the lock");
