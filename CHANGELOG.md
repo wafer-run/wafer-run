@@ -80,9 +80,19 @@
       outage into a permanent error stays permanent.
     - Waiting on another caller's in-flight init of B does not give B's
       observations to the waiter.
-    - Config reads are not recorded. The config source calls the
+    - Config reads are a second channel. The config source calls the
       `DatabaseService` directly, so a pre-Init config load is classed by
-      `ConfigError::Transient::detail_code`.
+      `ConfigError::Transient::detail_code`. Only its being in flight is
+      counted: a load that hangs past the init budget reads unavailable.
+    - A healthy but slow call still in flight when the init budget fires
+      reads as unavailable. This is deliberate: at the deadline a hang and
+      an over-budget call cannot be told apart.
+    - A call started while a nested attempt was open counts on the outer
+      attempt until it is answered, even after the nested attempt settles.
+    - A block that cancels its own hung call before the runtime's timer
+      fires leaves no class.
+  - At settle, the record never downgrades the block's own database class.
+    The stronger wins: unavailable > call_budget_exhausted > contended.
   - Migrate:
     - Match `InitError::Transient(failure)`.
     - Read `Retrying`'s `failure.message`.

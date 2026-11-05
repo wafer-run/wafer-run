@@ -925,10 +925,15 @@ pub(crate) async fn run_init_pipeline(
         // Started now, with the deadline, before the attempt is first polled.
         let timer = budget.map(|b| crate::platform::sleep(b.limit));
         let attempt = async {
-            let env_cfg = config_source
-                .load_for_block(name, config_keys)
-                .await
-                .map_err(ConfigError::into_init_error)?;
+            // The config load is a call of the attempt too: one that never
+            // answers is in flight when the init budget runs out.
+            let env_cfg = {
+                let _call = record.call();
+                config_source
+                    .load_for_block(name, config_keys)
+                    .await
+                    .map_err(ConfigError::into_init_error)?
+            };
 
             // Build the lifecycle(Init).data payload: start from the JSON
             // config the caller registered via `Wafer::add_block_config` (if
@@ -985,18 +990,27 @@ pub(crate) async fn run_init_pipeline(
 
 /// An init attempt's `outcome`, settled with what its database calls saw
 /// (`record`, closed here so nothing later is noted in it). A transient
-/// failure takes its class from the record when the record saw anything —
-/// whatever error the block returned, wrapped or not
-/// ([`TransientFailure::detail_code`]) — and keeps its own otherwise.
+/// failure's class is the stronger of the record's and the block's own
+/// database class (unavailable > call budget exhausted > contended), so the
+/// record never downgrades what the block reported; a code of the block's
+/// that is not a database class is replaced by any record class, and kept
+/// when the record saw nothing ([`TransientFailure::detail_code`]).
 fn settle_attempt(
     record: &wafer_block::init_attempt::InitAttemptRecord,
     outcome: Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError>,
 ) -> Result<crate::runtime::slot::InitializedState, crate::runtime::slot::InitError> {
+    use wafer_block::init_attempt::DatabaseAnswer;
+
     use crate::runtime::slot::InitError;
     let seen = record.close();
     match (outcome, seen) {
-        (Err(InitError::Transient(mut failure)), Some(answer)) => {
-            failure.detail_code = Some(answer.detail_code().to_string());
+        (Err(InitError::Transient(mut failure)), Some(seen)) => {
+            let own = failure
+                .detail_code
+                .as_deref()
+                .and_then(DatabaseAnswer::from_detail_code);
+            let class = own.map_or(seen, |own| own.max(seen));
+            failure.detail_code = Some(class.detail_code().to_string());
             Err(InitError::Transient(failure))
         }
         (outcome, _) => outcome,

@@ -49,6 +49,48 @@ use wafer_sql_utils::{
     Backend, Statement,
 };
 
+/// The context a wire conversion is given: it answers nothing, as the
+/// conversion asks it nothing (a malformed request is answered without a
+/// database call).
+struct NoContext;
+
+#[async_trait::async_trait]
+impl wafer_block::Context for NoContext {
+    async fn call_block(
+        &self,
+        block_name: &str,
+        _msg: wafer_block::Message,
+        _input: wafer_block::streams::input::InputStream,
+    ) -> wafer_block::streams::output::OutputStream {
+        panic!("a wire conversion called {block_name}");
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn config_get(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn clone_arc(&self) -> std::sync::Arc<dyn wafer_block::Context> {
+        std::sync::Arc::new(NoContext)
+    }
+    fn check_resource_access(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_block::types::ResourceType,
+        _access: wafer_block::types::ResourceAccess,
+    ) -> Result<(), wafer_block::WaferError> {
+        Ok(())
+    }
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_block::types::ResourceType,
+        _access: wafer_block::types::ResourceAccess,
+    ) -> bool {
+        true
+    }
+}
+
 /// Assert two independently-produced statements render identical SQL text and
 /// identical bound parameter values. Parameters are compared through
 /// [`sea_values_to_json`] (the same conversion the execution layer applies
@@ -303,7 +345,7 @@ fn upsert_set_columns_parity(backend: Backend) {
     };
     let bytes = codec::encode(&req).expect("encode UpsertRequest");
     let decoded: wire::UpsertRequest = codec::decode(&bytes).expect("decode UpsertRequest");
-    let (collection, spec) = to_upsert_spec(decoded).expect("to_upsert_spec");
+    let (collection, spec) = to_upsert_spec(&NoContext, decoded).expect("to_upsert_spec");
 
     // Mirror `DbExec::upsert`'s SetColumns arm (the rendering-dispatch is a few
     // lines; the wire->spec *conversion* under test is `to_upsert_spec`).
@@ -377,7 +419,7 @@ fn upsert_windowed_counter_parity(backend: Backend) {
     };
     let bytes = codec::encode(&req).expect("encode UpsertRequest");
     let decoded: wire::UpsertRequest = codec::decode(&bytes).expect("decode UpsertRequest");
-    let (collection, spec) = to_upsert_spec(decoded).expect("to_upsert_spec");
+    let (collection, spec) = to_upsert_spec(&NoContext, decoded).expect("to_upsert_spec");
 
     // Mirror `DbExec::upsert`'s WindowedCounter arm.
     let UpsertConflict::WindowedCounter {

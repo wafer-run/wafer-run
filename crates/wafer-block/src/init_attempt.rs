@@ -30,9 +30,21 @@
 //! - An attempt that waits on another caller's attempt at B's init, already
 //!   in flight, does not get B's observations: B's attempt started outside
 //!   it, so its record has no parent to note into.
-//! - Config reads are not recorded: a config source reads the database
-//!   directly, not through the database handler. A pre-`Init` config load
-//!   is classed by `ConfigError::Transient`'s detail code instead.
+//! - Config reads are a second channel: a config source reads the database
+//!   directly, not through the database handler, so what its read answers
+//!   is not noted here. A pre-`Init` config load is classed by
+//!   `ConfigError::Transient`'s detail code instead; only its being in
+//!   flight is counted (a load that hangs reads as below).
+//! - A call still in flight when the init budget runs out reads as
+//!   [`DatabaseAnswer::Unavailable`], healthy-but-slow included: at the
+//!   deadline a hang and a call that is merely over budget cannot be told
+//!   apart, and both mean the attempt could not get its answer in time.
+//! - A call started while a nested attempt was open counts in flight on
+//!   the outer attempt until it is answered, even after the nested attempt
+//!   settles.
+//! - A block that cancels its own hung call before the runtime's init
+//!   budget fires leaves no class: the call is answered (dropped) before
+//!   anything reads it as unanswered.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -56,6 +68,18 @@ pub enum DatabaseAnswer {
 }
 
 impl DatabaseAnswer {
+    /// The class a detail code names, if it is one of the database's.
+    #[must_use]
+    pub fn from_detail_code(code: &str) -> Option<Self> {
+        [
+            Self::Contended,
+            Self::CallBudgetExhausted,
+            Self::Unavailable,
+        ]
+        .into_iter()
+        .find(|answer| answer.detail_code() == code)
+    }
+
     /// The detail code ([`crate::WaferError::detail_code`]) of this class.
     #[must_use]
     pub const fn detail_code(self) -> &'static str {
@@ -95,8 +119,38 @@ impl InitAttemptRecord {
         })
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, RecordState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn with_state<T>(&self, f: impl FnOnce(&mut RecordState) -> T) -> T {
-        f(&mut self.state.lock().unwrap_or_else(PoisonError::into_inner))
+        f(&mut self.lock())
+    }
+
+    /// Apply `update` to this record and every open one it runs inside,
+    /// unless this one is closed: `false` then, and nothing changed. This
+    /// record's lock is held throughout (locks are taken inner to outer, as
+    /// everywhere), so a [`Self::close`] cannot fall between the check and
+    /// the update.
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "this record's lock is held across the outer records' updates on purpose: it is what makes the closed check and the update atomic"
+    )]
+    fn update_lineage(&self, update: impl Fn(&mut RecordState)) -> bool {
+        let mut own = self.lock();
+        if own.closed {
+            return false;
+        }
+        update(&mut own);
+        for outer in
+            std::iter::successors(self.parent.as_deref(), |record| record.parent.as_deref())
+        {
+            let mut state = outer.lock();
+            if !state.closed {
+                update(&mut state);
+            }
+        }
+        true
     }
 
     /// This record and every attempt it runs inside.
@@ -111,12 +165,7 @@ impl InitAttemptRecord {
     /// not in the attempts it ran inside either.
     #[must_use]
     pub fn call(self: &Arc<Self>) -> DatabaseCall {
-        let counted = !self.with_state(|state| state.closed);
-        if counted {
-            for record in self.lineage() {
-                record.with_state(|state| state.in_flight += 1);
-            }
-        }
+        let counted = self.update_lineage(|state| state.in_flight += 1);
         DatabaseCall {
             record: self.clone(),
             counted,
@@ -126,16 +175,7 @@ impl InitAttemptRecord {
     /// A database call failed with `answer`. Noted in this record and every
     /// attempt it runs inside, unless this attempt has settled.
     pub fn note(&self, answer: DatabaseAnswer) {
-        if self.with_state(|state| state.closed) {
-            return;
-        }
-        for record in self.lineage() {
-            record.with_state(|state| {
-                if !state.closed {
-                    state.worst = state.worst.max(Some(answer));
-                }
-            });
-        }
+        self.update_lineage(|state| state.worst = state.worst.max(Some(answer)));
     }
 
     /// The attempt's init budget ran out: a call still waiting on the

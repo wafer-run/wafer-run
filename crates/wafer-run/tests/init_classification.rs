@@ -57,6 +57,8 @@ enum Answer {
     Transient,
     SourceFault,
     Missing,
+    /// Never answers.
+    Hang,
 }
 
 /// A config source answering per block, counting its loads.
@@ -108,6 +110,7 @@ impl ConfigSource for ScriptedSource {
                 block: block.to_string(),
                 source: Box::new(SourceErr("no such table: variables")),
             }),
+            Answer::Hang => std::future::pending().await,
             Answer::Missing => Err(ConfigError::MissingRequired {
                 block: block.to_string(),
                 key: declared
@@ -132,6 +135,9 @@ enum InitBehaviour {
     WriteRowsWrapped(usize),
     /// Write `rows` rows, then fail with this error of the block's own.
     WriteRowsThenFail(usize, WaferError),
+    /// Try to write `rows` rows, carry on whatever the database answers, and
+    /// fail with this error of the block's own.
+    TryWriteRowsThenFail(usize, WaferError),
     /// Dispatch to [`Writer`] (`test/writer`), which writes a row, and wrap a
     /// failure in an `Unavailable` of the block's own.
     CallWriter,
@@ -262,6 +268,10 @@ impl Block for Probe {
                 .map_err(|_| WaferError::new(ErrorCode::Unavailable, "my store is not ready")),
             InitBehaviour::WriteRowsThenFail(rows, e) => {
                 write_rows(ctx, *rows).await?;
+                Err(e.clone())
+            }
+            InitBehaviour::TryWriteRowsThenFail(rows, e) => {
+                let _ = write_rows(ctx, *rows).await;
                 Err(e.clone())
             }
             InitBehaviour::CallWriter => {
@@ -1101,4 +1111,46 @@ async fn the_database_blocks_own_init_during_an_outage_reaches_the_callers_attem
         attempt_class(&wafer).await.as_deref(),
         Some(DATABASE_UNAVAILABLE)
     );
+}
+
+/// The record never downgrades the block's own database class: an attempt
+/// whose call met contention, and whose block then failed reporting the
+/// database down, reads as the database down (the stronger class).
+#[tokio::test]
+async fn the_record_never_downgrades_the_blocks_own_database_class() {
+    let down = WaferError::new(ErrorCode::Unavailable, "database temporarily unavailable")
+        .with_detail_code(DATABASE_UNAVAILABLE);
+    let (wafer, _, svc) = db_wafer(InitBehaviour::TryWriteRowsThenFail(1, down), None).await;
+    svc.contended.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+}
+
+/// A config load that never answers is a call of the attempt still in
+/// flight when the init budget runs out: the database not answering.
+#[tokio::test]
+async fn a_hung_config_load_cut_off_by_the_init_budget_reads_as_the_database_down() {
+    let source = Arc::new(ScriptedSource::default());
+    source.answer("test/hung-config", Answer::Hang);
+    let mut wafer = bare_wafer(source);
+    let probe = Arc::new(Probe {
+        name: "test/hung-config",
+        inits: Arc::new(AtomicUsize::new(0)),
+        behaviour: InitBehaviour::Ok,
+        init_timeout: Some(Duration::from_millis(100)),
+    });
+    wafer
+        .register_block("test/hung-config", probe)
+        .expect("register");
+    wafer.seal().await.expect("seal");
+    match wafer.init_block("test/hung-config").await {
+        Err(InitError::Transient(failure)) => assert_eq!(
+            failure.detail_code.as_deref(),
+            Some(DATABASE_UNAVAILABLE),
+            "{failure:?}"
+        ),
+        other => panic!("expected a transient failure, got {other:?}"),
+    }
 }
