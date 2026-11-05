@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 // Import query types from wafer-block for use in trait method signatures.
 use wafer_block::db::{Filter, FilterTree, ListOptions, SortField};
-use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
 pub use wafer_block::wire::database::{CatalogColumn, RawStatement, RecordData};
+use wafer_block::wire::database::{CALL_BUDGET_EXHAUSTED, DATABASE_UNAVAILABLE};
 use wafer_block_macro::wafer_async_trait;
 // Re-export schema types so consumers access them through the database module.
 pub use wafer_schema::{
@@ -84,17 +84,19 @@ impl DatabaseError {
     }
 
     /// The detail code ([`wafer_block::WaferError::detail_code`]) this error
-    /// answers with, telling a call-budget refusal apart from every other
-    /// error sharing its [`code`](Self::code): [`CALL_BUDGET_EXHAUSTED`] for
-    /// `CallBudgetExhausted`, none otherwise.
+    /// answers with, telling it apart from every other error sharing its
+    /// [`code`](Self::code): [`CALL_BUDGET_EXHAUSTED`] for
+    /// `CallBudgetExhausted` (a `ResourceExhausted` like the runtime's own
+    /// limits), [`DATABASE_UNAVAILABLE`] for `Unavailable` (an `Unavailable`
+    /// like any dependency a block has), none otherwise.
     #[must_use]
     pub const fn detail_code(&self) -> Option<&'static str> {
         match self {
             Self::CallBudgetExhausted(_) => Some(CALL_BUDGET_EXHAUSTED),
+            Self::Unavailable(_) => Some(DATABASE_UNAVAILABLE),
             Self::NotFound
             | Self::AlreadyExists(_)
             | Self::InvalidArgument(_)
-            | Self::Unavailable(_)
             | Self::Internal(_)
             | Self::Other(_) => None,
         }

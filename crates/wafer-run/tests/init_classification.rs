@@ -406,11 +406,13 @@ async fn a_transient_config_error_is_not_cached() {
 
     let err = wafer.init_block("test/flaky").await.expect_err("transient");
     assert!(
-        matches!(err, InitError::Transient(ref m) if m.contains("config fetch failed")),
+        matches!(err, InitError::Transient { ref message, detail_code: None } if message.contains("config fetch failed")),
         "{err:?}"
     );
     match wafer.init_states().get("test/flaky") {
-        Some(BlockInitState::Retrying { reason, retry_in }) => {
+        Some(BlockInitState::Retrying {
+            reason, retry_in, ..
+        }) => {
             assert!(reason.contains("daily row read limit"), "{reason}");
             // At most the first backoff; it may already have elapsed on a
             // slow runner (then zero), so no lower bound is asserted.
@@ -462,7 +464,7 @@ async fn an_init_that_meets_a_spent_call_budget_fails_transiently_and_reruns() {
         .await
         .expect_err("the call budget refuses the write");
     match err {
-        InitError::Transient(msg) => {
+        InitError::Transient { message: msg, .. } => {
             assert!(
                 msg.contains("lifecycle init failed") && msg.contains("ResourceExhausted"),
                 "the database's own refusal: {msg}"

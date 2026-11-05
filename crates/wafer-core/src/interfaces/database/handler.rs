@@ -1703,23 +1703,28 @@ mod tests {
         assert_eq!(w.message, "record not found");
     }
 
-    /// Only a call-budget refusal carries a detail code, so a caller can
-    /// tell it from the other errors sharing its coarse code. The message is
-    /// the backend's own, not the `DatabaseError` display.
+    /// A call-budget refusal and a database outage carry a detail code, so
+    /// a caller can tell each from the other errors sharing its coarse code
+    /// (the runtime's own limits; any other dependency being unavailable).
+    /// The refusal's message is the backend's own; the outage's is scrubbed.
     #[test]
-    fn only_call_budget_refusals_carry_a_detail_code() {
-        use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
+    fn call_budget_refusals_and_outages_carry_a_detail_code() {
+        use wafer_block::wire::database::{CALL_BUDGET_EXHAUSTED, DATABASE_UNAVAILABLE};
 
         let w = db_error_to_wafer(DatabaseError::CallBudgetExhausted("spent".into()));
         assert_eq!(w.code, ErrorCode::ResourceExhausted);
         assert_eq!(w.detail_code(), Some(CALL_BUDGET_EXHAUSTED));
         assert_eq!(w.message, "spent");
 
+        let w = db_error_to_wafer(DatabaseError::Unavailable("host db-1 refused".into()));
+        assert_eq!(w.code, ErrorCode::Unavailable);
+        assert_eq!(w.detail_code(), Some(DATABASE_UNAVAILABLE));
+        assert_eq!(w.message, "database temporarily unavailable");
+
         for other in [
             DatabaseError::NotFound,
             DatabaseError::AlreadyExists("k".into()),
             DatabaseError::InvalidArgument("bad column".into()),
-            DatabaseError::Unavailable("busy".into()),
             DatabaseError::Internal("boom".into()),
             DatabaseError::Other("driver".into()),
         ] {
@@ -1769,6 +1774,10 @@ mod tests {
         ));
         assert_eq!(w.code, ErrorCode::Unavailable);
         assert_eq!(w.message, "database temporarily unavailable");
+        assert_eq!(
+            w.detail_code(),
+            Some(wafer_block::wire::database::DATABASE_UNAVAILABLE)
+        );
         assert_eq!(failed_statement_index(&w), Some(1));
     }
 

@@ -733,7 +733,7 @@ pub(crate) fn init_error_to_wafer_error(
                 failed_message(block, &reference),
             )
         }
-        InitError::Transient(cause) => {
+        InitError::Transient { message: cause, .. } => {
             tracing::warn!(
                 correlation_id = %reference,
                 block = %block,
@@ -989,7 +989,7 @@ impl InitBudget {
         if let Some(failed) = failed {
             msg.push_str(&format!("; it failed after the budget passed: {failed}"));
         }
-        crate::runtime::slot::InitError::Transient(msg)
+        crate::runtime::slot::InitError::transient(msg)
     }
 }
 
@@ -1247,10 +1247,10 @@ mod tests {
         let wait = Some(Duration::from_secs(3));
         let has = |e: &WaferError| e.meta.iter().any(|m| m.key == "resp.header.Retry-After");
 
-        let transient = init_error_to_wafer_error("b", InitError::Transient("x".into()), wait);
+        let transient = init_error_to_wafer_error("b", InitError::transient("x"), wait);
         assert_eq!(transient.code, ErrorCode::Unavailable);
         assert!(has(&transient));
-        let none = init_error_to_wafer_error("b", InitError::Transient("x".into()), None);
+        let none = init_error_to_wafer_error("b", InitError::transient("x"), None);
         assert!(!has(&none));
         for e in [
             InitError::Permanent("x".into()),
@@ -1311,7 +1311,7 @@ mod tests {
             });
         }
 
-        let transient = init_error_to_wafer_error("a/b", InitError::Transient(CAUSE.into()), None);
+        let transient = init_error_to_wafer_error("a/b", InitError::transient(CAUSE), None);
         assert_eq!(transient.code, ErrorCode::Unavailable);
         let reference = reference_of(&transient.message, |r| unavailable_message("a/b", r));
         assert_eq!(

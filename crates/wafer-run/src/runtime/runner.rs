@@ -157,7 +157,7 @@ fn init_failure(
     e: super::slot::InitError,
 ) -> WaferError {
     let retry_in = match (&e, template.init_wait) {
-        (super::slot::InitError::Transient(_), super::InitWait::Await) => {
+        (super::slot::InitError::Transient { .. }, super::InitWait::Await) => {
             target.slot.pending_retry_in()
         }
         _ => None,

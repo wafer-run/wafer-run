@@ -69,10 +69,10 @@ async fn transient_init_error_is_not_cached() {
         let result = slot
             .get_or_init(|| async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Err::<InitializedState, _>(InitError::Transient("d1 timeout".to_string()))
+                Err::<InitializedState, _>(InitError::transient("d1 timeout"))
             })
             .await;
-        assert!(matches!(result, Err(InitError::Transient(_))));
+        assert!(matches!(result, Err(InitError::Transient { .. })));
     }
 
     // Inside the retry backoff: the failure comes back, init does not run.
@@ -85,11 +85,11 @@ async fn transient_init_error_is_not_cached() {
             })
             .await;
         assert!(
-            matches!(result, Err(InitError::Transient(_))),
+            matches!(result, Err(InitError::Transient { .. })),
             "inside the backoff the transient failure is returned: {result:?}"
         );
         assert!(
-            matches!(slot.try_cached(), Some(Err(InitError::Transient(_)))),
+            matches!(slot.try_cached(), Some(Err(InitError::Transient { .. }))),
             "the fast path also answers inside the backoff"
         );
     }
@@ -146,9 +146,9 @@ async fn pending_retry_in_names_the_backoff_only_while_it_lasts() {
     );
 
     let result = slot
-        .get_or_init(|| async { Err::<InitializedState, _>(InitError::Transient("down".into())) })
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::transient("down")) })
         .await;
-    assert!(matches!(result, Err(InitError::Transient(_))));
+    assert!(matches!(result, Err(InitError::Transient { .. })));
     let pending = slot
         .pending_retry_in()
         .expect("a transient failure starts a backoff");
@@ -182,11 +182,16 @@ async fn init_state_reports_each_state_without_waiting_for_an_attempt() {
 
     // A transient failure: retrying, with the backoff left.
     let _ = slot
-        .get_or_init(|| async { Err::<InitializedState, _>(InitError::Transient("down".into())) })
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::transient("down")) })
         .await;
     match slot.init_state() {
-        BlockInitState::Retrying { reason, retry_in } => {
+        BlockInitState::Retrying {
+            reason,
+            detail_code,
+            retry_in,
+        } => {
             assert_eq!(reason, "down");
+            assert_eq!(detail_code, None, "a failure with no detail code");
             // At most the first backoff; it may already have elapsed on a
             // slow runner (then zero), so no lower bound is asserted.
             assert!(retry_in <= TRANSIENT_RETRY_BASE, "{retry_in:?}");
@@ -198,6 +203,7 @@ async fn init_state_reports_each_state_without_waiting_for_an_attempt() {
         slot.init_state(),
         BlockInitState::Retrying {
             reason: "down".into(),
+            detail_code: None,
             retry_in: std::time::Duration::ZERO,
         },
         "past the backoff the last failure is still reported, due now"
@@ -285,7 +291,7 @@ async fn concurrent_readers_never_see_an_idle_slot_in_flight() {
     // A transient failure whose backoff has elapsed keeps its class.
     let elapsed = Arc::new(BlockSlot::new());
     let _ = elapsed
-        .get_or_init(|| async { Err::<InitializedState, _>(InitError::Transient("down".into())) })
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::transient("down")) })
         .await;
     tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
     let misreads = {
@@ -394,4 +400,55 @@ async fn a_cancelled_attempt_is_not_left_in_flight() {
     assert!(timed_out.is_err(), "the attempt is parked");
     assert_eq!(slot.init_state(), BlockInitState::NotInitialized);
     assert!(slot.try_cached().is_none());
+}
+
+/// A `lifecycle(Init)` that failed because its database could not answer
+/// keeps the failure's detail code: in the error a caller gets inside the
+/// backoff, and in the slot's `Retrying` state, during the backoff and once
+/// it has elapsed. The state is how an embedder that retries by rebuilding
+/// tells a database outage from a block failing on its own.
+#[tokio::test]
+async fn a_database_outage_keeps_its_detail_code_through_the_slot() {
+    use wafer_block::wire::database::DATABASE_UNAVAILABLE;
+    use wafer_run::{BlockInitState, ErrorCode, WaferError};
+
+    let outage = WaferError::new(ErrorCode::Unavailable, "database temporarily unavailable")
+        .with_detail_code(DATABASE_UNAVAILABLE);
+    let own = WaferError::new(ErrorCode::Unavailable, "the mail relay is down");
+
+    let slot = BlockSlot::new();
+    let failed = slot
+        .get_or_init(|| async {
+            Err::<InitializedState, _>(InitError::from_lifecycle_error(&outage))
+        })
+        .await;
+    assert!(
+        matches!(&failed, Err(InitError::Transient { detail_code: Some(code), .. }) if code == DATABASE_UNAVAILABLE),
+        "{failed:?}"
+    );
+    let inside = slot.try_cached();
+    assert!(
+        matches!(&inside, Some(Err(InitError::Transient { detail_code: Some(code), .. })) if code == DATABASE_UNAVAILABLE),
+        "inside the backoff: {inside:?}"
+    );
+    let detail = |state: BlockInitState| match state {
+        BlockInitState::Retrying { detail_code, .. } => detail_code,
+        other => panic!("expected Retrying, got {other:?}"),
+    };
+    assert_eq!(
+        detail(slot.init_state()).as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+    tokio::time::sleep(TRANSIENT_RETRY_BASE + TRANSIENT_RETRY_BASE / 2).await;
+    assert_eq!(
+        detail(slot.init_state()).as_deref(),
+        Some(DATABASE_UNAVAILABLE),
+        "past the backoff"
+    );
+
+    let slot = BlockSlot::new();
+    let _ = slot
+        .get_or_init(|| async { Err::<InitializedState, _>(InitError::from_lifecycle_error(&own)) })
+        .await;
+    assert_eq!(detail(slot.init_state()), None, "a block's own Unavailable");
 }

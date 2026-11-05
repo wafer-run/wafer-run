@@ -25,6 +25,21 @@ use serde::{Deserialize, Serialize};
 /// request) may run it.
 pub const CALL_BUDGET_EXHAUSTED: &str = "database.call_budget_exhausted";
 
+/// Detail code ([`crate::WaferError::detail_code`]) of the `Unavailable`
+/// answering a database call the backend itself could not answer: the
+/// database is down, overloaded, was reset, or is over a quota that resets
+/// (a backend's `DatabaseError::Unavailable`). Nothing can be assumed
+/// written. A retry may succeed once the backend recovers.
+///
+/// It tells a database outage apart from any other `Unavailable`, which a
+/// block raises for a dependency of its own. A block whose `lifecycle(Init)`
+/// propagates the database's error keeps it, and the runtime carries it into
+/// [`BlockInitState::Retrying`](crate::BlockInitState::Retrying), so an
+/// embedder can tell "the database failed this block's `Init`" from "the
+/// block failed on its own". A block that wraps the error in a new
+/// `WaferError` drops it, and reads as failing on its own.
+pub const DATABASE_UNAVAILABLE: &str = "database.unavailable";
+
 /// Meta key ([`crate::WaferError::meta`]) of the error answering a
 /// `database.ddl_transaction` that failed: the failing statement's zero-based
 /// position in [`DdlTransactionRequest::statements`], in decimal, when the

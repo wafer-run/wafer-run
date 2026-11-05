@@ -4,6 +4,36 @@
 
 ### Breaking changes
 
+- **A block's transient `Init` failure keeps its detail code, and a
+  database outage has one: `database.unavailable`.** An embedder that
+  retries a runtime by rebuilding it (impresspress on Cloudflare) has to
+  tell "the database failed this block's `Init`" from "the block failed on
+  its own", for example so that a deploy gate does not roll a good version
+  back during an outage. Both were an `Unavailable` with only text to tell
+  them apart.
+  - Added: `wire::database::DATABASE_UNAVAILABLE` (`"database.unavailable"`).
+    `DatabaseError::Unavailable(_).detail_code()` returns it, so the
+    database handler's `Unavailable` answer (scrubbed message,
+    `ErrorCode::Unavailable`) carries it, as a call-budget refusal carries
+    `database.call_budget_exhausted`. A client that renders detail codes
+    now sees it on a database outage's 503.
+  - Changed: `InitError::Transient(String)` is
+    `InitError::Transient { message: String, detail_code: Option<String> }`.
+    `InitError::from_lifecycle_error` keeps the `lifecycle(Init)` error's
+    detail code. A transient failure raised outside `lifecycle(Init)` (an
+    unreachable config source, the init budget) has none. The new
+    `InitError::transient(message)` builds one.
+  - Changed: `BlockInitState::Retrying { reason, retry_in }` is
+    `BlockInitState::Retrying { reason, detail_code, retry_in }`, the last
+    failure's detail code, during the backoff and after it.
+  - A block that propagates its database's error from `lifecycle(Init)`
+    (`?` on a `wafer_core::clients::database` call) keeps the code. A block
+    that wraps it in a new `WaferError` drops it, and its failure reads as
+    its own.
+  - Migrate: match `InitError::Transient { message, .. }` (was
+    `Transient(message)`), and construct with `InitError::transient(..)`.
+    Patterns naming `Retrying`'s fields without `..` add `detail_code`.
+
 - **The inspector serves two data routes, and its UI renders the
   runtime's types as they are.** `wafer-run/inspector` answers
   `{mount}/app` and `{mount}/webmcp` with data; every other path, the mount

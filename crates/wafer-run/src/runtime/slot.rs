@@ -70,8 +70,15 @@ pub enum InitError {
     /// `lifecycle(Init)` failed with a code that says a retry may succeed
     /// (see [`InitError::from_lifecycle_error`]).
     /// NOT cached — a caller after the retry backoff runs init again.
-    #[error("transient init failure: {0}")]
-    Transient(String),
+    #[error("transient init failure: {message}")]
+    Transient {
+        /// What failed.
+        message: String,
+        /// The detail code of the `lifecycle(Init)` error, when it had one
+        /// ([`WaferError::detail_code`]); carried into
+        /// [`BlockInitState::Retrying::detail_code`](crate::BlockInitState::Retrying).
+        detail_code: Option<String>,
+    },
 
     /// An init cycle was detected (block A's init calls block B whose init
     /// calls block A, in one dispatch or across concurrent ones). Not
@@ -84,12 +91,25 @@ pub enum InitError {
 }
 
 impl InitError {
+    /// A transient failure with no detail code: one raised outside
+    /// `lifecycle(Init)` (an unreachable config source, the init budget).
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self::Transient {
+            message: message.into(),
+            detail_code: None,
+        }
+    }
+
     /// Classify a `lifecycle(Init)` failure by
-    /// [`init_failure_is_transient`] over its code and detail code.
+    /// [`init_failure_is_transient`] over its code and detail code. A
+    /// transient one keeps its detail code.
     pub fn from_lifecycle_error(e: &WaferError) -> Self {
         let msg = format!("lifecycle init failed: {e}");
         if init_failure_is_transient(e.code, e.detail_code()) {
-            Self::Transient(msg)
+            Self::Transient {
+                message: msg,
+                detail_code: e.detail_code().map(str::to_owned),
+            }
         } else {
             Self::Permanent(msg)
         }
@@ -173,6 +193,8 @@ struct TransientBackoff {
     retry_at: Instant,
     /// The last transient failure, returned to callers inside the window.
     message: String,
+    /// Its detail code ([`InitError::Transient::detail_code`]).
+    detail_code: Option<String>,
 }
 
 impl TransientBackoff {
@@ -191,11 +213,14 @@ impl TransientBackoff {
     fn pending(&self, now: Instant) -> Option<InitError> {
         (now < self.retry_at).then(|| {
             let wait = self.retry_at.saturating_duration_since(now);
-            InitError::Transient(format!(
-                "{} (retry backoff: {} ms left)",
-                self.message,
-                wait.as_millis()
-            ))
+            InitError::Transient {
+                message: format!(
+                    "{} (retry backoff: {} ms left)",
+                    self.message,
+                    wait.as_millis()
+                ),
+                detail_code: self.detail_code.clone(),
+            }
         })
     }
 }
@@ -330,17 +355,19 @@ impl BlockSlot {
                 Some(b) if now < b.retry_at => {
                     return BlockInitState::Retrying {
                         reason: b.message.clone(),
+                        detail_code: b.detail_code.clone(),
                         retry_in: b.retry_at.saturating_duration_since(now),
                     };
                 }
                 _ if state.in_flight => return BlockInitState::Initializing,
-                Some(b) => Some(b.message.clone()),
+                Some(b) => Some((b.message.clone(), b.detail_code.clone())),
                 None => None,
             }
         };
         match last_transient {
-            Some(reason) => BlockInitState::Retrying {
+            Some((reason, detail_code)) => BlockInitState::Retrying {
                 reason,
+                detail_code,
                 retry_in: Duration::ZERO,
             },
             None => BlockInitState::NotInitialized,
@@ -351,7 +378,7 @@ impl BlockSlot {
     ///
     /// - `Ok(_)` → cached; all future callers see the same `InitializedState`.
     /// - `Err(Permanent(_))` → cached; all future callers see the same error.
-    /// - `Err(Transient(_))` → not cached; callers inside the retry backoff
+    /// - `Err(Transient { .. })` → not cached; callers inside the retry backoff
     ///   get it back without init running, the first caller after it runs
     ///   init again.
     /// - `Err(Cycle { .. })` → not cached, no backoff; returned as-is.
@@ -399,14 +426,21 @@ impl BlockSlot {
                 state.backoff = None;
                 Err(InitError::Permanent(msg))
             }
-            Err(InitError::Transient(msg)) => {
+            Err(InitError::Transient {
+                message,
+                detail_code,
+            }) => {
                 let failures = state.backoff.as_ref().map_or(0, |b| b.failures) + 1;
                 state.backoff = Some(TransientBackoff {
                     failures,
                     retry_at: Instant::now() + TransientBackoff::delay(failures),
-                    message: msg.clone(),
+                    message: message.clone(),
+                    detail_code: detail_code.clone(),
                 });
-                Err(InitError::Transient(msg))
+                Err(InitError::Transient {
+                    message,
+                    detail_code,
+                })
             }
             Err(other @ InitError::Cycle { .. }) => {
                 // Dispatch refuses a cyclic wait before reaching the slot.
@@ -451,7 +485,7 @@ mod tests {
             ErrorCode::Aborted,
         ] {
             let e = InitError::from_lifecycle_error(&WaferError::new(code, "x"));
-            assert!(matches!(e, InitError::Transient(_)), "{code:?} → {e:?}");
+            assert!(matches!(e, InitError::Transient { .. }), "{code:?} → {e:?}");
         }
         for code in [
             ErrorCode::ResourceExhausted,
@@ -476,7 +510,7 @@ mod tests {
             .with_detail_code(CALL_BUDGET_EXHAUSTED);
         assert!(matches!(
             InitError::from_lifecycle_error(&spent),
-            InitError::Transient(_)
+            InitError::Transient { .. }
         ));
 
         let runtime_limit = WaferError::new(ErrorCode::ResourceExhausted, "call depth");
@@ -511,7 +545,10 @@ mod tests {
                 e = e.with_detail_code(detail);
             }
             assert_eq!(
-                matches!(InitError::from_lifecycle_error(&e), InitError::Transient(_)),
+                matches!(
+                    InitError::from_lifecycle_error(&e),
+                    InitError::Transient { .. }
+                ),
                 transient,
                 "{code:?} {detail:?}"
             );

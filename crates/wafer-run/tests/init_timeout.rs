@@ -72,7 +72,7 @@ fn hangs(budget: Option<Duration>) -> Vec<(&'static str, Arc<dyn Block>)> {
 
 fn transient(err: &InitError) -> &str {
     match err {
-        InitError::Transient(msg) => msg,
+        InitError::Transient { message, .. } => message,
         other => panic!("an init over its budget is transient: {other:?}"),
     }
 }

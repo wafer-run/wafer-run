@@ -23,6 +23,15 @@ pub enum BlockInitState {
         /// The last transient failure's message. It may quote a backend's
         /// error; a public health body reports the class, not this text.
         reason: String,
+        /// The detail code ([`crate::WaferError::detail_code`]) of the error
+        /// the last attempt failed with, when it had one: a typed account of
+        /// the failure that, unlike `reason`, is safe to act on. A block
+        /// whose `Init` propagated its database's outage carries
+        /// [`DATABASE_UNAVAILABLE`](crate::wire::database::DATABASE_UNAVAILABLE).
+        /// `None` for a failure with no detail code, and for one raised
+        /// outside `lifecycle(Init)` (an unreachable config source, the init
+        /// budget).
+        detail_code: Option<String>,
         /// What is left of the runtime's retry backoff for this block:
         /// zero once it has elapsed. Where dispatch initializes lazily
         /// (`InitWait::Await`) the first dispatch after it runs init again;

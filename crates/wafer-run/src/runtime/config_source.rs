@@ -105,7 +105,7 @@ impl ConfigError {
                 "block `{block}` missing required config key `{key}`"
             )),
             Self::Transient { source, .. } => {
-                InitError::Transient(format!("config fetch failed: {source}"))
+                InitError::transient(format!("config fetch failed: {source}"))
             }
             Self::SourceFault { source, .. } => {
                 InitError::Permanent(format!("config source fault: {source}"))
