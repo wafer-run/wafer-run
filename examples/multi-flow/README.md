@@ -2,7 +2,7 @@
 
 ## What it demonstrates
 
-Multiple flows in a single wafer binary, visualized through the inspector. Registers the standard `wafer-run/http-server` flow plus an `onboarding` flow (for illustration); both are listed by `/_inspector/flows`. Includes inline blocks for `greeter`, `health`, and a `not-found` fallback.
+Multiple flows in a single wafer binary, visualized through the inspector. Registers the standard `wafer-run/http-server` flow plus an `onboarding` flow (for illustration); both are listed by the inspector's Flows view. Includes inline blocks for `greeter`, `health`, and a `not-found` fallback.
 
 ## Run
 
@@ -14,11 +14,11 @@ Then:
 
 ```
 curl http://localhost:8080/greet?name=Alice
-curl http://localhost:8080/_inspector/flows | python3 -m json.tool
-curl http://localhost:8080/_inspector/flows/onboarding | python3 -m json.tool
+curl -s http://localhost:8080/_inspector/app | jq '.flows[].id'
+curl -s http://localhost:8080/_inspector/app | jq '.flows[] | select(.id == "onboarding")'
 ```
 
-Visit `http://localhost:8080/_inspector/ui` for the visual flow inspector.
+Visit `http://localhost:8080/_inspector/ui` for the inspector UI.
 
 ## Key files
 

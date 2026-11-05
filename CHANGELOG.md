@@ -4,6 +4,42 @@
 
 ### Breaking changes
 
+- **The inspector serves two data routes, and its UI renders the
+  runtime's types as they are.** `wafer-run/inspector` answers
+  `{mount}/app` and `{mount}/webmcp` with data; every other path, the mount
+  root included, serves the UI.
+  - Removed: `{mount}/blocks`, `{mount}/blocks/{name}`, `{mount}/flows`,
+    `{mount}/flows/{id}`, `{mount}/interfaces`, and the counts summary at
+    any other path. `/app` already carried all of it — `{ blocks, flows,
+    configs, interfaces }`, the runtime's own `BlockInfo` / `WaferFlow` /
+    `InterfaceSpec` serialized verbatim with sensitive config values
+    redacted — and now also `aliases` (`{ "<alias>": "<block>" }`, from
+    the new `Context::block_aliases`, empty by default), so migrate with
+    `jq` over `/app`, e.g.
+    `jq '.blocks[] | select(.name == "org/x") | .capabilities'`.
+  - The UI loads `/app` once and has four views. **Blocks** shows each
+    block's full declaration — endpoints, declared config
+    (`config_keys` / `flow_config`), `admin_url` — and its running config;
+    the old cards read `admin_ui` and `config_schema`, which `BlockInfo`
+    no longer has, and never showed the declared config. **Flows** lists
+    each flow's steps in order with their `next`, `each` and `parallel`
+    entries; the old tree re-derived sequencing in JavaScript and drew
+    flows using `parallel` or `each` wrongly. **Routes** shows the
+    `routes` config of every block declaring `router@v1`, nesting a route
+    whose target is another router; it replaces the App topology view,
+    which matched `wafer-run/router` and `wafer-run/http-listener` by name.
+    A flow step or route that names an alias links to the block it
+    resolves to, and a block's page lists its aliases.
+    **Agent tools** is unchanged.
+  - The access policy is declared config: `allow_anonymous` (toggle,
+    default `false`) and `allowed_roles` (default `admin`) in
+    `flow_config`, read per request so a flow step's config overrides the
+    block's, as monitoring's `stats_*` variables are. `allowed_roles` is
+    now a comma-separated string, like monitoring's `stats_roles`; it was
+    a JSON array. A present but malformed value, or a role list naming no
+    roles, fails Init with
+    `InvalidArgument` where it fell back to the default.
+
 - **A declaration is never copied to be described: `registered_blocks()`
   lends the runtime's `Arc`s, and the discovery generators take them.**
   Since #478 a runtime holds each block's `BlockInfo` once, as an `Arc`, but

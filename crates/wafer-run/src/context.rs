@@ -479,6 +479,10 @@ impl Context for RuntimeContext {
         &self.snapshot.block_configs
     }
 
+    fn block_aliases(&self) -> &std::collections::HashMap<String, String> {
+        &self.aliases
+    }
+
     fn interface_specs(&self) -> &[wafer_block::InterfaceSpec] {
         &self.snapshot.interface_specs
     }

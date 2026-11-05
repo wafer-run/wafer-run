@@ -1,47 +1,179 @@
 #![warn(missing_docs)]
 //! Runtime introspection block (`wafer-run/inspector`).
 //!
-//! Exposes a read-only HTTP surface that lists the runtime's registered blocks,
-//! flows, and interface specs, plus a small static HTML UI for browsing them.
-//! Intended for operators and developers; access defaults to the `admin` role.
+//! A read-only HTTP surface over the runtime's sealed state, plus a static
+//! HTML UI that renders it. Intended for operators and developers; access
+//! defaults to the `admin` role.
+//!
+//! Three routes, resolved from the last path segment so any mount prefix
+//! works:
+//!
+//! - `{mount}/ui` (and any path that is not one of the two below, including
+//!   the mount root) — the HTML page (`inspector.html`, embedded).
+//! - `{mount}/app` — everything the page renders except the agent tools, in
+//!   one payload (see [`app_view`]).
+//! - `{mount}/webmcp` — the WebMCP tool manifest per auth level (see
+//!   [`webmcp::webmcp_view`]).
+//!
+//! # The data contract
+//!
+//! `/app` serializes the runtime's own types verbatim — `BlockInfo`,
+//! `WaferFlow`, `InterfaceSpec`, each block's config and the alias table —
+//! and the only transformation applied is [`redacted`]. Every field the page reads is a
+//! field on one of those types, so a change to them shows up in the page
+//! instead of silently dropping out of it.
 
-use std::sync::{Arc, OnceLock};
+mod webmcp;
+
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+};
 
 use wafer_block::*;
 
-/// Access control policy for the inspector.
-#[expect(
-    dead_code,
-    reason = "Authenticated variant reserved for future config path; \
-              other variants are constructed from config"
-)]
+/// Who may use the inspector: resolved per request from the two variables
+/// [`InspectorBlock::info`] declares (see [`InspectorBlock::policy`]).
+#[derive(Debug, PartialEq, Eq)]
 enum AccessPolicy {
-    /// Require `auth.user_id` to be set (default).
-    Authenticated,
-    /// Allow unauthenticated access (dev mode).
+    /// `allow_anonymous` is set: anyone, authenticated or not (dev only).
     Anonymous,
-    /// Require `auth.user_roles` to contain one of these roles.
+    /// The caller must be authenticated and hold one of these roles.
     Roles(Vec<String>),
 }
 
-/// The policy applied when `lifecycle(Init)` supplied no override:
-/// require the `admin` role.
-fn default_policy() -> AccessPolicy {
-    AccessPolicy::Roles(vec!["admin".to_string()])
+/// Config key: allow unauthenticated access.
+const ALLOW_ANONYMOUS: &str = "allow_anonymous";
+
+/// Config key: comma-separated roles that may use the inspector.
+const ALLOWED_ROLES: &str = "allowed_roles";
+
+/// Default of [`ALLOW_ANONYMOUS`].
+const DEFAULT_ALLOW_ANONYMOUS: bool = false;
+
+/// Default of [`ALLOWED_ROLES`].
+const DEFAULT_ALLOWED_ROLES: &str = "admin";
+
+/// The roles in a comma-separated list, trimmed, empty entries dropped.
+fn parse_roles(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
-/// Read-only HTTP block that exposes the runtime's registered blocks, flows,
-/// and interface specs as JSON, plus a small HTML UI at `/ui`.
-///
-/// Routes (resolved from the tail of the message path so any mount prefix
-/// works — see [`Route`]): `/app`, `/blocks`, `/blocks/{name}`, `/flows`,
-/// `/flows/{id}`, `/interfaces`, `/webmcp`, `/ui`; any other path returns a
-/// counts summary.
+fn invalid(reason: String) -> WaferError {
+    WaferError::new(ErrorCode::InvalidArgument, reason)
+}
+
+/// `"true"` / `"false"`, the stringified form flow-step config arrives in.
+fn parse_bool(value: &str) -> Result<bool, WaferError> {
+    value.parse().map_err(|_| {
+        invalid(format!(
+            "inspector: `{ALLOW_ANONYMOUS}` must be true or false, got {value:?}"
+        ))
+    })
+}
+
+/// The block-level settings, validated at `lifecycle(Init)`; each request
+/// starts from these and applies its flow step's overrides.
+#[derive(Debug, Clone)]
+struct Settings {
+    allow_anonymous: bool,
+    allowed_roles: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            allow_anonymous: DEFAULT_ALLOW_ANONYMOUS,
+            allowed_roles: DEFAULT_ALLOWED_ROLES.to_string(),
+        }
+    }
+}
+
+impl Settings {
+    /// Read the block config. A key that is present but malformed fails Init
+    /// instead of falling back to a default the operator did not ask for.
+    fn from_config(config: &BlockConfig) -> Result<Self, WaferError> {
+        let allow_anonymous = match config.get(ALLOW_ANONYMOUS) {
+            None => DEFAULT_ALLOW_ANONYMOUS,
+            Some(value) => config.bool(ALLOW_ANONYMOUS).ok_or_else(|| {
+                invalid(format!(
+                    "inspector: `{ALLOW_ANONYMOUS}` must be a boolean, got {value}"
+                ))
+            })?,
+        };
+        let allowed_roles = match config.get(ALLOWED_ROLES) {
+            None => DEFAULT_ALLOWED_ROLES.to_string(),
+            Some(serde_json::Value::String(list)) => list.clone(),
+            Some(other) => {
+                return Err(invalid(format!(
+                    "inspector: `{ALLOWED_ROLES}` must be a comma-separated string, got {other}"
+                )))
+            }
+        };
+        let settings = Self {
+            allow_anonymous,
+            allowed_roles,
+        };
+        settings.policy()?;
+        Ok(settings)
+    }
+
+    /// The policy these settings describe. A role list naming no roles would
+    /// deny every caller, so it is refused rather than enforced.
+    fn policy(&self) -> Result<AccessPolicy, WaferError> {
+        if self.allow_anonymous {
+            return Ok(AccessPolicy::Anonymous);
+        }
+        let roles = parse_roles(&self.allowed_roles);
+        if roles.is_empty() {
+            return Err(invalid(format!(
+                "inspector: `{ALLOWED_ROLES}` names no roles, which would deny every caller"
+            )));
+        }
+        Ok(AccessPolicy::Roles(roles))
+    }
+}
+
+impl AccessPolicy {
+    /// `Ok` when `msg`'s caller may use the inspector, else the error to
+    /// answer with. Reads only the host-owned `auth.*` metadata, which a
+    /// WASM guest cannot forge across the trust boundary.
+    fn admit(&self, msg: &Message) -> Result<(), WaferError> {
+        let Self::Roles(allowed) = self else {
+            return Ok(());
+        };
+        if msg.get_meta("auth.user_id").is_empty() {
+            return Err(WaferError::new(
+                ErrorCode::Unauthenticated,
+                "inspector requires authentication",
+            ));
+        }
+        let held = parse_roles(msg.get_meta("auth.user_roles"));
+        if allowed.iter().any(|role| held.contains(role)) {
+            Ok(())
+        } else {
+            Err(WaferError::new(
+                ErrorCode::PermissionDenied,
+                format!(
+                    "inspector requires one of these roles: [{}]",
+                    allowed.join(", ")
+                ),
+            ))
+        }
+    }
+}
+
+/// Read-only HTTP block over the runtime's blocks, flows, configs and
+/// interface specs, with a static HTML UI at `{mount}/ui`. See the crate
+/// docs for the routes.
 pub struct InspectorBlock {
-    /// Init-resolved access policy (write-once); [`default_policy`] applies
-    /// when Init supplied no override. Same `OnceLock` pattern as the other
-    /// infrastructure blocks.
-    policy: OnceLock<AccessPolicy>,
+    /// Block-level access settings, validated at Init (write-once); the
+    /// declared defaults apply when no Init has run.
+    settings: OnceLock<Settings>,
 }
 
 impl Default for InspectorBlock {
@@ -51,215 +183,55 @@ impl Default for InspectorBlock {
 }
 
 impl InspectorBlock {
-    /// Construct an inspector with the default `admin`-role access policy.
-    ///
-    /// Override at lifecycle `Init` time by passing config of the shape
-    /// `{ "allow_anonymous": true }` or `{ "allowed_roles": ["..."] }`.
+    /// Construct an inspector. Its access policy comes from the
+    /// `allow_anonymous` / `allowed_roles` variables declared in
+    /// [`Block::info`]; with neither set, only the `admin` role is admitted.
     pub fn new() -> Self {
         Self {
-            policy: OnceLock::new(),
+            settings: OnceLock::new(),
         }
     }
-}
 
-/// One of the inspector's own routes, resolved from the tail of a request
-/// path.
-///
-/// # Why the tail and not a whole-path suffix
-///
-/// The block is suffix-routed because it cannot see its own mount prefix —
-/// nothing in the message carries it. But every route is exactly one segment
-/// after that prefix, except `/blocks/{name}` and `/flows/{id}` which are
-/// two, so the last one or two segments settle which route was asked for
-/// without knowing where the mount begins.
-///
-/// Matching whole-path suffixes cannot do that: `ends_with("/webmcp")` is
-/// equally true of `{mount}/webmcp` and of `{mount}/blocks/webmcp` — a block
-/// whose name happens to be `webmcp` — so whichever `ends_with` runs first
-/// silently shadows the other, and the order of the checks becomes load-
-/// bearing. Reading the parent segment makes the two cases distinguishable
-/// and the order of the arms irrelevant.
-///
-/// The one shape this still cannot resolve is a mount prefix that itself
-/// ends in `/blocks` or `/flows`, where `{mount}/webmcp` and
-/// `{mount}/blocks/{name}` are the same string. No suffix rule can, and
-/// nothing mounts the inspector there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Route<'a> {
-    /// `{mount}/app` — flows, configs, blocks, and interfaces in one payload,
-    /// with sensitive config values redacted (see [`redacted`]).
-    App,
-    /// `{mount}/blocks` — every registered block.
-    Blocks,
-    /// `{mount}/blocks/{name}` — one block, by name.
-    Block(&'a str),
-    /// `{mount}/flows` — every flow.
-    Flows,
-    /// `{mount}/flows/{id}` — one flow definition, by id, with sensitive
-    /// step-config values redacted.
-    Flow(&'a str),
-    /// `{mount}/interfaces` — every interface spec.
-    Interfaces,
-    /// `{mount}/webmcp` — the agent tool manifest per auth level.
-    WebMcp,
-    /// `{mount}/ui` — the static HTML UI.
-    Ui,
-    /// Anything else, including the mount root: a counts summary.
-    Summary,
-}
-
-/// Resolve `path` to one of the inspector's routes. See [`Route`].
-fn route_of(path: &str) -> Route<'_> {
-    let mut tail = path.rsplit('/').filter(|segment| !segment.is_empty());
-    let Some(last) = tail.next() else {
-        return Route::Summary;
-    };
-    match (tail.next(), last) {
-        (Some("blocks"), name) => Route::Block(name),
-        (Some("flows"), id) => Route::Flow(id),
-        (_, "app") => Route::App,
-        (_, "blocks") => Route::Blocks,
-        (_, "flows") => Route::Flows,
-        (_, "interfaces") => Route::Interfaces,
-        (_, "webmcp") => Route::WebMcp,
-        (_, "ui") => Route::Ui,
-        _ => Route::Summary,
+    /// The access policy for one request: the Init-validated block config,
+    /// overridden by the flow step's config (`ctx.config_get`) as monitoring
+    /// does for its `stats_*` variables.
+    fn policy(&self, ctx: &dyn Context) -> Result<AccessPolicy, WaferError> {
+        let mut settings = self.settings.get().cloned().unwrap_or_default();
+        if let Some(value) = ctx.config_get(ALLOW_ANONYMOUS) {
+            settings.allow_anonymous = parse_bool(value)?;
+        }
+        if let Some(roles) = ctx.config_get(ALLOWED_ROLES) {
+            settings.allowed_roles = roles.to_string();
+        }
+        settings.policy()
     }
 }
 
-/// The auth levels the WebMCP view renders a manifest for, in increasing
-/// order of privilege.
-const WEBMCP_LEVELS: [AuthLevel; 3] = [
-    AuthLevel::Public,
-    AuthLevel::Authenticated,
-    AuthLevel::Admin,
-];
+/// One of the inspector's routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// Any other path — `{mount}/ui`, the mount root, anything else — the
+    /// static HTML UI, which finds the data routes relative to where it is
+    /// served.
+    Ui,
+    /// `{mount}/app` — see [`app_view`].
+    App,
+    /// `{mount}/webmcp` — see [`webmcp::webmcp_view`].
+    WebMcp,
+}
 
-/// Build the `/webmcp` payload: the WebMCP tool manifest as each auth level
-/// receives it, plus, per level, the endpoints that opted in to agent-tool
-/// exposure and produced no tool.
+/// Resolve `path` to a route from its last non-empty segment.
 ///
-/// # Why one document per level rather than one manifest
-///
-/// The point the view has to make is that the same site presents a
-/// *different* tool surface depending on who is asking. A single manifest
-/// cannot show that; three side by side make it unmissable, and the diff
-/// between adjacent levels is what an operator actually wants to audit
-/// before shipping an agent surface.
-///
-/// Refusals are per level for the same reason. All but one refusal reason is
-/// a defect in an endpoint's own declarations and is identical at every
-/// level, so those three lists agree — but `DuplicateToolName` is scoped to
-/// the manifest the collision occurs in, so a name claimed by both a public
-/// and an admin endpoint is a refusal only at the admin level, and the
-/// public tool below it is published. Folding the lists together would hide
-/// exactly that.
-///
-/// # A level's refusals name only endpoints that level can see
-///
-/// The producer reports a structural refusal to *every* caller, because a
-/// malformed path template is a defect whether an anonymous visitor or an
-/// admin asked, and an author debugging one should not have to authenticate
-/// to see it. That is right for the operator's log and wrong here: this page
-/// says it shows the manifest as each caller receives it, so an admin-only
-/// endpoint's block, method, path and tool name appearing under the "Public"
-/// heading is both a false statement about what that caller receives and a
-/// disclosure across exactly the tier boundary the auth filter draws.
-///
-/// So each level keeps only the entries whose
-/// `WebMcpRefusalReport::visible_to_caller` is set. That flag is the
-/// producer's own filter decision travelling with the report; re-deriving it
-/// here would be a second implementation of a security-critical filter, the
-/// same reason this block depends on `wafer-core` instead of rebuilding the
-/// refusal wall in the page's JavaScript.
-///
-/// # The auth basis is `ep.auth`, and the view says so
-///
-/// This block cannot see the consumer's route table, so it projects each
-/// endpoint's *declared* auth level. A consumer whose router raises auth by
-/// prefix — enforcing `max(prefix_tier, ep.auth)` — serves a narrower
-/// surface than what is rendered here. That is exactly the assumption
-/// `wafer_core::discovery::generate_webmcp_declared_auth` is named for, and
-/// the rendered page carries the caveat rather than leaving a reader to
-/// assume the inspector is showing production truth.
-///
-/// The same caveat covers feature gating, and for the same reason: a
-/// consumer that serves the manifest for only its feature-enabled blocks
-/// (Impresspress does) shows a narrower surface again, and `registered_blocks`
-/// carries no live enablement state for this block to filter on —
-/// `BlockInfo::default_enabled` is a first-run default, not what the admin
-/// has since switched off. Rather than filter on something that is not the
-/// answer, the page states plainly that it ignores feature gating.
-fn webmcp_view(blocks: &[Arc<BlockInfo>]) -> serde_json::Value {
-    use wafer_core::discovery::WebMcpRefusalScope;
-
-    let levels: Vec<serde_json::Value> = WEBMCP_LEVELS
-        .iter()
-        .map(|level| {
-            let (manifest, refusals) =
-                wafer_core::discovery::generate_webmcp_report(blocks, *level, |_block, ep| {
-                    Some(ep.auth)
-                });
-            // See "A level's refusals name only endpoints that level can
-            // see" above.
-            let visible: Vec<_> = refusals
-                .into_iter()
-                .filter(|r| r.visible_to_caller)
-                .collect();
-
-            let published = manifest["tools"].as_array().map_or(0, Vec::len);
-            // How many endpoints opted in *at this level*. An opted-in
-            // endpoint this caller can see either becomes a tool or is
-            // refused one, and nothing else, so the two add up — and the
-            // column's "N of M" then compares like with like. Dividing by a
-            // deployment-wide total instead makes every column below the
-            // top read as though its own endpoints had failed.
-            let opted_in = published
-                + visible
-                    .iter()
-                    .filter(|r| r.scope == WebMcpRefusalScope::Tool)
-                    .count();
-
-            let refusals: Vec<serde_json::Value> = visible
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "block": r.block,
-                        "method": r.method.to_string(),
-                        "path": r.path,
-                        "tool_name": r.tool_name,
-                        "scope": r.scope.to_string(),
-                        "reason": r.reason.to_string(),
-                    })
-                })
-                .collect();
-
-            serde_json::json!({
-                "level": level.to_string(),
-                "manifest": manifest,
-                "refusals": refusals,
-                "opted_in": opted_in,
-            })
-        })
-        .collect();
-
-    // Every endpoint that asked to be a tool, anywhere in the deployment.
-    // Counted from the declarations rather than from the manifests, because
-    // the whole question is what did not arrive. This is the page-level
-    // figure; each column carries its own, because the two answer different
-    // questions.
-    let opted_in = blocks
-        .iter()
-        .flat_map(|b| b.endpoints.iter())
-        .filter(|ep| ep.is_agent_tool())
-        .count();
-
-    serde_json::json!({
-        "auth_basis": "declared",
-        "feature_gating": "ignored",
-        "opted_in_endpoints": opted_in,
-        "levels": levels,
-    })
+/// The block cannot see its own mount prefix — nothing in the message
+/// carries it — but each data route is exactly one segment below that
+/// prefix, so the last segment settles it. Every other path is the UI, so
+/// the mount root opens it too.
+fn route_of(path: &str) -> Route {
+    match path.rsplit('/').find(|segment| !segment.is_empty()) {
+        Some("app") => Route::App,
+        Some("webmcp") => Route::WebMcp,
+        _ => Route::Ui,
+    }
 }
 
 /// What a sensitive config value is replaced with in every inspector view.
@@ -276,7 +248,7 @@ const SENSITIVE_KEYS: &[&str] = &["SECRET", "KEY", "TOKEN", "PASSWORD"];
 /// so a lower-case flow-config key such as `api_key` or `password` counts),
 /// or some registered block declares it as a [`InputType::Password`]
 /// variable.
-fn is_sensitive_key(key: &str, declared: &std::collections::HashSet<&str>) -> bool {
+fn is_sensitive_key(key: &str, declared: &HashSet<&str>) -> bool {
     let upper = key.to_ascii_uppercase();
     SENSITIVE_KEYS.contains(&upper.as_str())
         || SENSITIVE_SUFFIXES.iter().any(|s| upper.ends_with(s))
@@ -305,7 +277,7 @@ fn masked_url_credentials(value: &str) -> Option<String> {
 
 /// Every config key a registered block declares as sensitive
 /// ([`ConfigVar::is_sensitive`]), in either `config_keys` or `flow_config`.
-fn declared_sensitive_keys(blocks: &[Arc<BlockInfo>]) -> std::collections::HashSet<&str> {
+fn declared_sensitive_keys(blocks: &[Arc<BlockInfo>]) -> HashSet<&str> {
     blocks
         .iter()
         .flat_map(|b| b.config_keys.iter().chain(b.flow_config.iter()))
@@ -318,10 +290,7 @@ fn declared_sensitive_keys(blocks: &[Arc<BlockInfo>]) -> std::collections::HashS
 /// block configs nest and flow definitions carry per-step `config` objects —
 /// replaced by [`REDACTED`] (see [`is_sensitive_key`]), and the credentials
 /// of any other string that is a URL masked (see [`masked_url_credentials`]).
-fn redacted(
-    value: &serde_json::Value,
-    declared: &std::collections::HashSet<&str>,
-) -> serde_json::Value {
+fn redacted(value: &serde_json::Value, declared: &HashSet<&str>) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.iter()
@@ -345,10 +314,46 @@ fn redacted(
     }
 }
 
-/// Build an HTML OutputStream response.
-fn html_respond(html: Vec<u8>) -> OutputStream {
+/// The `/app` payload:
+///
+/// ```json
+/// {
+///   "blocks":     [BlockInfo, …],
+///   "flows":      [WaferFlow, …],           // redacted
+///   "configs":    { "<block>": <config> },  // redacted
+///   "interfaces": [InterfaceSpec, …],
+///   "aliases":    { "<alias>": "<block>" }
+/// }
+/// ```
+///
+/// `None` when the runtime does not expose `FlowIntrospection`.
+fn app_view(ctx: &dyn Context) -> Option<serde_json::Value> {
+    let intro = ctx.flow_introspection()?;
+    let blocks = ctx.registered_blocks();
+    let declared = declared_sensitive_keys(blocks);
+    let flows: Vec<_> = intro
+        .flow_defs_json()
+        .iter()
+        .map(|def| redacted(def, &declared))
+        .collect();
+    let configs: serde_json::Map<_, _> = ctx
+        .block_configs()
+        .iter()
+        .map(|(name, cfg)| (name.clone(), redacted(cfg, &declared)))
+        .collect();
+    Some(serde_json::json!({
+        "blocks": wafer_block::declarations(blocks),
+        "flows": flows,
+        "configs": configs,
+        "interfaces": ctx.interface_specs(),
+        "aliases": ctx.block_aliases(),
+    }))
+}
+
+/// Build an HTML response.
+fn html_respond(html: &'static str) -> OutputStream {
     OutputStream::respond_with_meta(
-        html,
+        html.as_bytes().to_vec(),
         vec![MetaEntry {
             key: META_RESP_CONTENT_TYPE.to_string(),
             value: "text/html; charset=utf-8".to_string(),
@@ -363,172 +368,58 @@ impl Block for InspectorBlock {
             "wafer-run/inspector",
             "0.0.1",
             "http-handler@v1",
-            "Runtime introspection — blocks, flows, and visual UI",
+            "Runtime introspection — blocks, flows, routes, and agent tools",
         )
         .infrastructure()
+        .flow_config(vec![
+            ConfigVar::new(
+                ALLOW_ANONYMOUS,
+                "Let anyone use the inspector, signed in or not. For local \
+                 development only: the inspector shows every block's config.",
+                "false",
+            )
+            .name("Allow anonymous access")
+            .input_type(InputType::Toggle),
+            ConfigVar::new(
+                ALLOWED_ROLES,
+                "Comma-separated roles that may use the inspector when \
+                 anonymous access is off. The caller must be signed in and \
+                 hold at least one.",
+                DEFAULT_ALLOWED_ROLES,
+            )
+            .name("Allowed roles"),
+        ])
     }
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, _input: InputStream) -> OutputStream {
-        // Access control
-        {
-            let policy = self.policy.get_or_init(default_policy);
-            match policy {
-                AccessPolicy::Anonymous => {}
-                AccessPolicy::Authenticated => {
-                    if msg.get_meta("auth.user_id").is_empty() {
-                        return OutputStream::error(WaferError {
-                            code: ErrorCode::Unauthenticated,
-                            message: "inspector requires authentication".to_string(),
-                            meta: vec![],
-                        });
-                    }
-                }
-                AccessPolicy::Roles(allowed) => {
-                    if msg.get_meta("auth.user_id").is_empty() {
-                        return OutputStream::error(WaferError {
-                            code: ErrorCode::Unauthenticated,
-                            message: "inspector requires authentication".to_string(),
-                            meta: vec![],
-                        });
-                    }
-                    let user_roles: Vec<&str> = msg
-                        .get_meta("auth.user_roles")
-                        .split(',')
-                        .map(|r| r.trim())
-                        .filter(|r| !r.is_empty())
-                        .collect();
-                    if !allowed.iter().any(|a| user_roles.contains(&a.as_str())) {
-                        let roles_list = allowed.join(", ");
-                        return OutputStream::error(WaferError {
-                            code: ErrorCode::PermissionDenied,
-                            message: format!(
-                                "inspector requires one of these roles: [{roles_list}]"
-                            ),
-                            meta: vec![],
-                        });
-                    }
-                }
-            }
+        // The gate runs before anything is read: every route exposes
+        // something an unauthorized caller must not see.
+        if let Err(e) = self.policy(ctx).and_then(|policy| policy.admit(&msg)) {
+            return OutputStream::error(e);
         }
 
-        // Only allow retrieve (GET)
-        let action = msg.action().to_string();
+        let action = msg.action();
         if !action.is_empty() && action != "retrieve" {
-            return OutputStream::error(WaferError {
-                code: ErrorCode::Unimplemented,
-                message: "only retrieve action is allowed".to_string(),
-                meta: vec![],
-            });
+            return OutputStream::error(WaferError::new(
+                ErrorCode::Unimplemented,
+                "inspector only answers retrieve (GET)",
+            ));
         }
 
-        let path = msg.path().to_string();
-
-        // Flow data is exposed via the runtime's FlowIntrospection
-        // capability, and each arm that needs it binds it for itself. Binding
-        // once for the whole handler instead would make every route that does
-        // *not* need it — the WebMCP view, the block routes, the static UI —
-        // have to be answered above the bind, so route order would carry a
-        // requirement that has nothing to do with routing. That is how
-        // `/webmcp` ended up ahead of everything else and shadowing
-        // `/blocks/webmcp`.
-        match route_of(&path) {
-            // A pure projection of `BlockInfo::endpoints`: no live flow
-            // state, so a runtime without that capability still serves it.
-            Route::WebMcp => ok_json(&webmcp_view(ctx.registered_blocks())),
-
-            Route::App => {
-                let Some(intro) = ctx.flow_introspection() else {
-                    return no_flow_introspection();
-                };
-                let blocks = ctx.registered_blocks();
-                let declared = declared_sensitive_keys(blocks);
-                let flows: Vec<_> = intro
-                    .flow_defs_json()
-                    .iter()
-                    .map(|def| redacted(def, &declared))
-                    .collect();
-                let configs: serde_json::Map<_, _> = ctx
-                    .block_configs()
-                    .iter()
-                    .map(|(name, cfg)| (name.clone(), redacted(cfg, &declared)))
-                    .collect();
-                let interfaces = ctx.interface_specs();
-                ok_json(&serde_json::json!({
-                    "flows": flows,
-                    "configs": configs,
-                    "blocks": wafer_block::declarations(blocks),
-                    "interfaces": interfaces,
-                }))
-            }
-
-            Route::Blocks => ok_json(&wafer_block::declarations(ctx.registered_blocks())),
-
-            Route::Block(name) => {
-                let decoded = percent_encoding::percent_decode_str(name)
-                    .decode_utf8_lossy()
-                    .into_owned();
-                let blocks = ctx.registered_blocks();
-                match blocks.iter().find(|b| b.name == decoded) {
-                    Some(info) => ok_json(&**info),
-                    None => OutputStream::error(WaferError {
-                        code: ErrorCode::NotFound,
-                        message: format!("block '{decoded}' not found"),
-                        meta: vec![],
-                    }),
-                }
-            }
-
-            Route::Flows => {
-                let Some(intro) = ctx.flow_introspection() else {
-                    return no_flow_introspection();
-                };
-                ok_json(&intro.flow_infos_json())
-            }
-
-            Route::Flow(id) => {
-                let Some(intro) = ctx.flow_introspection() else {
-                    return no_flow_introspection();
-                };
-                let decoded = percent_encoding::percent_decode_str(id)
-                    .decode_utf8_lossy()
-                    .into_owned();
-                match intro
-                    .flow_defs_json()
-                    .into_iter()
-                    .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(decoded.as_str()))
-                {
-                    Some(def) => ok_json(&redacted(
-                        &def,
-                        &declared_sensitive_keys(ctx.registered_blocks()),
-                    )),
-                    None => OutputStream::error(WaferError {
-                        code: ErrorCode::NotFound,
-                        message: format!("flow '{decoded}' not found"),
-                        meta: vec![],
-                    }),
-                }
-            }
-
-            Route::Interfaces => ok_json(&ctx.interface_specs()),
-
-            Route::Ui => html_respond(include_str!("inspector.html").as_bytes().to_vec()),
-
-            Route::Summary => {
-                let Some(intro) = ctx.flow_introspection() else {
-                    return no_flow_introspection();
-                };
-                let blocks = ctx.registered_blocks();
-                let flows = intro.flow_infos_json();
-                ok_json(&serde_json::json!({
-                    "block_count": blocks.len(),
-                    "flow_count": flows.len(),
-                    "blocks": blocks.iter().map(|b| &b.name).collect::<Vec<_>>(),
-                    "flows": flows
-                        .iter()
-                        .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
-                        .collect::<Vec<_>>(),
-                }))
-            }
+        match route_of(msg.path()) {
+            Route::Ui => html_respond(include_str!("inspector.html")),
+            Route::App => match app_view(ctx) {
+                Some(view) => ok_json(&view),
+                // A request handler must not panic over a host that does not
+                // expose the capability, so it is a typed error instead.
+                None => OutputStream::error(WaferError::new(
+                    ErrorCode::FailedPrecondition,
+                    "inspector requires the runtime to expose FlowIntrospection",
+                )),
+            },
+            // A pure projection of `BlockInfo::endpoints`: no flow state, so
+            // a runtime without `FlowIntrospection` still serves it.
+            Route::WebMcp => ok_json(&webmcp::webmcp_view(ctx.registered_blocks())),
         }
     }
 
@@ -538,163 +429,41 @@ impl Block for InspectorBlock {
         event: LifecycleEvent,
     ) -> std::result::Result<(), WaferError> {
         if let LifecycleType::Init = event.event_type {
-            let config = BlockConfig::from_event(&event);
-            // "allow_anonymous": true  → anyone can access
-            if config.bool("allow_anonymous").unwrap_or(false) {
-                tracing::warn!("inspector: anonymous access enabled — do not use in production");
-                // Write-once: Init fires a single time per registration.
-                let _ = self.policy.set(AccessPolicy::Anonymous);
-            }
-            // "allowed_roles": ["admin", "developer"]  → only these roles
-            else if let Some(role_list) = config.str_array("allowed_roles") {
-                if !role_list.is_empty() {
-                    tracing::info!("inspector: access restricted to roles: {:?}", role_list);
-                    let _ = self.policy.set(AccessPolicy::Roles(role_list));
+            let settings = Settings::from_config(&BlockConfig::from_event(&event))?;
+            match settings.policy()? {
+                AccessPolicy::Anonymous => {
+                    tracing::warn!("inspector: anonymous access enabled — do not use in production")
+                }
+                AccessPolicy::Roles(roles) => {
+                    tracing::info!("inspector: access restricted to roles: {roles:?}")
                 }
             }
+            // Write-once: Init fires a single time per registration.
+            let _ = self.settings.set(settings);
         }
         Ok(())
     }
 }
 
-/// The inspector is a runtime-only block, so an absent `FlowIntrospection`
-/// capability is a misconfiguration — but a request handler must not panic
-/// (and thus abort the worker) over a config mismatch, so it is a typed
-/// error instead.
-fn no_flow_introspection() -> OutputStream {
-    OutputStream::error(WaferError::new(
-        ErrorCode::FailedPrecondition,
-        "inspector requires the runtime to expose FlowIntrospection",
-    ))
-}
-
 wafer_block::register_static_block!("wafer-run/inspector", InspectorBlock);
 
 #[cfg(test)]
-mod auth_tests {
-    //! SEC-01: the inspector authorizes solely from message metadata
-    //! (`auth.user_id` / `auth.user_roles`). Since a WASM guest cannot forge
-    //! those keys across the trust boundary (host-owned protected namespace,
-    //! enforced in `wasmi_loader`), these tests pin the authorization decision
-    //! itself: default policy denies the unauthenticated and the wrong-role
-    //! caller, and the role list is parsed with comma-split + trim + empty
-    //! filtering.
+pub(crate) mod test_support {
+    //! A minimal [`Context`] for driving `handle` directly: it carries a
+    //! block list and nothing else, so `flow_introspection()` stays `None`.
 
     use wafer_block::{
         streams::{input::InputStream, output::TerminalNotResponse},
-        Context, ErrorCode, Message,
+        Block, BlockInfo, Context, ErrorCode, Message,
     };
 
     use super::InspectorBlock;
 
-    /// Minimal Context: the authorization arm returns before any Context
-    /// method is consulted, and a caller that *passes* auth then hits
-    /// `flow_introspection()` (defaulted to `None`) → `FailedPrecondition`,
-    /// which is exactly the signal these tests use to prove "auth passed".
-    #[derive(Clone)]
-    struct MockContext;
-
-    #[async_trait::async_trait]
-    impl Context for MockContext {
-        async fn call_block(
-            &self,
-            _name: &str,
-            _msg: Message,
-            _input: InputStream,
-        ) -> wafer_block::streams::output::OutputStream {
-            wafer_block::streams::output::OutputStream::error(wafer_block::WaferError::new(
-                ErrorCode::Unimplemented,
-                "mock",
-            ))
-        }
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-        fn config_get(&self, _key: &str) -> Option<&str> {
-            None
-        }
-        fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
-            std::sync::Arc::new(self.clone())
-        }
-        // Denies every access, as the trait's default `check_resource_access` does.
-        fn resource_access_admitted(
-            &self,
-            _resource: &str,
-            _resource_type: wafer_block::types::ResourceType,
-            _access: wafer_block::types::ResourceAccess,
-        ) -> bool {
-            false
-        }
-    }
-
-    async fn handle_code(msg: Message) -> ErrorCode {
-        use wafer_block::Block;
-        let block = InspectorBlock::new();
-        let out = block.handle(&MockContext, msg, InputStream::empty()).await;
-        match out.collect_buffered().await {
-            Err(TerminalNotResponse::Error(e)) => e.code,
-            Ok(_) => panic!("inspector must not produce a Respond on a mock context"),
-            Err(other) => panic!("unexpected terminal: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn default_policy_denies_unauthenticated() {
-        // No auth.user_id → Unauthenticated, before any data is exposed.
-        let code = handle_code(Message::new("retrieve")).await;
-        assert_eq!(code, ErrorCode::Unauthenticated);
-    }
-
-    #[tokio::test]
-    async fn default_policy_denies_wrong_role() {
-        // Authenticated but roles lack `admin` → PermissionDenied.
-        let mut msg = Message::new("retrieve");
-        msg.set_meta("auth.user_id", "u1");
-        msg.set_meta("auth.user_roles", "viewer,developer");
-        assert_eq!(handle_code(msg).await, ErrorCode::PermissionDenied);
-    }
-
-    #[tokio::test]
-    async fn default_policy_admits_admin_role() {
-        // `admin` present among comma+whitespace-separated roles → auth passes;
-        // the next failure is FailedPrecondition (mock has no FlowIntrospection),
-        // which distinguishes "authorized" from "denied".
-        let mut msg = Message::new("retrieve");
-        msg.set_meta("auth.user_id", "u1");
-        msg.set_meta("auth.user_roles", " viewer , admin ");
-        assert_eq!(handle_code(msg).await, ErrorCode::FailedPrecondition);
-    }
-
-    #[tokio::test]
-    async fn role_parsing_ignores_empty_and_whitespace_entries() {
-        // Empty/whitespace fragments must not accidentally match; a role list
-        // of only separators leaves no roles → wrong-role denial.
-        let mut msg = Message::new("retrieve");
-        msg.set_meta("auth.user_id", "u1");
-        msg.set_meta("auth.user_roles", " , ,  ");
-        assert_eq!(handle_code(msg).await, ErrorCode::PermissionDenied);
-    }
-}
-
-#[cfg(test)]
-mod webmcp_tests {
-    //! The WebMCP view is the inspector's only page whose content is a
-    //! security claim: it says what tool surface each caller is shown. These
-    //! pin the claim rather than the markup — that the three columns really
-    //! differ, that an endpoint which opted in and produced no tool is named
-    //! with a reason, and that the route does not need the runtime's flow
-    //! capability to answer.
-
-    use wafer_block::{
-        streams::{input::InputStream, output::TerminalNotResponse},
-        AuthLevel, Block, BlockEndpoint, BlockInfo, Context, ErrorCode, Message,
-    };
-
-    use super::InspectorBlock;
-
-    #[derive(Clone)]
-    struct BlocksContext {
-        blocks: Vec<std::sync::Arc<BlockInfo>>,
+    #[derive(Clone, Default)]
+    pub struct BlocksContext {
+        pub blocks: Vec<std::sync::Arc<BlockInfo>>,
+        /// What `config_get` answers: the flow step's config.
+        pub step_config: Vec<(&'static str, &'static str)>,
     }
 
     #[async_trait::async_trait]
@@ -713,8 +482,11 @@ mod webmcp_tests {
         fn is_cancelled(&self) -> bool {
             false
         }
-        fn config_get(&self, _key: &str) -> Option<&str> {
-            None
+        fn config_get(&self, key: &str) -> Option<&str> {
+            self.step_config
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| *v)
         }
         fn registered_blocks(&self) -> &[std::sync::Arc<BlockInfo>] {
             &self.blocks
@@ -733,295 +505,190 @@ mod webmcp_tests {
         }
     }
 
-    /// One tool per level, plus a refused endpoint at *each* of the outer two
-    /// levels.
-    ///
-    /// The admin-only refusal is the point: a structural refusal is computed
-    /// before the auth filter, so without a per-level filter the public
-    /// column would name an admin-only endpoint's block, method, path and
-    /// tool name. A fixture whose only refusal is public passes either way
-    /// and pins nothing.
-    fn fixture() -> Vec<BlockInfo> {
-        vec![
-            BlockInfo::new("test/shop", "1.0.0", "http-handler@v1", "Shop").endpoints(vec![
-                BlockEndpoint::get("/b/shop/products")
-                    .auth(AuthLevel::Public)
-                    .agent_tool("list_products", "List the public catalogue."),
-                BlockEndpoint::get("/b/shop/orders")
-                    .auth(AuthLevel::Authenticated)
-                    .agent_tool("list_my_orders", "List the signed-in user's orders."),
-                BlockEndpoint::get("/b/shop/admin/users")
-                    .auth(AuthLevel::Admin)
-                    .agent_tool("list_users", "List every account."),
-                BlockEndpoint::get("/b/shop/broken/{id}")
-                    .auth(AuthLevel::Public)
-                    .agent_tool("get_broken", "Never becomes a tool."),
-                BlockEndpoint::get("/b/shop/admin/broken/{secret_id}")
-                    .auth(AuthLevel::Admin)
-                    .agent_tool("get_admin_broken", "Never becomes a tool either."),
-            ]),
-        ]
-    }
-
-    /// `GET {mount}/webmcp` through the real handler, as an admin.
-    async fn webmcp_body(blocks: Vec<BlockInfo>) -> serde_json::Value {
+    /// `GET path` through a default-policy inspector on `ctx`.
+    pub async fn get(
+        ctx: &BlocksContext,
+        path: &str,
+        meta: &[(&str, &str)],
+    ) -> Result<Vec<u8>, ErrorCode> {
         let mut msg = Message::new("retrieve");
-        msg.set_meta(wafer_block::meta::META_REQ_RESOURCE, "/_inspector/webmcp");
-        msg.set_meta("auth.user_id", "u1");
-        msg.set_meta("auth.user_roles", "admin");
+        msg.set_meta(wafer_block::meta::META_REQ_RESOURCE, path);
+        for (k, v) in meta {
+            msg.set_meta(*k, *v);
+        }
         let out = InspectorBlock::new()
-            .handle(
-                &BlocksContext {
-                    blocks: blocks.into_iter().map(std::sync::Arc::new).collect(),
-                },
-                msg,
-                InputStream::empty(),
-            )
+            .handle(ctx, msg, InputStream::empty())
             .await;
         match out.collect_buffered().await {
-            Ok(response) => serde_json::from_slice(&response.body).expect("valid JSON body"),
-            Err(TerminalNotResponse::Error(e)) => panic!("unexpected error: {e:?}"),
+            Ok(response) => Ok(response.body),
+            Err(TerminalNotResponse::Error(e)) => Err(e.code),
             Err(other) => panic!("unexpected terminal: {other:?}"),
         }
     }
 
-    fn refusals_at(body: &serde_json::Value, level: &str) -> Vec<serde_json::Value> {
-        body["levels"]
-            .as_array()
-            .expect("levels")
-            .iter()
-            .find(|l| l["level"] == level)
-            .unwrap_or_else(|| panic!("level {level}"))["refusals"]
-            .as_array()
-            .expect("refusals")
-            .clone()
+    /// Metadata of a signed-in caller holding the `admin` role.
+    pub fn admin() -> [(&'static str, &'static str); 2] {
+        [("auth.user_id", "u1"), ("auth.user_roles", "admin")]
     }
+}
 
-    fn names_at(body: &serde_json::Value, level: &str) -> Vec<String> {
-        body["levels"]
-            .as_array()
-            .expect("levels")
-            .iter()
-            .find(|l| l["level"] == level)
-            .unwrap_or_else(|| panic!("level {level}"))["manifest"]["tools"]
-            .as_array()
-            .expect("tools")
-            .iter()
-            .map(|t| t["name"].as_str().expect("name").to_string())
-            .collect()
-    }
+#[cfg(test)]
+mod auth_tests {
+    //! SEC-01: the inspector authorizes solely from message metadata
+    //! (`auth.user_id` / `auth.user_roles`). Since a WASM guest cannot forge
+    //! those keys across the trust boundary (host-owned protected namespace,
+    //! enforced in `wasmi_loader`), these tests pin the authorization decision
+    //! itself and the config that sets it.
 
-    #[tokio::test]
-    async fn webmcp_view_answers_without_the_flow_introspection_capability() {
-        // Every other data route binds `ctx.flow_introspection()` first and
-        // fails with FailedPrecondition when it is absent. The WebMCP view is
-        // a pure projection of BlockInfo, so it must answer regardless.
-        let body = webmcp_body(fixture()).await;
-        assert_eq!(body["auth_basis"], "declared");
-        assert_eq!(body["feature_gating"], "ignored");
-        assert_eq!(body["opted_in_endpoints"], 5);
+    use wafer_block::{BlockConfig, ErrorCode, LifecycleEvent, LifecycleType};
+
+    use super::{
+        test_support::{get, BlocksContext},
+        AccessPolicy, Settings,
+    };
+
+    async fn code(meta: &[(&str, &str)]) -> ErrorCode {
+        // `/app` on a context without FlowIntrospection: a caller that passes
+        // the gate gets FailedPrecondition, which is how these tests tell
+        // "authorized" from "denied".
+        get(&BlocksContext::default(), "/_inspector/app", meta)
+            .await
+            .expect_err("the mock context never produces a response")
     }
 
     #[tokio::test]
-    async fn webmcp_view_shows_a_wider_tool_surface_at_each_level() {
-        // The point the page has to make at a glance: the same site presents
-        // a different tool surface depending on who is asking.
-        let body = webmcp_body(fixture()).await;
-        assert_eq!(names_at(&body, "public"), vec!["list_products".to_string()]);
-        assert_eq!(
-            names_at(&body, "authenticated"),
-            vec!["list_products".to_string(), "list_my_orders".to_string()]
-        );
-        assert_eq!(
-            names_at(&body, "admin"),
-            vec![
-                "list_products".to_string(),
-                "list_my_orders".to_string(),
-                "list_users".to_string()
-            ]
-        );
-
-        // And a name a caller cannot use never reaches that caller's column —
-        // the same posture the producer's auth filter enforces.
-        let public_level = body["levels"][0].to_string();
-        assert!(
-            !public_level.contains("list_users") && !public_level.contains("/b/shop/admin/users"),
-            "the admin tool leaked into the public column: {public_level}"
-        );
+    async fn default_policy_denies_unauthenticated() {
+        assert_eq!(code(&[]).await, ErrorCode::Unauthenticated);
     }
 
     #[tokio::test]
-    async fn webmcp_view_does_not_name_an_admin_endpoint_in_a_lower_column() {
-        // A structural refusal is computed *before* the auth filter, so
-        // without a per-level filter the admin-only endpoint's block, method,
-        // path and tool name land in the public column — the same cross-tier
-        // disclosure the auth filter exists to close, on a page that claims
-        // to show the manifest as each caller receives it.
-        let body = webmcp_body(fixture()).await;
-
-        for (index, level) in ["public", "authenticated"].iter().enumerate() {
-            let rendered = body["levels"][index].to_string();
-            assert_eq!(body["levels"][index]["level"], *level);
-            for leaked in [
-                "get_admin_broken",
-                "/b/shop/admin/broken/{secret_id}",
-                "secret_id",
-            ] {
-                assert!(
-                    !rendered.contains(leaked),
-                    "the admin-only refusal leaked into the {level} column via \
-                     `{leaked}`: {rendered}"
-                );
-            }
-        }
-
-        // It is still reported where it belongs — the filter must not have
-        // simply dropped the diagnostic.
-        let admin_refusals = refusals_at(&body, "admin");
-        assert!(
-            admin_refusals
-                .iter()
-                .any(|r| r["tool_name"] == "get_admin_broken"),
-            "the admin column must still carry it: {admin_refusals:?}"
-        );
+    async fn default_policy_denies_wrong_role() {
+        let meta = [
+            ("auth.user_id", "u1"),
+            ("auth.user_roles", "viewer,developer"),
+        ];
+        assert_eq!(code(&meta).await, ErrorCode::PermissionDenied);
     }
 
     #[tokio::test]
-    async fn webmcp_view_names_an_opted_in_endpoint_that_produced_no_tool() {
-        let body = webmcp_body(fixture()).await;
-        for level in ["public", "authenticated", "admin"] {
-            let refusals = refusals_at(&body, level);
-            let broken = refusals
-                .iter()
-                .find(|r| r["tool_name"] == "get_broken")
-                .unwrap_or_else(|| panic!("{level}: {refusals:?}"));
-            assert_eq!(broken["path"], "/b/shop/broken/{id}");
-            assert_eq!(broken["scope"], "tool");
-            assert!(
-                broken["reason"]
-                    .as_str()
-                    .expect("reason")
-                    .contains("path template placeholders"),
-                "the producer's own reason must reach the page: {refusals:?}"
-            );
-        }
+    async fn default_policy_admits_admin_role() {
+        let meta = [
+            ("auth.user_id", "u1"),
+            ("auth.user_roles", " viewer , admin "),
+        ];
+        assert_eq!(code(&meta).await, ErrorCode::FailedPrecondition);
     }
 
     #[tokio::test]
-    async fn webmcp_view_counts_opted_in_endpoints_per_level() {
-        // "N of M" must compare like with like. Against a deployment-wide M
-        // every column below the top reads as though its own endpoints had
-        // failed, when in fact they belong to a tier it cannot see.
-        let body = webmcp_body(fixture()).await;
-        let opted_in = |level: &str| {
-            body["levels"]
-                .as_array()
-                .expect("levels")
-                .iter()
-                .find(|l| l["level"] == level)
-                .expect("level")["opted_in"]
-                .as_u64()
-                .expect("opted_in")
+    async fn role_parsing_ignores_empty_and_whitespace_entries() {
+        let meta = [("auth.user_id", "u1"), ("auth.user_roles", " , ,  ")];
+        assert_eq!(code(&meta).await, ErrorCode::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn the_gate_runs_before_routing() {
+        // The UI itself is not served to an outsider either.
+        let denied = get(&BlocksContext::default(), "/_inspector", &[]).await;
+        assert_eq!(denied, Err(ErrorCode::Unauthenticated));
+    }
+
+    #[tokio::test]
+    async fn flow_step_config_overrides_the_policy_per_request() {
+        let ops = BlocksContext {
+            step_config: vec![("allowed_roles", "ops")],
+            ..Default::default()
         };
-        // public: list_products + get_broken.
-        assert_eq!(opted_in("public"), 2);
-        // authenticated: + list_my_orders.
-        assert_eq!(opted_in("authenticated"), 3);
-        // admin: + list_users + get_admin_broken.
-        assert_eq!(opted_in("admin"), 5);
+        let ops_caller = [("auth.user_id", "u1"), ("auth.user_roles", "ops")];
+        assert_eq!(
+            get(&ops, "/_inspector/app", &ops_caller).await,
+            Err(ErrorCode::FailedPrecondition),
+            "the step's role list admits an ops caller"
+        );
+        assert_eq!(
+            get(&ops, "/_inspector/app", &super::test_support::admin()).await,
+            Err(ErrorCode::PermissionDenied),
+            "and replaces the default, so admin alone no longer passes"
+        );
+
+        let open = BlocksContext {
+            step_config: vec![("allow_anonymous", "true")],
+            ..Default::default()
+        };
+        assert_eq!(
+            get(&open, "/_inspector/app", &[]).await,
+            Err(ErrorCode::FailedPrecondition)
+        );
+
+        let malformed = BlocksContext {
+            step_config: vec![("allow_anonymous", "yes")],
+            ..Default::default()
+        };
+        assert_eq!(
+            get(&malformed, "/_inspector/app", &[]).await,
+            Err(ErrorCode::InvalidArgument),
+            "a malformed step value is refused, not read as false"
+        );
+    }
+
+    fn policy(config: &serde_json::Value) -> Result<AccessPolicy, ErrorCode> {
+        let event = LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: serde_json::to_vec(config).expect("config JSON"),
+        };
+        Settings::from_config(&BlockConfig::from_event(&event))
+            .and_then(|settings| settings.policy())
+            .map_err(|e| e.code)
     }
 
     #[test]
-    fn webmcp_route_is_not_shadowed_by_a_block_or_flow_of_the_same_name() {
-        // `ends_with("/webmcp")` is equally true of `{mount}/webmcp` and of
-        // `{mount}/blocks/webmcp`, so ordering the checks decided which one
-        // answered. The parent segment settles it instead.
-        assert_eq!(super::route_of("/_inspector/webmcp"), super::Route::WebMcp);
+    fn config_resolves_to_the_declared_policy() {
+        let admin = AccessPolicy::Roles(vec!["admin".into()]);
+        assert_eq!(policy(&serde_json::json!({})), Ok(admin));
         assert_eq!(
-            super::route_of("/_inspector/blocks/webmcp"),
-            super::Route::Block("webmcp")
+            policy(&serde_json::json!({ "allow_anonymous": true })),
+            Ok(AccessPolicy::Anonymous)
+        );
+        // Flow-step config arrives stringified.
+        assert_eq!(
+            policy(&serde_json::json!({ "allow_anonymous": "true" })),
+            Ok(AccessPolicy::Anonymous)
         );
         assert_eq!(
-            super::route_of("/_inspector/flows/webmcp"),
-            super::Route::Flow("webmcp")
-        );
-        // And the rest of the table still resolves, under any mount.
-        assert_eq!(super::route_of("/a/b/c/_inspector/ui"), super::Route::Ui);
-        assert_eq!(super::route_of("/_inspector/blocks"), super::Route::Blocks);
-        assert_eq!(super::route_of("/_inspector/blocks/"), super::Route::Blocks);
-        assert_eq!(
-            super::route_of("/_inspector/blocks/org%2Fname"),
-            super::Route::Block("org%2Fname")
-        );
-        assert_eq!(super::route_of("/_inspector"), super::Route::Summary);
-        assert_eq!(super::route_of("/"), super::Route::Summary);
-    }
-
-    #[tokio::test]
-    async fn webmcp_view_shows_a_duplicate_only_in_the_column_it_collides_in() {
-        // Tool-name uniqueness is a property of a manifest, so a name claimed
-        // by both a public and an admin endpoint is published to the public
-        // caller and refused to the admin. The per-level refusal lists are
-        // what make that visible; one folded list would hide it.
-        let blocks = vec![
-            BlockInfo::new("test/shop", "1.0.0", "http-handler@v1", "Shop").endpoints(vec![
-                BlockEndpoint::get("/b/shop/thing")
-                    .auth(AuthLevel::Public)
-                    .agent_tool("get_thing", "Public thing."),
-                BlockEndpoint::get("/b/shop/admin/thing")
-                    .auth(AuthLevel::Admin)
-                    .agent_tool("get_thing", "Admin thing."),
-            ]),
-        ];
-
-        let body = webmcp_body(blocks).await;
-        assert_eq!(names_at(&body, "public"), vec!["get_thing".to_string()]);
-        assert_eq!(names_at(&body, "admin"), Vec::<String>::new());
-        assert!(
-            body["levels"][0]["refusals"]
-                .as_array()
-                .expect("refusals")
-                .is_empty(),
-            "nothing collides in the public column: {body}"
-        );
-        assert_eq!(
-            body["levels"][2]["refusals"]
-                .as_array()
-                .expect("refusals")
-                .len(),
-            2,
-            "both claimants must be named where the collision happens: {body}"
+            policy(&serde_json::json!({ "allow_anonymous": false, "allowed_roles": "ops, dev" })),
+            Ok(AccessPolicy::Roles(vec!["ops".into(), "dev".into()]))
         );
     }
 
-    #[tokio::test]
-    async fn webmcp_view_is_behind_the_same_access_policy_as_the_rest() {
-        // The columns name every admin-only tool, so the page must not be
-        // reachable by a caller the default policy denies.
-        let mut msg = Message::new("retrieve");
-        msg.set_meta(wafer_block::meta::META_REQ_RESOURCE, "/_inspector/webmcp");
-        let out = InspectorBlock::new()
-            .handle(
-                &BlocksContext {
-                    blocks: fixture().into_iter().map(std::sync::Arc::new).collect(),
-                },
-                msg,
-                InputStream::empty(),
-            )
-            .await;
-        match out.collect_buffered().await {
-            Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::Unauthenticated),
-            other => panic!("the webmcp view must not answer an unauthenticated caller: {other:?}"),
+    #[test]
+    fn malformed_config_fails_init_instead_of_falling_back() {
+        for bad in [
+            serde_json::json!({ "allow_anonymous": "yes" }),
+            serde_json::json!({ "allowed_roles": ["admin"] }),
+            serde_json::json!({ "allowed_roles": " , " }),
+        ] {
+            assert_eq!(policy(&bad), Err(ErrorCode::InvalidArgument), "{bad}");
         }
+    }
+
+    #[test]
+    fn routes_resolve_from_the_last_segment_under_any_mount() {
+        use super::{route_of, Route};
+        assert_eq!(route_of("/_inspector/ui"), Route::Ui);
+        assert_eq!(route_of("/b/inspector/app/"), Route::App);
+        assert_eq!(route_of("/a/b/c/webmcp"), Route::WebMcp);
+        // The mount root and anything else open the UI.
+        assert_eq!(route_of("/_inspector"), Route::Ui);
+        assert_eq!(route_of("/_inspector/blocks"), Route::Ui);
+        assert_eq!(route_of("/"), Route::Ui);
     }
 }
 
 #[cfg(test)]
 mod redaction_tests {
-    //! `/app` and `/flows/{id}` serve block configs and flow definitions as
-    //! the runtime holds them; a secret an operator put in either must not
-    //! reach the page. Driven through a real `Wafer`, so the configs and the
-    //! flow definitions are the runtime's own snapshot, not a mock's.
+    //! `/app` serves block configs and flow definitions as the runtime holds
+    //! them; a secret an operator put in either must not reach the page.
+    //! Driven through a real `Wafer`, so the configs and the flow definitions
+    //! are the runtime's own snapshot, not a mock's.
 
     use std::sync::Arc;
 
@@ -1057,21 +724,8 @@ mod redaction_tests {
         ]
     }"#;
 
-    async fn get(wafer: &wafer_run::Wafer, path: &str) -> String {
-        let mut msg = Message::new(format!("GET:{path}"));
-        msg.set_meta(META_REQ_ACTION, "retrieve");
-        msg.set_meta(META_REQ_RESOURCE, path);
-        let resp = wafer
-            .run_block("wafer-run/inspector", msg, InputStream::empty())
-            .await
-            .collect_buffered()
-            .await
-            .expect("inspector answers");
-        String::from_utf8(resp.body).expect("utf-8 JSON")
-    }
-
     #[tokio::test]
-    async fn app_and_flow_views_redact_sensitive_config_values() {
+    async fn app_view_redacts_sensitive_config_values() {
         let mut wafer = wafer_run::Wafer::builder()
             .disable_inventory()
             .disable_lockfile()
@@ -1100,17 +754,26 @@ mod redaction_tests {
             }),
         );
         wafer.add_flow_json(FLOW).expect("flow");
+        wafer.add_alias("@vault", "test-org/vault").expect("alias");
         let wafer = wafer.start().await.expect("start");
 
-        let app = get(&wafer, "/_inspector/app").await;
-        let flow = get(&wafer, "/_inspector/flows/test-flow").await;
-        for body in [&app, &flow] {
-            for secret in [
-                "s3cr3t", "hunter2", "k3y", "fl0wk3y", "gh0tok", "pw0rd", "smtpp4ss", "dbuser",
-                "dbp4ss", "gh0user",
-            ] {
-                assert!(!body.contains(secret), "{secret} leaked: {body}");
-            }
+        let path = "/_inspector/app";
+        let mut msg = Message::new(format!("GET:{path}"));
+        msg.set_meta(META_REQ_ACTION, "retrieve");
+        msg.set_meta(META_REQ_RESOURCE, path);
+        let resp = wafer
+            .run_block("wafer-run/inspector", msg, InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+            .expect("inspector answers");
+        let app = String::from_utf8(resp.body).expect("utf-8 JSON");
+
+        for secret in [
+            "s3cr3t", "hunter2", "k3y", "fl0wk3y", "gh0tok", "pw0rd", "smtpp4ss", "dbuser",
+            "dbp4ss", "gh0user",
+        ] {
+            assert!(!app.contains(secret), "{secret} leaked: {app}");
         }
         assert!(
             app.contains("visible-value"),
@@ -1125,8 +788,14 @@ mod redaction_tests {
             "a URL keeps everything but its credentials: {app}"
         );
         assert!(
-            flow.contains("\"mode\":\"plain\""),
-            "non-secret step config stays: {flow}"
+            app.contains("\"mode\":\"plain\""),
+            "non-secret step config stays: {app}"
+        );
+        let app: serde_json::Value = serde_json::from_str(&app).expect("JSON");
+        assert_eq!(
+            app["aliases"],
+            serde_json::json!({ "@vault": "test-org/vault" }),
+            "the alias table is sent so the page can resolve aliased steps and routes"
         );
     }
 }
