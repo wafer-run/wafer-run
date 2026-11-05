@@ -2,7 +2,9 @@
 //! connection holds the write lock on a real SQLite file, a `database.create`
 //! request goes through the shared database handler to the real service, and
 //! the error it gets back carries the transient code a caller — and the
-//! runtime, for a block whose Init hit the fault — may retry on. The Init-time
+//! runtime, for a block whose Init hit the fault — may retry on, and the
+//! `database.contended` detail code: it is contention, not the database
+//! down. The Init-time
 //! schema migration (`handle_lifecycle`) answers the same way. Once the lock
 //! is released, both succeed.
 
@@ -126,7 +128,12 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         ErrorCode::Unavailable,
         "a busy database is transient: {err:?}"
     );
-    assert_eq!(err.message, "database temporarily unavailable");
+    assert_eq!(err.message, "database busy, retry");
+    assert_eq!(
+        err.detail_code(),
+        Some(wafer_block::wire::database::DATABASE_CONTENDED),
+        "a busy database is contention, not an outage: {err:?}"
+    );
 
     let init = LifecycleEvent {
         event_type: LifecycleType::Init,
@@ -139,7 +146,7 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         primary_key: Vec::new(),
         unique_keys: Vec::new(),
     }];
-    let err = handle_lifecycle(&svc, &tags, &init)
+    let err = handle_lifecycle(&svc, &AllowCtx, &tags, &init)
         .await
         .expect_err("the Init migration cannot take the lock");
     assert_eq!(
@@ -147,12 +154,17 @@ async fn a_write_against_a_locked_database_is_unavailable_until_the_lock_is_rele
         ErrorCode::Unavailable,
         "a busy database during Init is transient: {err:?}"
     );
+    assert_eq!(
+        err.detail_code(),
+        Some(wafer_block::wire::database::DATABASE_CONTENDED),
+        "contention, not an outage: {err:?}"
+    );
 
     other.execute_batch("ROLLBACK").expect("release the lock");
     create(&svc, "n1")
         .await
         .expect("the same write succeeds once the lock is released");
-    handle_lifecycle(&svc, &tags, &init)
+    handle_lifecycle(&svc, &AllowCtx, &tags, &init)
         .await
         .expect("the same Init migration succeeds once the lock is released");
 

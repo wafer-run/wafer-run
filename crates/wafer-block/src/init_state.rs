@@ -7,6 +7,70 @@
 
 use std::time::Duration;
 
+/// A transient `Init` failure: what failed, and its detail code. The one
+/// shape the runtime keeps one in — the slot's `InitError::Transient`, its
+/// retry backoff, and [`BlockInitState::Retrying`] — so the detail code is
+/// carried wherever the failure is, never dropped on the way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransientFailure {
+    /// What failed. It may quote a backend's error (a table's name, a host);
+    /// a public body reports the class, not this text.
+    pub message: String,
+    /// The failure's class, as a detail code
+    /// ([`crate::WaferError::detail_code`]): a typed account that, unlike
+    /// `message`, is safe to act on. Exactly one of:
+    ///
+    /// - What the attempt's own database calls saw, when they saw anything
+    ///   ([`crate::init_attempt`]). It takes precedence over whatever error
+    ///   the block returned, so a block that wrapped its database's error, or
+    ///   hung on a call until the init budget cut it off, still reads as the
+    ///   database's failure. One of
+    ///   [`DATABASE_UNAVAILABLE`](crate::wire::database::DATABASE_UNAVAILABLE)
+    ///   (the database could not answer, or a call was still waiting on it
+    ///   at the init budget),
+    ///   [`DATABASE_CONTENDED`](crate::wire::database::DATABASE_CONTENDED)
+    ///   (busy with other work), or
+    ///   [`CALL_BUDGET_EXHAUSTED`](crate::wire::database::CALL_BUDGET_EXHAUSTED)
+    ///   (the invocation's call budget spent).
+    /// - Otherwise, the detail code of the error the attempt failed with,
+    ///   when it had one: the config source's (a database-backed source
+    ///   passes its read's, e.g. `database.unavailable`), a refused
+    ///   dispatch's (`database.unavailable` only), or any code the block's
+    ///   own error carried (`auth.invalid_token`, …).
+    /// - `None`: none of those — every call the attempt made answered, and
+    ///   the block failed on its own with no code, or the init budget ran out
+    ///   with no call in flight and no failure of the block's own.
+    ///
+    /// The record's limits ([`crate::init_attempt`]'s "Limits") apply: it
+    /// reports what the attempt's calls saw, which may be a failure the block
+    /// handled rather than the one it failed on; it classes only a transient
+    /// failure; and it does not see an attempt this one only waited on.
+    pub detail_code: Option<String>,
+}
+
+impl TransientFailure {
+    /// A failure with `message` and no detail code.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            detail_code: None,
+        }
+    }
+
+    /// This failure with class `detail_code` (see [`Self::detail_code`]).
+    #[must_use]
+    pub fn classed(mut self, detail_code: Option<impl Into<String>>) -> Self {
+        self.detail_code = detail_code.map(Into::into);
+        self
+    }
+}
+
+impl std::fmt::Display for TransientFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Where one block's `lifecycle(Init)` stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockInitState {
@@ -20,9 +84,8 @@ pub enum BlockInitState {
     /// unreachable, a backend down, a spent per-invocation call budget). The
     /// failure is not cached: init can run again.
     Retrying {
-        /// The last transient failure's message. It may quote a backend's
-        /// error; a public health body reports the class, not this text.
-        reason: String,
+        /// The last transient failure, with its detail code.
+        failure: TransientFailure,
         /// What is left of the runtime's retry backoff for this block:
         /// zero once it has elapsed. Where dispatch initializes lazily
         /// (`InitWait::Await`) the first dispatch after it runs init again;

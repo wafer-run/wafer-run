@@ -223,6 +223,17 @@ pub trait Context: crate::compat::MaybeSend + crate::compat::MaybeSync {
         std::collections::BTreeMap::new()
     }
 
+    /// The record of the init attempt this context runs on behalf of — a
+    /// block's `lifecycle(Init)` context and every context derived from it —
+    /// for the database handler to note what the attempt's calls saw
+    /// ([`crate::init_attempt`]). `None` outside every Init, and in a
+    /// context that does not track attempts (the default).
+    fn init_attempt_record(
+        &self,
+    ) -> Option<std::sync::Arc<crate::init_attempt::InitAttemptRecord>> {
+        None
+    }
+
     /// Authorize the CALLER (host-trusted identity) to `access` `resource` of
     /// `resource_type`. Runs the full WRAP grant + capability check.
     ///

@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use wafer_block::{
     core_types::{LifecycleEvent, LifecycleType, Message, WaferError},
     streams::{input::InputStream, output::OutputStream},
+    wire::database::DATABASE_UNAVAILABLE,
     Block, BlockInfo, ConfigVar, ErrorCode,
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
@@ -42,7 +43,7 @@ use wafer_core::{
 };
 use wafer_run::{
     runtime::slot::TRANSIENT_RETRY_BASE, BlockInitState, ConfigError, ConfigSource, Context,
-    EnvBlockConfig, InitError, UnavailableBlock, UnavailableReason, Wafer,
+    EnvBlockConfig, InitError, TransientFailure, UnavailableBlock, UnavailableReason, Wafer,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,8 @@ enum Answer {
     Transient,
     SourceFault,
     Missing,
+    /// Never answers.
+    Hang,
 }
 
 /// A config source answering per block, counting its loads.
@@ -96,14 +99,18 @@ impl ConfigSource for ScriptedSource {
             .unwrap_or(Answer::Ok);
         match answer {
             Answer::Ok => Ok(EnvBlockConfig::default()),
+            // A database-backed source passes its error's detail code: this
+            // read met the database's outage.
             Answer::Transient => Err(ConfigError::Transient {
                 block: block.to_string(),
                 source: Box::new(SourceErr("D1_ERROR: daily row read limit exceeded")),
+                detail_code: Some(DATABASE_UNAVAILABLE.to_string()),
             }),
             Answer::SourceFault => Err(ConfigError::SourceFault {
                 block: block.to_string(),
                 source: Box::new(SourceErr("no such table: variables")),
             }),
+            Answer::Hang => std::future::pending().await,
             Answer::Missing => Err(ConfigError::MissingRequired {
                 block: block.to_string(),
                 key: declared
@@ -123,6 +130,17 @@ enum InitBehaviour {
     /// Write `rows` rows to its own collection through the REAL
     /// `wafer-run/database` block, and fail with the error that answers.
     WriteRows(usize),
+    /// The same, but a failed write is wrapped in an `Unavailable` of the
+    /// block's own, which carries no detail code.
+    WriteRowsWrapped(usize),
+    /// Write `rows` rows, then fail with this error of the block's own.
+    WriteRowsThenFail(usize, WaferError),
+    /// Try to write `rows` rows, carry on whatever the database answers, and
+    /// fail with this error of the block's own.
+    TryWriteRowsThenFail(usize, WaferError),
+    /// Dispatch to [`Writer`] (`test/writer`), which writes a row, and wrap a
+    /// failure in an `Unavailable` of the block's own.
+    CallWriter,
     /// Wait until `release` is set, then succeed.
     Gated {
         entered: Arc<tokio::sync::Notify>,
@@ -136,6 +154,8 @@ struct Probe {
     name: &'static str,
     inits: Arc<AtomicUsize>,
     behaviour: InitBehaviour,
+    /// The probe's declared init budget.
+    init_timeout: Option<Duration>,
 }
 
 impl Probe {
@@ -146,6 +166,7 @@ impl Probe {
                 name,
                 inits: inits.clone(),
                 behaviour,
+                init_timeout: None,
             }),
             inits,
         )
@@ -170,16 +191,67 @@ fn declared_key(block: &str) -> String {
 /// `test/budget-init`'s own collection.
 const OWN_COLLECTION: &str = "test__budget_init__items";
 
+/// [`Writer`]'s name, and its own collection.
+const WRITER: &str = "test/writer";
+const WRITER_COLLECTION: &str = "test__writer__items";
+
+/// Write `rows` rows to `collection` through the REAL `wafer-run/database`
+/// block, propagating its error.
+async fn write_rows_to(ctx: &dyn Context, collection: &str, rows: usize) -> Result<(), WaferError> {
+    let rows = (0..rows)
+        .map(|i| HashMap::from([("name".to_string(), serde_json::json!(i))]))
+        .collect();
+    wafer_core::clients::database::create_many(ctx, collection, rows)
+        .await
+        .map(|_| ())
+}
+
+/// [`write_rows_to`] `test/budget-init`'s own collection.
+async fn write_rows(ctx: &dyn Context, rows: usize) -> Result<(), WaferError> {
+    write_rows_to(ctx, OWN_COLLECTION, rows).await
+}
+
+/// A block whose `handle` writes one row, answering the database's error
+/// when it fails. Another block's Init dispatches to it: its call is made in
+/// that Init's attempt.
+struct Writer;
+
+#[async_trait]
+impl Block for Writer {
+    fn info(&self) -> BlockInfo {
+        BlockInfo::new(WRITER, "0.1.0", "test/iface@v1", "writes a row")
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn Context,
+        _event: LifecycleEvent,
+    ) -> Result<(), WaferError> {
+        Ok(())
+    }
+
+    async fn handle(&self, ctx: &dyn Context, _msg: Message, _input: InputStream) -> OutputStream {
+        match write_rows_to(ctx, WRITER_COLLECTION, 1).await {
+            Ok(()) => OutputStream::respond(Vec::new()),
+            Err(e) => OutputStream::error(e),
+        }
+    }
+}
+
 #[async_trait]
 impl Block for Probe {
     fn info(&self) -> BlockInfo {
-        BlockInfo::new(
+        let info = BlockInfo::new(
             self.name,
             "0.1.0",
             "test/iface@v1",
             "init classification probe",
         )
-        .config_keys(vec![ConfigVar::new(&declared_key(self.name), "", "")])
+        .config_keys(vec![ConfigVar::new(&declared_key(self.name), "", "")]);
+        match self.init_timeout {
+            Some(budget) => info.init_timeout(budget),
+            None => info,
+        }
     }
 
     async fn lifecycle(&self, ctx: &dyn Context, event: LifecycleEvent) -> Result<(), WaferError> {
@@ -190,13 +262,29 @@ impl Block for Probe {
         match &self.behaviour {
             InitBehaviour::Ok => Ok(()),
             InitBehaviour::Fail(e) => Err(e.clone()),
-            InitBehaviour::WriteRows(rows) => {
-                let rows = (0..*rows)
-                    .map(|i| HashMap::from([("name".to_string(), serde_json::json!(i))]))
-                    .collect();
-                wafer_core::clients::database::create_many(ctx, OWN_COLLECTION, rows)
-                    .await
-                    .map(|_| ())
+            InitBehaviour::WriteRows(rows) => write_rows(ctx, *rows).await,
+            InitBehaviour::WriteRowsWrapped(rows) => write_rows(ctx, *rows)
+                .await
+                .map_err(|_| WaferError::new(ErrorCode::Unavailable, "my store is not ready")),
+            InitBehaviour::WriteRowsThenFail(rows, e) => {
+                write_rows(ctx, *rows).await?;
+                Err(e.clone())
+            }
+            InitBehaviour::TryWriteRowsThenFail(rows, e) => {
+                let _ = write_rows(ctx, *rows).await;
+                Err(e.clone())
+            }
+            InitBehaviour::CallWriter => {
+                let out = ctx
+                    .call_block(WRITER, Message::new("write"), InputStream::empty())
+                    .await;
+                match out.collect_buffered().await {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(WaferError::new(
+                        ErrorCode::Unavailable,
+                        "the writer I depend on failed",
+                    )),
+                }
             }
             InitBehaviour::Gated { entered, release } => {
                 entered.notify_one();
@@ -233,6 +321,14 @@ fn bare_wafer(source: Arc<dyn ConfigSource>) -> Wafer {
 struct Budgeted {
     inner: SQLiteDatabaseService,
     spent: AtomicBool,
+    /// The database is down: every write is refused as the backend's
+    /// outage, `DatabaseError::Unavailable`.
+    down: AtomicBool,
+    /// The database is busy: every write is refused as
+    /// `DatabaseError::Contended`.
+    contended: AtomicBool,
+    /// The database never answers: every write waits forever.
+    hang: AtomicBool,
 }
 
 impl Budgeted {
@@ -240,7 +336,20 @@ impl Budgeted {
         &self.inner
     }
 
-    fn spend_call(&self, what: &str) -> Result<(), DatabaseError> {
+    async fn spend_call(&self, what: &str) -> Result<(), DatabaseError> {
+        if self.hang.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self.contended.load(Ordering::SeqCst) {
+            return Err(DatabaseError::Contended(format!(
+                "{what}: database is locked"
+            )));
+        }
+        if self.down.load(Ordering::SeqCst) {
+            return Err(DatabaseError::Unavailable(format!(
+                "{what}: connection to db-1.internal:5432 refused"
+            )));
+        }
         if self.spent.load(Ordering::SeqCst) {
             return Err(DatabaseError::CallBudgetExhausted(format!(
                 "{what}: this invocation has no database call left"
@@ -278,7 +387,7 @@ wafer_core::forward_database_service! {
             insert_guarded: forward,
             update_guarded: forward,
             ensure_schema_table: forward,
-            ensure_schema_tables: forward,
+            ensure_schema_tables: custom,
             schema_table_exists: forward,
             schema_columns: forward,
             schema_drop_table: forward,
@@ -293,13 +402,18 @@ wafer_core::forward_database_service! {
             collection: &str,
             rows: Vec<HashMap<String, serde_json::Value>>,
         ) -> Result<i64, DatabaseError> {
-            self.spend_call("create_many")?;
+            self.spend_call("create_many").await?;
             self.inner.create_many(collection, rows).await
         }
 
         async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
-            self.spend_call("batch")?;
+            self.spend_call("batch").await?;
             self.inner.batch(ops).await
+        }
+
+        async fn ensure_schema_tables(&self, tables: &[Table]) -> Result<(), DatabaseError> {
+            self.spend_call("ensure_schema_tables").await?;
+            self.inner.ensure_schema_tables(tables).await
         }
     }
 }
@@ -308,6 +422,25 @@ wafer_core::forward_database_service! {
 /// SQLite service, which holds `test/budget-init`'s collection, and
 /// `test/budget-init`, whose Init writes `rows` rows through it.
 async fn budget_wafer(rows: usize) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
+    db_wafer(InitBehaviour::WriteRows(rows), None).await
+}
+
+/// [`budget_wafer`] with `test/budget-init`'s Init doing `behaviour` within
+/// `init_timeout`, and [`Writer`] registered beside it.
+async fn db_wafer(
+    behaviour: InitBehaviour,
+    init_timeout: Option<Duration>,
+) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
+    db_wafer_migrating(behaviour, init_timeout, vec![]).await
+}
+
+/// [`db_wafer`] with the database block's own Init migrating `tables`: it
+/// runs lazily, on the first call made to the database block.
+async fn db_wafer_migrating(
+    behaviour: InitBehaviour,
+    init_timeout: Option<Duration>,
+    tables: Vec<Table>,
+) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
     let mut wafer = bare_wafer(Arc::new(ScriptedSource::default()));
     let inner = SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite");
     inner
@@ -325,15 +458,42 @@ async fn budget_wafer(rows: usize) -> (Wafer, Arc<AtomicUsize>, Arc<Budgeted>) {
         })
         .await
         .expect("create the probe's collection");
+    inner
+        .ensure_schema_table(&Table {
+            name: WRITER_COLLECTION.to_string(),
+            columns: vec![
+                pk("id"),
+                Column::new("name", DataType::Int).null(),
+                Column::new("created_at", DataType::Text).null(),
+                Column::new("updated_at", DataType::Text).null(),
+            ],
+            indexes: Vec::new(),
+            primary_key: Vec::new(),
+            unique_keys: Vec::new(),
+        })
+        .await
+        .expect("create the writer's collection");
     let svc = Arc::new(Budgeted {
         inner,
         spent: AtomicBool::new(false),
+        down: AtomicBool::new(false),
+        contended: AtomicBool::new(false),
+        hang: AtomicBool::new(false),
     });
-    register_with_tables(&mut wafer, svc.clone(), vec![]).expect("register wafer-run/database");
-    let (probe, inits) = Probe::new("test/budget-init", InitBehaviour::WriteRows(rows));
+    register_with_tables(&mut wafer, svc.clone(), tables).expect("register wafer-run/database");
+    let inits = Arc::new(AtomicUsize::new(0));
+    let probe = Arc::new(Probe {
+        name: "test/budget-init",
+        inits: inits.clone(),
+        behaviour,
+        init_timeout,
+    });
     wafer
         .register_block("test/budget-init", probe)
         .expect("register probe");
+    wafer
+        .register_block(WRITER, Arc::new(Writer))
+        .expect("register the writer");
     wafer.seal().await.expect("seal");
     (wafer, inits, svc)
 }
@@ -406,12 +566,20 @@ async fn a_transient_config_error_is_not_cached() {
 
     let err = wafer.init_block("test/flaky").await.expect_err("transient");
     assert!(
-        matches!(err, InitError::Transient(ref m) if m.contains("config fetch failed")),
-        "{err:?}"
+        matches!(&err, InitError::Transient(failure)
+            if failure.message.contains("config fetch failed")
+                && failure.detail_code.as_deref() == Some(DATABASE_UNAVAILABLE)),
+        "the source's detail code is carried: {err:?}"
     );
     match wafer.init_states().get("test/flaky") {
-        Some(BlockInitState::Retrying { reason, retry_in }) => {
+        Some(BlockInitState::Retrying { failure, retry_in }) => {
+            let reason = &failure.message;
             assert!(reason.contains("daily row read limit"), "{reason}");
+            assert_eq!(
+                failure.detail_code.as_deref(),
+                Some(DATABASE_UNAVAILABLE),
+                "the slot keeps it"
+            );
             // At most the first backoff; it may already have elapsed on a
             // slow runner (then zero), so no lower bound is asserted.
             assert!(*retry_in <= TRANSIENT_RETRY_BASE, "{retry_in:?}");
@@ -462,7 +630,7 @@ async fn an_init_that_meets_a_spent_call_budget_fails_transiently_and_reruns() {
         .await
         .expect_err("the call budget refuses the write");
     match err {
-        InitError::Transient(msg) => {
+        InitError::Transient(TransientFailure { message: msg, .. }) => {
             assert!(
                 msg.contains("lifecycle init failed") && msg.contains("ResourceExhausted"),
                 "the database's own refusal: {msg}"
@@ -496,6 +664,57 @@ async fn an_init_that_meets_a_spent_call_budget_fails_transiently_and_reruns() {
     assert_eq!(
         svc.inner.count(OWN_COLLECTION, &[]).await.expect("count"),
         3
+    );
+}
+
+/// The same through a database outage: the real `wafer-run/database` block
+/// answers the backend's `DatabaseError::Unavailable` as `Unavailable` with
+/// the `database.unavailable` detail code; the client hands it to the
+/// block's `lifecycle(Init)`, which propagates it with `?`; the Init fails
+/// transiently, and the block's slot keeps the detail code — in the error and
+/// in its `Retrying` state — through the backoff. Back up, the re-run writes
+/// its rows.
+#[tokio::test]
+async fn an_init_that_meets_a_database_outage_keeps_its_detail_code_and_reruns() {
+    let (wafer, inits, svc) = budget_wafer(3).await;
+    svc.down.store(true, Ordering::SeqCst);
+    let err = wafer
+        .init_block("test/budget-init")
+        .await
+        .expect_err("the database is down");
+    match &err {
+        InitError::Transient(failure) => {
+            assert_eq!(
+                failure.detail_code.as_deref(),
+                Some(DATABASE_UNAVAILABLE),
+                "{failure:?}"
+            );
+            assert!(
+                !failure.message.contains("db-1.internal"),
+                "the driver's text is scrubbed: {failure:?}"
+            );
+        }
+        other => panic!("expected Transient, got {other:?}"),
+    }
+    match wafer.init_states().get("test/budget-init") {
+        Some(BlockInitState::Retrying { failure, .. }) => assert_eq!(
+            failure.detail_code.as_deref(),
+            Some(DATABASE_UNAVAILABLE),
+            "{failure:?}"
+        ),
+        other => panic!("expected Retrying, got {other:?}"),
+    }
+
+    svc.down.store(false, Ordering::SeqCst);
+    tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
+    wafer
+        .init_block("test/budget-init")
+        .await
+        .expect("the re-run writes its rows");
+    assert_eq!(inits.load(Ordering::SeqCst), 2, "Init ran again");
+    assert_eq!(
+        wafer.init_states().get("test/budget-init"),
+        Some(&BlockInitState::Ready)
     );
 }
 
@@ -573,13 +792,16 @@ async fn validation_reports_source_failures_as_typed_unavailable_entries() {
     assert_eq!(
         report.unavailable,
         vec![
+            // The source's detail code is carried into the report.
             UnavailableBlock {
                 block: "test/c-transient".to_string(),
                 reason: UnavailableReason::Transient,
+                detail_code: Some(DATABASE_UNAVAILABLE.to_string()),
             },
             UnavailableBlock {
                 block: "test/d-fault".to_string(),
                 reason: UnavailableReason::SourceFault,
+                detail_code: None,
             },
         ]
     );
@@ -694,7 +916,7 @@ async fn init_states_report_every_block_without_running_or_waiting_for_init() {
     );
     assert!(matches!(
         states.get("test/retrying"),
-        Some(BlockInitState::Retrying { reason, .. }) if reason.contains("config fetch failed")
+        Some(BlockInitState::Retrying { failure, .. }) if failure.message.contains("config fetch failed")
     ));
     assert!(matches!(
         states.get("test/failed"),
@@ -762,5 +984,173 @@ async fn init_states_report_every_block_without_running_or_waiting_for_init() {
         ("test/reporter", 1),
     ] {
         assert_eq!(counters[name].load(Ordering::SeqCst), expected, "{name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attempt-level attribution: what the attempt's own database calls saw
+// ---------------------------------------------------------------------------
+
+/// `test/budget-init`'s failure class after one transient Init attempt: the
+/// detail code of the error `init_block` answered, which must be the one its
+/// `Retrying` state keeps.
+async fn attempt_class(wafer: &Wafer) -> Option<String> {
+    let failure = match wafer.init_block("test/budget-init").await {
+        Err(InitError::Transient(failure)) => failure,
+        other => panic!("expected a transient failure, got {other:?}"),
+    };
+    match wafer.init_states().get("test/budget-init") {
+        Some(BlockInitState::Retrying { failure: kept, .. }) => {
+            assert_eq!(kept.detail_code, failure.detail_code, "the slot keeps it");
+        }
+        other => panic!("expected Retrying, got {other:?}"),
+    }
+    failure.detail_code
+}
+
+/// A block that wraps its database's error in one of its own (no detail
+/// code) during an outage still reads as the database's failure: the
+/// attempt's call was answered `Unavailable` where the handler answered it.
+#[tokio::test]
+async fn a_wrapped_error_during_an_outage_reads_as_the_database_down() {
+    let (wafer, _, svc) = db_wafer(InitBehaviour::WriteRowsWrapped(1), None).await;
+    svc.down.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+}
+
+/// A block's Init that dispatches to another block, whose call meets the
+/// outage, reads as the database down: the other block's call is made in the
+/// Init's attempt, whatever the Init then reports.
+#[tokio::test]
+async fn a_nested_blocks_outage_is_attributed_to_the_outer_attempt() {
+    let (wafer, _, svc) = db_wafer(InitBehaviour::CallWriter, None).await;
+    svc.down.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+}
+
+/// A call that never answers, cut off by the init budget, is the database
+/// not answering: the budget overrun reads `database.unavailable`, not a
+/// classless timeout.
+#[tokio::test]
+async fn a_hung_call_cut_off_by_the_init_budget_reads_as_the_database_down() {
+    let (wafer, _, svc) = db_wafer(
+        InitBehaviour::WriteRows(1),
+        Some(Duration::from_millis(100)),
+    )
+    .await;
+    svc.hang.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+}
+
+/// A busy database is contention, not an outage, even when the block wraps
+/// the error.
+#[tokio::test]
+async fn contention_reads_as_contention() {
+    use wafer_block::wire::database::DATABASE_CONTENDED;
+
+    let (wafer, _, svc) = db_wafer(InitBehaviour::WriteRowsWrapped(1), None).await;
+    svc.contended.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_CONTENDED)
+    );
+}
+
+/// An attempt whose every call answered, and whose block then failed on its
+/// own, has no database class: the block's own failure stands.
+#[tokio::test]
+async fn a_block_failing_on_its_own_after_every_call_answered_has_no_class() {
+    let own = WaferError::new(ErrorCode::Unavailable, "the mail relay is down");
+    let (wafer, _, _) = db_wafer(InitBehaviour::WriteRowsThenFail(1, own), None).await;
+    assert_eq!(attempt_class(&wafer).await, None);
+}
+
+/// One attempt's record is its own: an attempt that met the outage reads as
+/// the database down, and the next one — the database back, the block
+/// failing on its own — does not inherit it.
+#[tokio::test]
+async fn an_attempt_does_not_read_another_attempts_calls() {
+    let own = WaferError::new(ErrorCode::Unavailable, "the mail relay is down");
+    let (wafer, _, svc) = db_wafer(InitBehaviour::WriteRowsThenFail(1, own), None).await;
+    svc.down.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+    svc.down.store(false, Ordering::SeqCst);
+    tokio::time::sleep(TRANSIENT_RETRY_BASE * 2).await;
+    assert_eq!(attempt_class(&wafer).await, None, "the next attempt's own");
+}
+
+/// The database block's own Init — its schema migration, started lazily by
+/// the first call another block's Init makes to it — meets the outage. Its
+/// call is noted in its attempt and in the attempt it runs inside, so the
+/// caller, which wraps the refusal it gets, reads as the database down.
+#[tokio::test]
+async fn the_database_blocks_own_init_during_an_outage_reaches_the_callers_attempt() {
+    let migrated = Table {
+        name: "test__budget_init__migrated".to_string(),
+        columns: vec![pk("id")],
+        indexes: Vec::new(),
+        primary_key: Vec::new(),
+        unique_keys: Vec::new(),
+    };
+    let (wafer, _, svc) =
+        db_wafer_migrating(InitBehaviour::WriteRowsWrapped(1), None, vec![migrated]).await;
+    svc.down.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+}
+
+/// The record never downgrades the block's own database class: an attempt
+/// whose call met contention, and whose block then failed reporting the
+/// database down, reads as the database down (the stronger class).
+#[tokio::test]
+async fn the_record_never_downgrades_the_blocks_own_database_class() {
+    let down = WaferError::new(ErrorCode::Unavailable, "database temporarily unavailable")
+        .with_detail_code(DATABASE_UNAVAILABLE);
+    let (wafer, _, svc) = db_wafer(InitBehaviour::TryWriteRowsThenFail(1, down), None).await;
+    svc.contended.store(true, Ordering::SeqCst);
+    assert_eq!(
+        attempt_class(&wafer).await.as_deref(),
+        Some(DATABASE_UNAVAILABLE)
+    );
+}
+
+/// A config load that never answers is a call of the attempt still in
+/// flight when the init budget runs out: the database not answering.
+#[tokio::test]
+async fn a_hung_config_load_cut_off_by_the_init_budget_reads_as_the_database_down() {
+    let source = Arc::new(ScriptedSource::default());
+    source.answer("test/hung-config", Answer::Hang);
+    let mut wafer = bare_wafer(source);
+    let probe = Arc::new(Probe {
+        name: "test/hung-config",
+        inits: Arc::new(AtomicUsize::new(0)),
+        behaviour: InitBehaviour::Ok,
+        init_timeout: Some(Duration::from_millis(100)),
+    });
+    wafer
+        .register_block("test/hung-config", probe)
+        .expect("register");
+    wafer.seal().await.expect("seal");
+    match wafer.init_block("test/hung-config").await {
+        Err(InitError::Transient(failure)) => assert_eq!(
+            failure.detail_code.as_deref(),
+            Some(DATABASE_UNAVAILABLE),
+            "{failure:?}"
+        ),
+        other => panic!("expected a transient failure, got {other:?}"),
     }
 }

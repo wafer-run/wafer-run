@@ -18,8 +18,8 @@ crate::service_block! {
     handle: |this, ctx, msg, body| {
         handler::handle_message(this.service.as_ref(), ctx, &msg, &body).await
     },
-    lifecycle: |this, _ctx, event| {
-        handler::handle_lifecycle(this.service.as_ref(), &this.tables, &event).await
+    lifecycle: |this, ctx, event| {
+        handler::handle_lifecycle(this.service.as_ref(), ctx, &this.tables, &event).await
     },
 }
 

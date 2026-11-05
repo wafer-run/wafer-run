@@ -569,6 +569,18 @@ impl Context for RuntimeContext {
         // `Wafer::init_states`.
         crate::runtime::slot::init_states(&self.slots)
     }
+
+    /// The record of the `lifecycle(Init)` run this context executes on
+    /// behalf of ([`Self::init_attempt`]): set on a block's Init context and
+    /// inherited by every `call_block` sub-context, so the database handler
+    /// notes the calls of every block the Init reaches.
+    fn init_attempt_record(
+        &self,
+    ) -> Option<std::sync::Arc<wafer_block::init_attempt::InitAttemptRecord>> {
+        self.init_attempt
+            .as_ref()
+            .map(|attempt| attempt.record().clone())
+    }
 }
 
 impl RuntimeContext {

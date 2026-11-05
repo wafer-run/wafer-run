@@ -25,6 +25,30 @@ use serde::{Deserialize, Serialize};
 /// request) may run it.
 pub const CALL_BUDGET_EXHAUSTED: &str = "database.call_budget_exhausted";
 
+/// Detail code ([`crate::WaferError::detail_code`]) of the `Unavailable`
+/// answering a database call the backend itself could not answer: the
+/// database is down or unreachable, restarting, was reset, or is over a quota
+/// that resets (a backend's `DatabaseError::Unavailable`). Nothing can be
+/// assumed written. A retry may succeed once the backend recovers.
+/// Contention is also `Unavailable`, but carries [`DATABASE_CONTENDED`]: the
+/// database is up.
+///
+/// It tells a database outage apart from any other `Unavailable`, which a
+/// block raises for a dependency of its own. The runtime attributes it to a
+/// block's `Init` attempt where the database handler answers the attempt's
+/// calls ([`crate::init_attempt`]), whatever error the block then returns, so
+/// an embedder can tell "the database failed this block's `Init`" from "the
+/// block failed on its own" in
+/// [`BlockInitState::Retrying`](crate::BlockInitState::Retrying).
+pub const DATABASE_UNAVAILABLE: &str = "database.unavailable";
+
+/// Detail code ([`crate::WaferError::detail_code`]) of the `Unavailable`
+/// answering a database call the database refused because of other work on
+/// it, with the database up (a backend's `DatabaseError::Contended`): a lock
+/// not taken, or a deadlock or serialization conflict broken. Retrying the
+/// same call may succeed once that work is done.
+pub const DATABASE_CONTENDED: &str = "database.contended";
+
 /// Meta key ([`crate::WaferError::meta`]) of the error answering a
 /// `database.ddl_transaction` that failed: the failing statement's zero-based
 /// position in [`DdlTransactionRequest::statements`], in decimal, when the

@@ -242,8 +242,9 @@ impl SQLiteDatabaseService {
 /// A failed statement as a [`DatabaseError`]: a primary- or unique-key
 /// violation is [`DatabaseError::AlreadyExists`]; a busy or locked database
 /// (`SQLITE_BUSY` once the busy timeout ran out, `SQLITE_LOCKED`) is
-/// [`DatabaseError::Unavailable`], since the same statement can succeed once
-/// the other connection lets go; anything else `Internal`.
+/// [`DatabaseError::Contended`], since the same statement can succeed once
+/// the other connection lets go and the database is not down; anything else
+/// `Internal`.
 fn statement_error(e: &rusqlite::Error) -> DatabaseError {
     let rusqlite::Error::SqliteFailure(err, _) = e else {
         return DatabaseError::Internal(e.to_string());
@@ -256,7 +257,7 @@ fn statement_error(e: &rusqlite::Error) -> DatabaseError {
         err.code,
         rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
     ) {
-        DatabaseError::Unavailable(e.to_string())
+        DatabaseError::Contended(e.to_string())
     } else {
         DatabaseError::Internal(e.to_string())
     }
@@ -266,7 +267,7 @@ fn statement_error(e: &rusqlite::Error) -> DatabaseError {
 /// `what` naming the step in the message.
 fn step_error(what: &str, e: &rusqlite::Error) -> DatabaseError {
     match statement_error(e) {
-        DatabaseError::Unavailable(msg) => DatabaseError::Unavailable(format!("{what}: {msg}")),
+        DatabaseError::Contended(msg) => DatabaseError::Contended(format!("{what}: {msg}")),
         DatabaseError::AlreadyExists(msg) | DatabaseError::Internal(msg) => {
             DatabaseError::Internal(format!("{what}: {msg}"))
         }
@@ -638,7 +639,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn busy_and_locked_are_unavailable_and_a_taken_key_already_exists() {
+    fn busy_and_locked_are_contended_and_a_taken_key_already_exists() {
         let failure = |code: std::ffi::c_int| {
             rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
         };
@@ -648,10 +649,7 @@ mod tests {
             rusqlite::ffi::SQLITE_LOCKED,
         ] {
             assert!(
-                matches!(
-                    statement_error(&failure(code)),
-                    DatabaseError::Unavailable(_)
-                ),
+                matches!(statement_error(&failure(code)), DatabaseError::Contended(_)),
                 "code {code} is transient"
             );
         }
@@ -667,7 +665,7 @@ mod tests {
         }
         assert!(matches!(
             step_error("begin transaction", &failure(rusqlite::ffi::SQLITE_BUSY)),
-            DatabaseError::Unavailable(msg) if msg.starts_with("begin transaction: ")
+            DatabaseError::Contended(msg) if msg.starts_with("begin transaction: ")
         ));
     }
 

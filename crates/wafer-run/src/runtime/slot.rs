@@ -45,7 +45,7 @@ use thiserror::Error;
 use wafer_block::{
     core_types::{ErrorCode, WaferError},
     wire::database::CALL_BUDGET_EXHAUSTED,
-    BlockInitState,
+    BlockInitState, TransientFailure,
 };
 
 use crate::platform::Instant;
@@ -71,7 +71,7 @@ pub enum InitError {
     /// (see [`InitError::from_lifecycle_error`]).
     /// NOT cached — a caller after the retry backoff runs init again.
     #[error("transient init failure: {0}")]
-    Transient(String),
+    Transient(TransientFailure),
 
     /// An init cycle was detected (block A's init calls block B whose init
     /// calls block A, in one dispatch or across concurrent ones). Not
@@ -85,11 +85,12 @@ pub enum InitError {
 
 impl InitError {
     /// Classify a `lifecycle(Init)` failure by
-    /// [`init_failure_is_transient`] over its code and detail code.
+    /// [`init_failure_is_transient`] over its code and detail code. A
+    /// transient one keeps its detail code.
     pub fn from_lifecycle_error(e: &WaferError) -> Self {
         let msg = format!("lifecycle init failed: {e}");
         if init_failure_is_transient(e.code, e.detail_code()) {
-            Self::Transient(msg)
+            Self::Transient(TransientFailure::new(msg).classed(e.detail_code()))
         } else {
             Self::Permanent(msg)
         }
@@ -172,7 +173,7 @@ struct TransientBackoff {
     /// No init attempt runs before this instant.
     retry_at: Instant,
     /// The last transient failure, returned to callers inside the window.
-    message: String,
+    failure: TransientFailure,
 }
 
 impl TransientBackoff {
@@ -191,11 +192,14 @@ impl TransientBackoff {
     fn pending(&self, now: Instant) -> Option<InitError> {
         (now < self.retry_at).then(|| {
             let wait = self.retry_at.saturating_duration_since(now);
-            InitError::Transient(format!(
-                "{} (retry backoff: {} ms left)",
-                self.message,
-                wait.as_millis()
-            ))
+            InitError::Transient(TransientFailure {
+                message: format!(
+                    "{} (retry backoff: {} ms left)",
+                    self.failure.message,
+                    wait.as_millis()
+                ),
+                detail_code: self.failure.detail_code.clone(),
+            })
         })
     }
 }
@@ -329,18 +333,18 @@ impl BlockSlot {
             match &state.backoff {
                 Some(b) if now < b.retry_at => {
                     return BlockInitState::Retrying {
-                        reason: b.message.clone(),
+                        failure: b.failure.clone(),
                         retry_in: b.retry_at.saturating_duration_since(now),
                     };
                 }
                 _ if state.in_flight => return BlockInitState::Initializing,
-                Some(b) => Some(b.message.clone()),
+                Some(b) => Some(b.failure.clone()),
                 None => None,
             }
         };
         match last_transient {
-            Some(reason) => BlockInitState::Retrying {
-                reason,
+            Some(failure) => BlockInitState::Retrying {
+                failure,
                 retry_in: Duration::ZERO,
             },
             None => BlockInitState::NotInitialized,
@@ -351,7 +355,7 @@ impl BlockSlot {
     ///
     /// - `Ok(_)` → cached; all future callers see the same `InitializedState`.
     /// - `Err(Permanent(_))` → cached; all future callers see the same error.
-    /// - `Err(Transient(_))` → not cached; callers inside the retry backoff
+    /// - `Err(Transient { .. })` → not cached; callers inside the retry backoff
     ///   get it back without init running, the first caller after it runs
     ///   init again.
     /// - `Err(Cycle { .. })` → not cached, no backoff; returned as-is.
@@ -399,14 +403,14 @@ impl BlockSlot {
                 state.backoff = None;
                 Err(InitError::Permanent(msg))
             }
-            Err(InitError::Transient(msg)) => {
+            Err(InitError::Transient(failure)) => {
                 let failures = state.backoff.as_ref().map_or(0, |b| b.failures) + 1;
                 state.backoff = Some(TransientBackoff {
                     failures,
                     retry_at: Instant::now() + TransientBackoff::delay(failures),
-                    message: msg.clone(),
+                    failure: failure.clone(),
                 });
-                Err(InitError::Transient(msg))
+                Err(InitError::Transient(failure))
             }
             Err(other @ InitError::Cycle { .. }) => {
                 // Dispatch refuses a cyclic wait before reaching the slot.
@@ -506,10 +510,7 @@ mod tests {
                 transient,
                 "{code:?} {detail:?}"
             );
-            let mut e = WaferError::new(code, "x");
-            if let Some(detail) = detail {
-                e = e.with_detail_code(detail);
-            }
+            let e = WaferError::new(code, "x").with_optional_detail_code(detail);
             assert_eq!(
                 matches!(InitError::from_lifecycle_error(&e), InitError::Transient(_)),
                 transient,
