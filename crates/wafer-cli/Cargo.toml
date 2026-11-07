@@ -28,7 +28,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tar = "0.4"
 tempfile = { workspace = true }
-terminal_size = "0.3"
+terminal_size = "0.4"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
