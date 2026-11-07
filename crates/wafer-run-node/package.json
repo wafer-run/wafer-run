@@ -6,18 +6,15 @@
   "main": "wafer-run.node",
   "types": "index.d.ts",
   "napi": {
-    "name": "wafer-run",
-    "triples": {
-      "defaults": true
-    }
+    "binaryName": "wafer-run"
   },
   "scripts": {
     "build": "napi build --release",
     "build-debug": "napi build",
-    "build-test": "napi build test-build --cargo-flags=--locked",
+    "build-test": "napi build --output-dir test-build -- --locked",
     "test": "node --test test/smoke.test.cjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2"
+    "@napi-rs/cli": "^3"
   }
 }
