@@ -24,4 +24,4 @@ workspace = true
 [dev-dependencies]
 # Validates documents against the generated schema in the json_schema
 # round-trip tests; no network or file resolution needed.
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
