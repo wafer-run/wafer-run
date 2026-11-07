@@ -9,7 +9,7 @@ description = "Proc macros for WAFER block authoring"
 proc-macro = true
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 # Used at macro-expansion time to validate author-supplied `skill(parameters = "...")`
